@@ -6,6 +6,7 @@ import unittest
 from collections.abc import Sequence
 from collections.abc import Mapping
 import subprocess
+from pathlib import Path
 from typing import Literal
 from unittest.mock import patch
 from urllib.request import Request
@@ -231,6 +232,23 @@ class _AuditPoster:
             "status": "accepted",
             "records": {"runner_host_hygiene_audit_record_key": audit.audit_record_key},
         }
+
+
+class RunnerHostHygieneWorkflowTests(unittest.TestCase):
+    def test_workflow_runs_on_ops_lane_without_xargs_dependency(self) -> None:
+        workflow_text = Path(".github/workflows/runner-host-hygiene.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "    runs-on:\n"
+            "      - self-hosted\n"
+            "      - ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}\n",
+            workflow_text,
+        )
+        self.assertNotIn("${{ vars.LAUNCHPLANE_RUNNER_LABEL }}", workflow_text)
+        self.assertNotIn("xargs <<<", workflow_text)
+        self.assertIn('trimmed="${builder#', workflow_text)
 
 
 class RunnerHostHygieneExecutorTests(unittest.TestCase):

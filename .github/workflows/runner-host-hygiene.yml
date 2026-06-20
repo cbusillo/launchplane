@@ -57,7 +57,7 @@ jobs:
   runner-host-hygiene:
     runs-on:
       - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+      - ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}
     env:
       LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       RUNNER_HOST_NAME: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST }}
@@ -134,7 +134,8 @@ jobs:
           builder_args=()
           IFS=',' read -r -a builders <<< "$RUNNER_RETAINED_WARM_BUILDERS"
           for builder in "${builders[@]}"; do
-            trimmed="$(xargs <<< "$builder")"
+            trimmed="${builder#"${builder%%[![:space:]]*}"}"
+            trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
             if [ -n "$trimmed" ]; then
               builder_args+=(--retained-warm-builder "$trimmed")
             fi
@@ -148,7 +149,8 @@ jobs:
           target_volumes="${{ inputs.target_buildkit_state_volumes }}"
           IFS=',' read -r -a volumes <<< "$target_volumes"
           for volume in "${volumes[@]}"; do
-            trimmed="$(xargs <<< "$volume")"
+            trimmed="${volume#"${volume%%[![:space:]]*}"}"
+            trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
             if [ -n "$trimmed" ]; then
               volume_args+=(--target-buildkit-state-volume "$trimmed")
             fi
@@ -158,7 +160,8 @@ jobs:
             allowed_volumes="$RUNNER_ALLOWED_BUILDKIT_STATE_VOLUMES"
             IFS=',' read -r -a volumes <<< "$allowed_volumes"
             for volume in "${volumes[@]}"; do
-              trimmed="$(xargs <<< "$volume")"
+              trimmed="${volume#"${volume%%[![:space:]]*}"}"
+              trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
               if [ -n "$trimmed" ]; then
                 volume_args+=(--allowed-buildkit-state-volume "$trimmed")
               fi

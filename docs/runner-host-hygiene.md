@@ -133,7 +133,8 @@ calls the service route after it captures the required pre/post host evidence.
 
 The first live executor is `.github/workflows/runner-host-hygiene.yml`. It runs
 on a dedicated self-hosted ops lane selected by the operator-managed
-`LAUNCHPLANE_RUNNER_LABEL` repository variable, authenticates back to
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE` repository variable,
+authenticates back to
 Launchplane with GitHub Actions OIDC, and executes on the runner host as the
 constrained service user. The workflow runs daily on a schedule in dry-run mode
 and can also be manually dispatched for approved mutations. Scheduled runs
