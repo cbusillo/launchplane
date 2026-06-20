@@ -2936,7 +2936,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="invalid_request",
                 message="GitHub webhook payload is invalid.",
-            )
+            ) from None
         return JSONResponse(status_code=status_code, content=payload)
 
     def read_every_code_work_request_worker_write_identity(
