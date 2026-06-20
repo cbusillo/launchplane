@@ -508,6 +508,8 @@ class RunnerLaneRegistrationWorkflowTests(unittest.TestCase):
         self.assertIn("RUNNER_PACKAGE_URL: ${{ inputs.runner_package_url }}", workflow_text)
         self.assertIn('--runner-package-url "$RUNNER_PACKAGE_URL"', workflow_text)
         self.assertIn('[ "$MUTATE_REQUESTED" = "true" ]', workflow_text)
+        self.assertIn("IFS=',' read -r -a raw_labels", workflow_text)
+        self.assertNotIn("python - <<'PY'", workflow_text)
         self.assertIn(
             "    runs-on:\n"
             "      - self-hosted\n"

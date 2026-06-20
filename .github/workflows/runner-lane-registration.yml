@@ -159,18 +159,15 @@ jobs:
             echo "registration_root must match Launchplane approved root." >&2
             exit 1
           fi
-          python - <<'PY' > runner-lane-registration-label-args.bin
-          import os
-          import sys
-
-          labels = os.environ["RUNNER_LABELS_INPUT"].split(",")
-          for label in labels:
-              trimmed = label.strip()
-              if trimmed:
-                  sys.stdout.write("--label\0")
-                  sys.stdout.write(f"{trimmed}\0")
-          PY
-          mapfile -d '' -t label_args < runner-lane-registration-label-args.bin
+          IFS=',' read -r -a raw_labels <<<"$RUNNER_LABELS_INPUT"
+          label_args=()
+          for label in "${raw_labels[@]}"; do
+            trimmed="${label#"${label%%[![:space:]]*}"}"
+            trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+            if [ -n "$trimmed" ]; then
+              label_args+=(--label "$trimmed")
+            fi
+          done
           mutate_flag=--dry-run
           if [ "$MUTATE_REQUESTED" = "true" ]; then
             mutate_flag=--mutate
