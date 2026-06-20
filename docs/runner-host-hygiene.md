@@ -189,10 +189,12 @@ captured image and volume inventory to decide any later phase-two cleanup lane.
 Runner lane registration uses a separate manual ops-lane workflow,
 `.github/workflows/runner-lane-registration.yml`. It shares the same approved
 host, execution-lane, and service-user variables, but it does not prune Docker
-state or restart existing services. Its first slice registers a repo-scoped
-Actions runner lane under an allowlisted registration root and verifies the lane
-through GitHub inventory. Treat the registration artifact as evidence until the
-service-backed runner-registration audit record is accepted.
+state or restart existing services. Its first slice creates a new repo-scoped
+Actions runner lane under an allowlisted registration root, starts only the
+matching `launchplane-runner@<lane>.service` supervisor, and verifies the lane
+through GitHub inventory before writing a completed registration audit.
+Existing-lane adoption, stale-lane removal, and generic runner service restarts
+remain outside this slice.
 
 ## Host Replacement Runbook
 

@@ -224,6 +224,7 @@ uv run launchplane work-graph runner-lane-registration-executor \
   --service-user launchplane-runner-hygiene \
   --lane-name product-runner-1 \
   --registration-root /home/launchplane-runner-hygiene/actions-runners \
+  --runner-package-url "$ACTIONS_RUNNER_TARBALL_URL" \
   --label self-hosted \
   --label launchplane \
   --label launchplane-managed \
@@ -235,14 +236,26 @@ uv run launchplane work-graph runner-lane-registration-executor \
 ```
 
 The command is dry-run by default. A dry-run writes only local JSON evidence and
-does not request a GitHub registration token. `--mutate` records apply intent
-and writes a failed audit explaining that runner registration requires a
-supervised host maintainer. The earlier proof path briefly started `run.sh` from
-inside the GitHub Actions job, but that can produce transient online evidence
-and leave the runner offline after job cleanup. That shortcut is disabled. Until
-the supervised maintainer exists, mutate runs do not request a GitHub
-registration token. The token itself must never be written to the audit record,
-command output, or JSON result.
+does not request a GitHub registration token. When `--mutate` is explicitly set
+and the registration plan is ready, the executor performs a create-only
+supervised registration: it requests a short-lived GitHub registration token,
+prepares a new lane directory below the approved registration root, downloads
+the operator-supplied GitHub Actions runner package, runs `config.sh`, starts the
+root-owned `launchplane-runner@<lane>.service` unit through the reviewed narrow
+privilege boundary, and verifies that GitHub inventory reports exactly one
+online lane with the expected labels before writing a `completed` audit. If any
+step fails, the executor writes a `failed` audit. The raw registration token must
+never be written to the audit record, command output, or JSON result.
+GitHub's runner `config.sh` still requires the token as a command-line option,
+so the ops lane must treat same-user process inspection on the host as privileged
+and keep unrelated workloads off the constrained service user during mutation.
+
+This slice only creates a new lane. Existing-lane adoption, stale-lane removal,
+remove/recreate, runner work-directory pruning, and service restarts remain
+future maintainer capabilities. The earlier proof path briefly started `run.sh`
+from inside the GitHub Actions job, but that can produce transient online
+evidence and leave the runner offline after job cleanup. That shortcut remains
+disabled; the runner must be supervised outside the Actions job process tree.
 
 The manual workflow defaults `registration_root` to `auto`, which resolves to
 `$HOME/actions-runners` for the constrained service user. Operators may pass an
@@ -255,8 +268,12 @@ inventory and registration-token requests. The default `GITHUB_TOKEN` from the
 Launchplane workflow is not sufficient authority for product repository runner
 administration.
 
-This executor is the proving-ground adapter for #1231. Durable service-backed
-audit persistence is available through
+This executor is the proving-ground adapter for #1231. Mutating runs require an
+`ACTIONS_RUNNER_TARBALL_URL` value that points to an `actions/runner` release
+tarball on GitHub, plus a preinstalled `launchplane-runner@.service` template
+and a narrow sudo rule or equivalent root helper for `systemctl enable --now`
+and `systemctl is-active` on that template. Durable service-backed audit
+persistence is available through
 `POST /v1/evidence/runner-lane-registration/audits` under
 `runner_lane_registration_audit.write`; descriptor-backed operator routing for
 registration planning remains a later slice. The workflow still uploads the JSON
@@ -265,9 +282,9 @@ any other product proof.
 
 ## Supervised Runner Maintainer Plan
 
-The durable runner maintainer must replace the disabled apply shortcut before a
-product repository can rely on a Launchplane-managed runner lane. The maintainer
-should reconcile desired runner state rather than simply start `run.sh`:
+The durable runner maintainer grows from the create-only executor into full
+desired-state reconciliation. It must keep reconciling runner state rather than
+simply start `run.sh`:
 
 1. Read GitHub runner inventory and local service state for the requested lane.
 2. If registration is required, request a short-lived GitHub registration token

@@ -652,12 +652,17 @@ def runner_maintainer_plan(
     required=True,
     help="Absolute root directory where runner lanes may be registered.",
 )
+@click.option(
+    "--runner-package-url",
+    default="",
+    help="GitHub Actions runner tarball URL used when --mutate creates a lane.",
+)
 @click.option("--label", "labels", multiple=True, required=True, help="Runner label.")
 @click.option(
     "--mutate/--dry-run",
     default=False,
     show_default=True,
-    help="Record apply intent. Live registration is disabled until a supervised maintainer exists.",
+    help="Register a new lane through the supervised create-only executor.",
 )
 @click.option(
     "--audit-record-key",
@@ -738,6 +743,7 @@ def runner_lane_registration_executor(
     service_user: str,
     lane_name: str,
     registration_root: str,
+    runner_package_url: str,
     labels: tuple[str, ...],
     mutate: bool,
     audit_record_key: str,
@@ -786,6 +792,7 @@ def runner_lane_registration_executor(
             service_user=service_user,
             lane_name=lane_name,
             registration_root=registration_root,
+            runner_package_url=runner_package_url,
             labels=labels,
             mutate=mutate,
             audit_record_key=audit_record_key,
