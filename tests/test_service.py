@@ -2143,11 +2143,12 @@ def _invoke_app(
     headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     body_bytes = json.dumps(payload).encode("utf-8") if payload is not None else b""
-    environ = {
+    environ: dict[str, object] = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
         "QUERY_STRING": query_string,
         "CONTENT_LENGTH": str(len(body_bytes)),
+        "CONTENT_TYPE": "application/json" if payload is not None else "",
         "wsgi.input": io.BytesIO(body_bytes),
         "HTTP_AUTHORIZATION": authorization,
         "SERVER_NAME": "testserver",
@@ -2760,6 +2761,29 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "/v1/every-code/notification-policies/apply",
                     "/v1/previews/pr-feedback/notification-policies/apply",
                 )
+            )
+
+        for status_code, payload in responses:
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["error"]["code"], "not_found")
+
+    def test_preview_lifecycle_plan_legacy_wsgi_fallback_is_removed(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            responses = tuple(
+                _invoke_app(
+                    app,
+                    method=method,
+                    path="/v1/previews/lifecycle-plan",
+                    payload={"schema_version": 1},
+                )
+                for method in ("GET", "POST")
             )
 
         for status_code, payload in responses:
@@ -23713,8 +23737,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
+            app = create_launchplane_fastapi_wsgi_app(
                 verifier=_StubVerifier(
                     _identity(
                         workflow_ref=(
@@ -23725,6 +23748,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
             )
 
             status_code, payload = _invoke_app(
@@ -23791,8 +23815,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
+            app = create_launchplane_fastapi_wsgi_app(
                 verifier=_StubVerifier(
                     _identity(
                         workflow_ref=(
@@ -23803,6 +23826,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
             )
 
             status_code, payload = _invoke_app(
@@ -23838,8 +23862,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
+            app = create_launchplane_fastapi_wsgi_app(
                 verifier=_StubVerifier(
                     _identity(
                         workflow_ref=(
@@ -23850,6 +23873,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
             )
 
             status_code, payload = _invoke_app(
@@ -23867,6 +23891,184 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["status"], "missing_inventory")
         self.assertEqual(payload["result"]["orphaned_slugs"], [])
         self.assertIn("has not recorded", payload["result"]["error_message"])
+
+    def test_preview_lifecycle_plan_endpoint_replays_idempotent_request(self) -> None:
+        request_payload = {
+            "product": "verireel",
+            "context": "verireel-testing",
+            "source": "preview-janitor",
+            "desired_previews": [{"preview_slug": "pr-42"}],
+        }
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_lifecycle.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            first_status, first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-plan",
+                payload=request_payload,
+                headers={"Idempotency-Key": "preview-lifecycle-plan:42"},
+            )
+            replay_status, replay_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-plan",
+                payload=request_payload,
+                headers={"Idempotency-Key": "preview-lifecycle-plan:42"},
+            )
+            plan_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_lifecycle_plan_records(context_name="verireel-testing")
+
+        self.assertEqual(first_status, 202)
+        self.assertEqual(replay_status, 202)
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(
+            replay_payload["records"]["preview_lifecycle_plan_id"],
+            first_payload["records"]["preview_lifecycle_plan_id"],
+        )
+        self.assertEqual(replay_payload["result"], first_payload["result"])
+        self.assertEqual(len(plan_records), 1)
+
+    def test_preview_lifecycle_plan_endpoint_rejects_idempotency_key_reuse(
+        self,
+    ) -> None:
+        request_payload = {
+            "product": "verireel",
+            "context": "verireel-testing",
+            "source": "preview-janitor",
+            "desired_previews": [{"preview_slug": "pr-42"}],
+        }
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_lifecycle.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            first_status, _first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-plan",
+                payload=request_payload,
+                headers={"Idempotency-Key": "preview-lifecycle-plan:reuse"},
+            )
+            conflict_status, conflict_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-plan",
+                payload={
+                    **request_payload,
+                    "desired_previews": [{"preview_slug": "pr-43"}],
+                },
+                headers={"Idempotency-Key": "preview-lifecycle-plan:reuse"},
+            )
+
+        self.assertEqual(first_status, 202)
+        self.assertEqual(conflict_status, 409)
+        self.assertEqual(conflict_payload["error"]["code"], "idempotency_key_reused")
+
+    def test_preview_lifecycle_plan_endpoint_requires_plan_store(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_lifecycle.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=object,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-plan",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "desired_previews": [{"preview_slug": "pr-42"}],
+                },
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("preview lifecycle plan applies", payload["error"]["message"])
 
     def test_preview_desired_state_endpoint_discovers_and_records_labeled_prs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

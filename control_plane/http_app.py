@@ -125,6 +125,11 @@ from control_plane.contracts.preview_evidence import (
     PreviewGenerationEvidenceEnvelope,
 )
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_lifecycle_plan_record import (
+    PreviewLifecycleDesiredPreview,
+    PreviewLifecyclePlanRecord,
+)
 from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationAttemptRecord,
     PreviewPrFeedbackNotificationPolicyRecord,
@@ -230,6 +235,7 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
     reconcile_stale_odoo_stable_operation_records,
 )
+from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.work_graph_issue_inbox import (
     GitHubIssueInboxReadModel,
@@ -268,6 +274,7 @@ _EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/every-code/notification-polic
 _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
     "/v1/previews/pr-feedback/notification-policies/apply"
 )
+_PREVIEW_LIFECYCLE_PLAN_ROUTE = "/v1/previews/lifecycle-plan"
 _RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE = "/v1/runtime-key-safety/policies/apply"
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
 _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
@@ -1218,6 +1225,27 @@ class PreviewPrFeedbackNotificationPolicyApplyEnvelope(BaseModel):
         return self
 
 
+class PreviewLifecyclePlanEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    desired_previews: tuple[PreviewLifecycleDesiredPreview, ...] = ()
+    desired_state_id: str = ""
+    source: str = "workflow"
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewLifecyclePlanEnvelope":
+        if not self.product.strip():
+            raise ValueError("preview lifecycle plan requires product")
+        if not self.context.strip():
+            raise ValueError("preview lifecycle plan requires context")
+        if not self.source.strip():
+            raise ValueError("preview lifecycle plan requires source")
+        return self
+
+
 class EdgeEndpointApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1396,6 +1424,21 @@ class _PreviewPrFeedbackNotificationPolicyApplyStore(Protocol):
     def write_preview_pr_feedback_notification_policy_record(
         self,
         record: PreviewPrFeedbackNotificationPolicyRecord,
+    ) -> object: ...
+
+
+class _PreviewLifecyclePlanApplyStore(Protocol):
+    def list_preview_inventory_scan_records(
+        self,
+        *,
+        context_name: str | None = None,
+        limit: int | None = 50,
+        offset: int = 0,
+    ) -> tuple[PreviewInventoryScanRecord, ...]: ...
+
+    def write_preview_lifecycle_plan_record(
+        self,
+        record: PreviewLifecyclePlanRecord,
     ) -> object: ...
 
 
@@ -2271,6 +2314,27 @@ def require_ingress_route_apply_store(record_store: object) -> _IngressRouteAppl
             f"Launchplane record store does not support ingress route applies: {missing_summary}"
         )
     return cast(_IngressRouteApplyStore, record_store)
+
+
+def require_preview_lifecycle_plan_apply_store(
+    record_store: object,
+) -> _PreviewLifecyclePlanApplyStore:
+    required_methods = (
+        "list_preview_inventory_scan_records",
+        "write_preview_lifecycle_plan_record",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support preview lifecycle plan applies: "
+            f"{missing_summary}"
+        )
+    return cast(_PreviewLifecyclePlanApplyStore, record_store)
 
 
 def require_ingress_edge_endpoint_read_store(record_store: object) -> _IngressEdgeEndpointReadStore:
@@ -8731,6 +8795,82 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def apply_preview_lifecycle_plan(
+        request: Request,
+        plan_request: PreviewLifecyclePlanEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview_lifecycle.plan",
+            product=plan_request.product,
+            context=plan_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot plan preview lifecycle for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_LIFECYCLE_PLAN_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            plan_store = require_preview_lifecycle_plan_apply_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        inventory_scans = plan_store.list_preview_inventory_scan_records(
+            context_name=plan_request.context,
+            limit=1,
+        )
+        plan_record = build_preview_lifecycle_plan(
+            product=plan_request.product,
+            context=plan_request.context,
+            planned_at=utc_now_timestamp(),
+            source=plan_request.source,
+            desired_previews=plan_request.desired_previews,
+            desired_state_id=plan_request.desired_state_id,
+            latest_inventory_scan=next(iter(inventory_scans), None),
+        )
+        plan_store.write_preview_lifecycle_plan_record(plan_record)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"preview_lifecycle_plan_id": plan_record.plan_id},
+            result=plan_record.model_dump(mode="json"),
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_LIFECYCLE_PLAN_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
     async def apply_ingress_canary_route(
         request: Request,
         canary_request: IngressCanaryRouteApplyEnvelope,
@@ -10087,6 +10227,24 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="apply_preview_pr_feedback_notification_policy",
         summary="Apply preview PR feedback notification policy",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PREVIEW_LIFECYCLE_PLAN_ROUTE,
+        apply_preview_lifecycle_plan,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_preview_lifecycle_plan",
+        summary="Plan preview lifecycle",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

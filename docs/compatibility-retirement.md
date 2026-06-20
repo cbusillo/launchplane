@@ -193,6 +193,12 @@ Keep a compatibility surface only when it is one of these:
   local checkout `public-ingress-monitor run-once` CLI mutation command are
   deleted; the route has no `GET` API, manual reruns go through the GitHub
   workflow, and direct WSGI fallback calls fail closed.
+- Preview lifecycle plan uses native FastAPI
+  `POST /v1/previews/lifecycle-plan`, preserves
+  `preview_lifecycle.plan` authorization and optional `Idempotency-Key`
+  replay/conflict behavior, writes the typed lifecycle plan record, and returns
+  the stored plan as accepted evidence. Its legacy WSGI write branch is deleted,
+  and direct WSGI fallback calls fail closed.
 - Public ingress, Every Code, and preview PR feedback notification policy apply
   use native FastAPI routes for bearer-token callers and preserve DB-backed
   storage enforcement, local operator reason requirements, explicit preview
