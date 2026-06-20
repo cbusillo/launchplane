@@ -167,8 +167,11 @@ Keep a compatibility surface only when it is one of these:
   idempotency state. The PR-feedback status route also preserves the existing
   `404 not_found` and `409 feedback_already_final` transition semantics. Their
   legacy WSGI write branches are deleted; direct WSGI fallback calls fail closed.
-  The Every Code GitHub webhook route remains on the mounted WSGI fallback until
-  its native replacement lands.
+  The Every Code GitHub webhook uses native FastAPI, preserves unauthenticated
+  GitHub HMAC verification, delivery/event/signature validation, signed-event
+  skip semantics, work-request creation/dedupe, issue and pull-request close
+  handling, preview validation comments, and PR-feedback ingestion. Its legacy
+  WSGI write branch is deleted; direct WSGI fallback calls fail closed.
 - Agent write-intent evaluation uses native FastAPI
   `POST /v1/agent/write-intents/evaluate`, preserves terminal-agent scoped
   preflight access, returns denied intents as successful `202 accepted` preflight
