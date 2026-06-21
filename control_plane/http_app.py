@@ -127,6 +127,7 @@ from control_plane.contracts.preview_evidence import (
     PreviewGenerationEvidenceEnvelope,
 )
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
@@ -162,6 +163,10 @@ from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
 from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
+from control_plane.drivers.generic_web_preview_dispatch import (
+    GenericWebPreviewDesiredStateEnvelope,
+    _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
+)
 from control_plane.every_code_work_request_write import (
     EveryCodeWorkRequestCreateEnvelope,
     build_every_code_work_request_record,
@@ -245,6 +250,12 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     reconcile_stale_odoo_stable_operation_records,
 )
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
+from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
+from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
+from control_plane.workflows.generic_web_preview import (
+    GenericWebPreviewProfileStore,
+    discover_generic_web_preview_desired_state,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.work_graph_issue_inbox import (
     GitHubIssueInboxReadModel,
@@ -298,6 +309,7 @@ _EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/every-code/notification-polic
 _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
     "/v1/previews/pr-feedback/notification-policies/apply"
 )
+_PREVIEW_DESIRED_STATE_ROUTE = "/v1/previews/desired-state"
 _PREVIEW_LIFECYCLE_PLAN_ROUTE = "/v1/previews/lifecycle-plan"
 _RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE = "/v1/runtime-key-safety/policies/apply"
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
@@ -379,6 +391,13 @@ class AgentContextReadStore(ProductReadModelStore, Protocol):
 
 class ProductProfileWriteStore(Protocol):
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> object: ...
+
+
+class PreviewDesiredStateWriteStore(Protocol):
+    def write_preview_desired_state_record(
+        self,
+        record: PreviewDesiredStateRecord,
+    ) -> object: ...
 
 
 class WorkGraphSnapshotReadStore(ProductReadModelStore, WorkGraphWorkRequestStore, Protocol):
@@ -1483,6 +1502,38 @@ class PreviewLifecyclePlanEnvelope(BaseModel):
         return self
 
 
+class PreviewDesiredStateEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    source: str = "workflow"
+    repository: str
+    label: str = "preview"
+    anchor_repo: str
+    preview_slug_prefix: str = "pr-"
+    max_pages: int = Field(default=10, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewDesiredStateEnvelope":
+        if not self.product.strip():
+            raise ValueError("preview desired state requires product")
+        if not self.context.strip():
+            raise ValueError("preview desired state requires context")
+        if not self.source.strip():
+            raise ValueError("preview desired state requires source")
+        if not self.repository.strip():
+            raise ValueError("preview desired state requires repository")
+        if not self.label.strip():
+            raise ValueError("preview desired state requires label")
+        if not self.anchor_repo.strip():
+            raise ValueError("preview desired state requires anchor_repo")
+        if not self.preview_slug_prefix.strip():
+            raise ValueError("preview desired state requires preview_slug_prefix")
+        return self
+
+
 class EdgeEndpointApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2572,6 +2623,44 @@ def require_preview_lifecycle_plan_apply_store(
             f"{missing_summary}"
         )
     return cast(_PreviewLifecyclePlanApplyStore, record_store)
+
+
+def require_preview_desired_state_write_store(
+    record_store: object,
+) -> PreviewDesiredStateWriteStore:
+    write_record = getattr(record_store, "write_preview_desired_state_record", None)
+    if not callable(write_record):
+        raise TypeError(
+            "Launchplane record store does not support preview desired-state writes: "
+            "write_preview_desired_state_record"
+        )
+    return cast(PreviewDesiredStateWriteStore, record_store)
+
+
+def read_generic_web_preview_profile(
+    *, record_store: object, product: str
+) -> LaunchplaneProductProfileRecord:
+    try:
+        profile_store = require_product_profile_read_store(record_store)
+        profile = profile_store.read_product_profile_record(product.strip())
+    except TypeError as error:
+        raise TypeError(
+            "Launchplane record store does not support generic web preview desired-state "
+            "profile reads: read_product_profile_record"
+        ) from error
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            "Generic web preview desired-state requires an existing product profile."
+        ) from error
+    if not product_profile_uses_generic_web_base(profile):
+        raise ValueError(
+            "Product profile is not compatible with the generic-web preview desired-state route."
+        )
+    if not profile.preview.enabled:
+        raise ValueError("Product profile does not have generic-web previews enabled.")
+    if not profile.preview.context.strip():
+        raise ValueError("Product profile does not define a preview context.")
+    return profile
 
 
 def require_ingress_edge_endpoint_read_store(record_store: object) -> _IngressEdgeEndpointReadStore:
@@ -9257,6 +9346,184 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_preview_desired_state(
+        request: Request,
+        desired_state_request: PreviewDesiredStateEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview_desired_state.discover",
+            product=desired_state_request.product,
+            context=desired_state_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot discover preview desired state for the requested "
+                    "product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_DESIRED_STATE_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            desired_state_store = require_preview_desired_state_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        driver_result = discover_github_preview_desired_state(
+            control_plane_root=resolved_control_plane_root,
+            product=desired_state_request.product,
+            context=desired_state_request.context,
+            source=desired_state_request.source,
+            discovered_at=utc_now_timestamp(),
+            repository=desired_state_request.repository,
+            label=desired_state_request.label,
+            anchor_repo=desired_state_request.anchor_repo,
+            preview_slug_prefix=desired_state_request.preview_slug_prefix,
+            max_pages=desired_state_request.max_pages,
+        )
+        desired_state_store.write_preview_desired_state_record(driver_result)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"preview_desired_state_id": driver_result.desired_state_id},
+            result=driver_result.model_dump(mode="json"),
+        )
+        if driver_result.status != "fail":
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_PREVIEW_DESIRED_STATE_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_generic_web_preview_desired_state(
+        request: Request,
+        desired_state_request: GenericWebPreviewDesiredStateEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            profile = read_generic_web_preview_profile(
+                record_store=record_store,
+                product=desired_state_request.product,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="driver_route_dependency_not_found",
+                message=(
+                    "Driver route is registered, but required product or runtime records "
+                    "were not found."
+                ),
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview_desired_state.discover",
+            product=profile.product,
+            context=profile.preview.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot discover generic web preview desired state "
+                    "for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            desired_state_store = require_preview_desired_state_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        driver_result = discover_generic_web_preview_desired_state(
+            control_plane_root=resolved_control_plane_root,
+            record_store=cast(GenericWebPreviewProfileStore, record_store),
+            request=desired_state_request.desired_state,
+            discovered_at=utc_now_timestamp(),
+            profile=profile,
+        )
+        desired_state_store.write_preview_desired_state_record(driver_result)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"preview_desired_state_id": driver_result.desired_state_id},
+            result=driver_result.model_dump(mode="json"),
+        )
+        if driver_result.status != "fail":
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
     async def apply_ingress_canary_route(
         request: Request,
         canary_request: IngressCanaryRouteApplyEnvelope,
@@ -10672,6 +10939,24 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _PREVIEW_DESIRED_STATE_ROUTE,
+        apply_preview_desired_state,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_preview_desired_state",
+        summary="Discover preview desired state",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _PREVIEW_LIFECYCLE_PLAN_ROUTE,
         apply_preview_lifecycle_plan,
         methods=["POST"],
@@ -10680,6 +10965,24 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="apply_preview_lifecycle_plan",
         summary="Plan preview lifecycle",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
+        apply_generic_web_preview_desired_state,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_generic_web_preview_desired_state",
+        summary="Discover generic web preview desired state",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

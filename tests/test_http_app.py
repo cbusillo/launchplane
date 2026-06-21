@@ -60,11 +60,13 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationState,
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
 )
+from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecycleDesiredPreview
 from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationAttemptRecord,
     PreviewPrFeedbackNotificationDestination,
@@ -11740,6 +11742,219 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiPreviewDesiredStateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_desired_state_discovers_and_records_labeled_prs(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="preview_desired_state.discover",
+                    product="verireel",
+                    context="verireel-testing",
+                ),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+            record = PreviewDesiredStateRecord(
+                desired_state_id="preview-desired-state-verireel-testing-20260429T213000Z",
+                product="verireel",
+                context="verireel-testing",
+                source="launchplane-preview-lifecycle",
+                discovered_at="2026-04-29T21:30:00Z",
+                repository="every/verireel",
+                label="preview",
+                anchor_repo="verireel",
+                status="pass",
+                desired_count=1,
+                desired_previews=(
+                    PreviewLifecycleDesiredPreview(
+                        preview_slug="pr-42",
+                        anchor_repo="verireel",
+                        anchor_pr_number=42,
+                        anchor_pr_url="https://github.com/every/verireel/pull/42",
+                        head_sha="abc1234",
+                    ),
+                ),
+            )
+
+            with patch(
+                "control_plane.http_app.discover_github_preview_desired_state",
+                return_value=record,
+            ) as discover:
+                first_response = await _post_preview_desired_state(
+                    app,
+                    _preview_desired_state_payload(),
+                    idempotency_key="preview-desired-state:verireel-testing",
+                )
+                replay_response = await _post_preview_desired_state(
+                    app,
+                    _preview_desired_state_payload(),
+                    idempotency_key="preview-desired-state:verireel-testing",
+                )
+            records = store.list_preview_desired_state_records(context_name="verireel-testing")
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        payload = first_response.json()
+        self.assertEqual(
+            payload["records"]["preview_desired_state_id"],
+            "preview-desired-state-verireel-testing-20260429T213000Z",
+        )
+        self.assertEqual(payload["result"]["desired_previews"][0]["preview_slug"], "pr-42")
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(len(records), 1)
+        discover.assert_called_once()
+
+    async def test_preview_desired_state_rejects_unauthorized_workflow(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_notification_policy_apply_policy(
+                action="preview_lifecycle.plan",
+                product="verireel",
+                context="verireel-testing",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_preview_desired_state(app, _preview_desired_state_payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_generic_web_preview_desired_state_uses_profile_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_generic_web_preview_desired_state_identity()),
+                authz_policy=_generic_web_preview_desired_state_policy(
+                    context="sellyouroutboard-testing"
+                ),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+            record = PreviewDesiredStateRecord(
+                desired_state_id="preview-desired-state-syo-testing-1",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                source="generic-web-preview",
+                discovered_at="2026-04-30T21:00:00Z",
+                repository="cbusillo/sellyouroutboard",
+                label="preview",
+                anchor_repo="sellyouroutboard",
+                status="pass",
+                desired_count=0,
+            )
+
+            with patch(
+                "control_plane.http_app.discover_generic_web_preview_desired_state",
+                return_value=record,
+            ) as discover:
+                response = await _post_generic_web_preview_desired_state(
+                    app,
+                    _generic_web_preview_desired_state_payload(),
+                    idempotency_key="generic-web-preview-desired-state:syo",
+                )
+            records = store.list_preview_desired_state_records(
+                context_name="sellyouroutboard-testing"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            response.json()["records"]["preview_desired_state_id"],
+            "preview-desired-state-syo-testing-1",
+        )
+        discover.assert_called_once()
+        _, kwargs = discover.call_args
+        self.assertEqual(kwargs["profile"].preview.context, "sellyouroutboard-testing")
+        self.assertEqual(records[0].desired_state_id, "preview-desired-state-syo-testing-1")
+
+    async def test_generic_web_preview_desired_state_rejects_wrong_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_generic_web_preview_desired_state_identity()),
+                authz_policy=_generic_web_preview_desired_state_policy(context="different-context"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_generic_web_preview_desired_state(
+                app,
+                _generic_web_preview_desired_state_payload(),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_generic_web_preview_desired_state_keeps_profile_errors_invalid_request(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            profile_payload = _product_profile_payload()
+            profile_payload["preview"] = {
+                "enabled": False,
+                "context": "sellyouroutboard-testing",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_generic_web_preview_desired_state_identity()),
+                authz_policy=_generic_web_preview_desired_state_policy(
+                    context="sellyouroutboard-testing"
+                ),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            with patch(
+                "control_plane.http_app.discover_generic_web_preview_desired_state"
+            ) as discover:
+                response = await _post_generic_web_preview_desired_state(
+                    app,
+                    _generic_web_preview_desired_state_payload(),
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        discover.assert_not_called()
+
+    async def test_openapi_includes_preview_desired_state_routes(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        self.assertEqual(
+            openapi["paths"]["/v1/previews/desired-state"]["post"]["operationId"],
+            "apply_preview_desired_state",
+        )
+        self.assertEqual(
+            openapi["paths"]["/v1/drivers/generic-web/preview-desired-state"]["post"][
+                "operationId"
+            ],
+            "apply_generic_web_preview_desired_state",
+        )
+
+
 class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_ingress_route_dry_run_returns_plan_without_mutation(self) -> None:
         client = _FakeNpmplusIngressClient()
@@ -18959,6 +19174,34 @@ def _notification_policy_apply_policy(
     )
 
 
+def _generic_web_preview_desired_state_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "cbusillo/sellyouroutboard",
+                    "workflow_refs": [
+                        "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["sellyouroutboard"],
+                    "contexts": [context],
+                    "actions": ["preview_desired_state.discover"],
+                }
+            ]
+        }
+    )
+
+
+def _generic_web_preview_desired_state_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="cbusillo/sellyouroutboard",
+        workflow_ref=(
+            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+        ),
+    )
+
+
 def _runtime_key_safety_policy_apply_policy(*, action: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -20523,6 +20766,72 @@ async def _post_product_profile(
         app,
         "POST",
         "/v1/product-profiles",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+def _preview_desired_state_payload(*, label: str = "preview") -> dict[str, object]:
+    return {
+        "product": "verireel",
+        "context": "verireel-testing",
+        "source": "launchplane-preview-lifecycle",
+        "repository": "every/verireel",
+        "label": label,
+        "anchor_repo": "verireel",
+    }
+
+
+async def _post_preview_desired_state(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/previews/desired-state",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+def _generic_web_preview_desired_state_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "sellyouroutboard",
+        "desired_state": {
+            "schema_version": 1,
+            "product": "sellyouroutboard",
+        },
+    }
+
+
+async def _post_generic_web_preview_desired_state(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/drivers/generic-web/preview-desired-state",
         headers=request_headers,
         payload=payload,
     )
