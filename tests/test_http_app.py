@@ -66,7 +66,13 @@ from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
 )
-from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecycleDesiredPreview
+from control_plane.contracts.preview_lifecycle_plan_record import (
+    PreviewLifecycleDesiredPreview,
+    PreviewLifecyclePlanRecord,
+)
+from control_plane.contracts.preview_lifecycle_cleanup_record import (
+    PreviewLifecycleCleanupRecord,
+)
 from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationAttemptRecord,
     PreviewPrFeedbackNotificationDestination,
@@ -141,6 +147,10 @@ from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyResult,
     NpmplusIngressOperation,
 )
+from control_plane.workflows.generic_web_preview import (
+    GenericWebPreviewInventoryItem,
+    GenericWebPreviewInventoryResult,
+)
 from tests.test_service import create_launchplane_service_app
 from tests.test_service import (
     _FakeNpmplusIngressClient,
@@ -161,6 +171,7 @@ from tests.test_service import (
     _product_profile_payload,
     _product_profile_payload_with_prod,
     _npmplus_proxy_host,
+    _invoke_app,
     _npmplus_ingress_route_payload,
     _meta_product_config_payload,
     _product_config_payload,
@@ -174,6 +185,518 @@ from tests.test_service import (
 from tests.test_service import _StubVerifier
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from tests.test_protected_artifacts import _seed_store as seed_protected_artifact_store
+
+
+class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
+    def _cleanup_policy(self, actions: list[str]) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["verireel"],
+                        "contexts": ["verireel-testing"],
+                        "actions": actions,
+                    }
+                ]
+            }
+        )
+
+    def _cleanup_app(
+        self, *, root: Path, state_dir: Path, policy: LaunchplaneAuthzPolicy
+    ) -> FastAPI:
+        return create_launchplane_fastapi_app(
+            verifier=_StubVerifier(
+                _identity(
+                    workflow_ref=(
+                        "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                    ),
+                    event_name="workflow_dispatch",
+                )
+            ),
+            authz_policy=policy,
+            control_plane_root_path=root,
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=state_dir),
+        )
+
+    def _write_cleanup_plan(self, state_dir: Path) -> None:
+        FilesystemRecordStore(state_dir=state_dir).write_preview_lifecycle_plan_record(
+            PreviewLifecyclePlanRecord(
+                plan_id="preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                product="verireel",
+                context="verireel-testing",
+                planned_at="2026-04-29T19:58:38Z",
+                source="preview-janitor",
+                status="pass",
+                inventory_scan_id="preview-inventory-scan-verireel-testing-20260429T195837Z",
+                actual_slugs=("pr-41",),
+                orphaned_slugs=("pr-41",),
+            )
+        )
+
+    async def test_preview_lifecycle_cleanup_records_report_only_cleanup(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            self._write_cleanup_plan(state_dir)
+            app = self._cleanup_app(
+                root=root,
+                state_dir=state_dir,
+                policy=self._cleanup_policy(["preview_lifecycle.cleanup"]),
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-cleanup",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                    "source": "preview-janitor",
+                    "apply": False,
+                },
+            )
+            payload = response.json()
+            cleanup_records = FilesystemRecordStore(
+                state_dir=state_dir
+            ).list_preview_lifecycle_cleanup_records(context_name="verireel-testing")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            payload["records"]["preview_lifecycle_cleanup_id"], cleanup_records[0].cleanup_id
+        )
+        self.assertEqual(payload["result"]["status"], "report_only")
+        self.assertEqual(payload["result"]["planned_slugs"], ["pr-41"])
+        self.assertFalse(cleanup_records[0].apply)
+
+    async def test_preview_lifecycle_cleanup_rejects_missing_plan_without_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            app = self._cleanup_app(
+                root=root,
+                state_dir=state_dir,
+                policy=self._cleanup_policy(["preview_lifecycle.cleanup"]),
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-cleanup",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "plan_id": "preview-lifecycle-plan-verireel-testing-missing",
+                    "apply": False,
+                },
+            )
+            cleanup_records = FilesystemRecordStore(
+                state_dir=state_dir
+            ).list_preview_lifecycle_cleanup_records(context_name="verireel-testing")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+        self.assertEqual(cleanup_records, ())
+
+    async def test_preview_lifecycle_cleanup_replays_idempotency(self) -> None:
+        request_payload = {
+            "product": "verireel",
+            "context": "verireel-testing",
+            "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+            "source": "preview-janitor",
+            "apply": False,
+        }
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            self._write_cleanup_plan(state_dir)
+            app = self._cleanup_app(
+                root=root,
+                state_dir=state_dir,
+                policy=self._cleanup_policy(["preview_lifecycle.cleanup"]),
+            )
+            headers = {
+                "Authorization": "Bearer valid-token",
+                "Idempotency-Key": "preview-lifecycle-cleanup:42",
+            }
+
+            first_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-cleanup",
+                headers=headers,
+                payload=request_payload,
+            )
+            replay_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-cleanup",
+                headers=headers,
+                payload=request_payload,
+            )
+            cleanup_records = FilesystemRecordStore(
+                state_dir=state_dir
+            ).list_preview_lifecycle_cleanup_records(context_name="verireel-testing")
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(replay_response.json()["result"], first_response.json()["result"])
+        self.assertEqual(len(cleanup_records), 1)
+
+    async def test_preview_lifecycle_cleanup_apply_requires_preview_write_store_before_destroy(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            self._write_cleanup_plan(state_dir)
+            store = _PreviewLifecycleCleanupPlanOnlyStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=self._cleanup_policy(["preview_lifecycle.cleanup"]),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            with patch(
+                "control_plane.workflows.preview_lifecycle_cleanup.execute_verireel_preview_destroy"
+            ) as destroy_mock:
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/lifecycle-cleanup",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={
+                        "product": "verireel",
+                        "context": "verireel-testing",
+                        "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                        "source": "preview-janitor",
+                        "apply": True,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+        self.assertIn("preview lifecycle cleanup mutations", response.json()["error"]["message"])
+        self.assertEqual(store.cleanup_records, [])
+        destroy_mock.assert_not_called()
+
+    async def test_preview_lifecycle_cleanup_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            app = self._cleanup_app(
+                root=root,
+                state_dir=state_dir,
+                policy=self._cleanup_policy(["preview_lifecycle.plan"]),
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-cleanup",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                    "apply": False,
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_preview_lifecycle_sweep_uses_enabled_product_profiles(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload(product="syo")
+                )
+            )
+            disabled_payload = _generic_site_profile_payload(product="discord-blue")
+            disabled_payload["preview"] = {"enabled": False}
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(disabled_payload)
+            )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-syo-syo-pr-41",
+                    context="syo",
+                    anchor_repo="syo",
+                    anchor_pr_number=41,
+                    anchor_pr_url="https://github.example/every/syo/pull/41",
+                    preview_label="syo/syo#41",
+                    canonical_url="https://pr-41.syo.example",
+                    state="active",
+                    created_at="2026-04-20T10:00:00Z",
+                    updated_at="2026-04-20T10:00:00Z",
+                    eligible_at="2026-04-20T10:00:00Z",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/launchplane",
+                            "workflow_refs": [
+                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["syo"],
+                            "contexts": ["syo"],
+                            "actions": ["preview_lifecycle.plan", "preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/launchplane",
+                        workflow_ref=(
+                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=state_dir),
+            )
+
+            with (
+                patch(
+                    "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory",
+                    return_value=GenericWebPreviewInventoryResult(
+                        product="syo",
+                        context="syo",
+                        source="launchplane-preview-lifecycle",
+                        app_name_prefix="syo-preview",
+                        previews=(
+                            GenericWebPreviewInventoryItem(
+                                applicationId="app-41",
+                                applicationName="syo-preview-pr-41",
+                                previewSlug="pr-41",
+                            ),
+                        ),
+                    ),
+                ) as inventory_mock,
+                patch(
+                    "control_plane.preview_lifecycle_cleanup_routes.discover_generic_web_preview_desired_state",
+                    return_value=PreviewDesiredStateRecord(
+                        desired_state_id="preview-desired-state-syo-20260510T120000Z",
+                        product="syo",
+                        context="syo",
+                        source="launchplane-preview-lifecycle",
+                        discovered_at="2026-05-10T12:00:00Z",
+                        repository="every/syo",
+                        label="preview",
+                        anchor_repo="syo",
+                        preview_slug_prefix="pr-",
+                        status="pass",
+                        desired_count=0,
+                        desired_previews=(),
+                    ),
+                ) as desired_mock,
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/lifecycle-sweep",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={"source": "launchplane-preview-lifecycle", "apply": False},
+                )
+            payload = response.json()
+            records = FilesystemRecordStore(state_dir=state_dir)
+            plan_records = records.list_preview_lifecycle_plan_records(context_name="syo")
+            cleanup_records = records.list_preview_lifecycle_cleanup_records(context_name="syo")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["status"], "pass")
+        self.assertEqual(payload["result"]["profile_count"], 1)
+        self.assertEqual(payload["result"]["profiles"][0]["product"], "syo")
+        self.assertEqual(payload["result"]["profiles"][0]["orphaned_slugs"], ["pr-41"])
+        self.assertEqual(plan_records[0].orphaned_slugs, ("pr-41",))
+        self.assertEqual(cleanup_records[0].status, "report_only")
+        inventory_mock.assert_called_once()
+        desired_mock.assert_called_once()
+
+    async def test_preview_lifecycle_sweep_rejects_missing_product_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload(product="syo")
+                )
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload(product="verireel")
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/launchplane",
+                            "workflow_refs": [
+                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["syo"],
+                            "contexts": ["syo"],
+                            "actions": ["preview_lifecycle.plan", "preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/launchplane",
+                        workflow_ref=(
+                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=state_dir),
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-sweep",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={"source": "launchplane-preview-lifecycle"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(payload["authz"]["request"]["product"], "verireel")
+        self.assertEqual(payload["authz"]["request"]["context"], "verireel")
+        self.assertEqual(payload["authz"]["request"]["action"], "preview_lifecycle.plan")
+
+    async def test_preview_lifecycle_sweep_requires_write_capable_store_before_drivers(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _generic_site_profile_payload(product="syo")
+        )
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/launchplane",
+                        "workflow_refs": [
+                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["syo"],
+                        "contexts": ["syo"],
+                        "actions": ["preview_lifecycle.plan", "preview_lifecycle.cleanup"],
+                    }
+                ]
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(
+                _identity(
+                    repository="every/launchplane",
+                    workflow_ref=(
+                        "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                    ),
+                    event_name="workflow_dispatch",
+                )
+            ),
+            authz_policy=policy,
+            record_store_factory=lambda: _PreviewLifecycleSweepProfileOnlyStore(profile),
+        )
+
+        with patch(
+            "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory"
+        ) as inventory_mock:
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-sweep",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={"source": "launchplane-preview-lifecycle", "apply": True},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+        self.assertIn("preview lifecycle sweep applies", response.json()["error"]["message"])
+        inventory_mock.assert_not_called()
+
+    def test_preview_lifecycle_cleanup_legacy_wsgi_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity(repository="every/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-cleanup",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    def test_preview_lifecycle_sweep_legacy_wsgi_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity(repository="every/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-sweep",
+                payload={"source": "launchplane-preview-lifecycle"},
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
 
 class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
@@ -21588,6 +22111,60 @@ class _StubFastApiGitHubOAuthClient:
 
 class _MissingProductReadStore:
     pass
+
+
+class _PreviewLifecycleSweepProfileOnlyStore:
+    backend_name = "test-preview-lifecycle-sweep-profile-only"
+
+    def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
+        self.profile = profile
+
+    def close(self) -> None:
+        return None
+
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        return (self.profile,)
+
+
+class _PreviewLifecycleCleanupPlanOnlyStore:
+    backend_name = "test-preview-lifecycle-cleanup-plan-only"
+
+    def __init__(self, *, state_dir: Path) -> None:
+        self.delegate = FilesystemRecordStore(state_dir=state_dir)
+        self.cleanup_records: list[PreviewLifecycleCleanupRecord] = []
+
+    def close(self) -> None:
+        return None
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        return self.delegate.read_idempotency_record(
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object:
+        return self.delegate.write_idempotency_record(record)
+
+    def list_preview_lifecycle_plan_records(
+        self, *, context_name: str = "", limit: int | None = 25
+    ) -> tuple[PreviewLifecyclePlanRecord, ...]:
+        return self.delegate.list_preview_lifecycle_plan_records(
+            context_name=context_name,
+            limit=limit,
+        )
+
+    def write_preview_lifecycle_cleanup_record(
+        self, record: PreviewLifecycleCleanupRecord
+    ) -> object:
+        self.cleanup_records.append(record)
+        return f"preview-lifecycle-cleanup://{record.cleanup_id}"
 
 
 class _ConcurrentProductConfigDryRunMarkerStore:

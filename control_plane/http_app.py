@@ -180,6 +180,18 @@ from control_plane.notifications import post_discord_webhook
 from control_plane.preview_pr_feedback_notifications import (
     deliver_preview_pr_feedback_notifications,
 )
+from control_plane.preview_lifecycle_cleanup_routes import (
+    PreviewLifecycleCleanupEnvelope,
+    PreviewLifecycleSweepEnvelope,
+    build_preview_lifecycle_sweep,
+    latest_preview_lifecycle_plan,
+    preview_lifecycle_cleanup_profile_settings,
+    preview_lifecycle_sweep_profiles,
+    require_preview_lifecycle_cleanup_apply_store,
+    require_preview_lifecycle_cleanup_mutation_store,
+    require_preview_lifecycle_sweep_store,
+    write_preview_lifecycle_cleanup_apply_record,
+)
 from control_plane.product_config_http import (
     ProductConfigApplyEnvelope,
     product_config_live_target_next_actions,
@@ -201,6 +213,7 @@ from control_plane.runtime_key_safety import (
     runtime_key_safety_environment_class,
 )
 from control_plane.service_auth import (
+    AgentAuthzDecision,
     BearerIdentityConfig,
     GitHubActionsIdentity,
     GitHubHumanIdentity,
@@ -257,6 +270,9 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     reconcile_stale_odoo_stable_operation_records,
 )
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
+from control_plane.workflows.preview_lifecycle_cleanup import (
+    build_preview_lifecycle_cleanup_record,
+)
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_pr_feedback import (
     DEFAULT_PREVIEW_FEEDBACK_MARKER,
@@ -324,6 +340,8 @@ _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
 _PREVIEW_PR_FEEDBACK_ROUTE = "/v1/previews/pr-feedback"
 _PREVIEW_DESIRED_STATE_ROUTE = "/v1/previews/desired-state"
 _PREVIEW_LIFECYCLE_PLAN_ROUTE = "/v1/previews/lifecycle-plan"
+_PREVIEW_LIFECYCLE_CLEANUP_ROUTE = "/v1/previews/lifecycle-cleanup"
+_PREVIEW_LIFECYCLE_SWEEP_ROUTE = "/v1/previews/lifecycle-sweep"
 _RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE = "/v1/runtime-key-safety/policies/apply"
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
 _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
@@ -461,6 +479,7 @@ class LaunchplaneErrorResponse(BaseModel):
     trace_id: str
     error: LaunchplaneErrorDetail
     records: dict[str, str] | None = None
+    authz: dict[str, object] | None = None
 
 
 class HealthResponse(BaseModel):
@@ -9460,6 +9479,208 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_preview_lifecycle_cleanup(
+        request: Request,
+        cleanup_request: PreviewLifecycleCleanupEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview_lifecycle.cleanup",
+            product=cleanup_request.product,
+            context=cleanup_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot clean preview lifecycle for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_LIFECYCLE_CLEANUP_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            cleanup_store = require_preview_lifecycle_cleanup_apply_store(record_store)
+            cleanup_mutation_store = (
+                require_preview_lifecycle_cleanup_mutation_store(record_store)
+                if cleanup_request.apply
+                else cleanup_store
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        plan = latest_preview_lifecycle_plan(
+            record_store=cleanup_store,
+            context_name=cleanup_request.context,
+            plan_id=cleanup_request.plan_id,
+        )
+        if plan is None or plan.product != cleanup_request.product:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=(
+                    "Preview lifecycle cleanup requires an existing plan for the requested"
+                    " product/context."
+                ),
+            )
+        cleanup_driver_id, cleanup_slug_template = preview_lifecycle_cleanup_profile_settings(
+            record_store=record_store,
+            product=cleanup_request.product,
+        )
+        cleanup_record = build_preview_lifecycle_cleanup_record(
+            plan=plan,
+            requested_at=utc_now_timestamp(),
+            source=cleanup_request.source,
+            apply=cleanup_request.apply,
+            destroy_reason=cleanup_request.destroy_reason,
+            control_plane_root=resolved_control_plane_root,
+            record_store=cleanup_mutation_store,
+            timeout_seconds=cleanup_request.timeout_seconds,
+            driver_id=cleanup_driver_id,
+            preview_slug_template=cleanup_slug_template,
+        )
+        preview_lifecycle_cleanup_id = write_preview_lifecycle_cleanup_apply_record(
+            record_store=cleanup_store,
+            record=cleanup_record,
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"preview_lifecycle_cleanup_id": preview_lifecycle_cleanup_id},
+            result=cleanup_record.model_dump(mode="json"),
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_LIFECYCLE_CLEANUP_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def apply_preview_lifecycle_sweep(
+        request: Request,
+        sweep_request: PreviewLifecycleSweepEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            sweep_store = require_preview_lifecycle_sweep_store(record_store)
+            requested_sweep_profiles = preview_lifecycle_sweep_profiles(
+                record_store=sweep_store,
+                product=sweep_request.product,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        if sweep_request.product.strip() and not requested_sweep_profiles:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=(
+                    "Preview lifecycle sweep found no enabled preview profile for the"
+                    " requested product."
+                ),
+            )
+        denied_profile: LaunchplaneProductProfileRecord | None = None
+        denied_action = ""
+        for profile in requested_sweep_profiles:
+            for action in ("preview_lifecycle.plan", "preview_lifecycle.cleanup"):
+                if not resolved_authz_policy_runtime.policy.allows(
+                    identity=identity,
+                    action=action,
+                    product=profile.product,
+                    context=profile.preview.context,
+                ):
+                    denied_profile = profile
+                    denied_action = action
+                    break
+            if denied_profile is not None:
+                break
+        if denied_profile is not None:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot sweep preview lifecycle for one or more enabled"
+                    " product profiles."
+                ),
+                authz=_authz_diagnostic_payload(
+                    identity=identity,
+                    authz_policy_sha256_value=resolved_authz_policy_runtime.policy_sha256,
+                    authz_policy_source=resolved_authz_policy_runtime.source,
+                    action=denied_action,
+                    product=denied_profile.product,
+                    context=denied_profile.preview.context,
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_LIFECYCLE_SWEEP_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        sweep_result = build_preview_lifecycle_sweep(
+            control_plane_root=resolved_control_plane_root,
+            record_store=sweep_store,
+            request=sweep_request,
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result=sweep_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_LIFECYCLE_SWEEP_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
     async def apply_preview_pr_feedback(
         request: Request,
         feedback_request: PreviewPrFeedbackEnvelope,
@@ -11223,6 +11444,44 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _PREVIEW_LIFECYCLE_CLEANUP_ROUTE,
+        apply_preview_lifecycle_cleanup,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_preview_lifecycle_cleanup",
+        summary="Clean preview lifecycle",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PREVIEW_LIFECYCLE_SWEEP_ROUTE,
+        apply_preview_lifecycle_sweep,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_preview_lifecycle_sweep",
+        summary="Sweep preview lifecycle",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
         apply_generic_web_preview_desired_state,
         methods=["POST"],
@@ -12710,13 +12969,16 @@ def create_launchplane_fastapi_app(
             code = str(detail.get("code", code))
             message = str(detail.get("message", "Launchplane request failed."))
             records = detail.get("records")
+            authz = detail.get("authz")
         else:
             message = str(http_error.detail)
             records = None
+            authz = None
         payload = LaunchplaneErrorResponse(
             trace_id=trace_id,
             error=LaunchplaneErrorDetail(code=code, message=message),
             records=records if isinstance(records, dict) else None,
+            authz=authz if isinstance(authz, dict) else None,
         )
         response = JSONResponse(
             status_code=http_error.status_code,
@@ -12768,12 +13030,94 @@ def create_launchplane_fastapi_app(
 
 
 def _launchplane_http_error(
-    *, status_code: int, trace_id: str, code: str, message: str
+    *,
+    status_code: int,
+    trace_id: str,
+    code: str,
+    message: str,
+    authz: dict[str, object] | None = None,
 ) -> HTTPException:
+    detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
+    if authz is not None:
+        detail["authz"] = authz
     return HTTPException(
         status_code=status_code,
-        detail={"trace_id": trace_id, "code": code, "message": message},
+        detail=detail,
     )
+
+
+def _authz_diagnostic_payload(
+    *,
+    identity: LaunchplaneIdentity,
+    authz_policy_sha256_value: str,
+    authz_policy_source: str,
+    action: str = "",
+    product: str = "",
+    context: str = "",
+    decision: str = "denied",
+    reason_code: str = "authorization_denied",
+) -> dict[str, object]:
+    if isinstance(identity, GitHubHumanIdentity):
+        identity_payload: dict[str, object] = {
+            "type": "github_human",
+            "login": identity.login,
+            "role": identity.role,
+        }
+    elif isinstance(identity, TerminalAgentIdentity):
+        identity_payload = {
+            "type": "terminal_agent",
+            "subject": identity.subject,
+            "token_label": identity.token_label,
+        }
+    elif isinstance(identity, LocalOperatorIdentity):
+        identity_payload = {
+            "type": "local_operator",
+            "subject": identity.subject,
+            "token_label": identity.token_label,
+        }
+    elif isinstance(identity, LocalAdminIdentity):
+        identity_payload = {
+            "type": "local_admin",
+            "subject": identity.subject,
+            "token_label": identity.token_label,
+        }
+    else:
+        identity_payload = {
+            "type": "github_actions",
+            "repository": identity.repository,
+            "workflow_ref": identity.workflow_ref,
+            "job_workflow_ref": identity.job_workflow_ref,
+            "event_name": identity.event_name,
+            "ref": identity.ref,
+            "ref_type": identity.ref_type,
+            "environment": identity.environment,
+            "subject": identity.subject,
+        }
+    normalized_decision: AgentAuthzDecision = "allowed" if decision == "allowed" else "denied"
+    audit = agent_authz_audit(
+        identity=identity,
+        action=action,
+        product=product,
+        context=context,
+        decision=normalized_decision,
+        reason_code=reason_code,
+        policy_source=authz_policy_source,
+        policy_sha256=authz_policy_sha256_value,
+    )
+    payload: dict[str, object] = {
+        "identity": identity_payload,
+        "agent_consumer": audit.subject.model_dump(mode="json"),
+        "agent_audit": audit.model_dump(mode="json"),
+        "policy_source": authz_policy_source,
+        "policy_sha256": authz_policy_sha256_value,
+    }
+    if action or product or context:
+        payload["request"] = {
+            "action": action,
+            "product": product,
+            "context": context,
+        }
+    return payload
 
 
 def _record_slug(value: str) -> str:
