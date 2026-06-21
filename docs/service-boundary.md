@@ -348,15 +348,16 @@ typed Pydantic response, focused OpenAPI assertions, and direct WSGI fallback
 retirement. Do not turn that route into a migration framework; use it as the
 small contract shape for the next route-family slice.
 
-`GET /v1/auth/session` and `POST /auth/logout` use native FastAPI routes in the
-mounted service. Session read preserves the Launchplane human-session response
-shape, renews expiring signed session cookies with the existing
-`HumanSessionManager`, returns `authentication_required` with the `configured`
-flag when no valid human session exists, and has focused OpenAPI coverage. Logout
-deletes the cookie-backed session when auth is configured and always emits the
-Launchplane session clearing cookie. The direct WSGI handlers remain as
-compatibility branches until the GitHub OAuth login and callback routes move to
-the same native auth/session family.
+The human auth/session family uses native FastAPI routes in the mounted service:
+`GET /auth/github/login`, `GET /auth/github/callback`, `GET /v1/auth/session`,
+and `POST /auth/logout`. GitHub OAuth login preserves PKCE state, same-origin
+`return_to` sanitization, GitHub authorization redirect, callback error
+envelopes, and signed session cookie issuance with the existing
+`HumanSessionManager`. Session read preserves the Launchplane human-session
+response shape, renews expiring signed session cookies, and returns
+`authentication_required` with the `configured` flag when no valid human session
+exists. Logout deletes the cookie-backed session when auth is configured and
+always emits the Launchplane session clearing cookie.
 
 Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
 deployment/promotion/preview lifecycle evidence over HTTP, and executes the
