@@ -178,7 +178,6 @@ from control_plane.drivers.generic_web_dispatch import (
     _validate_generic_web_prod_promotion_lanes as _validate_generic_web_prod_promotion_lanes,
 )
 from control_plane.drivers.generic_web_preview_dispatch import (
-    GenericWebPreviewDesiredStateEnvelope as GenericWebPreviewDesiredStateEnvelope,
     GenericWebPreviewDestroyEnvelope as GenericWebPreviewDestroyEnvelope,
     GenericWebPreviewInventoryEnvelope as GenericWebPreviewInventoryEnvelope,
     GenericWebPreviewReadinessEnvelope as GenericWebPreviewReadinessEnvelope,
@@ -203,7 +202,6 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _generic_web_preview_refresh_mutation_requests as _generic_web_preview_refresh_mutation_requests,
     _generic_web_preview_refresh_states as _generic_web_preview_refresh_states,
     _generic_web_preview_refresh_timing as _generic_web_preview_refresh_timing,
-    _handle_generic_web_preview_desired_state as _handle_generic_web_preview_desired_state,
     _handle_generic_web_preview_destroy as _handle_generic_web_preview_destroy,
     _handle_generic_web_preview_inventory as _handle_generic_web_preview_inventory,
     _handle_generic_web_preview_readiness as _handle_generic_web_preview_readiness,
@@ -301,7 +299,6 @@ from control_plane.workflows.odoo_preview_runtime import (
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
 )
-from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
     build_preview_lifecycle_cleanup_record,
@@ -418,7 +415,12 @@ _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/controller/
 _MERGE_TRAIN_PR_FEEDBACK_ROUTE = "/v1/work-graph/merge-train/pr-feedback"
 _MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
 _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET"
-_NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset({"/v1/drivers/ingress/route-apply"})
+_NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
+    {
+        "/v1/drivers/generic-web/preview-desired-state",
+        "/v1/drivers/ingress/route-apply",
+    }
+)
 
 
 class MergeTrainRunOnceEnvelope(BaseModel):
@@ -839,38 +841,6 @@ _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
 _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
     _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
 )
-
-
-class PreviewDesiredStateEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    context: str
-    source: str = "workflow"
-    repository: str
-    label: str = "preview"
-    anchor_repo: str
-    preview_slug_prefix: str = "pr-"
-    max_pages: int = Field(default=10, ge=1, le=20)
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "PreviewDesiredStateEnvelope":
-        if not self.product.strip():
-            raise ValueError("preview desired state requires product")
-        if not self.context.strip():
-            raise ValueError("preview desired state requires context")
-        if not self.source.strip():
-            raise ValueError("preview desired state requires source")
-        if not self.repository.strip():
-            raise ValueError("preview desired state requires repository")
-        if not self.label.strip():
-            raise ValueError("preview desired state requires label")
-        if not self.anchor_repo.strip():
-            raise ValueError("preview desired state requires anchor_repo")
-        if not self.preview_slug_prefix.strip():
-            raise ValueError("preview desired state requires preview_slug_prefix")
-        return self
 
 
 class PreviewLifecycleCleanupEnvelope(BaseModel):
@@ -2625,17 +2595,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_generic_web_stable_verification,
         ),
-        _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                use_preview_context_for_authorization=True,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_preview_desired_state,
-            pre_idempotency_validator=_validate_generic_web_preview_profile,
-        ),
         _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -2967,7 +2926,6 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
             _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
             _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
-            _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
@@ -3305,7 +3263,6 @@ def _build_write_routes() -> frozenset[str]:
         _MERGE_TRAIN_PR_FEEDBACK_ROUTE,
         _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_RUN_ONCE_ROUTE,
-        "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
         "/v1/previews/lifecycle-sweep",
@@ -8507,57 +8464,6 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     request=self_deploy_request.deploy,
                 ).model_dump(mode="json")
-            elif path == "/v1/previews/desired-state":
-                preview_desired_state_request = PreviewDesiredStateEnvelope.model_validate(payload)
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="preview_desired_state.discover",
-                    product=preview_desired_state_request.product,
-                    context=preview_desired_state_request.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot discover preview desired state for the requested"
-                                    " product/context."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = discover_github_preview_desired_state(
-                    control_plane_root=resolved_root,
-                    product=preview_desired_state_request.product,
-                    context=preview_desired_state_request.context,
-                    source=preview_desired_state_request.source,
-                    discovered_at=_utc_now_timestamp(),
-                    repository=preview_desired_state_request.repository,
-                    label=preview_desired_state_request.label,
-                    anchor_repo=preview_desired_state_request.anchor_repo,
-                    preview_slug_prefix=preview_desired_state_request.preview_slug_prefix,
-                    max_pages=preview_desired_state_request.max_pages,
-                )
-                preview_desired_state_id = _write_preview_desired_state_if_supported(
-                    record_store=record_store,
-                    record=driver_result,
-                )
-                result = {"preview_desired_state_id": preview_desired_state_id}
             elif path == "/v1/previews/pr-feedback":
                 preview_pr_feedback_request = PreviewPrFeedbackEnvelope.model_validate(payload)
                 if not _allows_preview_pr_feedback_write(

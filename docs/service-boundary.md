@@ -278,7 +278,7 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/prod-rollback-plan`
   - `POST /v1/drivers/generic-web/prod-rollback`
   - `POST /v1/drivers/generic-web/stable-verification`
-  - `POST /v1/drivers/generic-web/preview-desired-state`
+  - `POST /v1/drivers/generic-web/preview-desired-state` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-refresh`
   - `POST /v1/drivers/generic-web/preview-inventory`
   - `POST /v1/drivers/generic-web/preview-readiness`
@@ -1120,7 +1120,15 @@ report-only behavior and records the cleanup request/result next to the plan.
 Destructive provider cleanup is only attempted when `apply=true` is explicitly
 supplied by an authorized GitHub Actions workflow.
 
-`POST /v1/previews/lifecycle-plan` is a native FastAPI route. It requires
+`POST /v1/previews/desired-state` and `POST /v1/previews/lifecycle-plan` are
+native FastAPI routes. Desired-state discovery requires
+`preview_desired_state.discover` authorization for the requested product/context,
+requires storage that can persist `PreviewDesiredStateRecord`, preserves optional
+`Idempotency-Key` replay/conflict behavior for successful scans, and returns the
+stored scan as accepted evidence. Its legacy WSGI fallback branch is deleted;
+direct fallback calls fail closed.
+
+`POST /v1/previews/lifecycle-plan` requires
 `preview_lifecycle.plan` authorization for the requested product/context,
 preserves optional `Idempotency-Key` replay/conflict behavior, writes the typed
 preview lifecycle plan record, and has its legacy WSGI fallback branch deleted;
@@ -1468,10 +1476,14 @@ configuration still uses provider-specific target type fields internally where
 application-vs-compose behavior is required.
 
 Generic web preview desired-state discovery uses
-`POST /v1/drivers/generic-web/preview-desired-state`. The request names the
-product and optional pull-request label/page limit; Launchplane resolves the
-repository, preview context, anchor repo, and preview slug template from the
-DB-backed product profile before recording desired preview state.
+`POST /v1/drivers/generic-web/preview-desired-state`, now owned by native
+FastAPI. The request names the product and optional pull-request label/page
+limit; Launchplane resolves the repository, preview context, anchor repo, and
+preview slug template from the DB-backed product profile before recording
+desired preview state. Authorization uses the resolved profile product and
+preview context, not caller-supplied runtime authority, and the legacy WSGI
+descriptor branch is exempted from the fallback dispatcher so direct fallback
+calls fail closed.
 
 Generic web preview refresh uses
 `POST /v1/drivers/generic-web/preview-refresh`. The request names the product,

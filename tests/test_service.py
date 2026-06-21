@@ -83,10 +83,7 @@ from control_plane.contracts.preview_generation_record import (
     PreviewPullRequestSummary,
 )
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
-from control_plane.contracts.preview_lifecycle_plan_record import (
-    PreviewLifecycleDesiredPreview,
-    PreviewLifecyclePlanRecord,
-)
+from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
 from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationAttemptRecord,
     PreviewPrFeedbackNotificationDestination,
@@ -16147,125 +16144,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
         dispatch_mock.assert_not_called()
 
-    def test_generic_web_preview_desired_state_route_uses_profile_context(self) -> None:
+    def test_generic_web_preview_desired_state_legacy_wsgi_route_is_retired(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/sellyouroutboard",
-                            "workflow_refs": [
-                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["preview_desired_state.discover"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/sellyouroutboard",
-                        workflow_ref=(
-                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
-                            "@refs/heads/main"
-                        ),
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-            record = PreviewDesiredStateRecord(
-                desired_state_id="preview-desired-state-syo-testing-1",
-                product="sellyouroutboard",
-                context="sellyouroutboard-testing",
-                source="generic-web-preview",
-                discovered_at="2026-04-30T21:00:00Z",
-                repository="cbusillo/sellyouroutboard",
-                label="preview",
-                anchor_repo="sellyouroutboard",
-                status="pass",
-                desired_count=0,
-            )
-
-            with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.discover_generic_web_preview_desired_state",
-                return_value=record,
-            ) as discover:
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/drivers/generic-web/preview-desired-state",
-                    payload={
-                        "schema_version": 1,
-                        "product": "sellyouroutboard",
-                        "desired_state": {
-                            "schema_version": 1,
-                            "product": "sellyouroutboard",
-                        },
-                    },
-                    headers={"Idempotency-Key": "generic-web-preview-desired-state:syo"},
-                )
-            records = FilesystemRecordStore(state_dir=state_dir).list_preview_desired_state_records(
-                context_name="sellyouroutboard-testing"
-            )
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(
-            payload["records"]["preview_desired_state_id"],
-            "preview-desired-state-syo-testing-1",
-        )
-        discover.assert_called_once()
-        _, kwargs = discover.call_args
-        self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
-        self.assertEqual(kwargs["profile"].preview.context, "sellyouroutboard-testing")
-        self.assertEqual(records[0].desired_state_id, "preview-desired-state-syo-testing-1")
-
-    def test_generic_web_preview_desired_state_route_rejects_wrong_context(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/sellyouroutboard",
-                            "workflow_refs": [
-                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["different-context"],
-                            "actions": ["preview_desired_state.discover"],
-                        }
-                    ]
-                }
-            )
             app = create_launchplane_service_app(
                 state_dir=root / "state",
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/sellyouroutboard",
-                        workflow_ref=(
-                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
-                            "@refs/heads/main"
-                        ),
-                    )
-                ),
-                authz_policy=policy,
+                verifier=_StubVerifier(_identity(repository="cbusillo/sellyouroutboard")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=root,
             )
 
@@ -16283,77 +16168,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_generic_web_preview_desired_state_route_keeps_profile_errors_invalid_request(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            profile_payload = _product_profile_payload()
-            profile_payload["preview"] = {
-                "enabled": False,
-                "context": "sellyouroutboard-testing",
-                "slug_template": "pr-{number}",
-            }
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(profile_payload)
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/sellyouroutboard",
-                            "workflow_refs": [
-                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["preview_desired_state.discover"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/sellyouroutboard",
-                        workflow_ref=(
-                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
-                            "@refs/heads/main"
-                        ),
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.discover_generic_web_preview_desired_state"
-            ) as discover:
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/drivers/generic-web/preview-desired-state",
-                    payload={
-                        "schema_version": 1,
-                        "product": "sellyouroutboard",
-                        "desired_state": {
-                            "schema_version": 1,
-                            "product": "sellyouroutboard",
-                        },
-                    },
-                    headers={"Idempotency-Key": "generic-web-preview-disabled:syo"},
-                )
-
-        self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_request")
-        discover.assert_not_called()
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_generic_web_preview_inventory_route_writes_scan_from_driver_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -23916,123 +23732,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "database_storage_required")
         self.assertIn("preview lifecycle plan applies", payload["error"]["message"])
 
-    def test_preview_desired_state_endpoint_discovers_and_records_labeled_prs(self) -> None:
+    def test_preview_desired_state_endpoint_legacy_wsgi_route_is_retired(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/launchplane",
-                            "workflow_refs": [
-                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
-                            ],
-                            "event_names": ["workflow_dispatch"],
-                            "products": ["verireel"],
-                            "contexts": ["verireel-testing"],
-                            "actions": ["preview_desired_state.discover"],
-                        }
-                    ]
-                }
-            )
             app = create_launchplane_service_app(
                 state_dir=root / "state",
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="every/launchplane",
-                        workflow_ref=(
-                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
-                        ),
-                        event_name="workflow_dispatch",
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            with patch(
-                "control_plane.service.discover_github_preview_desired_state",
-                return_value=PreviewDesiredStateRecord(
-                    desired_state_id="preview-desired-state-verireel-testing-20260429T213000Z",
-                    product="verireel",
-                    context="verireel-testing",
-                    source="launchplane-preview-lifecycle",
-                    discovered_at="2026-04-29T21:30:00Z",
-                    repository="every/verireel",
-                    label="preview",
-                    anchor_repo="verireel",
-                    status="pass",
-                    desired_count=1,
-                    desired_previews=(
-                        PreviewLifecycleDesiredPreview(
-                            preview_slug="pr-42",
-                            anchor_repo="verireel",
-                            anchor_pr_number=42,
-                            anchor_pr_url="https://github.com/every/verireel/pull/42",
-                            head_sha="abc1234",
-                        ),
-                    ),
-                ),
-            ) as discover_mock:
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/previews/desired-state",
-                    payload={
-                        "product": "verireel",
-                        "context": "verireel-testing",
-                        "source": "launchplane-preview-lifecycle",
-                        "repository": "every/verireel",
-                        "label": "preview",
-                        "anchor_repo": "verireel",
-                    },
-                )
-
-            records = FilesystemRecordStore(
-                state_dir=root / "state"
-            ).list_preview_desired_state_records(context_name="verireel-testing")
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(
-            payload["records"]["preview_desired_state_id"],
-            "preview-desired-state-verireel-testing-20260429T213000Z",
-        )
-        self.assertEqual(payload["result"]["desired_previews"][0]["preview_slug"], "pr-42")
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0].desired_count, 1)
-        discover_mock.assert_called_once()
-
-    def test_preview_desired_state_endpoint_rejects_unauthorized_workflow(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/launchplane",
-                            "workflow_refs": [
-                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
-                            ],
-                            "event_names": ["workflow_dispatch"],
-                            "products": ["verireel"],
-                            "contexts": ["verireel-testing"],
-                            "actions": ["preview_lifecycle.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="every/launchplane",
-                        workflow_ref=(
-                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
-                        ),
-                        event_name="workflow_dispatch",
-                    )
-                ),
-                authz_policy=policy,
+                verifier=_StubVerifier(_identity(repository="every/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=root,
             )
 
@@ -24048,8 +23754,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_preview_lifecycle_sweep_uses_enabled_product_profiles(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

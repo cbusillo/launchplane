@@ -207,6 +207,14 @@ Keep a compatibility surface only when it is one of these:
   replay/conflict behavior, writes the typed lifecycle plan record, and returns
   the stored plan as accepted evidence. Its legacy WSGI write branch is deleted,
   and direct WSGI fallback calls fail closed.
+- Preview desired-state discovery uses native FastAPI
+  `POST /v1/previews/desired-state` and
+  `POST /v1/drivers/generic-web/preview-desired-state`, preserves
+  `preview_desired_state.discover` authorization and optional successful-scan
+  `Idempotency-Key` replay/conflict behavior, requires a store capable of
+  persisting desired-state records, and returns the stored scan as accepted
+  evidence. The central WSGI branch and generic-web descriptor fallback branch
+  are deleted/exempted, and direct WSGI fallback calls fail closed.
 - Public ingress, Every Code, and preview PR feedback notification policy apply
   use native FastAPI routes for bearer-token callers and preserve DB-backed
   storage enforcement, local operator reason requirements, explicit preview

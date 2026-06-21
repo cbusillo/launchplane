@@ -19,6 +19,9 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.drivers import registry
+from control_plane.drivers.generic_web_preview_dispatch import (
+    GenericWebPreviewDesiredStateEnvelope,
+)
 from control_plane.drivers.registry import (
     build_driver_context_view,
     effective_driver_actions,
@@ -661,10 +664,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
         self.assertIn(
-            control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
-            dispatch_routes,
-        )
-        self.assertIn(
             control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
             dispatch_routes,
         )
@@ -680,6 +679,20 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
             dispatch_routes,
         )
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_generic_web_preview_desired_state_is_native_fastapi_dispatch_exempt(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        route_path = control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path
+
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
+        self.assertIn(
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
+        )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_generic_web_source_ref_deploy_registered_in_descriptor_dispatch(self) -> None:
@@ -1505,9 +1518,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
 
     def test_generic_web_preview_descriptor_requires_dispatch_registration(self) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(
-            control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path
-        )
         dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path)
@@ -1876,7 +1886,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 ),
                 "preview_desired_state": (
                     control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
-                    control_plane_service.GenericWebPreviewDesiredStateEnvelope,
+                    GenericWebPreviewDesiredStateEnvelope,
                     "preview desired state",
                 ),
                 "preview_inventory": (
