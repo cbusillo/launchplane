@@ -1111,6 +1111,7 @@ write-restricted for runner-lane registration audit evidence.
 
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/previews/lifecycle-cleanup`
+- `POST /v1/previews/lifecycle-sweep`
 - `POST /v1/previews/desired-state`
 - `POST /v1/previews/pr-feedback`
 
@@ -1124,8 +1125,10 @@ report-only behavior and records the cleanup request/result next to the plan.
 Destructive provider cleanup is only attempted when `apply=true` is explicitly
 supplied by an authorized GitHub Actions workflow.
 
-`POST /v1/previews/desired-state` and `POST /v1/previews/lifecycle-plan` are
-native FastAPI routes. Desired-state discovery requires
+`POST /v1/previews/desired-state`, `POST /v1/previews/lifecycle-plan`,
+`POST /v1/previews/lifecycle-cleanup`, and
+`POST /v1/previews/lifecycle-sweep` are native FastAPI routes.
+Desired-state discovery requires
 `preview_desired_state.discover` authorization for the requested product/context,
 requires storage that can persist `PreviewDesiredStateRecord`, preserves optional
 `Idempotency-Key` replay/conflict behavior for successful scans, and returns the
@@ -1137,6 +1140,25 @@ direct fallback calls fail closed.
 preserves optional `Idempotency-Key` replay/conflict behavior, writes the typed
 preview lifecycle plan record, and has its legacy WSGI fallback branch deleted;
 direct fallback calls fail closed.
+
+`POST /v1/previews/lifecycle-cleanup` requires
+`preview_lifecycle.cleanup` authorization for the requested product/context,
+preserves optional `Idempotency-Key` replay/conflict behavior, requires storage
+that can read lifecycle plan records and write cleanup records, and additionally
+requires preview read/write capability before any `apply=true` provider destroy
+mutation starts. It rejects missing or product-mismatched `plan_id` values before
+writing cleanup state and returns the stored cleanup record as accepted evidence.
+Its legacy WSGI fallback branch is deleted; direct fallback calls fail closed.
+
+`POST /v1/previews/lifecycle-sweep` derives enabled preview profiles from
+Launchplane product-profile records, requires both `preview_lifecycle.plan` and
+`preview_lifecycle.cleanup` authorization for every selected profile before any
+inventory, desired-state, plan, or cleanup mutation starts, requires storage
+that can read product profiles and preview/inventory history and write preview,
+inventory, desired-state, lifecycle plan, and cleanup records, preserves optional
+`Idempotency-Key` replay/conflict behavior, and returns the sweep summary as
+accepted evidence. Its legacy WSGI fallback branch is deleted; direct fallback
+calls fail closed.
 
 PR feedback delivery is part of the same preview lifecycle boundary. Product
 repos submit thin preview outcome facts to `POST /v1/previews/pr-feedback`;

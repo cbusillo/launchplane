@@ -224,6 +224,13 @@ Keep a compatibility surface only when it is one of these:
   or failed PR comment delivery, and returns the stored feedback record as
   accepted evidence. Its legacy WSGI write branch is retired; direct WSGI
   fallback calls fail closed.
+- Preview lifecycle cleanup and sweep use native FastAPI
+  `POST /v1/previews/lifecycle-cleanup` and
+  `POST /v1/previews/lifecycle-sweep`, preserve cleanup/sweep authorization and
+  optional `Idempotency-Key` replay/conflict behavior, require the relevant
+  Launchplane record-store capabilities before mutation, and return accepted
+  evidence for cleanup records or sweep summaries. Their legacy WSGI write
+  branches are retired; direct WSGI fallback calls fail closed.
 - Public ingress, Every Code, and preview PR feedback notification policy apply
   use native FastAPI routes for bearer-token callers and preserve DB-backed
   storage enforcement, local operator reason requirements, explicit preview
