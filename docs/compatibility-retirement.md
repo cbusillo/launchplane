@@ -272,6 +272,13 @@ Keep a compatibility surface only when it is one of these:
   sessions, and local operator/admin bearer callers; apply requests preserve
   optional `Idempotency-Key` replay/conflict handling while dry-runs remain
   stateless.
+- Merge-train PR feedback uses native FastAPI
+  `POST /v1/work-graph/merge-train/pr-feedback` for policy-backed managed PR
+  comments and feedback evidence records. Its legacy WSGI write branch is
+  deleted, and direct WSGI fallback calls fail closed. Requests require the
+  matching merge-train repository policy `service_authz`, configured GitHub
+  token environment variable, feedback record storage, and preserve optional
+  `Idempotency-Key` replay/conflict handling for successful accepted writes.
 - Authz policy grant and removal routes use native FastAPI
   `POST /v1/authz-policies/github-actions/grants`,
   `POST /v1/authz-policies/github-actions/removals`,

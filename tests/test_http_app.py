@@ -5444,6 +5444,487 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["admission"]["status"], "admitted")
 
 
+class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_creates_managed_comment_and_records_evidence(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            policy_record = _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ) as find_comment,
+                patch(
+                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    return_value={
+                        "id": 123,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-123",
+                    },
+                ) as create_comment,
+            ):
+                response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "waiting",
+                        "controller_action": "observe_candidate",
+                        "controller_record_id": "candidate-1",
+                        "message": "Waiting for required checks to settle.",
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        feedback = payload["result"]["feedback"]
+        self.assertEqual(feedback["delivery_status"], "delivered")
+        self.assertEqual(feedback["delivery_action"], "created_comment")
+        self.assertEqual(feedback["comment_id"], 123)
+        self.assertEqual(feedback["policy_sha256"], policy_record.policy_sha256)
+        self.assertIn("launchplane-merge-train", feedback["marker"])
+        self.assertIn("Waiting for required checks", feedback["comment_markdown"])
+        self.assertEqual(payload["records"]["merge_train_pr_feedback_id"], feedback["feedback_id"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].comment_id, 123)
+        self.assertEqual(records[0].delivery_action, "created_comment")
+        find_comment.assert_called_once()
+        create_comment.assert_called_once()
+
+    async def test_updates_managed_comment_and_records_evidence(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value={"id": 456, "body": "old body"},
+                ) as find_comment,
+                patch(
+                    "control_plane.merge_train_pr_feedback.update_github_issue_comment",
+                    return_value={
+                        "id": 456,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-456",
+                    },
+                ) as update_comment,
+                patch(
+                    "control_plane.merge_train_pr_feedback.create_github_issue_comment"
+                ) as create_comment,
+            ):
+                response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "completed",
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        feedback = response.json()["result"]["feedback"]
+        self.assertEqual(feedback["delivery_status"], "delivered")
+        self.assertEqual(feedback["delivery_action"], "updated_comment")
+        self.assertEqual(feedback["comment_id"], 456)
+        self.assertEqual(records[0].delivery_action, "updated_comment")
+        find_comment.assert_called_once()
+        update_comment.assert_called_once()
+        create_comment.assert_not_called()
+
+    async def test_rejects_comment_delivery_failure_but_records_evidence(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ),
+                patch(
+                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    side_effect=ClickException("GitHub API returned 502"),
+                ) as create_comment,
+            ):
+                response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "blocked",
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(response.status_code, 502)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "github_comment_delivery_failed")
+        self.assertIn("GitHub API returned 502", payload["error"]["message"])
+        feedback = payload["result"]["feedback"]
+        self.assertEqual(feedback["delivery_status"], "failed")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].delivery_status, "failed")
+        create_comment.assert_called_once()
+
+    async def test_replays_idempotent_request(self) -> None:
+        request_payload = {
+            "schema_version": 1,
+            "repository": "cbusillo/sellyouroutboard",
+            "base_branch": "main",
+            "pull_request_number": 7,
+            "event": "waiting",
+            "controller_action": "observe_candidate",
+            "controller_record_id": "candidate-1",
+            "message": "Waiting for required checks to settle.",
+        }
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ) as find_comment,
+                patch(
+                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    return_value={
+                        "id": 123,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-123",
+                    },
+                ) as create_comment,
+            ):
+                first_response = await _post_merge_train_pr_feedback(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-pr-feedback-7-waiting",
+                )
+                replay_response = await _post_merge_train_pr_feedback(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-pr-feedback-7-waiting",
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        first_payload = first_response.json()
+        replay_payload = replay_response.json()
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(
+            replay_payload["result"]["feedback"]["feedback_id"],
+            first_payload["result"]["feedback"]["feedback_id"],
+        )
+        self.assertEqual(len(records), 1)
+        find_comment.assert_called_once()
+        create_comment.assert_called_once()
+
+    async def test_rejects_reused_idempotency_key_with_different_payload(self) -> None:
+        request_payload = {
+            "schema_version": 1,
+            "repository": "cbusillo/sellyouroutboard",
+            "base_branch": "main",
+            "pull_request_number": 7,
+            "event": "waiting",
+        }
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ),
+                patch(
+                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    return_value={
+                        "id": 123,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-123",
+                    },
+                ),
+            ):
+                first_response = await _post_merge_train_pr_feedback(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-pr-feedback-7-conflict",
+                )
+                conflict_response = await _post_merge_train_pr_feedback(
+                    app,
+                    {**request_payload, "event": "blocked"},
+                    idempotency_key="merge-train-pr-feedback-7-conflict",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_preserves_same_second_updates(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value={"id": 456, "body": "old body"},
+                ),
+                patch(
+                    "control_plane.merge_train_pr_feedback.update_github_issue_comment",
+                    return_value={
+                        "id": 456,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-456",
+                    },
+                ),
+                patch(
+                    "control_plane.http_app.utc_now_timestamp",
+                    return_value="2026-05-20T15:00:00Z",
+                ),
+            ):
+                first_response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "waiting",
+                    },
+                )
+                second_response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "waiting",
+                        "message": "Still waiting after a rerun.",
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        self.assertNotEqual(
+            first_response.json()["result"]["feedback"]["feedback_id"],
+            second_response.json()["result"]["feedback"]["feedback_id"],
+        )
+        self.assertEqual(len(records), 2)
+
+    async def test_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: store,
+            )
+            with patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True):
+                response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "blocked",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_rejects_missing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "blocked",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "github_token_not_configured")
+
+    async def test_rejects_terminal_agent_bearer_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-pr-feedback-terminal-agent-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T21:00:00Z",
+                    policy=parse_merge_train_policy_toml(
+                        _merge_train_policy_table("cbusillo/sellyouroutboard").replace(
+                            'action = "merge_train.run_once"',
+                            'action = "merge_train.pr_feedback"',
+                        )
+                    ),
+                ),
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_merge_train_pr_feedback_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-read-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+            )
+            response = await _post_merge_train_pr_feedback(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "pull_request_number": 7,
+                    "event": "blocked",
+                },
+                authorization="Bearer terminal-read-token",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/merge-train/pr-feedback",
+                payload={
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "pull_request_number": 7,
+                    "event": "blocked",
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_openapi_includes_pr_feedback_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/work-graph/merge-train/pr-feedback"]["post"]
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
+
+
 class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
     async def test_evaluate_returns_allowed_dry_run_without_execution(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -18214,6 +18695,22 @@ def _terminal_agent_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+def _terminal_agent_merge_train_pr_feedback_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["merge_train.pr_feedback"],
+                }
+            ]
+        }
+    )
+
+
 def _local_operator_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -21016,6 +21513,25 @@ async def _post_preview_pr_feedback(
         app,
         "POST",
         "/v1/previews/pr-feedback",
+        headers=headers,
+        payload=payload,
+    )
+
+
+async def _post_merge_train_pr_feedback(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/merge-train/pr-feedback",
         headers=headers,
         payload=payload,
     )

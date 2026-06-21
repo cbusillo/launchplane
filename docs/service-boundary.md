@@ -273,7 +273,7 @@ VeriReel product paths:
   - `POST /v1/work-graph/rank` (native FastAPI)
   - `POST /v1/work-graph/github/issues/reconcile` (native FastAPI)
   - `POST /v1/work-graph/merge-train/run-once`
-  - `POST /v1/work-graph/merge-train/pr-feedback`
+  - `POST /v1/work-graph/merge-train/pr-feedback` (native FastAPI)
   - `POST /v1/work-graph/merge-train/controller/run-once`
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
@@ -529,16 +529,16 @@ policy or token is available. The route is dry-run by default; `mutate: true`
 applies at most one worker transition from one fresh snapshot. This route is the
 deployed sequential baseline, not the full batch train target.
 
-`POST /v1/work-graph/merge-train/pr-feedback` writes the public pull-request
-feedback surface for train progress. It uses the same repository/base policy and
-`service_authz` scope as `run-once`, resolves the same GitHub token, and creates
-or updates one Launchplane-managed issue comment per PR using a hidden marker.
-Accepted calls persist a `launchplane_merge_train_pr_feedback` record with the
-rendered markdown, event, controller action metadata, delivery status, and
-GitHub comment id/url. The route fails closed when authorization or token
-configuration is missing; callers should use it for queued, waiting, blocked,
-stale-policy, and completed transition summaries instead of writing ad hoc
-comments from scheduler scripts.
+`POST /v1/work-graph/merge-train/pr-feedback` is a native FastAPI route that
+writes the public pull-request feedback surface for train progress. It uses the
+same repository/base policy and `service_authz` scope as `run-once`, resolves the
+same GitHub token, and creates or updates one Launchplane-managed issue comment
+per PR using a hidden marker. Accepted calls persist a
+`launchplane_merge_train_pr_feedback` record with the rendered markdown, event,
+controller action metadata, delivery status, and GitHub comment id/url. The route
+fails closed when authorization, storage, or token configuration is missing;
+callers should use it for queued, waiting, blocked, stale-policy, and completed
+transition summaries instead of writing ad hoc comments from scheduler scripts.
 
 `GET /v1/work-graph/merge-train/policy-targets` is a native FastAPI route that
 returns the authorized repository/base-branch targets from the active DB-backed
