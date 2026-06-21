@@ -219,6 +219,193 @@ class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("shinycomputers", example_text)
 
 
+class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_session_read_rejects_missing_human_session(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/v1/auth/session")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(payload["error"]["message"], "Sign in with GitHub to access Launchplane.")
+        self.assertFalse(payload["configured"])
+        self.assertTrue(str(payload["trace_id"]).startswith("launchplane_req_"))
+        self.assertNotIn("WWW-Authenticate", response.headers)
+
+    async def test_session_read_rejects_missing_cookie_when_auth_is_configured(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_get(app, "/v1/auth/session")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertTrue(payload["configured"])
+        self.assertNotIn("WWW-Authenticate", response.headers)
+
+    async def test_session_read_returns_github_human_identity(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        human_session = session_manager.issue(
+            GitHubHumanIdentity(
+                login="example-operator",
+                github_id=123,
+                name="Example Operator",
+                email="operator@example.com",
+                organizations=frozenset({"z-org", "a-org"}),
+                teams=frozenset({"z-org/admins", "a-org/operators"}),
+                role="admin",
+            )
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/auth/session",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Set-Cookie", response.headers)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(str(payload["trace_id"]).startswith("launchplane_req_"))
+        self.assertEqual(
+            payload["identity"],
+            {
+                "provider": "github",
+                "login": "example-operator",
+                "github_id": 123,
+                "name": "Example Operator",
+                "email": "operator@example.com",
+                "organizations": ["a-org", "z-org"],
+                "teams": ["a-org/operators", "z-org/admins"],
+                "role": "admin",
+            },
+        )
+
+    async def test_session_read_renews_expiring_human_session(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        now = datetime.now(timezone.utc)
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+            now=lambda: now,
+        )
+        expiring_session = LaunchplaneHumanSession(
+            session_id="expiring-session",
+            identity=_github_human_identity(role="read_only"),
+            created_at=now - timedelta(days=13),
+            expires_at=now + timedelta(hours=12),
+        )
+        session_store.write_session(expiring_session)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/auth/session",
+            headers={"Cookie": session_manager.session_cookie_header(expiring_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        self.assertIn("Max-Age=1209600", response.headers["Set-Cookie"])
+        renewed_session = session_store.read_session("expiring-session")
+        self.assertIsNotNone(renewed_session)
+        assert renewed_session is not None
+        self.assertGreater(renewed_session.expires_at, expiring_session.expires_at)
+
+    async def test_session_read_native_route_precedes_wsgi_fallback(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        human_session = session_manager.issue(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+        fallback_calls: list[str] = []
+
+        def fallback_app(
+            environ: dict[str, object], start_response: Callable[..., object]
+        ) -> list[bytes]:
+            fallback_calls.append(str(environ.get("PATH_INFO", "")))
+            start_response("599 Legacy Fallback", [("Content-Type", "application/json")])
+            return [b'{"status":"legacy"}']
+
+        app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, fallback_app))))
+
+        response = await _asgi_get(
+            app,
+            "/v1/auth/session",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["identity"]["login"], "example-operator")
+        self.assertEqual(fallback_calls, [])
+
+    async def test_openapi_includes_auth_session_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/auth/session"]["get"]
+        self.assertEqual(route["operationId"], "read_human_auth_session")
+        success_schema = route["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AuthSessionResponse")
+        rejected_schema = route["responses"]["401"]["content"]["application/json"]["schema"]
+        self.assertEqual(
+            rejected_schema["$ref"], "#/components/schemas/AuthSessionRequiredResponse"
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["AuthSessionResponse"]["additionalProperties"],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["AuthSessionRequiredResponse"]["additionalProperties"],
+            False,
+        )
+
+
 class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_reports_current_image_and_policy_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
