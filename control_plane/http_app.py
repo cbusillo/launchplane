@@ -308,6 +308,7 @@ _AUTHZ_POLICY_TERMINAL_AGENTS_GRANTS_ROUTE = "/v1/authz-policies/terminal-agents
 _AUTHZ_POLICY_LOCAL_OPERATORS_GRANTS_ROUTE = "/v1/authz-policies/local-operators/grants"
 _AUTHZ_POLICY_LOCAL_ADMINS_GRANTS_ROUTE = "/v1/authz-policies/local-admins/grants"
 _AUTH_SESSION_ROUTE = "/v1/auth/session"
+_AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
@@ -446,6 +447,13 @@ class AuthSessionRequiredResponse(BaseModel):
     trace_id: str
     error: LaunchplaneErrorDetail
     configured: bool
+
+
+class AuthLogoutResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
 
 
 class EvidenceIngressRequestContractMiddleware:
@@ -3086,6 +3094,19 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             identity=human_identity_response(session.identity),
         )
+
+    def logout_auth_session(
+        response: Response,
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> AuthLogoutResponse:
+        trace_id = next_trace_id()
+        if human_session_manager is not None:
+            human_session_manager.delete_cookie_session(cookie)
+            clear_cookie = human_session_manager.clear_cookie_header()
+        else:
+            clear_cookie = "launchplane_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+        response.headers.append("Set-Cookie", clear_cookie)
+        return AuthLogoutResponse(trace_id=trace_id)
 
     def read_identity(
         request: Request,
@@ -10401,6 +10422,16 @@ def create_launchplane_fastapi_app(
         operation_id="read_human_auth_session",
         summary="Read human auth session",
         responses={401: {"model": AuthSessionRequiredResponse}},
+    )
+
+    app.add_api_route(
+        _AUTH_LOGOUT_ROUTE,
+        logout_auth_session,
+        methods=["POST"],
+        response_model=AuthLogoutResponse,
+        response_model_exclude_none=True,
+        operation_id="logout_human_auth_session",
+        summary="Logout human auth session",
     )
 
     app.add_api_route(

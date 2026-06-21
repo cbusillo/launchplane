@@ -56,12 +56,14 @@ Keep a compatibility surface only when it is one of these:
 - The Launchplane health read uses the native FastAPI `GET /v1/health` route.
   Its legacy WSGI branch is deleted; direct fallback calls fail closed while
   the mounted fallback remains for retained non-native routes.
-- The human auth-session read uses native FastAPI `GET /v1/auth/session` in the
-  mounted service. It preserves the existing signed-session cookie read/renewal
-  behavior, `authentication_required` rejection envelope, and `configured` flag.
-  The legacy WSGI session-read branch remains only as a direct compatibility
-  branch until the GitHub OAuth login, callback, and logout routes migrate to the
-  same native auth/session family.
+- The human auth-session read and logout routes use native FastAPI
+  `GET /v1/auth/session` and `POST /auth/logout` in the mounted service. Session
+  read preserves the existing signed-session cookie read/renewal behavior,
+  `authentication_required` rejection envelope, and `configured` flag. Logout
+  preserves cookie-backed session deletion and the clearing `Set-Cookie` header.
+  The legacy WSGI branches remain only as direct compatibility branches until
+  the GitHub OAuth login and callback routes migrate to the same native
+  auth/session family.
 - Launchplane service runtime and Odoo worker status reads use native FastAPI
   routes for bearer-token and human-session callers. Odoo worker reconcile uses
   native FastAPI `POST /v1/service/odoo-workers/reconcile` on the bearer/OIDC
