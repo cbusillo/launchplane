@@ -137,6 +137,10 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationAttemptRecord,
     PreviewPrFeedbackNotificationPolicyRecord,
 )
+from control_plane.contracts.preview_pr_feedback_record import (
+    PreviewPrFeedbackRecord,
+    PreviewPrFeedbackStatus,
+)
 from control_plane.contracts.preview_readiness_read_model import (
     PreviewReadinessReadModel,
     build_preview_readiness_read_model,
@@ -173,6 +177,9 @@ from control_plane.every_code_work_request_write import (
 )
 from control_plane.every_code_notifications_delivery import deliver_every_code_blocked_notifications
 from control_plane.notifications import post_discord_webhook
+from control_plane.preview_pr_feedback_notifications import (
+    deliver_preview_pr_feedback_notifications,
+)
 from control_plane.product_config_http import (
     ProductConfigApplyEnvelope,
     product_config_live_target_next_actions,
@@ -251,6 +258,11 @@ from control_plane.workflows.odoo_stable_operation_worker import (
 )
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
+from control_plane.workflows.preview_pr_feedback import (
+    DEFAULT_PREVIEW_FEEDBACK_MARKER,
+    EveryCodeWorkRequestReadStore,
+    build_preview_pr_feedback_record,
+)
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewProfileStore,
@@ -309,6 +321,7 @@ _EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/every-code/notification-polic
 _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
     "/v1/previews/pr-feedback/notification-policies/apply"
 )
+_PREVIEW_PR_FEEDBACK_ROUTE = "/v1/previews/pr-feedback"
 _PREVIEW_DESIRED_STATE_ROUTE = "/v1/previews/desired-state"
 _PREVIEW_LIFECYCLE_PLAN_ROUTE = "/v1/previews/lifecycle-plan"
 _RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE = "/v1/runtime-key-safety/policies/apply"
@@ -1481,6 +1494,46 @@ class PreviewPrFeedbackNotificationPolicyApplyEnvelope(BaseModel):
         return self
 
 
+class PreviewPrFeedbackEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    source: str = "workflow"
+    repository: str
+    anchor_repo: str
+    anchor_pr_number: int = Field(ge=1)
+    anchor_pr_url: str
+    status: PreviewPrFeedbackStatus
+    marker: str = DEFAULT_PREVIEW_FEEDBACK_MARKER
+    preview_url: str = ""
+    immutable_image_reference: str = ""
+    refresh_image_reference: str = ""
+    revision: str = ""
+    run_url: str = ""
+    failure_summary: str = ""
+    dry_run: bool = False
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewPrFeedbackEnvelope":
+        if not self.product.strip():
+            raise ValueError("preview PR feedback requires product")
+        if not self.context.strip():
+            raise ValueError("preview PR feedback requires context")
+        if not self.source.strip():
+            raise ValueError("preview PR feedback requires source")
+        if not self.repository.strip():
+            raise ValueError("preview PR feedback requires repository")
+        if not self.anchor_repo.strip():
+            raise ValueError("preview PR feedback requires anchor_repo")
+        if not self.anchor_pr_url.strip():
+            raise ValueError("preview PR feedback requires anchor_pr_url")
+        if not self.marker.strip():
+            raise ValueError("preview PR feedback requires marker")
+        return self
+
+
 class PreviewLifecyclePlanEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1712,6 +1765,13 @@ class _PreviewPrFeedbackNotificationPolicyApplyStore(Protocol):
     def write_preview_pr_feedback_notification_policy_record(
         self,
         record: PreviewPrFeedbackNotificationPolicyRecord,
+    ) -> object: ...
+
+
+class _PreviewPrFeedbackWriteStore(Protocol):
+    def write_preview_pr_feedback_record(
+        self,
+        record: PreviewPrFeedbackRecord,
     ) -> object: ...
 
 
@@ -2637,6 +2697,57 @@ def require_preview_desired_state_write_store(
     return cast(PreviewDesiredStateWriteStore, record_store)
 
 
+def require_preview_pr_feedback_write_store(
+    record_store: object,
+) -> _PreviewPrFeedbackWriteStore:
+    write_record = getattr(record_store, "write_preview_pr_feedback_record", None)
+    if not callable(write_record):
+        raise TypeError(
+            "Launchplane record store does not support preview PR feedback writes: "
+            "write_preview_pr_feedback_record"
+        )
+    return cast(_PreviewPrFeedbackWriteStore, record_store)
+
+
+def supports_every_code_work_requests(record_store: object) -> bool:
+    return hasattr(record_store, "list_every_code_work_request_records")
+
+
+def allows_preview_pr_feedback_write(
+    *,
+    authz_policy: LaunchplaneAuthzPolicy,
+    identity: LaunchplaneIdentity,
+    product: str,
+    context: str,
+    status: PreviewPrFeedbackStatus,
+) -> bool:
+    if authz_policy.allows(
+        identity=identity,
+        action="preview_pr_feedback.write",
+        product=product,
+        context=context,
+    ):
+        return True
+
+    lifecycle_actions_by_status = {
+        "pending": ("preview_refresh.execute",),
+        "ready": ("preview_refresh.execute",),
+        "failed": ("preview_refresh.execute",),
+        "destroyed": ("preview_destroy.execute",),
+        "cleanup_failed": ("preview_destroy.execute",),
+        "cleared": ("preview_refresh.execute", "preview_destroy.execute"),
+    }
+    return any(
+        authz_policy.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+        )
+        for action in lifecycle_actions_by_status.get(status, ())
+    )
+
+
 def read_generic_web_preview_profile(
     *, record_store: object, product: str
 ) -> LaunchplaneProductProfileRecord:
@@ -3088,6 +3199,9 @@ def create_launchplane_fastapi_app(
     work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
+    preview_pr_feedback_discord_sender: Callable[
+        [str, dict[str, object]], object
+    ] = post_discord_webhook,
     every_code_github_webhook_handler: EveryCodeGitHubWebhookHandler | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -9346,6 +9460,122 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_preview_pr_feedback(
+        request: Request,
+        feedback_request: PreviewPrFeedbackEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not allows_preview_pr_feedback_write(
+            authz_policy=resolved_authz_policy_runtime.policy,
+            identity=identity,
+            product=feedback_request.product,
+            context=feedback_request.context,
+            status=feedback_request.status,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write preview PR feedback for the requested product/context."
+                ),
+            )
+        if feedback_request.dry_run:
+            preview_pr_feedback_dry_run_result: dict[str, object] = {
+                "dry_run": True,
+                "preview_pr_feedback": "authorized",
+                "product": feedback_request.product,
+                "context": feedback_request.context,
+                "status": feedback_request.status,
+                "anchor_pr_number": feedback_request.anchor_pr_number,
+            }
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={},
+                result=preview_pr_feedback_dry_run_result,
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_PR_FEEDBACK_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            feedback_store = require_preview_pr_feedback_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        every_code_record_store = (
+            cast(EveryCodeWorkRequestReadStore, record_store)
+            if supports_every_code_work_requests(record_store)
+            else None
+        )
+        feedback_record = build_preview_pr_feedback_record(
+            control_plane_root=resolved_control_plane_root,
+            product=feedback_request.product,
+            context=feedback_request.context,
+            source=feedback_request.source,
+            requested_at=utc_now_timestamp(),
+            repository=feedback_request.repository,
+            anchor_repo=feedback_request.anchor_repo,
+            anchor_pr_number=feedback_request.anchor_pr_number,
+            anchor_pr_url=feedback_request.anchor_pr_url,
+            status=feedback_request.status,
+            marker=feedback_request.marker,
+            preview_url=feedback_request.preview_url,
+            immutable_image_reference=feedback_request.immutable_image_reference,
+            refresh_image_reference=feedback_request.refresh_image_reference,
+            revision=feedback_request.revision,
+            run_url=feedback_request.run_url,
+            failure_summary=feedback_request.failure_summary,
+            every_code_record_store=every_code_record_store,
+        )
+        feedback_store.write_preview_pr_feedback_record(feedback_record)
+        notification_attempts = deliver_preview_pr_feedback_notifications(
+            record_store=record_store,
+            feedback=feedback_record,
+            attempted_at=feedback_record.requested_at,
+            discord_sender=preview_pr_feedback_discord_sender,
+        )
+        result_records: dict[str, str] = {"preview_pr_feedback_id": feedback_record.feedback_id}
+        response_result: dict[str, object] = feedback_record.model_dump(mode="json")
+        if notification_attempts:
+            response_result["notification_attempt_count"] = len(notification_attempts)
+            response_result["notifications"] = [
+                attempt.model_dump(mode="json") for attempt in notification_attempts
+            ]
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=result_records,
+            result=response_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_PR_FEEDBACK_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
     async def apply_preview_desired_state(
         request: Request,
         desired_state_request: PreviewDesiredStateEnvelope,
@@ -10929,6 +11159,24 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="apply_preview_pr_feedback_notification_policy",
         summary="Apply preview PR feedback notification policy",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PREVIEW_PR_FEEDBACK_ROUTE,
+        apply_preview_pr_feedback,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_preview_pr_feedback",
+        summary="Apply preview PR feedback",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
