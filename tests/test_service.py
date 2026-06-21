@@ -9,12 +9,10 @@ import tempfile
 import unittest
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, Literal, cast
-from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 from click import ClickException, Command
@@ -154,8 +152,8 @@ from control_plane.service_human_auth import (
     GitHubOAuthClient,
     GitHubOAuthConfig,
     HumanSessionManager,
+    HumanSessionStore,
     InMemoryHumanSessionStore,
-    LaunchplaneHumanSession,
     load_github_oauth_config_from_env,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -1131,16 +1129,17 @@ def _signed_human_session_cookie(session_id: str, session_secret: str) -> str:
     return f"launchplane_session={session_id}.{signature}"
 
 
-def _signed_in_cookie(app: WsgiApp) -> str:
-    _, login_headers, _ = _invoke_raw_app(app, method="GET", path="/auth/github/login")
-    state = parse_qs(urlparse(login_headers["Location"]).query)["state"][0]
-    _, callback_headers, _ = _invoke_raw_app(
-        app,
-        method="GET",
-        path="/auth/github/callback",
-        query_string=f"code=github-code&state={state}",
+def _signed_in_cookie(
+    session_store: HumanSessionStore,
+    *,
+    role: Literal["read_only", "admin"] = "read_only",
+) -> str:
+    session_manager = HumanSessionManager(
+        config=_github_oauth_config(),
+        session_store=session_store,
     )
-    return callback_headers["Set-Cookie"]
+    human_session = session_manager.issue(_human_identity(role=role))
+    return session_manager.session_cookie_header(human_session)
 
 
 def _fastapi_human_session_manager() -> HumanSessionManager:
@@ -2413,203 +2412,43 @@ class GitHubHumanAuthTests(unittest.TestCase):
         self.assertEqual(identity.role, "admin")
         self.assertIn(GITHUB_EMAILS_URL, oauth_session.requested_urls)
 
-    def _signed_in_cookie(
-        self,
-        app: WsgiApp,
-    ) -> str:
-        _, login_headers, _ = _invoke_raw_app(app, method="GET", path="/auth/github/login")
-        state = parse_qs(urlparse(login_headers["Location"]).query)["state"][0]
-        _, callback_headers, _ = _invoke_raw_app(
-            app,
-            method="GET",
-            path="/auth/github/callback",
-            query_string=f"code=github-code&state={state}",
-        )
-        return callback_headers["Set-Cookie"]
-
-    def test_github_oauth_callback_issues_session_cookie(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}
-        )
-        oauth_client = _StubGitHubOAuthClient(_human_identity())
-        with TemporaryDirectory() as tmpdir:
-            app = create_launchplane_service_app(
-                state_dir=Path(tmpdir),
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,
-            )
-            status_code, headers, _ = _invoke_raw_app(
-                app,
-                method="GET",
-                path="/auth/github/login",
-                query_string="return_to=/ui",
-            )
-            self.assertEqual(status_code, 302)
-            state = parse_qs(urlparse(headers["Location"]).query)["state"][0]
-
-            status_code, headers, _ = _invoke_raw_app(
-                app,
-                method="GET",
-                path="/auth/github/callback",
-                query_string=f"code=github-code&state={state}",
-            )
-
-        self.assertEqual(status_code, 302)
-        self.assertEqual(headers["Location"], "/ui")
-        self.assertIn("launchplane_session=", headers["Set-Cookie"])
-        self.assertIn("HttpOnly", headers["Set-Cookie"])
-        self.assertTrue(oauth_client.code_verifier)
-
-    def test_session_endpoint_reads_github_human_session(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}
-        )
-        oauth_client = _StubGitHubOAuthClient(_human_identity())
-        with TemporaryDirectory() as tmpdir:
-            app = create_launchplane_service_app(
-                state_dir=Path(tmpdir),
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,
-            )
-            cookie = _signed_in_cookie(app)
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/auth/session",
-                authorization="",
-                headers={"Cookie": cookie},
-            )
-
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["identity"]["login"], "alice")
-        self.assertEqual(payload["identity"]["role"], "read_only")
-
-    def test_session_endpoint_does_not_refresh_fresh_session_cookie(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}
-        )
-        oauth_client = _StubGitHubOAuthClient(_human_identity())
-        with TemporaryDirectory() as tmpdir:
-            database_url = f"sqlite+pysqlite:///{Path(tmpdir) / 'launchplane.sqlite3'}"
-            app = create_launchplane_service_app(
-                state_dir=Path(tmpdir) / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,
-            )
-            cookie = _signed_in_cookie(app)
-
-            status_code, headers, body = _invoke_raw_app(
-                app,
-                method="GET",
-                path="/v1/auth/session",
-                authorization="",
-                headers={"Cookie": cookie},
-            )
-
-        self.assertEqual(status_code, 200)
-        payload = json.loads(body)
-        self.assertEqual(payload["identity"]["login"], "alice")
-        self.assertNotIn("Set-Cookie", headers)
-
-    def test_session_endpoint_renews_expiring_database_backed_human_session(
-        self,
-    ) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}
-        )
-        session_store = InMemoryHumanSessionStore()
-        session = LaunchplaneHumanSession(
-            session_id="expiring-session",
-            identity=_human_identity(),
-            created_at=datetime.now(timezone.utc) - timedelta(days=13),
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=12),
-        )
-        session_store.write_session(session)
+    def test_auth_session_family_legacy_wsgi_routes_are_retired(self) -> None:
         with TemporaryDirectory() as tmpdir:
             app = create_launchplane_service_app(
                 state_dir=Path(tmpdir) / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
+                authz_policy=LaunchplaneAuthzPolicy(),
                 github_oauth_config=_github_oauth_config(),
-                human_session_store=session_store,
-            )
-            cookie = _signed_human_session_cookie("expiring-session", "test-session-secret")
-
-            status_code, headers, body = _invoke_raw_app(
-                app,
-                method="GET",
-                path="/v1/auth/session",
-                authorization="",
-                headers={"Cookie": cookie},
             )
 
-        self.assertEqual(status_code, 200)
-        payload = json.loads(body)
-        self.assertEqual(payload["identity"]["login"], "alice")
-        self.assertIn("launchplane_session=", headers["Set-Cookie"])
-        self.assertIn("Max-Age=1209600", headers["Set-Cookie"])
-        renewed_session = session_store.read_session("expiring-session")
-        self.assertIsNotNone(renewed_session)
-        assert renewed_session is not None
-        self.assertGreater(renewed_session.expires_at, session.expires_at)
-
-    def test_database_backed_human_session_survives_app_recreation(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}
-        )
-        oauth_client = _StubGitHubOAuthClient(_human_identity())
-        with TemporaryDirectory() as tmpdir:
-            database_url = f"sqlite+pysqlite:///{Path(tmpdir) / 'launchplane.sqlite3'}"
-            app = create_launchplane_service_app(
-                state_dir=Path(tmpdir) / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,
-            )
-            cookie = _signed_in_cookie(app)
-            recreated_app = create_launchplane_service_app(
-                state_dir=Path(tmpdir) / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,
+            responses = tuple(
+                _invoke_app(app, method=method, path=path, authorization="")
+                for method, path in (
+                    ("GET", "/auth/github/login"),
+                    ("GET", "/auth/github/callback"),
+                    ("GET", "/v1/auth/session"),
+                    ("POST", "/auth/logout"),
+                )
             )
 
-            status_code, payload = _invoke_app(
-                recreated_app,
-                method="GET",
-                path="/v1/auth/session",
-                authorization="",
-                headers={"Cookie": cookie},
-            )
-
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["identity"]["login"], "alice")
+        for status_code, payload in responses:
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_human_session_does_not_authorize_post_mutations(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {"github_humans": [{"logins": ["alice"], "roles": ["admin"]}]}
         )
-        oauth_client = _StubGitHubOAuthClient(_human_identity(role="admin"))
+        session_store = InMemoryHumanSessionStore()
         with TemporaryDirectory() as tmpdir:
             app = create_launchplane_service_app(
                 state_dir=Path(tmpdir),
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,
+                human_session_store=session_store,
             )
-            cookie = self._signed_in_cookie(app)
+            cookie = _signed_in_cookie(session_store, role="admin")
             status_code, payload = _invoke_app(
                 app,
                 method="POST",
@@ -15709,6 +15548,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
+            session_store = InMemoryHumanSessionStore()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
             )
@@ -15731,9 +15571,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_store=session_store,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _signed_in_cookie(session_store, role="admin")
 
             with patch(
                 "control_plane.drivers.generic_web_dispatch.execute_generic_web_prod_promotion",
@@ -15785,6 +15625,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
+            session_store = InMemoryHumanSessionStore()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
             )
@@ -15807,9 +15648,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_store=session_store,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _signed_in_cookie(session_store, role="admin")
 
             status_code, payload = _invoke_app(
                 app,
@@ -15838,6 +15679,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
+            session_store = InMemoryHumanSessionStore()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
             )
@@ -15860,7 +15702,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_store=session_store,
             )
             request_payload = {
                 "schema_version": 1,
@@ -15895,7 +15737,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 )
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _signed_in_cookie(session_store, role="admin")
 
             status_code, payload = _invoke_app(
                 app,
@@ -15914,6 +15756,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
+            session_store = InMemoryHumanSessionStore()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
             )
@@ -15936,9 +15779,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_store=session_store,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _signed_in_cookie(session_store, role="admin")
 
             with patch(
                 "control_plane.drivers.generic_web_dispatch.dispatch_generic_web_promotion_workflow",
@@ -15990,6 +15833,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
+            session_store = InMemoryHumanSessionStore()
             profile_payload = _product_profile_payload_with_prod()
             profile_payload["lanes"] = tuple(
                 {**lane, "context": f"  {lane['context']}  "}
@@ -16017,9 +15861,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_store=session_store,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _signed_in_cookie(session_store, role="admin")
 
             with patch(
                 "control_plane.drivers.generic_web_dispatch.dispatch_generic_web_promotion_workflow",
@@ -16065,6 +15909,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
+            session_store = InMemoryHumanSessionStore()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
             )
@@ -16074,9 +15919,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_humans": []}),
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_store=session_store,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _signed_in_cookie(session_store, role="admin")
 
             status_code, payload = _invoke_app(
                 app,
@@ -16185,6 +16030,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
+            session_store = InMemoryHumanSessionStore()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
             )
@@ -16207,9 +16053,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_store=session_store,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _signed_in_cookie(session_store, role="admin")
 
             with patch(
                 "control_plane.drivers.generic_web_dispatch.dispatch_generic_web_promotion_workflow"

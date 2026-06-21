@@ -147,6 +147,13 @@ def build_pkce_verifier() -> tuple[str, str]:
     return verifier, challenge
 
 
+def safe_oauth_return_to(value: str) -> str:
+    normalized = value.strip() or "/"
+    if not normalized.startswith("/") or normalized.startswith("//"):
+        return "/"
+    return normalized
+
+
 class GitHubOAuthClient:
     def __init__(self, config: GitHubOAuthConfig) -> None:
         self._config = config
@@ -314,9 +321,7 @@ class HumanSessionManager:
             return None
         return self._session_store.read_session(session_id)
 
-    def renew_if_needed(
-        self, session: LaunchplaneHumanSession
-    ) -> LaunchplaneHumanSession | None:
+    def renew_if_needed(self, session: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
         now = self._now()
         if session.expires_at <= now:
             self._session_store.delete_session(session.session_id)

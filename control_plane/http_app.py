@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -10,7 +11,7 @@ from uuid import uuid4
 import click
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -200,7 +201,14 @@ from control_plane.service_auth import (
     agent_authz_audit,
     bearer_identity_from_token,
 )
-from control_plane.service_human_auth import HumanSessionManager, LaunchplaneHumanSession
+from control_plane.service_human_auth import (
+    HumanSessionManager,
+    LaunchplaneHumanSession,
+    OAuthLoginState,
+    OAuthLoginStateStore,
+    build_pkce_verifier,
+    safe_oauth_return_to,
+)
 from control_plane.launchplane_mutations import (
     LaunchplaneDestroyPreviewStore,
     LaunchplaneMutationStore,
@@ -258,6 +266,9 @@ EveryCodeGitHubWebhookHandler = Callable[
 ]
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
 _LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
 _LAUNCHPLANE_DRIVER_READ_CONTEXT = "launchplane"
@@ -308,6 +319,8 @@ _AUTHZ_POLICY_TERMINAL_AGENTS_GRANTS_ROUTE = "/v1/authz-policies/terminal-agents
 _AUTHZ_POLICY_LOCAL_OPERATORS_GRANTS_ROUTE = "/v1/authz-policies/local-operators/grants"
 _AUTHZ_POLICY_LOCAL_ADMINS_GRANTS_ROUTE = "/v1/authz-policies/local-admins/grants"
 _AUTH_SESSION_ROUTE = "/v1/auth/session"
+_AUTH_GITHUB_LOGIN_ROUTE = "/auth/github/login"
+_AUTH_GITHUB_CALLBACK_ROUTE = "/auth/github/callback"
 _AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
@@ -382,6 +395,24 @@ class OdooStableTargetReplacementOperationReadStore(Protocol):
     def read_odoo_stable_target_replacement_operation_record(
         self, operation_id: str
     ) -> OdooStableTargetReplacementOperationRecord: ...
+
+
+class GitHubOAuthLoginClient(Protocol):
+    def authorization_url(self, *, state: str, code_challenge: str) -> str: ...
+
+    def fetch_identity(
+        self,
+        *,
+        code: str,
+        code_verifier: str,
+        authz_policy: LaunchplaneAuthzPolicy,
+    ) -> GitHubHumanIdentity: ...
+
+
+class OAuthLoginStateRepository(Protocol):
+    def put(self, *, state: str, code_verifier: str, return_to: str) -> OAuthLoginState: ...
+
+    def pop(self, state: str) -> OAuthLoginState | None: ...
 
 
 class LaunchplaneErrorDetail(BaseModel):
@@ -2961,6 +2992,8 @@ def create_launchplane_fastapi_app(
     npmplus_ingress_client_factory: _NpmplusIngressClientFactory | None = None,
     bearer_identity_config: BearerIdentityConfig | None = None,
     human_session_manager: HumanSessionManager | None = None,
+    github_oauth_client: GitHubOAuthLoginClient | None = None,
+    oauth_login_state_store: OAuthLoginStateRepository | None = None,
     control_plane_root_path: FilePath | None = None,
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
     work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
@@ -3013,6 +3046,9 @@ def create_launchplane_fastapi_app(
 
     app = FastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(EvidenceIngressRequestContractMiddleware)
+    resolved_oauth_login_state_store = (
+        oauth_login_state_store if oauth_login_state_store is not None else OAuthLoginStateStore()
+    )
 
     def next_trace_id() -> str:
         return f"launchplane_req_{uuid4().hex}"
@@ -3093,6 +3129,95 @@ def create_launchplane_fastapi_app(
         return AuthSessionResponse(
             trace_id=trace_id,
             identity=human_identity_response(session.identity),
+        )
+
+    def reject_github_oauth_not_configured(trace_id: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content=LaunchplaneErrorResponse(
+                trace_id=trace_id,
+                error=LaunchplaneErrorDetail(
+                    code="auth_not_configured",
+                    message="GitHub OAuth is not configured for Launchplane.",
+                ),
+            ).model_dump(mode="json"),
+        )
+
+    def reject_invalid_github_oauth_callback(trace_id: str, message: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content=LaunchplaneErrorResponse(
+                trace_id=trace_id,
+                error=LaunchplaneErrorDetail(
+                    code="invalid_oauth_callback",
+                    message=message,
+                ),
+            ).model_dump(mode="json"),
+        )
+
+    def login_github_oauth(return_to: str = "/") -> Response:
+        trace_id = next_trace_id()
+        if human_session_manager is None or github_oauth_client is None:
+            return reject_github_oauth_not_configured(trace_id)
+        state = secrets.token_urlsafe(32)
+        code_verifier, code_challenge = build_pkce_verifier()
+        resolved_oauth_login_state_store.put(
+            state=state,
+            code_verifier=code_verifier,
+            return_to=safe_oauth_return_to(return_to),
+        )
+        return RedirectResponse(
+            url=github_oauth_client.authorization_url(
+                state=state,
+                code_challenge=code_challenge,
+            ),
+            status_code=302,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    def complete_github_oauth_callback(
+        code: str = "",
+        state: str = "",
+    ) -> Response:
+        trace_id = next_trace_id()
+        if human_session_manager is None or github_oauth_client is None:
+            return reject_github_oauth_not_configured(trace_id)
+        callback_code = code.strip()
+        callback_state = state.strip()
+        login_state = resolved_oauth_login_state_store.pop(callback_state)
+        if not callback_code or login_state is None:
+            return reject_invalid_github_oauth_callback(
+                trace_id,
+                "GitHub OAuth callback is missing a valid code or state.",
+            )
+        try:
+            human_identity = github_oauth_client.fetch_identity(
+                code=callback_code,
+                code_verifier=login_state.code_verifier,
+                authz_policy=resolved_authz_policy_runtime.policy,
+            )
+        except PermissionError:
+            return JSONResponse(
+                status_code=403,
+                content=LaunchplaneErrorResponse(
+                    trace_id=trace_id,
+                    error=LaunchplaneErrorDetail(
+                        code="authorization_denied",
+                        message="GitHub identity is not authorized for Launchplane.",
+                    ),
+                ).model_dump(mode="json"),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("GitHub OAuth callback failed", extra={"trace_id": trace_id})
+            return reject_invalid_github_oauth_callback(
+                trace_id,
+                "GitHub OAuth callback could not be completed.",
+            )
+        session = human_session_manager.issue(human_identity)
+        return RedirectResponse(
+            url=login_state.return_to,
+            status_code=302,
+            headers={"Set-Cookie": human_session_manager.session_cookie_header(session)},
         )
 
     def logout_auth_session(
@@ -10422,6 +10547,34 @@ def create_launchplane_fastapi_app(
         operation_id="read_human_auth_session",
         summary="Read human auth session",
         responses={401: {"model": AuthSessionRequiredResponse}},
+    )
+
+    app.add_api_route(
+        _AUTH_GITHUB_LOGIN_ROUTE,
+        login_github_oauth,
+        methods=["GET"],
+        status_code=302,
+        operation_id="login_github_oauth",
+        summary="Start GitHub OAuth login",
+        response_class=RedirectResponse,
+        response_model=None,
+        responses={503: {"model": LaunchplaneErrorResponse}},
+    )
+
+    app.add_api_route(
+        _AUTH_GITHUB_CALLBACK_ROUTE,
+        complete_github_oauth_callback,
+        methods=["GET"],
+        status_code=302,
+        operation_id="complete_github_oauth_callback",
+        summary="Complete GitHub OAuth callback",
+        response_class=RedirectResponse,
+        response_model=None,
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(

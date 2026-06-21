@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from collections.abc import Callable, MutableMapping
 from typing import Any, Literal, cast
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 from unittest.mock import patch
 
 from a2wsgi import WSGIMiddleware
@@ -220,6 +220,291 @@ class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_github_oauth_login_redirects_to_authorization_url(self) -> None:
+        oauth_client = _StubFastApiGitHubOAuthClient(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=HumanSessionManager(
+                config=_github_oauth_config(),
+                session_store=InMemoryHumanSessionStore(),
+            ),
+            github_oauth_client=oauth_client,
+        )
+
+        response = await _asgi_get(app, "/auth/github/login?return_to=/ui")
+
+        self.assertEqual(response.status_code, 302)
+        location = response.headers["Location"]
+        self.assertTrue(location.startswith("https://github.example/authorize?"))
+        query = parse_qs(urlparse(location).query)
+        self.assertEqual(query["state"], [oauth_client.authorization_state])
+        self.assertTrue(query["challenge"][0])
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    async def test_github_oauth_login_rejects_when_auth_is_not_configured(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/auth/github/login")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "auth_not_configured")
+
+    async def test_github_oauth_login_rejects_without_session_manager(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            github_oauth_client=_StubFastApiGitHubOAuthClient(_github_human_identity()),
+        )
+
+        response = await _asgi_get(app, "/auth/github/login")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "auth_not_configured")
+
+    async def test_github_oauth_callback_issues_session_cookie(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        oauth_client = _StubFastApiGitHubOAuthClient(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=oauth_client,
+        )
+        login_response = await _asgi_get(app, "/auth/github/login?return_to=/ui")
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+
+        response = await _asgi_get(
+            app,
+            f"/auth/github/callback?code=github-code&state={state}",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/ui")
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        self.assertIn("HttpOnly", response.headers["Set-Cookie"])
+        self.assertIn("SameSite=Lax", response.headers["Set-Cookie"])
+        self.assertTrue(oauth_client.code_verifier)
+
+    async def test_github_oauth_callback_session_survives_app_recreation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            session_manager = HumanSessionManager(
+                config=_github_oauth_config(),
+                session_store=store,
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_local_operator_launchplane_service_read_policy(),
+                record_store_factory=lambda: store,
+                human_session_manager=session_manager,
+                github_oauth_client=_StubFastApiGitHubOAuthClient(_github_human_identity()),
+            )
+            login_response = await _asgi_get(app, "/auth/github/login")
+            state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+            callback_response = await _asgi_get(
+                app,
+                f"/auth/github/callback?code=github-code&state={state}",
+            )
+
+            recreated_store = PostgresRecordStore(database_url=database_url)
+            recreated_session_manager = HumanSessionManager(
+                config=_github_oauth_config(),
+                session_store=recreated_store,
+            )
+            recreated_app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_local_operator_launchplane_service_read_policy(),
+                record_store_factory=lambda: recreated_store,
+                human_session_manager=recreated_session_manager,
+            )
+            session_response = await _asgi_get(
+                recreated_app,
+                "/v1/auth/session",
+                headers={"Cookie": callback_response.headers["Set-Cookie"]},
+            )
+
+        self.assertEqual(callback_response.status_code, 302)
+        self.assertEqual(session_response.status_code, 200)
+        payload = session_response.json()
+        self.assertEqual(payload["identity"]["login"], "example-operator")
+        self.assertEqual(payload["identity"]["role"], "admin")
+
+    async def test_github_oauth_callback_sanitizes_external_return_to(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        oauth_client = _StubFastApiGitHubOAuthClient(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=oauth_client,
+        )
+        login_response = await _asgi_get(
+            app,
+            "/auth/github/login?return_to=https%3A%2F%2Fevil.example%2Fui",
+        )
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+
+        response = await _asgi_get(
+            app,
+            f"/auth/github/callback?code=github-code&state={state}",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/")
+
+    async def test_github_oauth_callback_rejects_missing_code_or_state(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=_StubFastApiGitHubOAuthClient(_github_human_identity()),
+        )
+
+        response = await _asgi_get(app, "/auth/github/callback?state=missing")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_oauth_callback")
+
+    async def test_github_oauth_callback_rejects_reused_state(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=_StubFastApiGitHubOAuthClient(_github_human_identity()),
+        )
+        login_response = await _asgi_get(app, "/auth/github/login")
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+        await _asgi_get(app, f"/auth/github/callback?code=github-code&state={state}")
+
+        response = await _asgi_get(
+            app,
+            f"/auth/github/callback?code=github-code&state={state}",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_oauth_callback")
+
+    async def test_github_oauth_callback_rejects_unauthorized_identity(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=_StubFastApiGitHubOAuthClient(
+                _github_human_identity(), permission_error=True
+            ),
+        )
+        login_response = await _asgi_get(app, "/auth/github/login")
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+
+        response = await _asgi_get(
+            app,
+            f"/auth/github/callback?code=github-code&state={state}",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_github_oauth_callback_maps_client_failure(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=_StubFastApiGitHubOAuthClient(
+                _github_human_identity(), fail_fetch=True
+            ),
+        )
+        login_response = await _asgi_get(app, "/auth/github/login")
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+
+        with self.assertLogs("control_plane.http_app", level="ERROR") as captured_logs:
+            response = await _asgi_get(
+                app,
+                f"/auth/github/callback?code=github-code&state={state}",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_oauth_callback")
+        self.assertTrue(
+            any("GitHub OAuth callback failed" in entry for entry in captured_logs.output)
+        )
+
+    async def test_github_oauth_routes_precede_wsgi_fallback(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        oauth_client = _StubFastApiGitHubOAuthClient(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=oauth_client,
+        )
+        fallback_calls: list[str] = []
+
+        def fallback_app(
+            environ: dict[str, object], start_response: Callable[..., object]
+        ) -> list[bytes]:
+            fallback_calls.append(str(environ.get("PATH_INFO", "")))
+            start_response("599 Legacy Fallback", [("Content-Type", "application/json")])
+            return [b'{"status":"legacy"}']
+
+        app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, fallback_app))))
+        login_response = await _asgi_get(app, "/auth/github/login")
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+        callback_response = await _asgi_get(
+            app,
+            f"/auth/github/callback?code=github-code&state={state}",
+        )
+
+        self.assertEqual(login_response.status_code, 302)
+        self.assertEqual(callback_response.status_code, 302)
+        self.assertEqual(fallback_calls, [])
+
     async def test_session_read_rejects_missing_human_session(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -515,6 +800,25 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
             openapi["components"]["schemas"]["AuthLogoutResponse"]["additionalProperties"],
             False,
         )
+        login_route = openapi["paths"]["/auth/github/login"]["get"]
+        self.assertEqual(login_route["operationId"], "login_github_oauth")
+        self.assertIn("302", login_route["responses"])
+        login_rejected_schema = login_route["responses"]["503"]["content"]["application/json"][
+            "schema"
+        ]
+        self.assertEqual(
+            login_rejected_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse"
+        )
+        callback_route = openapi["paths"]["/auth/github/callback"]["get"]
+        self.assertEqual(callback_route["operationId"], "complete_github_oauth_callback")
+        self.assertIn("302", callback_route["responses"])
+        for status_code in ("400", "403", "503"):
+            callback_schema = callback_route["responses"][status_code]["content"][
+                "application/json"
+            ]["schema"]
+            self.assertEqual(
+                callback_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse"
+            )
 
 
 class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
@@ -20680,6 +20984,40 @@ class _CaseInsensitiveHeaders(dict[str, str]):
 
     def __getitem__(self, key: str) -> str:
         return super().__getitem__(key.lower())
+
+
+class _StubFastApiGitHubOAuthClient:
+    def __init__(
+        self,
+        identity: GitHubHumanIdentity,
+        *,
+        fail_fetch: bool = False,
+        permission_error: bool = False,
+    ) -> None:
+        self.identity = identity
+        self.fail_fetch = fail_fetch
+        self.permission_error = permission_error
+        self.authorization_state = ""
+        self.code_verifier = ""
+
+    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+        self.authorization_state = state
+        return f"https://github.example/authorize?state={state}&challenge={code_challenge}"
+
+    def fetch_identity(
+        self,
+        *,
+        code: str,
+        code_verifier: str,
+        authz_policy: LaunchplaneAuthzPolicy,
+    ) -> GitHubHumanIdentity:
+        del authz_policy
+        self.code_verifier = code_verifier
+        if self.permission_error:
+            raise PermissionError("not authorized")
+        if self.fail_fetch or code != "github-code":
+            raise ValueError("unexpected code")
+        return self.identity
 
 
 class _MissingProductReadStore:
