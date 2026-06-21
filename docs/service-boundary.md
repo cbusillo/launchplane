@@ -127,6 +127,12 @@ VeriReel product paths:
   - `POST /v1/products/public-ingress-monitor/run-once` (native FastAPI for
     bearer-token callers, with Pydantic/OpenAPI contract coverage,
     idempotency replay preservation, and no legacy `GET` route)
+  - Native `POST /v1/evidence/*` ingress routes reject non-JSON media types with
+    the Launchplane `400 invalid_request` envelope; they require bounded,
+    non-chunked `Content-Length` headers and enforce the same 2 MiB byte ceiling
+    while reading the request stream, returning the Launchplane
+    `413 request_entity_too_large` envelope before route-specific storage
+    mutation.
   - `POST /v1/evidence/backup-gates` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
   - `POST /v1/evidence/deployments` (native FastAPI for bearer-token callers,

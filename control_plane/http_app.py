@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import dokploy as control_plane_dokploy
@@ -267,6 +268,18 @@ _PREVIEW_GENERATION_EVIDENCE_ROUTE = "/v1/evidence/previews/generations"
 _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
 _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
+_EVIDENCE_INGRESS_MAX_BODY_BYTES = 2 * 1024 * 1024
+_EVIDENCE_INGRESS_ROUTES = frozenset(
+    {
+        _DEPLOYMENT_EVIDENCE_ROUTE,
+        _BACKUP_GATE_EVIDENCE_ROUTE,
+        _PROMOTION_EVIDENCE_ROUTE,
+        _PREVIEW_GENERATION_EVIDENCE_ROUTE,
+        _PREVIEW_DESTROYED_EVIDENCE_ROUTE,
+        _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE,
+        _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE,
+    }
+)
 _DOKPLOY_TARGET_SETUP_ROUTE = "/v1/dokploy-targets/setup"
 _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE = "/v1/products/public-ingress-monitor/run-once"
 _PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/public-ingress/notification-policies/apply"
@@ -402,6 +415,160 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     storage_backend: str
+
+
+class EvidenceIngressRequestContractMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope.get("type") != "http"
+            or str(scope.get("method", "")).upper() != "POST"
+            or str(scope.get("path", "")) not in _EVIDENCE_INGRESS_ROUTES
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        content_type_values = _asgi_header_values(scope=scope, name="content-type")
+        content_type = content_type_values[0] if len(content_type_values) == 1 else ""
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=400,
+                code="invalid_request",
+                message="Evidence ingress requests require Content-Type: application/json.",
+            )
+            return
+
+        transfer_encoding_tokens = {
+            token.split(";", 1)[0].strip().lower()
+            for value in _asgi_header_values(scope=scope, name="transfer-encoding")
+            for token in value.split(",")
+            if token.strip()
+        }
+        if "chunked" in transfer_encoding_tokens:
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=413,
+                code="request_entity_too_large",
+                message="Evidence ingress requests require a bounded Content-Length.",
+            )
+            return
+
+        content_length_values = _asgi_header_values(scope=scope, name="content-length")
+        if not content_length_values:
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=413,
+                code="request_entity_too_large",
+                message="Evidence ingress requests require a bounded Content-Length.",
+            )
+            return
+        if len(content_length_values) != 1:
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=400,
+                code="invalid_request",
+                message="Evidence ingress requests require exactly one Content-Length header.",
+            )
+            return
+        content_length = content_length_values[0].strip()
+        if not content_length or not all("0" <= character <= "9" for character in content_length):
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=400,
+                code="invalid_request",
+                message="Evidence ingress Content-Length must be an unsigned decimal integer.",
+            )
+            return
+        declared_body_size = int(content_length)
+        if declared_body_size > _EVIDENCE_INGRESS_MAX_BODY_BYTES:
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=413,
+                code="request_entity_too_large",
+                message="Evidence ingress request body is too large.",
+            )
+            return
+
+        buffered_messages: list[Message] = []
+        observed_body_size = 0
+        while True:
+            message = await receive()
+            if message.get("type") != "http.request":
+                buffered_messages.append(message)
+                break
+            body = message.get("body", b"")
+            if isinstance(body, bytes):
+                observed_body_size += len(body)
+            if observed_body_size > _EVIDENCE_INGRESS_MAX_BODY_BYTES:
+                await _send_launchplane_error_response(
+                    scope=scope,
+                    receive=receive,
+                    send=send,
+                    status_code=413,
+                    code="request_entity_too_large",
+                    message="Evidence ingress request body is too large.",
+                )
+                return
+            buffered_messages.append(message)
+            if not message.get("more_body", False):
+                break
+
+        next_message_index = 0
+
+        async def replay_receive() -> Message:
+            nonlocal next_message_index
+            if next_message_index < len(buffered_messages):
+                message = buffered_messages[next_message_index]
+                next_message_index += 1
+                return message
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+
+def _asgi_header_values(*, scope: Scope, name: str) -> list[str]:
+    header_values: list[str] = []
+    normalized_name = name.lower().encode("latin-1")
+    for raw_name, raw_value in scope.get("headers", []):
+        if raw_name.lower() == normalized_name:
+            header_values.append(raw_value.decode("latin-1"))
+    return header_values
+
+
+async def _send_launchplane_error_response(
+    *,
+    scope: Scope,
+    receive: Receive,
+    send: Send,
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    payload = LaunchplaneErrorResponse(
+        trace_id=f"launchplane_req_{uuid4().hex}",
+        error=LaunchplaneErrorDetail(code=code, message=message),
+    )
+    response = JSONResponse(
+        status_code=status_code,
+        content=payload.model_dump(mode="json", exclude_none=True),
+    )
+    await response(scope, receive, send)
 
 
 class LaunchplaneRuntimeStatus(BaseModel):
@@ -2806,6 +2973,7 @@ def create_launchplane_fastapi_app(
                 shared_record_store.close()
 
     app = FastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(EvidenceIngressRequestContractMiddleware)
 
     def next_trace_id() -> str:
         return f"launchplane_req_{uuid4().hex}"
@@ -10692,6 +10860,14 @@ def create_launchplane_fastapi_app(
         409: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
+    evidence_ingress_error_responses: dict[int | str, dict[str, object]] = {
+        400: {"model": LaunchplaneErrorResponse},
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        409: {"model": LaunchplaneErrorResponse},
+        413: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
 
     app.add_api_route(
         _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
@@ -11629,13 +11805,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_backup_gate_evidence",
         summary="Write backup gate evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11647,13 +11817,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_promotion_evidence",
         summary="Write promotion evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11665,13 +11829,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_preview_generation_evidence",
         summary="Write preview generation evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11683,13 +11841,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_preview_destroyed_evidence",
         summary="Write preview destroyed evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11701,13 +11853,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_runner_host_hygiene_audit_evidence",
         summary="Write runner host hygiene audit evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11719,13 +11865,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_runner_lane_registration_audit_evidence",
         summary="Write runner lane registration audit evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11737,13 +11877,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_deployment_evidence",
         summary="Write deployment evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     def launchplane_http_exception_handler(request: Request, error: Exception) -> JSONResponse:
