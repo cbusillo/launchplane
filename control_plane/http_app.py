@@ -307,6 +307,7 @@ _AUTHZ_POLICY_GITHUB_HUMANS_GRANTS_ROUTE = "/v1/authz-policies/github-humans/gra
 _AUTHZ_POLICY_TERMINAL_AGENTS_GRANTS_ROUTE = "/v1/authz-policies/terminal-agents/grants"
 _AUTHZ_POLICY_LOCAL_OPERATORS_GRANTS_ROUTE = "/v1/authz-policies/local-operators/grants"
 _AUTHZ_POLICY_LOCAL_ADMINS_GRANTS_ROUTE = "/v1/authz-policies/local-admins/grants"
+_AUTH_SESSION_ROUTE = "/v1/auth/session"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
@@ -415,6 +416,36 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     storage_backend: str
+
+
+class GitHubHumanIdentityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["github"] = "github"
+    login: str
+    github_id: int
+    name: str
+    email: str
+    organizations: tuple[str, ...]
+    teams: tuple[str, ...]
+    role: Literal["read_only", "admin"]
+
+
+class AuthSessionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    identity: GitHubHumanIdentityResponse
+
+
+class AuthSessionRequiredResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["rejected"] = "rejected"
+    trace_id: str
+    error: LaunchplaneErrorDetail
+    configured: bool
 
 
 class EvidenceIngressRequestContractMiddleware:
@@ -3014,6 +3045,47 @@ def create_launchplane_fastapi_app(
             response.headers.append("Set-Cookie", session_cookie_header)
             request.state.launchplane_renewed_session_cookie = session_cookie_header
         return session.identity
+
+    def human_identity_response(identity: GitHubHumanIdentity) -> GitHubHumanIdentityResponse:
+        return GitHubHumanIdentityResponse(
+            login=identity.login,
+            github_id=identity.github_id,
+            name=identity.name,
+            email=identity.email,
+            organizations=tuple(sorted(identity.organizations)),
+            teams=tuple(sorted(identity.teams)),
+            role=identity.role,
+        )
+
+    def read_auth_session(
+        request: Request,
+        response: Response,
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> AuthSessionResponse | JSONResponse:
+        trace_id = next_trace_id()
+        session_result = read_human_session(cookie_header=cookie)
+        if session_result is None:
+            payload = AuthSessionRequiredResponse(
+                trace_id=trace_id,
+                error=LaunchplaneErrorDetail(
+                    code="authentication_required",
+                    message="Sign in with GitHub to access Launchplane.",
+                ),
+                configured=human_session_manager is not None,
+            )
+            return JSONResponse(
+                status_code=401,
+                content=payload.model_dump(mode="json"),
+            )
+        session, was_renewed = session_result
+        if was_renewed and human_session_manager is not None:
+            session_cookie_header = human_session_manager.session_cookie_header(session)
+            response.headers.append("Set-Cookie", session_cookie_header)
+            request.state.launchplane_renewed_session_cookie = session_cookie_header
+        return AuthSessionResponse(
+            trace_id=trace_id,
+            identity=human_identity_response(session.identity),
+        )
 
     def read_identity(
         request: Request,
@@ -10318,6 +10390,17 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
         },
+    )
+
+    app.add_api_route(
+        _AUTH_SESSION_ROUTE,
+        read_auth_session,
+        methods=["GET"],
+        response_model=AuthSessionResponse,
+        response_model_exclude_none=True,
+        operation_id="read_human_auth_session",
+        summary="Read human auth session",
+        responses={401: {"model": AuthSessionRequiredResponse}},
     )
 
     app.add_api_route(
