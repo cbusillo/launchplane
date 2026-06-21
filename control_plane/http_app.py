@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import os
 import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -109,6 +110,11 @@ from control_plane.merge_train_admission import (
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
+)
+from control_plane.merge_train_pr_feedback import (
+    MergeTrainPrFeedbackEnvelope,
+    build_merge_train_pr_feedback_record,
+    require_merge_train_pr_feedback_record_store,
 )
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
@@ -342,6 +348,7 @@ _PREVIEW_DESIRED_STATE_ROUTE = "/v1/previews/desired-state"
 _PREVIEW_LIFECYCLE_PLAN_ROUTE = "/v1/previews/lifecycle-plan"
 _PREVIEW_LIFECYCLE_CLEANUP_ROUTE = "/v1/previews/lifecycle-cleanup"
 _PREVIEW_LIFECYCLE_SWEEP_ROUTE = "/v1/previews/lifecycle-sweep"
+_MERGE_TRAIN_PR_FEEDBACK_ROUTE = "/v1/work-graph/merge-train/pr-feedback"
 _RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE = "/v1/runtime-key-safety/policies/apply"
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
 _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
@@ -4925,6 +4932,151 @@ def create_launchplane_fastapi_app(
             },
             targets=targets,
         )
+
+    async def write_merge_train_pr_feedback(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            feedback_request = MergeTrainPrFeedbackEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if normalized_idempotency_key:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_PR_FEEDBACK_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+
+        try:
+            policy_record = resolve_merge_train_policy_record(record_store)
+        except MergeTrainPolicyStoreMissingError as error:
+            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
+        try:
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository=feedback_request.repository,
+                base_branch=feedback_request.base_branch,
+            )
+        except ValueError as error:
+            raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=repository_policy.service_authz.action,
+            product=repository_policy.service_authz.product,
+            context=repository_policy.service_authz.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot write merge train PR feedback.",
+            )
+        token_env = repository_policy.github_token.env_var
+        if not token_env:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Merge train policy does not define a GitHub token environment variable.",
+            )
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Configured merge train GitHub token is not available.",
+            )
+        try:
+            feedback_store = require_merge_train_pr_feedback_record_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        feedback_record = build_merge_train_pr_feedback_record(
+            request=feedback_request,
+            policy_key=repository_policy.policy_key,
+            policy_sha256=policy_record.policy_sha256,
+            token=token,
+            recorded_at=utc_now_timestamp(),
+            response_trace_id=trace_id,
+        )
+        feedback_store.write_merge_train_pr_feedback_record(feedback_record)
+        result: dict[str, object] = {"feedback": feedback_record.model_dump(mode="json")}
+        if feedback_record.delivery_status == "failed":
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "github_comment_delivery_failed",
+                        "message": (
+                            feedback_record.error_message
+                            or "Merge train PR feedback comment delivery failed."
+                        ),
+                    },
+                    "records": {
+                        "merge_train_pr_feedback_id": feedback_record.feedback_id,
+                    },
+                    "result": result,
+                },
+            )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"merge_train_pr_feedback_id": feedback_record.feedback_id},
+            result=result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_MERGE_TRAIN_PR_FEEDBACK_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
 
     def read_every_code_summary(
         identity: Annotated[
@@ -12155,6 +12307,33 @@ def create_launchplane_fastapi_app(
         operation_id="read_merge_train_policy_targets",
         summary="Read merge train policy targets",
         responses=merge_train_read_error_responses,
+    )
+
+    app.add_api_route(
+        _MERGE_TRAIN_PR_FEEDBACK_ROUTE,
+        write_merge_train_pr_feedback,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": MergeTrainPrFeedbackEnvelope.model_json_schema()}
+                },
+            }
+        },
+        operation_id="write_merge_train_pr_feedback",
+        summary="Write merge train PR feedback",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            502: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(
