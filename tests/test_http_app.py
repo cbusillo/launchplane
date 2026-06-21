@@ -14025,7 +14025,7 @@ class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
             route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/AcceptedEvidenceResponse",
         )
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             self.assertIn("LaunchplaneErrorResponse", json.dumps(route["responses"][status_code]))
         self.assertEqual(
             openapi["components"]["schemas"]["BackupGateEvidenceRequest"]["additionalProperties"],
@@ -14674,7 +14674,7 @@ class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_schema["$ref"], "#/components/schemas/PromotionEvidenceRequest")
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         promotion_schema = openapi["components"]["schemas"]["PromotionEvidenceRequest"]
@@ -15016,7 +15016,7 @@ class FastApiPreviewGenerationEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"]["PreviewGenerationEvidenceEnvelope"]
@@ -15336,7 +15336,7 @@ class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"]["PreviewDestroyedEvidenceEnvelope"]
@@ -15658,7 +15658,7 @@ class FastApiRunnerHostHygieneAuditEvidenceTests(unittest.IsolatedAsyncioTestCas
         )
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"]["RunnerHostHygieneAuditEvidenceEnvelope"]
@@ -15988,7 +15988,7 @@ class FastApiRunnerLaneRegistrationAuditEvidenceTests(unittest.IsolatedAsyncioTe
         )
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"][
@@ -16163,6 +16163,335 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "invalid_request")
         self.assertNotIn("detail", payload)
 
+    async def test_deployment_evidence_requires_json_content_type(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "text/plain",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress requests require Content-Type: application/json.",
+        )
+
+    async def test_deployment_evidence_accepts_json_content_type_with_charset(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/evidence/deployments",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["status"], "accepted")
+
+    async def test_deployment_evidence_rejects_invalid_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "not-a-number",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress Content-Length must be an unsigned decimal integer.",
+        )
+
+    async def test_deployment_evidence_rejects_empty_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "   ",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress Content-Length must be an unsigned decimal integer.",
+        )
+
+    async def test_deployment_evidence_rejects_plus_prefixed_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "+2",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress Content-Length must be an unsigned decimal integer.",
+        )
+
+    async def test_deployment_evidence_rejects_duplicate_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "2",
+            },
+            extra_headers=[("Content-Length", "200")],
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress requests require exactly one Content-Length header.",
+        )
+
+    async def test_deployment_evidence_rejects_negative_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "-1",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress Content-Length must be an unsigned decimal integer.",
+        )
+
+    async def test_deployment_evidence_requires_bounded_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+            set_content_length=False,
+        )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "request_entity_too_large")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress requests require a bounded Content-Length.",
+        )
+
+    async def test_deployment_evidence_rejects_duplicate_chunked_transfer_encoding(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Transfer-Encoding": "identity",
+            },
+            extra_headers=[("Transfer-Encoding", "chunked")],
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+            set_content_length=False,
+        )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "request_entity_too_large")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress requests require a bounded Content-Length.",
+        )
+
+    async def test_deployment_evidence_rejects_chunked_transfer_encoding(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Transfer-Encoding": "chunked",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+            set_content_length=False,
+        )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "request_entity_too_large")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress requests require a bounded Content-Length.",
+        )
+
+    async def test_deployment_evidence_rejects_oversized_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": str(2 * 1024 * 1024 + 1),
+            },
+            raw_body=b"{}",
+        )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "request_entity_too_large")
+        self.assertEqual(payload["error"]["message"], "Evidence ingress request body is too large.")
+
+    async def test_deployment_evidence_rejects_stream_body_over_limit(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "2",
+            },
+            raw_body=b"{" + (b" " * (2 * 1024 * 1024 + 1)),
+        )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "request_entity_too_large")
+        self.assertEqual(payload["error"]["message"], "Evidence ingress request body is too large.")
+
     async def test_deployment_evidence_replays_idempotent_write(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -16248,7 +16577,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/AcceptedEvidenceResponse",
         )
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             self.assertIn("LaunchplaneErrorResponse", json.dumps(route["responses"][status_code]))
         self.assertEqual(
             openapi["components"]["schemas"]["DeploymentEvidenceRequest"]["additionalProperties"],
@@ -19983,8 +20312,10 @@ async def _asgi_request(
     path: str,
     *,
     headers: dict[str, str] | None = None,
+    extra_headers: list[tuple[str, str]] | None = None,
     payload: dict[str, object] | None = None,
     raw_body: bytes | None = None,
+    set_content_length: bool = True,
 ) -> _AsgiResponse:
     request_path, separator, raw_query_string = path.partition("?")
     request_headers_dict = dict(headers or {})
@@ -19994,11 +20325,15 @@ async def _asgi_request(
     elif payload is not None:
         body = json.dumps(payload).encode("utf-8")
         request_headers_dict.setdefault("Content-Type", "application/json")
-    request_headers_dict.setdefault("Content-Length", str(len(body)))
+    if set_content_length:
+        request_headers_dict.setdefault("Content-Length", str(len(body)))
     request_headers = [
         (key.lower().encode("ascii"), value.encode("latin-1"))
         for key, value in request_headers_dict.items()
     ]
+    request_headers.extend(
+        (key.lower().encode("ascii"), value.encode("latin-1")) for key, value in extra_headers or []
+    )
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
