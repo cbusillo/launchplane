@@ -377,6 +377,109 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["identity"]["login"], "example-operator")
         self.assertEqual(fallback_calls, [])
 
+    async def test_logout_deletes_session_and_clears_cookie(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        human_session = session_manager.issue(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/auth/logout",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertTrue(str(response.json()["trace_id"]).startswith("launchplane_req_"))
+        self.assertIsNone(session_store.read_session(human_session.session_id))
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        self.assertIn("Max-Age=0", response.headers["Set-Cookie"])
+        self.assertIn("HttpOnly", response.headers["Set-Cookie"])
+        self.assertIn("SameSite=Lax", response.headers["Set-Cookie"])
+        self.assertNotIn("Secure", response.headers["Set-Cookie"])
+
+    async def test_logout_clears_cookie_when_auth_is_not_configured(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(app, "POST", "/auth/logout")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(
+            response.headers["Set-Cookie"],
+            "launchplane_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+        )
+
+    async def test_logout_clears_cookie_when_auth_is_configured_without_cookie(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_request(app, "POST", "/auth/logout")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        self.assertIn("Max-Age=0", response.headers["Set-Cookie"])
+        self.assertIn("HttpOnly", response.headers["Set-Cookie"])
+        self.assertIn("SameSite=Lax", response.headers["Set-Cookie"])
+
+    async def test_logout_native_route_precedes_wsgi_fallback(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        human_session = session_manager.issue(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+        fallback_calls: list[str] = []
+
+        def fallback_app(
+            environ: dict[str, object], start_response: Callable[..., object]
+        ) -> list[bytes]:
+            fallback_calls.append(str(environ.get("PATH_INFO", "")))
+            start_response("599 Legacy Fallback", [("Content-Type", "application/json")])
+            return [b'{"status":"legacy"}']
+
+        app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, fallback_app))))
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/auth/logout",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(fallback_calls, [])
+
     async def test_openapi_includes_auth_session_contract(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -402,6 +505,14 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             openapi["components"]["schemas"]["AuthSessionRequiredResponse"]["additionalProperties"],
+            False,
+        )
+        logout_route = openapi["paths"]["/auth/logout"]["post"]
+        self.assertEqual(logout_route["operationId"], "logout_human_auth_session")
+        logout_schema = logout_route["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(logout_schema["$ref"], "#/components/schemas/AuthLogoutResponse")
+        self.assertEqual(
+            openapi["components"]["schemas"]["AuthLogoutResponse"]["additionalProperties"],
             False,
         )
 
