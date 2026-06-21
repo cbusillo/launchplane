@@ -101,19 +101,6 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecyclePlanRecord,
 )
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
-from control_plane.contracts.preview_pr_feedback_record import (
-    PreviewPrFeedbackRecord,
-    PreviewPrFeedbackStatus,
-)
-from control_plane.contracts.preview_pr_feedback_notifications import (
-    PreviewPrFeedbackNotificationAttemptRecord,
-    PreviewPrFeedbackNotificationDeliveryStatus,
-    PreviewPrFeedbackNotificationDestination,
-    PreviewPrFeedbackNotificationEvent,
-    PreviewPrFeedbackNotificationPolicyRecord,
-    build_preview_pr_feedback_notification_attempt_id,
-    preview_pr_feedback_notification_event,
-)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -128,7 +115,6 @@ from control_plane.every_code_work_request_write import (
     EveryCodeWorkRequestCreateEnvelope,
     build_every_code_work_request_record,
 )
-from control_plane.notifications import post_discord_webhook, public_discord_url_error
 from control_plane.drivers.dispatch import (
     _DescriptorDriverDispatchContext as _DescriptorDriverDispatchContext,
     _DescriptorDriverDispatchRoute as _DescriptorDriverDispatchRoute,
@@ -304,8 +290,6 @@ from control_plane.workflows.preview_lifecycle_cleanup import (
     build_preview_lifecycle_cleanup_record,
 )
 from control_plane.workflows.preview_pr_feedback import (
-    DEFAULT_PREVIEW_FEEDBACK_MARKER,
-    build_preview_pr_feedback_record,
     handle_every_code_preview_validation_comment,
 )
 from control_plane.workflows.launchplane import (
@@ -887,46 +871,6 @@ class PreviewLifecycleSweepEnvelope(BaseModel):
             raise ValueError("preview lifecycle sweep requires source")
         if not self.destroy_reason.strip():
             raise ValueError("preview lifecycle sweep requires destroy_reason")
-        return self
-
-
-class PreviewPrFeedbackEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    context: str
-    source: str = "workflow"
-    repository: str
-    anchor_repo: str
-    anchor_pr_number: int = Field(ge=1)
-    anchor_pr_url: str
-    status: PreviewPrFeedbackStatus
-    marker: str = DEFAULT_PREVIEW_FEEDBACK_MARKER
-    preview_url: str = ""
-    immutable_image_reference: str = ""
-    refresh_image_reference: str = ""
-    revision: str = ""
-    run_url: str = ""
-    failure_summary: str = ""
-    dry_run: bool = False
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "PreviewPrFeedbackEnvelope":
-        if not self.product.strip():
-            raise ValueError("preview PR feedback requires product")
-        if not self.context.strip():
-            raise ValueError("preview PR feedback requires context")
-        if not self.source.strip():
-            raise ValueError("preview PR feedback requires source")
-        if not self.repository.strip():
-            raise ValueError("preview PR feedback requires repository")
-        if not self.anchor_repo.strip():
-            raise ValueError("preview PR feedback requires anchor_repo")
-        if not self.anchor_pr_url.strip():
-            raise ValueError("preview PR feedback requires anchor_pr_url")
-        if not self.marker.strip():
-            raise ValueError("preview PR feedback requires marker")
         return self
 
 
@@ -3263,7 +3207,6 @@ def _build_write_routes() -> frozenset[str]:
         _MERGE_TRAIN_PR_FEEDBACK_ROUTE,
         _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_RUN_ONCE_ROUTE,
-        "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
         "/v1/previews/lifecycle-sweep",
         "/v1/drivers/launchplane/self-deploy",
@@ -3423,35 +3366,6 @@ class _EveryCodeWorkRequestStore(Protocol):
     ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
 
 
-class _PreviewPrFeedbackNotificationStore(Protocol):
-    def write_preview_pr_feedback_notification_policy_record(
-        self, record: PreviewPrFeedbackNotificationPolicyRecord
-    ) -> object: ...
-
-    def list_preview_pr_feedback_notification_policy_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        repository: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[PreviewPrFeedbackNotificationPolicyRecord, ...]: ...
-
-    def write_preview_pr_feedback_notification_attempt_record(
-        self, record: PreviewPrFeedbackNotificationAttemptRecord
-    ) -> object: ...
-
-    def list_preview_pr_feedback_notification_attempt_records(
-        self,
-        *,
-        feedback_id: str = "",
-        event: str = "",
-        destination_kind: str = "",
-        limit: int | None = None,
-    ) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]: ...
-
-
 def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkRequestStore:
     required_methods = (
         "write_every_code_work_request_record",
@@ -3467,20 +3381,6 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EveryCodeWorkRequestStore, record_store)
     raise TypeError("record store does not support Every Code work requests")
-
-
-def _preview_pr_feedback_notification_store(
-    record_store: object,
-) -> _PreviewPrFeedbackNotificationStore | None:
-    required_methods = (
-        "write_preview_pr_feedback_notification_policy_record",
-        "list_preview_pr_feedback_notification_policy_records",
-        "write_preview_pr_feedback_notification_attempt_record",
-        "list_preview_pr_feedback_notification_attempt_records",
-    )
-    if all(hasattr(record_store, method_name) for method_name in required_methods):
-        return cast(_PreviewPrFeedbackNotificationStore, record_store)
-    return None
 
 
 class _MergeTrainBatchCandidateRecordStore(Protocol):
@@ -5646,290 +5546,6 @@ def _write_idempotency_record(
     )
 
 
-def _deliver_preview_pr_feedback_notifications(
-    *,
-    record_store: object,
-    feedback: PreviewPrFeedbackRecord,
-    attempted_at: str,
-    discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
-) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]:
-    if feedback.delivery_status not in {"skipped", "failed"}:
-        return ()
-    notification_store = _preview_pr_feedback_notification_store(record_store)
-    secret_store = _secret_capable_store(record_store)
-    if notification_store is None or secret_store is None:
-        return ()
-    policies = tuple(
-        policy
-        for policy in notification_store.list_preview_pr_feedback_notification_policy_records(
-            product=feedback.product,
-            context_name=feedback.context,
-            repository=feedback.repository,
-            status="enabled",
-            limit=None,
-        )
-        if policy.matches(feedback)
-    )
-    if not policies:
-        return ()
-    event = preview_pr_feedback_notification_event(feedback)
-    secret_resolver = _launchplane_managed_secret_resolver(
-        record_store=secret_store,
-        context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-        instance_name="preview-feedback",
-    )
-    attempts: list[PreviewPrFeedbackNotificationAttemptRecord] = []
-    for policy in policies:
-        for destination in policy.destinations:
-            existing_attempt = _existing_preview_pr_feedback_notification_attempt(
-                notification_store=notification_store,
-                feedback=feedback,
-                event=event,
-                policy=policy,
-                destination=destination,
-            )
-            if existing_attempt is not None and existing_attempt.delivery_status in {
-                "pending",
-                "delivered",
-                "skipped",
-            }:
-                attempts.append(existing_attempt)
-                continue
-            if destination.status != "enabled":
-                attempt = _write_preview_pr_feedback_notification_attempt(
-                    notification_store=notification_store,
-                    feedback=feedback,
-                    event=event,
-                    policy=policy,
-                    destination=destination,
-                    attempted_at=attempted_at,
-                    delivery_status="skipped",
-                    action="destination_disabled",
-                )
-                attempts.append(attempt)
-                continue
-            if destination.kind == "discord":
-                attempt = _deliver_preview_pr_feedback_discord_notification(
-                    notification_store=notification_store,
-                    secret_resolver=secret_resolver,
-                    discord_sender=discord_sender,
-                    feedback=feedback,
-                    event=event,
-                    policy=policy,
-                    destination=destination,
-                    attempted_at=attempted_at,
-                )
-                attempts.append(attempt)
-    return tuple(attempts)
-
-
-def _deliver_preview_pr_feedback_discord_notification(
-    *,
-    notification_store: _PreviewPrFeedbackNotificationStore,
-    secret_resolver: Callable[[str], str],
-    discord_sender: Callable[[str, dict[str, object]], object],
-    feedback: PreviewPrFeedbackRecord,
-    event: PreviewPrFeedbackNotificationEvent,
-    policy: PreviewPrFeedbackNotificationPolicyRecord,
-    destination: PreviewPrFeedbackNotificationDestination,
-    attempted_at: str,
-) -> PreviewPrFeedbackNotificationAttemptRecord:
-    webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
-    if not webhook_url:
-        return _write_preview_pr_feedback_notification_attempt(
-            notification_store=notification_store,
-            feedback=feedback,
-            event=event,
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="failed",
-            action="missing_discord_webhook",
-            error_message="Discord webhook secret could not be resolved.",
-        )
-    public_url_error = public_discord_url_error(webhook_url)
-    if public_url_error:
-        return _write_preview_pr_feedback_notification_attempt(
-            notification_store=notification_store,
-            feedback=feedback,
-            event=event,
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="failed",
-            action="invalid_discord_webhook",
-            error_message=f"Discord webhook URL is not public: {public_url_error}",
-        )
-    pending_attempt = _write_preview_pr_feedback_notification_attempt(
-        notification_store=notification_store,
-        feedback=feedback,
-        event=event,
-        policy=policy,
-        destination=destination,
-        attempted_at=attempted_at,
-        delivery_status="pending",
-        action="dispatching_discord",
-    )
-    try:
-        discord_sender(webhook_url, _preview_pr_feedback_discord_payload(feedback, event=event))
-    except Exception as error:  # noqa: BLE001 - delivery attempts preserve provider failures.
-        return _write_preview_pr_feedback_notification_attempt(
-            notification_store=notification_store,
-            feedback=feedback,
-            event=event,
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="failed",
-            action="discord_webhook_failed",
-            error_message=str(error) or error.__class__.__name__,
-        )
-    try:
-        return _write_preview_pr_feedback_notification_attempt(
-            notification_store=notification_store,
-            feedback=feedback,
-            event=event,
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="delivered",
-            action="posted_discord",
-        )
-    except Exception:  # noqa: BLE001 - the pending attempt preserves dispatch evidence.
-        return pending_attempt
-
-
-def _existing_preview_pr_feedback_notification_attempt(
-    *,
-    notification_store: _PreviewPrFeedbackNotificationStore,
-    feedback: PreviewPrFeedbackRecord,
-    event: PreviewPrFeedbackNotificationEvent,
-    policy: PreviewPrFeedbackNotificationPolicyRecord,
-    destination: PreviewPrFeedbackNotificationDestination,
-) -> PreviewPrFeedbackNotificationAttemptRecord | None:
-    attempt_id = build_preview_pr_feedback_notification_attempt_id(
-        feedback_id=feedback.feedback_id,
-        event=event,
-        policy_id=policy.policy_id,
-        destination_id=destination.destination_id,
-    )
-    return next(
-        (
-            attempt
-            for attempt in notification_store.list_preview_pr_feedback_notification_attempt_records(
-                feedback_id=feedback.feedback_id,
-                event=event,
-                limit=None,
-            )
-            if attempt.attempt_id == attempt_id
-        ),
-        None,
-    )
-
-
-def _write_preview_pr_feedback_notification_attempt(
-    *,
-    notification_store: _PreviewPrFeedbackNotificationStore,
-    feedback: PreviewPrFeedbackRecord,
-    event: PreviewPrFeedbackNotificationEvent,
-    policy: PreviewPrFeedbackNotificationPolicyRecord,
-    destination: PreviewPrFeedbackNotificationDestination,
-    attempted_at: str,
-    delivery_status: PreviewPrFeedbackNotificationDeliveryStatus,
-    action: str,
-    error_message: str = "",
-) -> PreviewPrFeedbackNotificationAttemptRecord:
-    attempt = PreviewPrFeedbackNotificationAttemptRecord(
-        attempt_id=build_preview_pr_feedback_notification_attempt_id(
-            feedback_id=feedback.feedback_id,
-            event=event,
-            policy_id=policy.policy_id,
-            destination_id=destination.destination_id,
-        ),
-        feedback_id=feedback.feedback_id,
-        event=event,
-        policy_id=policy.policy_id,
-        destination_id=destination.destination_id,
-        destination_kind=destination.kind,
-        delivery_status=delivery_status,
-        attempted_at=attempted_at,
-        action=action,
-        error_message=_bounded_text(error_message, max_length=500),
-    )
-    notification_store.write_preview_pr_feedback_notification_attempt_record(attempt)
-    return attempt
-
-
-def _preview_pr_feedback_discord_payload(
-    feedback: PreviewPrFeedbackRecord,
-    *,
-    event: PreviewPrFeedbackNotificationEvent,
-) -> dict[str, object]:
-    fields = [
-        {"name": "Product", "value": feedback.product, "inline": True},
-        {"name": "Context", "value": feedback.context, "inline": True},
-        {"name": "Repository", "value": feedback.repository, "inline": True},
-        {"name": "PR", "value": str(feedback.anchor_pr_number), "inline": True},
-        {"name": "Delivery", "value": feedback.delivery_status, "inline": True},
-        {"name": "Status", "value": feedback.status, "inline": True},
-        {"name": "Feedback", "value": feedback.feedback_id, "inline": False},
-    ]
-    if feedback.anchor_pr_url:
-        fields.append({"name": "Pull request", "value": feedback.anchor_pr_url, "inline": False})
-    if feedback.run_url:
-        fields.append({"name": "Workflow", "value": feedback.run_url, "inline": False})
-    description = feedback.error_message or "Preview PR feedback could not be delivered."
-    return {
-        "embeds": [
-            {
-                "title": "Launchplane preview PR feedback delivery failed",
-                "description": description,
-                "color": 0xC62828,
-                "fields": fields,
-                "footer": {"text": event},
-            }
-        ]
-    }
-
-
-def _launchplane_managed_secret_resolver(
-    *,
-    record_store: control_plane_secrets.SecretReadStore,
-    context_name: str,
-    instance_name: str,
-) -> Callable[[str], str]:
-    def resolve(secret_id: str) -> str:
-        normalized_secret_id = secret_id.strip()
-        if not normalized_secret_id:
-            return ""
-        try:
-            record = record_store.read_secret_record(normalized_secret_id)
-        except Exception:  # noqa: BLE001 - notification attempts capture missing secrets.
-            return ""
-        if record.status != control_plane_secrets.SECRET_STATUS_CONFIGURED:
-            return ""
-        if not control_plane_secrets._scope_matches_record(
-            record,
-            context_name=context_name,
-            instance_name=instance_name,
-        ):
-            return ""
-        try:
-            version = record_store.read_secret_version(record.current_version_id)
-            return control_plane_secrets._decrypt_secret_value(version.ciphertext)
-        except Exception:  # noqa: BLE001 - notification attempts capture unreadable secrets.
-            return ""
-
-    return resolve
-
-
-def _bounded_text(value: str, *, max_length: int) -> str:
-    normalized_value = " ".join(value.strip().split())
-    if len(normalized_value) <= max_length:
-        return normalized_value
-    return f"{normalized_value[: max_length - 3]}..."
-
-
 def _check_idempotent_request(
     *,
     record_store: object,
@@ -6619,15 +6235,6 @@ def _write_preview_lifecycle_cleanup_if_supported(
     return record.cleanup_id
 
 
-def _write_preview_pr_feedback_if_supported(
-    *, record_store: object, record: PreviewPrFeedbackRecord
-) -> str:
-    if not hasattr(record_store, "write_preview_pr_feedback_record"):
-        return ""
-    getattr(record_store, "write_preview_pr_feedback_record")(record)
-    return record.feedback_id
-
-
 def _verireel_preview_manifest_fingerprint(request: VeriReelPreviewRefreshRequest) -> str:
     normalized_sha = request.anchor_head_sha.strip().lower()
     short_sha = normalized_sha[:7]
@@ -6832,41 +6439,6 @@ def _apply_verireel_testing_verification_records(
     return result
 
 
-def _allows_preview_pr_feedback_write(
-    *,
-    authz_policy: LaunchplaneAuthzPolicy,
-    identity: LaunchplaneIdentity,
-    product: str,
-    context: str,
-    status: PreviewPrFeedbackStatus,
-) -> bool:
-    if authz_policy.allows(
-        identity=identity,
-        action="preview_pr_feedback.write",
-        product=product,
-        context=context,
-    ):
-        return True
-
-    lifecycle_actions_by_status = {
-        "pending": ("preview_refresh.execute",),
-        "ready": ("preview_refresh.execute",),
-        "failed": ("preview_refresh.execute",),
-        "destroyed": ("preview_destroy.execute",),
-        "cleanup_failed": ("preview_destroy.execute",),
-        "cleared": ("preview_refresh.execute", "preview_destroy.execute"),
-    }
-    return any(
-        authz_policy.allows(
-            identity=identity,
-            action=action,
-            product=product,
-            context=context,
-        )
-        for action in lifecycle_actions_by_status.get(status, ())
-    )
-
-
 def create_launchplane_service_app(
     *,
     state_dir: Path,
@@ -6877,9 +6449,6 @@ def create_launchplane_service_app(
     local_record_store_for_tests: _TestLaunchplaneServiceRecordStore | None = None,
     github_oauth_config: GitHubOAuthConfig | None = None,
     human_session_store: HumanSessionStore | None = None,
-    preview_pr_feedback_discord_sender: Callable[
-        [str, dict[str, object]], object
-    ] = post_discord_webhook,
     authz_policy_runtime: LaunchplaneAuthzPolicyRuntime | None = None,
     record_store_for_service: _TestLaunchplaneServiceRecordStore | None = None,
 ) -> _WsgiApp:
@@ -8464,112 +8033,6 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     request=self_deploy_request.deploy,
                 ).model_dump(mode="json")
-            elif path == "/v1/previews/pr-feedback":
-                preview_pr_feedback_request = PreviewPrFeedbackEnvelope.model_validate(payload)
-                if not _allows_preview_pr_feedback_write(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=preview_pr_feedback_request.product,
-                    context=preview_pr_feedback_request.context,
-                    status=preview_pr_feedback_request.status,
-                ):
-                    feedback_authz_action = "preview_pr_feedback.write"
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write preview PR feedback for the requested"
-                                    " product/context."
-                                ),
-                            },
-                            "authz": _authz_diagnostic_payload(
-                                identity=identity,
-                                authz_policy_sha256_value=resolved_authz_policy_sha256,
-                                authz_policy_source=resolved_authz_policy_source,
-                                action=feedback_authz_action,
-                                product=preview_pr_feedback_request.product,
-                                context=preview_pr_feedback_request.context,
-                            ),
-                        },
-                    )
-                if preview_pr_feedback_request.dry_run:
-                    preview_pr_feedback_dry_run_result: dict[str, object] = {
-                        "dry_run": True,
-                        "preview_pr_feedback": "authorized",
-                        "product": preview_pr_feedback_request.product,
-                        "context": preview_pr_feedback_request.context,
-                        "status": preview_pr_feedback_request.status,
-                        "anchor_pr_number": preview_pr_feedback_request.anchor_pr_number,
-                    }
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=202,
-                        payload=_accepted_payload(
-                            trace_id=request_trace_id,
-                            result=preview_pr_feedback_dry_run_result,
-                            driver_result=preview_pr_feedback_dry_run_result,
-                        ),
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = build_preview_pr_feedback_record(
-                    control_plane_root=resolved_root,
-                    product=preview_pr_feedback_request.product,
-                    context=preview_pr_feedback_request.context,
-                    source=preview_pr_feedback_request.source,
-                    requested_at=_utc_now_timestamp(),
-                    repository=preview_pr_feedback_request.repository,
-                    anchor_repo=preview_pr_feedback_request.anchor_repo,
-                    anchor_pr_number=preview_pr_feedback_request.anchor_pr_number,
-                    anchor_pr_url=preview_pr_feedback_request.anchor_pr_url,
-                    status=preview_pr_feedback_request.status,
-                    marker=preview_pr_feedback_request.marker,
-                    preview_url=preview_pr_feedback_request.preview_url,
-                    immutable_image_reference=preview_pr_feedback_request.immutable_image_reference,
-                    refresh_image_reference=preview_pr_feedback_request.refresh_image_reference,
-                    revision=preview_pr_feedback_request.revision,
-                    run_url=preview_pr_feedback_request.run_url,
-                    failure_summary=preview_pr_feedback_request.failure_summary,
-                    every_code_record_store=(
-                        record_store if _supports_every_code_work_requests(record_store) else None
-                    ),
-                )
-                preview_pr_feedback_id = _write_preview_pr_feedback_if_supported(
-                    record_store=record_store,
-                    record=driver_result,
-                )
-                notification_attempts = _deliver_preview_pr_feedback_notifications(
-                    record_store=record_store,
-                    feedback=driver_result,
-                    attempted_at=driver_result.requested_at,
-                    discord_sender=preview_pr_feedback_discord_sender,
-                )
-                result = {"preview_pr_feedback_id": preview_pr_feedback_id}
-                if notification_attempts:
-                    result["preview_pr_feedback_notification_attempt_count"] = len(
-                        notification_attempts
-                    )
-                    feedback_payload = driver_result.model_dump(mode="json")
-                    feedback_payload["notifications"] = [
-                        attempt.model_dump(mode="json") for attempt in notification_attempts
-                    ]
-                    driver_result = {
-                        **feedback_payload,
-                    }
             elif path == "/v1/previews/lifecycle-cleanup":
                 preview_lifecycle_cleanup_request = PreviewLifecycleCleanupEnvelope.model_validate(
                     payload

@@ -254,6 +254,10 @@ VeriReel product paths:
     worker-token callers, direct preview-gate record writes, and DB-backed
     storage capability enforcement without idempotency state)
 - preview PR feedback notification policy route:
+  - `POST /v1/previews/pr-feedback` (native FastAPI for bearer-token callers,
+    `preview_pr_feedback.write` or matching lifecycle authorization,
+    preview PR feedback write-capable storage, optional `Idempotency-Key` replay/conflict
+    handling, and preview PR feedback notification delivery attempts)
   - `POST /v1/previews/pr-feedback/notification-policies/apply` (native FastAPI
     for bearer-token callers, DB-backed storage, explicit product/context scope,
     local-operator reason enforcement, and optional `Idempotency-Key`
@@ -1139,6 +1143,10 @@ repos submit thin preview outcome facts to `POST /v1/previews/pr-feedback`;
 Launchplane renders the review comment, upserts the anchored GitHub PR comment
 when its runtime token is available, and stores an append-only feedback record
 with the comment body, delivery action, comment URL, and any skip/failure reason.
+The route is native FastAPI; it requires a store capable of writing preview PR
+feedback records, preserves optional `Idempotency-Key` replay/conflict behavior,
+and the legacy direct WSGI fallback branch is retired so fallback calls fail
+closed. Dry-runs evaluate authorization without writing records or comments.
 Workflows can be granted explicit `preview_pr_feedback.write`, or generic-web
 preview workflows can reuse their matching lifecycle grants: refresh-capable
 workflows may report pending/ready/failed feedback, and destroy-capable workflows

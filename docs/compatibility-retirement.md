@@ -215,6 +215,15 @@ Keep a compatibility surface only when it is one of these:
   persisting desired-state records, and returns the stored scan as accepted
   evidence. The central WSGI branch and generic-web descriptor fallback branch
   are deleted/exempted, and direct WSGI fallback calls fail closed.
+- Preview PR feedback uses native FastAPI `POST /v1/previews/pr-feedback`,
+  preserves explicit `preview_pr_feedback.write` authorization and the matching
+  preview lifecycle grant fallbacks for refresh/destroy feedback, preserves
+  dry-run authorization checks without mutation, requires preview PR feedback
+  record-write storage for apply requests, preserves optional `Idempotency-Key`
+  replay/conflict behavior, writes configured notification attempts for skipped
+  or failed PR comment delivery, and returns the stored feedback record as
+  accepted evidence. Its legacy WSGI write branch is retired; direct WSGI
+  fallback calls fail closed.
 - Public ingress, Every Code, and preview PR feedback notification policy apply
   use native FastAPI routes for bearer-token callers and preserve DB-backed
   storage enforcement, local operator reason requirements, explicit preview

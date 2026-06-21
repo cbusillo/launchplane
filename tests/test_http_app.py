@@ -11955,6 +11955,190 @@ class FastApiPreviewDesiredStateTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiPreviewPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_pr_feedback_records_skipped_delivery_without_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+            feedback_records = store.list_preview_pr_feedback_records(
+                context_name="verireel-testing"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["preview_pr_feedback_id"], feedback_records[0].feedback_id
+        )
+        self.assertEqual(payload["result"]["delivery_status"], "skipped")
+        self.assertIn("Launchplane preview is ready", payload["result"]["comment_markdown"])
+        self.assertIn("GITHUB_TOKEN", feedback_records[0].error_message)
+
+    async def test_preview_pr_feedback_replays_idempotent_notification(self) -> None:
+        sent_payloads: list[tuple[str, dict[str, object]]] = []
+
+        def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
+            sent_payloads.append((webhook_url, payload))
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ),
+        ):
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+                preview_pr_feedback_discord_sender=send_discord,
+            )
+            try:
+                secret_result = control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration="preview-pr-feedback-notifications",
+                    name="discord webhook",
+                    plaintext_value="https://discord.com/api/webhooks/test/webhook",
+                    binding_key="DISCORD_WEBHOOK",
+                    context_name="launchplane",
+                    instance_name="preview-feedback",
+                    actor="test",
+                    source_label="test",
+                )
+                store.write_preview_pr_feedback_notification_policy_record(
+                    _preview_pr_feedback_notification_policy_record(
+                        policy_id="preview-pr-feedback-notification-discord",
+                        product="verireel",
+                        context="verireel-testing",
+                        repository="every/verireel",
+                    ).model_copy(
+                        update={
+                            "destinations": (
+                                PreviewPrFeedbackNotificationDestination(
+                                    destination_id="discord",
+                                    kind="discord",
+                                    discord_webhook_secret=str(secret_result["secret_id"]),
+                                ),
+                            )
+                        }
+                    )
+                )
+                first_response = await _post_preview_pr_feedback(
+                    app,
+                    _preview_pr_feedback_payload(),
+                    idempotency_key="preview-pr-feedback:verireel:42",
+                )
+                replay_response = await _post_preview_pr_feedback(
+                    app,
+                    _preview_pr_feedback_payload(),
+                    idempotency_key="preview-pr-feedback:verireel:42",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(len(sent_payloads), 1)
+        first_payload = first_response.json()
+        self.assertEqual(
+            first_payload["result"]["notifications"][0]["delivery_status"], "delivered"
+        )
+        sent_embeds = cast(list[dict[str, object]], sent_payloads[0][1]["embeds"])
+        sent_embed = sent_embeds[0]
+        sent_embed_fields = cast(list[dict[str, str]], sent_embed["fields"])
+        sent_fields = {field["name"]: field["value"] for field in sent_embed_fields}
+        self.assertEqual(sent_fields["Pull request"], "https://github.com/every/verireel/pull/42")
+        self.assertEqual(
+            sent_fields["Workflow"], "https://github.com/every/verireel/actions/runs/123"
+        )
+
+    async def test_preview_pr_feedback_dry_run_authorizes_without_writing(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_preview_pr_feedback(
+                app,
+                _preview_pr_feedback_payload(dry_run=True),
+            )
+            feedback_records = store.list_preview_pr_feedback_records(
+                context_name="verireel-testing"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["preview_pr_feedback"], "authorized")
+        self.assertEqual(feedback_records, ())
+
+    async def test_preview_pr_feedback_accepts_lifecycle_refresh_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_refresh.execute"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+            feedback_records = store.list_preview_pr_feedback_records(
+                context_name="verireel-testing"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(feedback_records[0].status, "ready")
+
+    async def test_preview_pr_feedback_rejects_unauthorized_workflow(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_generation.write"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_openapi_includes_preview_pr_feedback_route(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/previews/pr-feedback"]["post"]
+        self.assertEqual(route["operationId"], "apply_preview_pr_feedback")
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+
+
 class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_ingress_route_dry_run_returns_plan_without_mutation(self) -> None:
         client = _FakeNpmplusIngressClient()
@@ -19344,6 +19528,60 @@ def _preview_pr_feedback_notification_policy_record(
     )
 
 
+def _preview_pr_feedback_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="every/verireel",
+        workflow_ref=(
+            "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge"
+        ),
+        event_name="pull_request",
+    )
+
+
+def _preview_pr_feedback_policy(*, action: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["verireel"],
+                    "contexts": ["verireel-testing"],
+                    "actions": [action],
+                }
+            ]
+        }
+    )
+
+
+def _preview_pr_feedback_payload(
+    *,
+    status: str = "ready",
+    dry_run: bool = False,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "product": "verireel",
+        "context": "verireel-testing",
+        "source": "preview-control-plane",
+        "repository": "every/verireel",
+        "anchor_repo": "verireel",
+        "anchor_pr_number": 42,
+        "anchor_pr_url": "https://github.com/every/verireel/pull/42",
+        "status": status,
+        "preview_url": "https://pr-42.preview.example",
+        "immutable_image_reference": "ghcr.io/every/verireel:pr-42-a1b2c3d4",
+        "refresh_image_reference": "ghcr.io/every/verireel:preview-pr-42",
+        "revision": "a1b2c3d4",
+        "run_url": "https://github.com/every/verireel/actions/runs/123",
+    }
+    if dry_run:
+        payload["dry_run"] = True
+    return payload
+
+
 def _ingress_route_audit_record(
     *,
     record_id: str = "ingress-route-audit-test",
@@ -20238,6 +20476,25 @@ async def _get_preview_pr_feedback_notification_attempts(
         app,
         f"/v1/previews/pr-feedback/notification-attempts{suffix}",
         headers=headers,
+    )
+
+
+async def _post_preview_pr_feedback(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/previews/pr-feedback",
+        headers=headers,
+        payload=payload,
     )
 
 
