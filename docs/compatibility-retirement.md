@@ -119,9 +119,10 @@ Keep a compatibility surface only when it is one of these:
   closed. Setup keeps the apply-only idempotency replay/conflict contract while
   dry-runs remain repeatable.
 - Merge-train admission, controller-status, and policy-target reads use native
-  FastAPI routes. Their legacy WSGI read branches are deleted; merge-train
-  worker, controller mutation, feedback, and phase runner routes remain on the
-  retained fallback until their native write replacements land.
+  FastAPI routes. Their legacy WSGI read branches are deleted. Merge-train
+  run-once and PR feedback also use native FastAPI write routes; controller
+  mutation and phase runner routes remain on the retained fallback until their
+  native write replacements land.
 - Work graph snapshot, work-graph rank, GitHub issue-inbox reads, and GitHub
   issue-inbox reconcile use native FastAPI routes. Their legacy WSGI
   read/rank/reconcile branches and WSGI-only helpers are deleted.
@@ -278,6 +279,13 @@ Keep a compatibility surface only when it is one of these:
   deleted, and direct WSGI fallback calls fail closed. Requests require the
   matching merge-train repository policy `service_authz`, configured GitHub
   token environment variable, feedback record storage, and preserve optional
+  `Idempotency-Key` replay/conflict handling for successful accepted writes.
+- Merge-train run-once uses native FastAPI
+  `POST /v1/work-graph/merge-train/run-once` for the policy-backed Level 1
+  ordered-queue pass. Its legacy WSGI write branch is deleted, and direct WSGI
+  fallback calls fail closed. Requests require the matching merge-train
+  repository policy `service_authz`, configured GitHub token environment
+  variable, merge-train run record storage, and preserve optional
   `Idempotency-Key` replay/conflict handling for successful accepted writes.
 - Authz policy grant and removal routes use native FastAPI
   `POST /v1/authz-policies/github-actions/grants`,

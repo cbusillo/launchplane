@@ -272,7 +272,7 @@ VeriReel product paths:
   - `GET /v1/work-graph/merge-train/controller/status` (native FastAPI)
   - `POST /v1/work-graph/rank` (native FastAPI)
   - `POST /v1/work-graph/github/issues/reconcile` (native FastAPI)
-  - `POST /v1/work-graph/merge-train/run-once`
+  - `POST /v1/work-graph/merge-train/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/pr-feedback` (native FastAPI)
   - `POST /v1/work-graph/merge-train/controller/run-once`
 - product driver routes:
@@ -527,7 +527,10 @@ repository policy, resolves its GitHub token from that policy's
 `github_token.env_var`, and fails closed before GitHub calls when no matching
 policy or token is available. The route is dry-run by default; `mutate: true`
 applies at most one worker transition from one fresh snapshot. This route is the
-deployed sequential baseline, not the full batch train target.
+deployed sequential baseline, not the full batch train target. It is native
+FastAPI; the legacy WSGI fallback branch is deleted, direct fallback calls fail
+closed, and accepted calls persist `launchplane_merge_train_runs` evidence with
+optional `Idempotency-Key` replay/conflict handling.
 
 `POST /v1/work-graph/merge-train/pr-feedback` is a native FastAPI route that
 writes the public pull-request feedback surface for train progress. It uses the
