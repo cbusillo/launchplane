@@ -255,6 +255,73 @@ class _StackCollapseWithoutBatchCandidateStore:
         )
 
 
+class _BatchLandingWithoutLandingPlanStore:
+    backend_name = "test-batch-landing-without-landing-plan"
+
+    def __init__(self, *, state_dir: Path) -> None:
+        self.delegate = FilesystemRecordStore(state_dir=state_dir)
+
+    def close(self) -> None:
+        return None
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        return self.delegate.read_idempotency_record(
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object:
+        return self.delegate.write_idempotency_record(record)
+
+    def list_merge_train_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[MergeTrainPolicyRecord, ...]:
+        return self.delegate.list_merge_train_policy_records(status=status, limit=limit)
+
+    def write_merge_train_batch_candidate_record(self, record: Any) -> object:
+        return self.delegate.write_merge_train_batch_candidate_record(record)
+
+    def list_merge_train_batch_candidate_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[Any, ...]:
+        return self.delegate.list_merge_train_batch_candidate_records(
+            repository=repository,
+            base_branch=base_branch,
+            status=status,
+            limit=limit,
+        )
+
+    def write_merge_train_stack_collapse_plan_record(self, record: Any) -> object:
+        return self.delegate.write_merge_train_stack_collapse_plan_record(record)
+
+    def list_merge_train_stack_collapse_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[Any, ...]:
+        return self.delegate.list_merge_train_stack_collapse_plan_records(
+            repository=repository,
+            base_branch=base_branch,
+            status=status,
+            limit=limit,
+        )
+
+
 def _product_environment_read_policy(
     *,
     context: str = "launchplane",
@@ -3231,6 +3298,46 @@ async def _post_merge_train_batch_candidate_run_once(
     )
 
 
+async def _post_merge_train_controller_run_once(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/merge-train/controller/run-once",
+        headers=headers,
+        payload=payload,
+    )
+
+
+async def _post_merge_train_batch_landing_run_once(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    capture_server_error_response: bool = False,
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/merge-train/batch-landing/run-once",
+        headers=headers,
+        payload=payload,
+        capture_server_error_response=capture_server_error_response,
+    )
+
+
 async def _post_merge_train_stack_collapse_run_once(
     app: FastAPI,
     payload: dict[str, object],
@@ -4236,6 +4343,7 @@ async def _asgi_request(
     payload: dict[str, object] | None = None,
     raw_body: bytes | None = None,
     set_content_length: bool = True,
+    capture_server_error_response: bool = False,
 ) -> _AsgiResponse:
     request_path, separator, raw_query_string = path.partition("?")
     request_headers_dict = dict(headers or {})
@@ -4280,7 +4388,13 @@ async def _asgi_request(
     async def send(message: MutableMapping[str, Any]) -> None:
         sent.append(message)
 
-    await app(scope, receive, send)
+    try:
+        await app(scope, receive, send)
+    except Exception:
+        if not capture_server_error_response or not any(
+            message["type"] == "http.response.start" for message in sent
+        ):
+            raise
 
     start = next(message for message in sent if message["type"] == "http.response.start")
     body = b"".join(
