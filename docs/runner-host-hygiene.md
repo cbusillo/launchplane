@@ -133,7 +133,8 @@ calls the service route after it captures the required pre/post host evidence.
 
 The first live executor is `.github/workflows/runner-host-hygiene.yml`. It runs
 on a dedicated self-hosted ops lane selected by the operator-managed
-`LAUNCHPLANE_RUNNER_LABEL` repository variable, authenticates back to
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE` repository variable,
+authenticates back to
 Launchplane with GitHub Actions OIDC, and executes on the runner host as the
 constrained service user. The workflow runs daily on a schedule in dry-run mode
 and can also be manually dispatched for approved mutations. Scheduled runs
@@ -189,10 +190,12 @@ captured image and volume inventory to decide any later phase-two cleanup lane.
 Runner lane registration uses a separate manual ops-lane workflow,
 `.github/workflows/runner-lane-registration.yml`. It shares the same approved
 host, execution-lane, and service-user variables, but it does not prune Docker
-state or restart existing services. Its first slice registers a repo-scoped
-Actions runner lane under an allowlisted registration root and verifies the lane
-through GitHub inventory. Treat the registration artifact as evidence until the
-service-backed runner-registration audit record is accepted.
+state or restart existing services. Its first slice creates a new repo-scoped
+Actions runner lane under an allowlisted registration root, starts only the
+matching `launchplane-runner@<lane>.service` supervisor, and verifies the lane
+through GitHub inventory before writing a completed registration audit.
+Existing-lane adoption, stale-lane removal, and generic runner service restarts
+remain outside this slice.
 
 ## Host Replacement Runbook
 

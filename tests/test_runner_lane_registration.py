@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 from typing import Any
+from unittest.mock import patch
 from click import Command
 from click.testing import CliRunner
 import getpass
@@ -61,8 +62,14 @@ class _TokenFetcher:
 
 
 class _CommandRunner:
-    def __init__(self, *, returncode: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        returncode: int = 0,
+        returncodes: Sequence[int] | None = None,
+    ) -> None:
         self.returncode = returncode
+        self.returncodes = list(returncodes or ())
         self.commands: list[tuple[str, ...]] = []
         self.envs: list[dict[str, str]] = []
 
@@ -71,7 +78,20 @@ class _CommandRunner:
     ) -> RemoteCommandResult:
         self.commands.append(tuple(command))
         self.envs.append(dict(env))
-        return RemoteCommandResult(returncode=self.returncode, stderr="registration failed")
+        returncode = self.returncodes.pop(0) if self.returncodes else self.returncode
+        return RemoteCommandResult(returncode=returncode, stderr="registration failed")
+
+
+class _InventoryReader:
+    def __init__(self, inventories: Sequence[RunnerLaneInventory]) -> None:
+        self.inventories = list(inventories)
+        self.calls: list[str] = []
+
+    def __call__(self, repository: str) -> RunnerLaneInventory:
+        self.calls.append(repository)
+        if len(self.inventories) > 1:
+            return self.inventories.pop(0)
+        return self.inventories[0]
 
 
 class _AuditPoster:
@@ -197,7 +217,83 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
         self.assertEqual(command_runner.commands, [])
         self.assertEqual(audit_poster.records[0][0], "planned")
 
-    def test_ready_executor_requires_supervised_host_maintainer(self) -> None:
+    def test_blocked_plan_allows_invalid_runner_package_url_without_token_or_command(
+        self,
+    ) -> None:
+        token_fetcher = _TokenFetcher()
+        command_runner = _CommandRunner()
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_lane_registration_executor(
+            request=_executor_request(
+                mutate=True,
+                runner_package_url=(
+                    "https://github.com/actions/runner/releases/download/"
+                    "../download/actions-runner-linux-x64-2.327.1.tar.gz"
+                ),
+            ),
+            policy=_policy(),
+            pre_inventory=_inventory(lanes=(_lane(),)),
+            inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
+            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(token_fetcher.calls, [])
+        self.assertEqual(command_runner.commands, [])
+        self.assertEqual([record[0] for record in audit_poster.records], ["planned"])
+
+    def test_ready_executor_posts_failed_audit_without_runner_package_url(self) -> None:
+        token_fetcher = _TokenFetcher()
+        command_runner = _CommandRunner()
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_lane_registration_executor(
+            request=_executor_request(mutate=True, runner_package_url=""),
+            policy=_policy(),
+            pre_inventory=_inventory(lanes=()),
+            inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
+            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("requires runner_package_url", result.message)
+        self.assertEqual(token_fetcher.calls, [])
+        self.assertEqual(command_runner.commands, [])
+        self.assertEqual([record[0] for record in audit_poster.records], ["planned", "failed"])
+
+    def test_ready_executor_posts_failed_audit_for_unsafe_runner_package_url(self) -> None:
+        token_fetcher = _TokenFetcher()
+        command_runner = _CommandRunner()
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_lane_registration_executor(
+            request=_executor_request(
+                mutate=True,
+                runner_package_url=(
+                    "https://github.com/actions/runner/releases/download/"
+                    "../download/actions-runner-linux-x64-2.327.1.tar.gz"
+                ),
+            ),
+            policy=_policy(),
+            pre_inventory=_inventory(lanes=()),
+            inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
+            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("actions/runner tarball URL", result.message)
+        self.assertEqual(token_fetcher.calls, [])
+        self.assertEqual(command_runner.commands, [])
+        self.assertEqual([record[0] for record in audit_poster.records], ["planned", "failed"])
+
+    def test_ready_executor_completes_supervised_registration(self) -> None:
         token_fetcher = _TokenFetcher()
         command_runner = _CommandRunner()
         audit_poster = _AuditPoster()
@@ -212,13 +308,128 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             audit_poster=audit_poster,
         )
 
-        self.assertEqual(result.status, "failed")
-        self.assertIn("supervised host maintainer", result.message)
-        self.assertEqual(token_fetcher.calls, [])
-        self.assertEqual(command_runner.commands, [])
-        self.assertEqual(result.token_record, None)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(token_fetcher.calls, ["cbusillo/odoo-tenant-cm-website"])
+        self.assertEqual(len(command_runner.commands), 4)
+        self.assertEqual(command_runner.commands[0][:3], ("sh", "-eu", "-c"))
+        self.assertIn("config.sh", command_runner.commands[1][3])
+        self.assertEqual(
+            command_runner.commands[2],
+            (
+                "sudo",
+                "-n",
+                "systemctl",
+                "enable",
+                "--now",
+                "launchplane-runner@cm-website-runner-1.service",
+            ),
+        )
+        self.assertEqual(
+            command_runner.commands[3],
+            (
+                "sudo",
+                "-n",
+                "systemctl",
+                "is-active",
+                "--quiet",
+                "launchplane-runner@cm-website-runner-1.service",
+            ),
+        )
+        self.assertEqual(
+            command_runner.envs[1]["RUNNER_DIRECTORY"],
+            "/home/launchplane-runner-hygiene/actions-runners/cm-website-runner-1",
+        )
+        self.assertEqual(command_runner.envs[1]["RUNNER_REGISTRATION_TOKEN"], "secret-token")
+        self.assertNotIn("secret-token", " ".join(command_runner.commands[1]))
+        self.assertIsNotNone(result.token_record)
+        if result.token_record is not None:
+            self.assertEqual(result.token_record.repository, "cbusillo/odoo-tenant-cm-website")
         self.assertNotIn("secret-token", result.model_dump_json())
+        self.assertEqual([record[0] for record in audit_poster.records], ["planned", "completed"])
+
+    def test_ready_executor_posts_failed_audit_when_config_fails(self) -> None:
+        token_fetcher = _TokenFetcher()
+        command_runner = _CommandRunner(returncodes=[0, 1])
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_lane_registration_executor(
+            request=_executor_request(mutate=True),
+            policy=_policy(),
+            pre_inventory=_inventory(lanes=()),
+            inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
+            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("configure runner", result.message)
         self.assertEqual([record[0] for record in audit_poster.records], ["planned", "failed"])
+        self.assertNotIn("secret-token", result.model_dump_json())
+
+    def test_ready_executor_reports_command_stderr_in_failed_audit(self) -> None:
+        token_fetcher = _TokenFetcher()
+        command_runner = _CommandRunner(returncodes=[1])
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_lane_registration_executor(
+            request=_executor_request(mutate=True),
+            policy=_policy(),
+            pre_inventory=_inventory(lanes=()),
+            inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
+            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("prepare runner directory", result.message)
+        self.assertIn("registration failed", result.message)
+
+    def test_ready_executor_posts_failed_audit_when_post_inventory_is_missing_lane(self) -> None:
+        token_fetcher = _TokenFetcher()
+        command_runner = _CommandRunner()
+        audit_poster = _AuditPoster()
+
+        with patch("control_plane.workflows.runner_lane_registration_executor.sleep"):
+            result = execute_runner_lane_registration_executor(
+                request=_executor_request(mutate=True),
+                policy=_policy(),
+                pre_inventory=_inventory(lanes=()),
+                inventory_reader=lambda _repo: _inventory(lanes=()),
+                token_fetcher=token_fetcher,  # type: ignore[arg-type]
+                remote_runner=command_runner,
+                audit_poster=audit_poster,
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("exactly one matching lane", result.message)
+        self.assertEqual([record[0] for record in audit_poster.records], ["planned", "failed"])
+
+    def test_ready_executor_polls_until_post_inventory_reports_online_lane(self) -> None:
+        token_fetcher = _TokenFetcher()
+        command_runner = _CommandRunner()
+        audit_poster = _AuditPoster()
+        inventory_reader = _InventoryReader(
+            (
+                _inventory(lanes=()),
+                _inventory(lanes=(_lane(),)),
+            )
+        )
+
+        with patch("control_plane.workflows.runner_lane_registration_executor.sleep"):
+            result = execute_runner_lane_registration_executor(
+                request=_executor_request(mutate=True),
+                policy=_policy(),
+                pre_inventory=_inventory(lanes=()),
+                inventory_reader=inventory_reader,
+                token_fetcher=token_fetcher,  # type: ignore[arg-type]
+                remote_runner=command_runner,
+                audit_poster=audit_poster,
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(inventory_reader.calls), 2)
 
     def test_local_environment_fails_closed_without_actions_repository(self) -> None:
         with self.assertRaisesRegex(ValueError, "must run from cbusillo/launchplane"):
@@ -228,11 +439,22 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
                 current_user="launchplane-runner-hygiene",
             )
 
-    def test_local_environment_fails_closed_without_execution_lane_label(self) -> None:
+    def test_local_environment_fails_closed_without_runner_identity(self) -> None:
         with self.assertRaisesRegex(ValueError, "approved execution lane"):
             validate_local_executor_environment(
                 request=_executor_request(mutate=True),
                 env={"GITHUB_REPOSITORY": "cbusillo/launchplane"},
+                current_user="launchplane-runner-hygiene",
+            )
+
+    def test_local_environment_fails_closed_without_execution_lane_label(self) -> None:
+        with self.assertRaisesRegex(ValueError, "approved execution lane"):
+            validate_local_executor_environment(
+                request=_executor_request(mutate=True),
+                env={
+                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                    "RUNNER_NAME": "chris-testing-launchplane",
+                },
                 current_user="launchplane-runner-hygiene",
             )
 
@@ -242,6 +464,16 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             env={
                 "GITHUB_REPOSITORY": "cbusillo/launchplane",
                 "RUNNER_LABELS": "self-hosted,launchplane,chris-testing-ops-gate",
+            },
+            current_user="launchplane-runner-hygiene",
+        )
+
+    def test_local_environment_accepts_expected_runner_name(self) -> None:
+        validate_local_executor_environment(
+            request=_executor_request(mutate=True),
+            env={
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "RUNNER_NAME": "chris-testing-ops-gate",
             },
             current_user="launchplane-runner-hygiene",
         )
@@ -360,6 +592,18 @@ class RunnerLaneRegistrationWorkflowTests(unittest.TestCase):
         self.assertIn("if: always()", workflow_text)
         self.assertIn("if-no-files-found: warn", workflow_text)
         self.assertIn("runner lane registration executor did not produce a result", workflow_text)
+        self.assertIn("RUNNER_PACKAGE_URL: ${{ inputs.runner_package_url }}", workflow_text)
+        self.assertIn('--runner-package-url "$RUNNER_PACKAGE_URL"', workflow_text)
+        self.assertIn('[ "$MUTATE_REQUESTED" = "true" ]', workflow_text)
+        self.assertIn("IFS=',' read -r -a raw_labels", workflow_text)
+        self.assertNotIn("python - <<'PY'", workflow_text)
+        self.assertIn(
+            "    runs-on:\n"
+            "      - self-hosted\n"
+            "      - ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}\n",
+            workflow_text,
+        )
+        self.assertNotIn("${{ vars.LAUNCHPLANE_RUNNER_LABEL }}", workflow_text)
 
     def test_workflow_does_not_allowlist_user_registration_root(self) -> None:
         workflow_text = Path(".github/workflows/runner-lane-registration.yml").read_text(
@@ -399,7 +643,14 @@ def _request(
 
 
 def _executor_request(
-    *, mutate: bool, execution_lane: str = "chris-testing-ops-gate"
+    *,
+    mutate: bool,
+    execution_lane: str = "chris-testing-ops-gate",
+    runner_package_url: str = (
+        "https://github.com/actions/runner/releases/download/"
+        "v2.327.1/actions-runner-linux-x64-2.327.1.tar.gz"
+    ),
+    timeout_seconds: int = 120,
 ) -> RunnerLaneRegistrationExecutorRequest:
     return RunnerLaneRegistrationExecutorRequest(
         repository="cbusillo/odoo-tenant-cm-website",
@@ -408,9 +659,11 @@ def _executor_request(
         service_user="launchplane-runner-hygiene",
         lane_name="cm-website-runner-1",
         registration_root="/home/launchplane-runner-hygiene/actions-runners",
+        runner_package_url=runner_package_url,
         labels=("self-hosted", "launchplane", "launchplane-managed"),
         mutate=mutate,
         audit_record_key="runner-lane-registration/2026-06-08/cm-website/test",
+        timeout_seconds=timeout_seconds,
     )
 
 

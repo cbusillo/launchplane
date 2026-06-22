@@ -58,10 +58,10 @@ totals.
 When a policy requires Docker toolchain observation, missing toolchain evidence
 or missing Buildx CLI version evidence is not ready. When it sets a
 `minimum_docker_buildx_version`, an unparsable Buildx version is not ready, and
-a stale Buildx CLI plugin is not ready. The `0.13.1+ds1` Debian-packaged Buildx
-plugin observed on `chris-testing` fails a `0.23.0` minimum even when the
-workflow's BuildKit builder container is newer; the readiness gate is about the
-host-side Docker CLI plugin used by `docker buildx build --load`.
+a stale Buildx CLI plugin is not ready. For example, a `0.13.1+ds1`
+Debian-packaged Buildx plugin fails a `0.23.0` minimum even when the workflow's
+BuildKit builder container is newer; the readiness gate is about the host-side
+Docker CLI plugin used by `docker buildx build --load`.
 
 ## Operations
 
@@ -76,6 +76,11 @@ That command reads GitHub runner metadata only. Host-level observation and futur
 reconciliation must run through a Launchplane-owned runner lane flow, not through
 product workflow edits and not through ad hoc retries after a shared Docker
 credential race.
+
+Before increasing a shared host's general lane count, confirm that workflows do
+not rely on shared mutable Docker names. Buildx builder names and loaded image
+tags should be unique per run or per job so two admitted jobs cannot race on the
+same host-local builder state or image tag.
 
 To inspect whether recent workflow jobs look runner-capacity constrained from
 GitHub Actions timing evidence, run:
@@ -224,6 +229,7 @@ uv run launchplane work-graph runner-lane-registration-executor \
   --service-user launchplane-runner-hygiene \
   --lane-name product-runner-1 \
   --registration-root /home/launchplane-runner-hygiene/actions-runners \
+  --runner-package-url "$ACTIONS_RUNNER_TARBALL_URL" \
   --label self-hosted \
   --label launchplane \
   --label launchplane-managed \
@@ -235,14 +241,26 @@ uv run launchplane work-graph runner-lane-registration-executor \
 ```
 
 The command is dry-run by default. A dry-run writes only local JSON evidence and
-does not request a GitHub registration token. `--mutate` records apply intent
-and writes a failed audit explaining that runner registration requires a
-supervised host maintainer. The earlier proof path briefly started `run.sh` from
-inside the GitHub Actions job, but that can produce transient online evidence
-and leave the runner offline after job cleanup. That shortcut is disabled. Until
-the supervised maintainer exists, mutate runs do not request a GitHub
-registration token. The token itself must never be written to the audit record,
-command output, or JSON result.
+does not request a GitHub registration token. When `--mutate` is explicitly set
+and the registration plan is ready, the executor performs a create-only
+supervised registration: it requests a short-lived GitHub registration token,
+prepares a new lane directory below the approved registration root, downloads
+the operator-supplied GitHub Actions runner package, runs `config.sh`, starts the
+root-owned `launchplane-runner@<lane>.service` unit through the reviewed narrow
+privilege boundary, and verifies that GitHub inventory reports exactly one
+online lane with the expected labels before writing a `completed` audit. If any
+step fails, the executor writes a `failed` audit. The raw registration token must
+never be written to the audit record, command output, or JSON result.
+GitHub's runner `config.sh` still requires the token as a command-line option,
+so the ops lane must treat same-user process inspection on the host as privileged
+and keep unrelated workloads off the constrained service user during mutation.
+
+This slice only creates a new lane. Existing-lane adoption, stale-lane removal,
+remove/recreate, runner work-directory pruning, and service restarts remain
+future maintainer capabilities. The earlier proof path briefly started `run.sh`
+from inside the GitHub Actions job, but that can produce transient online
+evidence and leave the runner offline after job cleanup. That shortcut remains
+disabled; the runner must be supervised outside the Actions job process tree.
 
 The manual workflow defaults `registration_root` to `auto`, which resolves to
 `$HOME/actions-runners` for the constrained service user. Operators may pass an
@@ -255,19 +273,71 @@ inventory and registration-token requests. The default `GITHUB_TOKEN` from the
 Launchplane workflow is not sufficient authority for product repository runner
 administration.
 
-This executor is the proving-ground adapter for #1231. Durable service-backed
-audit persistence is available through
+This executor is the proving-ground adapter for #1231. Mutating runs require an
+`ACTIONS_RUNNER_TARBALL_URL` value that points to an `actions/runner` release
+tarball on GitHub, plus a preinstalled `launchplane-runner@.service` template
+and a narrow sudo rule or equivalent root helper for `systemctl enable --now`
+and `systemctl is-active` on that template. Durable service-backed audit
+persistence is available through
 `POST /v1/evidence/runner-lane-registration/audits` under
 `runner_lane_registration_audit.write`; descriptor-backed operator routing for
 registration planning remains a later slice. The workflow still uploads the JSON
 artifact so operators can inspect the exact plan/result packet for cm-website or
 any other product proof.
 
+The current host bootstrap uses a root-owned template that runs the packaged
+service wrapper rather than the interactive runner script:
+
+```ini
+[Unit]
+Description=Launchplane GitHub Actions Runner (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=launchplane-runner-hygiene
+WorkingDirectory=/home/launchplane-runner-hygiene/actions-runners/%i
+ExecStart=/home/launchplane-runner-hygiene/actions-runners/%i/bin/runsvc.sh
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`bin/runsvc.sh` is part of the official GitHub Actions runner tarball and traps
+service termination for the runner listener. `run.sh` remains the interactive
+script and must not be the long-lived systemd entrypoint for this supervised
+path. Validate the template with `systemd-analyze verify` before enabling any
+lane service.
+
+The sudo boundary should validate the lane-shaped unit argument rather than use
+a broad shell glob. On sudo versions that support command-argument regular
+expressions, the installed shape is:
+
+<!-- markdownlint-disable MD013 -->
+
+```sudoers
+Cmnd_Alias LAUNCHPLANE_RUNNER_REG_ENABLE = /usr/bin/systemctl ^enable --now launchplane-runner@[a-z0-9][a-z0-9._-]{0,127}\.service$
+Cmnd_Alias LAUNCHPLANE_RUNNER_REG_ACTIVE = /usr/bin/systemctl ^is-active --quiet launchplane-runner@[a-z0-9][a-z0-9._-]{0,127}\.service$
+launchplane-runner-hygiene ALL=(root) NOPASSWD: LAUNCHPLANE_RUNNER_REG_ENABLE, LAUNCHPLANE_RUNNER_REG_ACTIVE
+```
+
+<!-- markdownlint-enable MD013 -->
+
+Validate sudoers changes with `visudo -cf`. If a host cannot support sudoers
+argument regex, use a tiny root-owned helper that validates the lane name before
+calling `systemctl`; do not broaden the rule to arbitrary `systemctl`, shell,
+file-write, or generic restart authority.
+
 ## Supervised Runner Maintainer Plan
 
-The durable runner maintainer must replace the disabled apply shortcut before a
-product repository can rely on a Launchplane-managed runner lane. The maintainer
-should reconcile desired runner state rather than simply start `run.sh`:
+The durable runner maintainer grows from the create-only executor into full
+desired-state reconciliation. It must keep reconciling runner state rather than
+starting a transient runner process:
 
 1. Read GitHub runner inventory and local service state for the requested lane.
 2. If registration is required, request a short-lived GitHub registration token
@@ -275,7 +345,8 @@ should reconcile desired runner state rather than simply start `run.sh`:
 3. Install or update a persistent supervisor outside the GitHub Actions job
    process tree. Prefer a root-owned systemd unit such as
    `launchplane-runner@<lane>.service` with `User=<service_user>`, an approved
-   `WorkingDirectory`, `ExecStart=<runner-dir>/run.sh`, and `Restart=always`.
+   `WorkingDirectory`, `ExecStart=<runner-dir>/bin/runsvc.sh`, and
+   `Restart=always`.
 4. Use a small validated root helper or narrow sudo rule for the privileged
    systemd verbs. Do not grant arbitrary `systemctl`, file-write, or shell
    authority.

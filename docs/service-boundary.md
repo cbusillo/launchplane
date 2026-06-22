@@ -127,6 +127,12 @@ VeriReel product paths:
   - `POST /v1/products/public-ingress-monitor/run-once` (native FastAPI for
     bearer-token callers, with Pydantic/OpenAPI contract coverage,
     idempotency replay preservation, and no legacy `GET` route)
+  - Native `POST /v1/evidence/*` ingress routes reject non-JSON media types with
+    the Launchplane `400 invalid_request` envelope; they require bounded,
+    non-chunked `Content-Length` headers and enforce the same 2 MiB byte ceiling
+    while reading the request stream, returning the Launchplane
+    `413 request_entity_too_large` envelope before route-specific storage
+    mutation.
   - `POST /v1/evidence/backup-gates` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
   - `POST /v1/evidence/deployments` (native FastAPI for bearer-token callers,
@@ -248,6 +254,10 @@ VeriReel product paths:
     worker-token callers, direct preview-gate record writes, and DB-backed
     storage capability enforcement without idempotency state)
 - preview PR feedback notification policy route:
+  - `POST /v1/previews/pr-feedback` (native FastAPI for bearer-token callers,
+    `preview_pr_feedback.write` or matching lifecycle authorization,
+    preview PR feedback write-capable storage, optional `Idempotency-Key` replay/conflict
+    handling, and preview PR feedback notification delivery attempts)
   - `POST /v1/previews/pr-feedback/notification-policies/apply` (native FastAPI
     for bearer-token callers, DB-backed storage, explicit product/context scope,
     local-operator reason enforcement, and optional `Idempotency-Key`
@@ -262,9 +272,12 @@ VeriReel product paths:
   - `GET /v1/work-graph/merge-train/controller/status` (native FastAPI)
   - `POST /v1/work-graph/rank` (native FastAPI)
   - `POST /v1/work-graph/github/issues/reconcile` (native FastAPI)
-  - `POST /v1/work-graph/merge-train/run-once`
-  - `POST /v1/work-graph/merge-train/pr-feedback`
-  - `POST /v1/work-graph/merge-train/controller/run-once`
+  - `POST /v1/work-graph/merge-train/run-once` (native FastAPI)
+  - `POST /v1/work-graph/merge-train/batch-candidate/run-once` (native FastAPI)
+  - `POST /v1/work-graph/merge-train/batch-landing/run-once` (native FastAPI)
+  - `POST /v1/work-graph/merge-train/stack-collapse/run-once` (native FastAPI)
+  - `POST /v1/work-graph/merge-train/pr-feedback` (native FastAPI)
+  - `POST /v1/work-graph/merge-train/controller/run-once` (native FastAPI)
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
@@ -272,7 +285,7 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/prod-rollback-plan`
   - `POST /v1/drivers/generic-web/prod-rollback`
   - `POST /v1/drivers/generic-web/stable-verification`
-  - `POST /v1/drivers/generic-web/preview-desired-state`
+  - `POST /v1/drivers/generic-web/preview-desired-state` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-refresh`
   - `POST /v1/drivers/generic-web/preview-inventory`
   - `POST /v1/drivers/generic-web/preview-readiness`
@@ -341,6 +354,17 @@ Before a migrated route is done, verify all of the following:
 typed Pydantic response, focused OpenAPI assertions, and direct WSGI fallback
 retirement. Do not turn that route into a migration framework; use it as the
 small contract shape for the next route-family slice.
+
+The human auth/session family uses native FastAPI routes in the mounted service:
+`GET /auth/github/login`, `GET /auth/github/callback`, `GET /v1/auth/session`,
+and `POST /auth/logout`. GitHub OAuth login preserves PKCE state, same-origin
+`return_to` sanitization, GitHub authorization redirect, callback error
+envelopes, and signed session cookie issuance with the existing
+`HumanSessionManager`. Session read preserves the Launchplane human-session
+response shape, renews expiring signed session cookies, and returns
+`authentication_required` with the `configured` flag when no valid human session
+exists. Logout deletes the cookie-backed session when auth is configured and
+always emits the Launchplane session clearing cookie.
 
 Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
 deployment/promotion/preview lifecycle evidence over HTTP, and executes the
@@ -506,18 +530,21 @@ repository policy, resolves its GitHub token from that policy's
 `github_token.env_var`, and fails closed before GitHub calls when no matching
 policy or token is available. The route is dry-run by default; `mutate: true`
 applies at most one worker transition from one fresh snapshot. This route is the
-deployed sequential baseline, not the full batch train target.
+deployed sequential baseline, not the full batch train target. It is native
+FastAPI; the legacy WSGI fallback branch is deleted, direct fallback calls fail
+closed, and accepted calls persist `launchplane_merge_train_runs` evidence with
+optional `Idempotency-Key` replay/conflict handling.
 
-`POST /v1/work-graph/merge-train/pr-feedback` writes the public pull-request
-feedback surface for train progress. It uses the same repository/base policy and
-`service_authz` scope as `run-once`, resolves the same GitHub token, and creates
-or updates one Launchplane-managed issue comment per PR using a hidden marker.
-Accepted calls persist a `launchplane_merge_train_pr_feedback` record with the
-rendered markdown, event, controller action metadata, delivery status, and
-GitHub comment id/url. The route fails closed when authorization or token
-configuration is missing; callers should use it for queued, waiting, blocked,
-stale-policy, and completed transition summaries instead of writing ad hoc
-comments from scheduler scripts.
+`POST /v1/work-graph/merge-train/pr-feedback` is a native FastAPI route that
+writes the public pull-request feedback surface for train progress. It uses the
+same repository/base policy and `service_authz` scope as `run-once`, resolves the
+same GitHub token, and creates or updates one Launchplane-managed issue comment
+per PR using a hidden marker. Accepted calls persist a
+`launchplane_merge_train_pr_feedback` record with the rendered markdown, event,
+controller action metadata, delivery status, and GitHub comment id/url. The route
+fails closed when authorization, storage, or token configuration is missing;
+callers should use it for queued, waiting, blocked, stale-policy, and completed
+transition summaries instead of writing ad hoc comments from scheduler scripts.
 
 `GET /v1/work-graph/merge-train/policy-targets` is a native FastAPI route that
 returns the authorized repository/base-branch targets from the active DB-backed
@@ -547,7 +574,9 @@ SHA/check state, and compact entry counts without invoking a worker mutation.
 one-action controller for the full batch train. Request payloads name
 `repository`, `base_branch`, and optional `mutate`; the route uses the same
 policy, authorization, and GitHub token boundary as the lower-level merge-train
-routes. Each call advances at most one safe phase from DB-backed records and
+routes. The native FastAPI route supports optional `Idempotency-Key`
+replay/conflict handling and direct legacy WSGI fallback calls fail closed.
+Each call advances at most one safe phase from DB-backed records and
 fresh GitHub evidence: plan stack collapse, execute stack collapse, admit the
 collapsed root PR, plan/build/observe a batch candidate, plan landing, or land
 the original PRs. Dry-run calls return the next controller action without
@@ -560,26 +589,46 @@ matrix and public-safe reporting fields.
 
 `POST /v1/work-graph/merge-train/batch-candidate/run-once` executes one
 policy-backed batch-candidate phase for a requested repository/base branch. The
-route accepts `mode: plan`, `mode: build`, or `mode: observe`. Plan mode reads a
-fresh GitHub snapshot, derives one deterministic batch candidate from the
-currently eligible queued PRs, and writes a
-`launchplane_merge_train_batch_candidates` record. Build mode requires a prior
-candidate record id, creates or resets the Launchplane train ref, merges queued
-PR heads into that ref in order, and records the resulting candidate SHA. Observe
-mode requires a prior candidate record id, reads required checks for that exact
-candidate SHA, and records whether the candidate is still pending, passed, or
-failed. The route never lands original PRs; PR-native landing remains a later
-phase with separate records and pre-merge invariants.
+native FastAPI route accepts `mode: plan`, `mode: build`, or `mode: observe`.
+Plan mode reads a fresh GitHub snapshot, derives one deterministic batch
+candidate from the currently eligible queued PRs, and writes a
+`launchplane_merge_train_batch_candidates` record. When the selected PR is the
+root of a supported stack, plan mode writes a stack-collapse plan record instead
+of a batch candidate; unsupported stack topologies return accepted evidence with
+no record write. Build mode requires a prior candidate record id, creates or
+resets the Launchplane train ref, merges queued PR heads into that ref in order,
+and records the resulting candidate SHA. Observe mode requires a prior candidate
+record id, reads required checks for that exact candidate SHA, and records
+whether the candidate is still pending, passed, or failed. The legacy WSGI
+fallback branch is deleted, and direct fallback calls fail closed. The route
+never lands original PRs; PR-native landing remains a later phase with separate
+records and pre-merge invariants.
+
+`POST /v1/work-graph/merge-train/stack-collapse/run-once` executes one
+policy-backed stack-collapse phase for a requested repository/base branch. The
+native FastAPI route accepts `mode: execute` with an existing stack-collapse plan
+record id, merges supported stack children into the root PR, and persists a
+waiting-for-root-checks stack-collapse plan record. `mode: admit` requires that
+executed record, verifies the active policy digest and the root PR head against
+fresh GitHub evidence, then writes a root-only batch-candidate record for the
+normal candidate build/observe/landing phases. The legacy WSGI fallback branch
+is deleted, direct fallback calls fail closed, and accepted calls support
+optional `Idempotency-Key` replay/conflict handling.
 
 `POST /v1/work-graph/merge-train/batch-landing/run-once` executes one
 policy-backed batch-landing phase for a requested repository/base branch. The
-route accepts `mode: plan` with a passed batch-candidate record id or
-`mode: land` with a landing-plan record id. Plan mode writes a
+native FastAPI route accepts `mode: plan` with a passed batch-candidate record id
+or `mode: land` with a landing-plan record id. Plan mode writes a
 `launchplane_merge_train_batch_landing_plans` record with the original PR order,
 expected head SHAs, expected base SHA, and policy merge method. Land mode merges
 the original PRs in that order through GitHub's PR merge endpoint, rejects stale
-base-branch movement before merging, and relies on GitHub's SHA guard for each
-PR head.
+base-branch movement before merging, relies on GitHub's SHA guard for each PR
+head, and records stale landing evidence before returning the normal stale-state
+response. When landing a collapsed stack root, the route validates the linked
+stack-collapse record before the root merge and then writes stack-child
+disposition evidence after the landing record is persisted. The legacy WSGI
+fallback branch is deleted, direct fallback calls fail closed, and accepted calls
+support optional `Idempotency-Key` replay/conflict handling.
 
 `.github/workflows/merge-train-runner.yml` is the first external scheduler for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
@@ -1090,6 +1139,7 @@ write-restricted for runner-lane registration audit evidence.
 
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/previews/lifecycle-cleanup`
+- `POST /v1/previews/lifecycle-sweep`
 - `POST /v1/previews/desired-state`
 - `POST /v1/previews/pr-feedback`
 
@@ -1103,17 +1153,50 @@ report-only behavior and records the cleanup request/result next to the plan.
 Destructive provider cleanup is only attempted when `apply=true` is explicitly
 supplied by an authorized GitHub Actions workflow.
 
-`POST /v1/previews/lifecycle-plan` is a native FastAPI route. It requires
+`POST /v1/previews/desired-state`, `POST /v1/previews/lifecycle-plan`,
+`POST /v1/previews/lifecycle-cleanup`, and
+`POST /v1/previews/lifecycle-sweep` are native FastAPI routes.
+Desired-state discovery requires
+`preview_desired_state.discover` authorization for the requested product/context,
+requires storage that can persist `PreviewDesiredStateRecord`, preserves optional
+`Idempotency-Key` replay/conflict behavior for successful scans, and returns the
+stored scan as accepted evidence. Its legacy WSGI fallback branch is deleted;
+direct fallback calls fail closed.
+
+`POST /v1/previews/lifecycle-plan` requires
 `preview_lifecycle.plan` authorization for the requested product/context,
 preserves optional `Idempotency-Key` replay/conflict behavior, writes the typed
 preview lifecycle plan record, and has its legacy WSGI fallback branch deleted;
 direct fallback calls fail closed.
+
+`POST /v1/previews/lifecycle-cleanup` requires
+`preview_lifecycle.cleanup` authorization for the requested product/context,
+preserves optional `Idempotency-Key` replay/conflict behavior, requires storage
+that can read lifecycle plan records and write cleanup records, and additionally
+requires preview read/write capability before any `apply=true` provider destroy
+mutation starts. It rejects missing or product-mismatched `plan_id` values before
+writing cleanup state and returns the stored cleanup record as accepted evidence.
+Its legacy WSGI fallback branch is deleted; direct fallback calls fail closed.
+
+`POST /v1/previews/lifecycle-sweep` derives enabled preview profiles from
+Launchplane product-profile records, requires both `preview_lifecycle.plan` and
+`preview_lifecycle.cleanup` authorization for every selected profile before any
+inventory, desired-state, plan, or cleanup mutation starts, requires storage
+that can read product profiles and preview/inventory history and write preview,
+inventory, desired-state, lifecycle plan, and cleanup records, preserves optional
+`Idempotency-Key` replay/conflict behavior, and returns the sweep summary as
+accepted evidence. Its legacy WSGI fallback branch is deleted; direct fallback
+calls fail closed.
 
 PR feedback delivery is part of the same preview lifecycle boundary. Product
 repos submit thin preview outcome facts to `POST /v1/previews/pr-feedback`;
 Launchplane renders the review comment, upserts the anchored GitHub PR comment
 when its runtime token is available, and stores an append-only feedback record
 with the comment body, delivery action, comment URL, and any skip/failure reason.
+The route is native FastAPI; it requires a store capable of writing preview PR
+feedback records, preserves optional `Idempotency-Key` replay/conflict behavior,
+and the legacy direct WSGI fallback branch is retired so fallback calls fail
+closed. Dry-runs evaluate authorization without writing records or comments.
 Workflows can be granted explicit `preview_pr_feedback.write`, or generic-web
 preview workflows can reuse their matching lifecycle grants: refresh-capable
 workflows may report pending/ready/failed feedback, and destroy-capable workflows
@@ -1451,10 +1534,14 @@ configuration still uses provider-specific target type fields internally where
 application-vs-compose behavior is required.
 
 Generic web preview desired-state discovery uses
-`POST /v1/drivers/generic-web/preview-desired-state`. The request names the
-product and optional pull-request label/page limit; Launchplane resolves the
-repository, preview context, anchor repo, and preview slug template from the
-DB-backed product profile before recording desired preview state.
+`POST /v1/drivers/generic-web/preview-desired-state`, now owned by native
+FastAPI. The request names the product and optional pull-request label/page
+limit; Launchplane resolves the repository, preview context, anchor repo, and
+preview slug template from the DB-backed product profile before recording
+desired preview state. Authorization uses the resolved profile product and
+preview context, not caller-supplied runtime authority, and the legacy WSGI
+descriptor branch is exempted from the fallback dispatcher so direct fallback
+calls fail closed.
 
 Generic web preview refresh uses
 `POST /v1/drivers/generic-web/preview-refresh`. The request names the product,

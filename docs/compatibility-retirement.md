@@ -56,6 +56,14 @@ Keep a compatibility surface only when it is one of these:
 - The Launchplane health read uses the native FastAPI `GET /v1/health` route.
   Its legacy WSGI branch is deleted; direct fallback calls fail closed while
   the mounted fallback remains for retained non-native routes.
+- The human auth/session family uses native FastAPI routes in the mounted
+  service: `GET /auth/github/login`, `GET /auth/github/callback`,
+  `GET /v1/auth/session`, and `POST /auth/logout`. GitHub OAuth login preserves
+  PKCE state, same-origin `return_to` sanitization, GitHub authorization
+  redirect, callback error envelopes, and signed session cookie issuance. Session
+  read preserves the existing signed-session cookie read/renewal behavior,
+  `authentication_required` rejection envelope, and `configured` flag. Logout
+  preserves cookie-backed session deletion and the clearing `Set-Cookie` header.
 - Launchplane service runtime and Odoo worker status reads use native FastAPI
   routes for bearer-token and human-session callers. Odoo worker reconcile uses
   native FastAPI `POST /v1/service/odoo-workers/reconcile` on the bearer/OIDC
@@ -111,9 +119,11 @@ Keep a compatibility surface only when it is one of these:
   closed. Setup keeps the apply-only idempotency replay/conflict contract while
   dry-runs remain repeatable.
 - Merge-train admission, controller-status, and policy-target reads use native
-  FastAPI routes. Their legacy WSGI read branches are deleted; merge-train
-  worker, controller mutation, feedback, and phase runner routes remain on the
-  retained fallback until their native write replacements land.
+  FastAPI routes. Their legacy WSGI read branches are deleted. Merge-train
+  run-once, batch-candidate run-once, batch-landing run-once, stack-collapse
+  run-once, controller run-once, and PR feedback also use native FastAPI write
+  routes. Their legacy WSGI branches are deleted, and direct fallback calls fail
+  closed while the mounted fallback remains for retained non-native routes.
 - Work graph snapshot, work-graph rank, GitHub issue-inbox reads, and GitHub
   issue-inbox reconcile use native FastAPI routes. Their legacy WSGI
   read/rank/reconcile branches and WSGI-only helpers are deleted.
@@ -199,6 +209,30 @@ Keep a compatibility surface only when it is one of these:
   replay/conflict behavior, writes the typed lifecycle plan record, and returns
   the stored plan as accepted evidence. Its legacy WSGI write branch is deleted,
   and direct WSGI fallback calls fail closed.
+- Preview desired-state discovery uses native FastAPI
+  `POST /v1/previews/desired-state` and
+  `POST /v1/drivers/generic-web/preview-desired-state`, preserves
+  `preview_desired_state.discover` authorization and optional successful-scan
+  `Idempotency-Key` replay/conflict behavior, requires a store capable of
+  persisting desired-state records, and returns the stored scan as accepted
+  evidence. The central WSGI branch and generic-web descriptor fallback branch
+  are deleted/exempted, and direct WSGI fallback calls fail closed.
+- Preview PR feedback uses native FastAPI `POST /v1/previews/pr-feedback`,
+  preserves explicit `preview_pr_feedback.write` authorization and the matching
+  preview lifecycle grant fallbacks for refresh/destroy feedback, preserves
+  dry-run authorization checks without mutation, requires preview PR feedback
+  record-write storage for apply requests, preserves optional `Idempotency-Key`
+  replay/conflict behavior, writes configured notification attempts for skipped
+  or failed PR comment delivery, and returns the stored feedback record as
+  accepted evidence. Its legacy WSGI write branch is retired; direct WSGI
+  fallback calls fail closed.
+- Preview lifecycle cleanup and sweep use native FastAPI
+  `POST /v1/previews/lifecycle-cleanup` and
+  `POST /v1/previews/lifecycle-sweep`, preserve cleanup/sweep authorization and
+  optional `Idempotency-Key` replay/conflict behavior, require the relevant
+  Launchplane record-store capabilities before mutation, and return accepted
+  evidence for cleanup records or sweep summaries. Their legacy WSGI write
+  branches are retired; direct WSGI fallback calls fail closed.
 - Public ingress, Every Code, and preview PR feedback notification policy apply
   use native FastAPI routes for bearer-token callers and preserve DB-backed
   storage enforcement, local operator reason requirements, explicit preview
@@ -240,6 +274,20 @@ Keep a compatibility surface only when it is one of these:
   sessions, and local operator/admin bearer callers; apply requests preserve
   optional `Idempotency-Key` replay/conflict handling while dry-runs remain
   stateless.
+- Merge-train PR feedback uses native FastAPI
+  `POST /v1/work-graph/merge-train/pr-feedback` for policy-backed managed PR
+  comments and feedback evidence records. Its legacy WSGI write branch is
+  deleted, and direct WSGI fallback calls fail closed. Requests require the
+  matching merge-train repository policy `service_authz`, configured GitHub
+  token environment variable, feedback record storage, and preserve optional
+  `Idempotency-Key` replay/conflict handling for successful accepted writes.
+- Merge-train run-once uses native FastAPI
+  `POST /v1/work-graph/merge-train/run-once` for the policy-backed Level 1
+  ordered-queue pass. Its legacy WSGI write branch is deleted, and direct WSGI
+  fallback calls fail closed. Requests require the matching merge-train
+  repository policy `service_authz`, configured GitHub token environment
+  variable, merge-train run record storage, and preserve optional
+  `Idempotency-Key` replay/conflict handling for successful accepted writes.
 - Authz policy grant and removal routes use native FastAPI
   `POST /v1/authz-policies/github-actions/grants`,
   `POST /v1/authz-policies/github-actions/removals`,

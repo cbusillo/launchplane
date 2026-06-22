@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from collections.abc import Callable, MutableMapping
 from typing import Any, Literal, cast
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 from unittest.mock import patch
 
 from a2wsgi import WSGIMiddleware
@@ -53,6 +53,12 @@ from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
     parse_merge_train_policy_toml,
 )
+from control_plane.contracts.merge_train_stack_collapse import (
+    build_merge_train_stack_collapse_plan_record,
+    execute_merge_train_stack_collapse_plan,
+)
+from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train_github import MergeTrainGitHubError, MergeTrainGitHubStaleHeadError
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -60,10 +66,18 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationState,
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
+)
+from control_plane.contracts.preview_lifecycle_plan_record import (
+    PreviewLifecycleDesiredPreview,
+    PreviewLifecyclePlanRecord,
+)
+from control_plane.contracts.preview_lifecycle_cleanup_record import (
+    PreviewLifecycleCleanupRecord,
 )
 from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationAttemptRecord,
@@ -139,6 +153,10 @@ from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyResult,
     NpmplusIngressOperation,
 )
+from control_plane.workflows.generic_web_preview import (
+    GenericWebPreviewInventoryItem,
+    GenericWebPreviewInventoryResult,
+)
 from tests.test_service import create_launchplane_service_app
 from tests.test_service import (
     _FakeNpmplusIngressClient,
@@ -146,6 +164,16 @@ from tests.test_service import (
     _generic_site_profile_payload,
     _edge_endpoint_apply_payload,
     _edge_endpoint_record,
+    _FakeCollapsedRootStackedMergeTrainSnapshotReader,
+    _CleanupFailingMergeTrainGitHubClient,
+    _FakeMergeTrainGitHubClient,
+    _FakeExpandedMergeTrainSnapshotReader,
+    _FakeMergeTrainSnapshotReader,
+    _FakeFailingMergeTrainGitHubClient,
+    _FakeMovedRootStackedMergeTrainSnapshotReader,
+    _FakeStackedMergeTrainSnapshotReader,
+    _StaleLandingMergeTrainGitHubClient,
+    _StackCollapseWriteFailingFilesystemRecordStore,
     _identity,
     _ingress_canary_route_record,
     _ingress_canary_route_record_apply_payload,
@@ -159,11 +187,17 @@ from tests.test_service import (
     _product_profile_payload,
     _product_profile_payload_with_prod,
     _npmplus_proxy_host,
+    _invoke_app,
     _npmplus_ingress_route_payload,
     _meta_product_config_payload,
     _product_config_payload,
     _product_config_secrets,
     _seed_merge_train_policy,
+    _mark_merge_train_batch_candidate_record_passed,
+    _seed_admitted_merge_train_stack_collapse_candidate,
+    _seed_executed_merge_train_stack_collapse_plan_record,
+    _seed_merge_train_batch_candidate_record,
+    _seed_merge_train_stack_collapse_plan_record,
     _seed_tracked_target_records,
     _sqlite_database_url,
     _write_runtime_key_safety_policy,
@@ -172,6 +206,518 @@ from tests.test_service import (
 from tests.test_service import _StubVerifier
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from tests.test_protected_artifacts import _seed_store as seed_protected_artifact_store
+
+
+class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
+    def _cleanup_policy(self, actions: list[str]) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["verireel"],
+                        "contexts": ["verireel-testing"],
+                        "actions": actions,
+                    }
+                ]
+            }
+        )
+
+    def _cleanup_app(
+        self, *, root: Path, state_dir: Path, policy: LaunchplaneAuthzPolicy
+    ) -> FastAPI:
+        return create_launchplane_fastapi_app(
+            verifier=_StubVerifier(
+                _identity(
+                    workflow_ref=(
+                        "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                    ),
+                    event_name="workflow_dispatch",
+                )
+            ),
+            authz_policy=policy,
+            control_plane_root_path=root,
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=state_dir),
+        )
+
+    def _write_cleanup_plan(self, state_dir: Path) -> None:
+        FilesystemRecordStore(state_dir=state_dir).write_preview_lifecycle_plan_record(
+            PreviewLifecyclePlanRecord(
+                plan_id="preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                product="verireel",
+                context="verireel-testing",
+                planned_at="2026-04-29T19:58:38Z",
+                source="preview-janitor",
+                status="pass",
+                inventory_scan_id="preview-inventory-scan-verireel-testing-20260429T195837Z",
+                actual_slugs=("pr-41",),
+                orphaned_slugs=("pr-41",),
+            )
+        )
+
+    async def test_preview_lifecycle_cleanup_records_report_only_cleanup(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            self._write_cleanup_plan(state_dir)
+            app = self._cleanup_app(
+                root=root,
+                state_dir=state_dir,
+                policy=self._cleanup_policy(["preview_lifecycle.cleanup"]),
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-cleanup",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                    "source": "preview-janitor",
+                    "apply": False,
+                },
+            )
+            payload = response.json()
+            cleanup_records = FilesystemRecordStore(
+                state_dir=state_dir
+            ).list_preview_lifecycle_cleanup_records(context_name="verireel-testing")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            payload["records"]["preview_lifecycle_cleanup_id"], cleanup_records[0].cleanup_id
+        )
+        self.assertEqual(payload["result"]["status"], "report_only")
+        self.assertEqual(payload["result"]["planned_slugs"], ["pr-41"])
+        self.assertFalse(cleanup_records[0].apply)
+
+    async def test_preview_lifecycle_cleanup_rejects_missing_plan_without_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            app = self._cleanup_app(
+                root=root,
+                state_dir=state_dir,
+                policy=self._cleanup_policy(["preview_lifecycle.cleanup"]),
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-cleanup",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "plan_id": "preview-lifecycle-plan-verireel-testing-missing",
+                    "apply": False,
+                },
+            )
+            cleanup_records = FilesystemRecordStore(
+                state_dir=state_dir
+            ).list_preview_lifecycle_cleanup_records(context_name="verireel-testing")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+        self.assertEqual(cleanup_records, ())
+
+    async def test_preview_lifecycle_cleanup_replays_idempotency(self) -> None:
+        request_payload = {
+            "product": "verireel",
+            "context": "verireel-testing",
+            "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+            "source": "preview-janitor",
+            "apply": False,
+        }
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            self._write_cleanup_plan(state_dir)
+            app = self._cleanup_app(
+                root=root,
+                state_dir=state_dir,
+                policy=self._cleanup_policy(["preview_lifecycle.cleanup"]),
+            )
+            headers = {
+                "Authorization": "Bearer valid-token",
+                "Idempotency-Key": "preview-lifecycle-cleanup:42",
+            }
+
+            first_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-cleanup",
+                headers=headers,
+                payload=request_payload,
+            )
+            replay_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-cleanup",
+                headers=headers,
+                payload=request_payload,
+            )
+            cleanup_records = FilesystemRecordStore(
+                state_dir=state_dir
+            ).list_preview_lifecycle_cleanup_records(context_name="verireel-testing")
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(replay_response.json()["result"], first_response.json()["result"])
+        self.assertEqual(len(cleanup_records), 1)
+
+    async def test_preview_lifecycle_cleanup_apply_requires_preview_write_store_before_destroy(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            self._write_cleanup_plan(state_dir)
+            store = _PreviewLifecycleCleanupPlanOnlyStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=self._cleanup_policy(["preview_lifecycle.cleanup"]),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            with patch(
+                "control_plane.workflows.preview_lifecycle_cleanup.execute_verireel_preview_destroy"
+            ) as destroy_mock:
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/lifecycle-cleanup",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={
+                        "product": "verireel",
+                        "context": "verireel-testing",
+                        "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                        "source": "preview-janitor",
+                        "apply": True,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+        self.assertIn("preview lifecycle cleanup mutations", response.json()["error"]["message"])
+        self.assertEqual(store.cleanup_records, [])
+        destroy_mock.assert_not_called()
+
+    async def test_preview_lifecycle_cleanup_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            app = self._cleanup_app(
+                root=root,
+                state_dir=state_dir,
+                policy=self._cleanup_policy(["preview_lifecycle.plan"]),
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-cleanup",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                    "apply": False,
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_preview_lifecycle_sweep_uses_enabled_product_profiles(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload(product="syo")
+                )
+            )
+            disabled_payload = _generic_site_profile_payload(product="discord-blue")
+            disabled_payload["preview"] = {"enabled": False}
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(disabled_payload)
+            )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-syo-syo-pr-41",
+                    context="syo",
+                    anchor_repo="syo",
+                    anchor_pr_number=41,
+                    anchor_pr_url="https://github.example/every/syo/pull/41",
+                    preview_label="syo/syo#41",
+                    canonical_url="https://pr-41.syo.example",
+                    state="active",
+                    created_at="2026-04-20T10:00:00Z",
+                    updated_at="2026-04-20T10:00:00Z",
+                    eligible_at="2026-04-20T10:00:00Z",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/launchplane",
+                            "workflow_refs": [
+                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["syo"],
+                            "contexts": ["syo"],
+                            "actions": ["preview_lifecycle.plan", "preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/launchplane",
+                        workflow_ref=(
+                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=state_dir),
+            )
+
+            with (
+                patch(
+                    "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory",
+                    return_value=GenericWebPreviewInventoryResult(
+                        product="syo",
+                        context="syo",
+                        source="launchplane-preview-lifecycle",
+                        app_name_prefix="syo-preview",
+                        previews=(
+                            GenericWebPreviewInventoryItem(
+                                applicationId="app-41",
+                                applicationName="syo-preview-pr-41",
+                                previewSlug="pr-41",
+                            ),
+                        ),
+                    ),
+                ) as inventory_mock,
+                patch(
+                    "control_plane.preview_lifecycle_cleanup_routes.discover_generic_web_preview_desired_state",
+                    return_value=PreviewDesiredStateRecord(
+                        desired_state_id="preview-desired-state-syo-20260510T120000Z",
+                        product="syo",
+                        context="syo",
+                        source="launchplane-preview-lifecycle",
+                        discovered_at="2026-05-10T12:00:00Z",
+                        repository="every/syo",
+                        label="preview",
+                        anchor_repo="syo",
+                        preview_slug_prefix="pr-",
+                        status="pass",
+                        desired_count=0,
+                        desired_previews=(),
+                    ),
+                ) as desired_mock,
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/lifecycle-sweep",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={"source": "launchplane-preview-lifecycle", "apply": False},
+                )
+            payload = response.json()
+            records = FilesystemRecordStore(state_dir=state_dir)
+            plan_records = records.list_preview_lifecycle_plan_records(context_name="syo")
+            cleanup_records = records.list_preview_lifecycle_cleanup_records(context_name="syo")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["status"], "pass")
+        self.assertEqual(payload["result"]["profile_count"], 1)
+        self.assertEqual(payload["result"]["profiles"][0]["product"], "syo")
+        self.assertEqual(payload["result"]["profiles"][0]["orphaned_slugs"], ["pr-41"])
+        self.assertEqual(plan_records[0].orphaned_slugs, ("pr-41",))
+        self.assertEqual(cleanup_records[0].status, "report_only")
+        inventory_mock.assert_called_once()
+        desired_mock.assert_called_once()
+
+    async def test_preview_lifecycle_sweep_rejects_missing_product_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload(product="syo")
+                )
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload(product="verireel")
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/launchplane",
+                            "workflow_refs": [
+                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["syo"],
+                            "contexts": ["syo"],
+                            "actions": ["preview_lifecycle.plan", "preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/launchplane",
+                        workflow_ref=(
+                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=state_dir),
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-sweep",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={"source": "launchplane-preview-lifecycle"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(payload["authz"]["request"]["product"], "verireel")
+        self.assertEqual(payload["authz"]["request"]["context"], "verireel")
+        self.assertEqual(payload["authz"]["request"]["action"], "preview_lifecycle.plan")
+
+    async def test_preview_lifecycle_sweep_requires_write_capable_store_before_drivers(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _generic_site_profile_payload(product="syo")
+        )
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/launchplane",
+                        "workflow_refs": [
+                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["syo"],
+                        "contexts": ["syo"],
+                        "actions": ["preview_lifecycle.plan", "preview_lifecycle.cleanup"],
+                    }
+                ]
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(
+                _identity(
+                    repository="every/launchplane",
+                    workflow_ref=(
+                        "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                    ),
+                    event_name="workflow_dispatch",
+                )
+            ),
+            authz_policy=policy,
+            record_store_factory=lambda: _PreviewLifecycleSweepProfileOnlyStore(profile),
+        )
+
+        with patch(
+            "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory"
+        ) as inventory_mock:
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/lifecycle-sweep",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={"source": "launchplane-preview-lifecycle", "apply": True},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+        self.assertIn("preview lifecycle sweep applies", response.json()["error"]["message"])
+        inventory_mock.assert_not_called()
+
+    def test_preview_lifecycle_cleanup_legacy_wsgi_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity(repository="every/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-cleanup",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    def test_preview_lifecycle_sweep_legacy_wsgi_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity(repository="every/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-sweep",
+                payload={"source": "launchplane-preview-lifecycle"},
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
 
 class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
@@ -217,6 +763,608 @@ class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("launchplane_req_00000000000000000000000000000000", example_text)
         self.assertNotIn("example-site", example_text)
         self.assertNotIn("shinycomputers", example_text)
+
+
+class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_github_oauth_login_redirects_to_authorization_url(self) -> None:
+        oauth_client = _StubFastApiGitHubOAuthClient(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=HumanSessionManager(
+                config=_github_oauth_config(),
+                session_store=InMemoryHumanSessionStore(),
+            ),
+            github_oauth_client=oauth_client,
+        )
+
+        response = await _asgi_get(app, "/auth/github/login?return_to=/ui")
+
+        self.assertEqual(response.status_code, 302)
+        location = response.headers["Location"]
+        self.assertTrue(location.startswith("https://github.example/authorize?"))
+        query = parse_qs(urlparse(location).query)
+        self.assertEqual(query["state"], [oauth_client.authorization_state])
+        self.assertTrue(query["challenge"][0])
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    async def test_github_oauth_login_rejects_when_auth_is_not_configured(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/auth/github/login")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "auth_not_configured")
+
+    async def test_github_oauth_login_rejects_without_session_manager(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            github_oauth_client=_StubFastApiGitHubOAuthClient(_github_human_identity()),
+        )
+
+        response = await _asgi_get(app, "/auth/github/login")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "auth_not_configured")
+
+    async def test_github_oauth_callback_issues_session_cookie(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        oauth_client = _StubFastApiGitHubOAuthClient(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=oauth_client,
+        )
+        login_response = await _asgi_get(app, "/auth/github/login?return_to=/ui")
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+
+        response = await _asgi_get(
+            app,
+            f"/auth/github/callback?code=github-code&state={state}",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/ui")
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        self.assertIn("HttpOnly", response.headers["Set-Cookie"])
+        self.assertIn("SameSite=Lax", response.headers["Set-Cookie"])
+        self.assertTrue(oauth_client.code_verifier)
+
+    async def test_github_oauth_callback_session_survives_app_recreation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            session_manager = HumanSessionManager(
+                config=_github_oauth_config(),
+                session_store=store,
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_local_operator_launchplane_service_read_policy(),
+                record_store_factory=lambda: store,
+                human_session_manager=session_manager,
+                github_oauth_client=_StubFastApiGitHubOAuthClient(_github_human_identity()),
+            )
+            login_response = await _asgi_get(app, "/auth/github/login")
+            state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+            callback_response = await _asgi_get(
+                app,
+                f"/auth/github/callback?code=github-code&state={state}",
+            )
+
+            recreated_store = PostgresRecordStore(database_url=database_url)
+            recreated_session_manager = HumanSessionManager(
+                config=_github_oauth_config(),
+                session_store=recreated_store,
+            )
+            recreated_app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_local_operator_launchplane_service_read_policy(),
+                record_store_factory=lambda: recreated_store,
+                human_session_manager=recreated_session_manager,
+            )
+            session_response = await _asgi_get(
+                recreated_app,
+                "/v1/auth/session",
+                headers={"Cookie": callback_response.headers["Set-Cookie"]},
+            )
+
+        self.assertEqual(callback_response.status_code, 302)
+        self.assertEqual(session_response.status_code, 200)
+        payload = session_response.json()
+        self.assertEqual(payload["identity"]["login"], "example-operator")
+        self.assertEqual(payload["identity"]["role"], "admin")
+
+    async def test_github_oauth_callback_sanitizes_external_return_to(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        oauth_client = _StubFastApiGitHubOAuthClient(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=oauth_client,
+        )
+        login_response = await _asgi_get(
+            app,
+            "/auth/github/login?return_to=https%3A%2F%2Fevil.example%2Fui",
+        )
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+
+        response = await _asgi_get(
+            app,
+            f"/auth/github/callback?code=github-code&state={state}",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/")
+
+    async def test_github_oauth_callback_rejects_missing_code_or_state(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=_StubFastApiGitHubOAuthClient(_github_human_identity()),
+        )
+
+        response = await _asgi_get(app, "/auth/github/callback?state=missing")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_oauth_callback")
+
+    async def test_github_oauth_callback_rejects_reused_state(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=_StubFastApiGitHubOAuthClient(_github_human_identity()),
+        )
+        login_response = await _asgi_get(app, "/auth/github/login")
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+        await _asgi_get(app, f"/auth/github/callback?code=github-code&state={state}")
+
+        response = await _asgi_get(
+            app,
+            f"/auth/github/callback?code=github-code&state={state}",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_oauth_callback")
+
+    async def test_github_oauth_callback_rejects_unauthorized_identity(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=_StubFastApiGitHubOAuthClient(
+                _github_human_identity(), permission_error=True
+            ),
+        )
+        login_response = await _asgi_get(app, "/auth/github/login")
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+
+        response = await _asgi_get(
+            app,
+            f"/auth/github/callback?code=github-code&state={state}",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_github_oauth_callback_maps_client_failure(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=_StubFastApiGitHubOAuthClient(
+                _github_human_identity(), fail_fetch=True
+            ),
+        )
+        login_response = await _asgi_get(app, "/auth/github/login")
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+
+        with self.assertLogs("control_plane.http_app", level="ERROR") as captured_logs:
+            response = await _asgi_get(
+                app,
+                f"/auth/github/callback?code=github-code&state={state}",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_oauth_callback")
+        self.assertTrue(
+            any("GitHub OAuth callback failed" in entry for entry in captured_logs.output)
+        )
+
+    async def test_github_oauth_routes_precede_wsgi_fallback(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        oauth_client = _StubFastApiGitHubOAuthClient(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+            github_oauth_client=oauth_client,
+        )
+        fallback_calls: list[str] = []
+
+        def fallback_app(
+            environ: dict[str, object], start_response: Callable[..., object]
+        ) -> list[bytes]:
+            fallback_calls.append(str(environ.get("PATH_INFO", "")))
+            start_response("599 Legacy Fallback", [("Content-Type", "application/json")])
+            return [b'{"status":"legacy"}']
+
+        app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, fallback_app))))
+        login_response = await _asgi_get(app, "/auth/github/login")
+        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+        callback_response = await _asgi_get(
+            app,
+            f"/auth/github/callback?code=github-code&state={state}",
+        )
+
+        self.assertEqual(login_response.status_code, 302)
+        self.assertEqual(callback_response.status_code, 302)
+        self.assertEqual(fallback_calls, [])
+
+    async def test_session_read_rejects_missing_human_session(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/v1/auth/session")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(payload["error"]["message"], "Sign in with GitHub to access Launchplane.")
+        self.assertFalse(payload["configured"])
+        self.assertTrue(str(payload["trace_id"]).startswith("launchplane_req_"))
+        self.assertNotIn("WWW-Authenticate", response.headers)
+
+    async def test_session_read_rejects_missing_cookie_when_auth_is_configured(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_get(app, "/v1/auth/session")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertTrue(payload["configured"])
+        self.assertNotIn("WWW-Authenticate", response.headers)
+
+    async def test_session_read_returns_github_human_identity(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        human_session = session_manager.issue(
+            GitHubHumanIdentity(
+                login="example-operator",
+                github_id=123,
+                name="Example Operator",
+                email="operator@example.com",
+                organizations=frozenset({"z-org", "a-org"}),
+                teams=frozenset({"z-org/admins", "a-org/operators"}),
+                role="admin",
+            )
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/auth/session",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Set-Cookie", response.headers)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(str(payload["trace_id"]).startswith("launchplane_req_"))
+        self.assertEqual(
+            payload["identity"],
+            {
+                "provider": "github",
+                "login": "example-operator",
+                "github_id": 123,
+                "name": "Example Operator",
+                "email": "operator@example.com",
+                "organizations": ["a-org", "z-org"],
+                "teams": ["a-org/operators", "z-org/admins"],
+                "role": "admin",
+            },
+        )
+
+    async def test_session_read_renews_expiring_human_session(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        now = datetime.now(timezone.utc)
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+            now=lambda: now,
+        )
+        expiring_session = LaunchplaneHumanSession(
+            session_id="expiring-session",
+            identity=_github_human_identity(role="read_only"),
+            created_at=now - timedelta(days=13),
+            expires_at=now + timedelta(hours=12),
+        )
+        session_store.write_session(expiring_session)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/auth/session",
+            headers={"Cookie": session_manager.session_cookie_header(expiring_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        self.assertIn("Max-Age=1209600", response.headers["Set-Cookie"])
+        renewed_session = session_store.read_session("expiring-session")
+        self.assertIsNotNone(renewed_session)
+        assert renewed_session is not None
+        self.assertGreater(renewed_session.expires_at, expiring_session.expires_at)
+
+    async def test_session_read_native_route_precedes_wsgi_fallback(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        human_session = session_manager.issue(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+        fallback_calls: list[str] = []
+
+        def fallback_app(
+            environ: dict[str, object], start_response: Callable[..., object]
+        ) -> list[bytes]:
+            fallback_calls.append(str(environ.get("PATH_INFO", "")))
+            start_response("599 Legacy Fallback", [("Content-Type", "application/json")])
+            return [b'{"status":"legacy"}']
+
+        app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, fallback_app))))
+
+        response = await _asgi_get(
+            app,
+            "/v1/auth/session",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["identity"]["login"], "example-operator")
+        self.assertEqual(fallback_calls, [])
+
+    async def test_logout_deletes_session_and_clears_cookie(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        human_session = session_manager.issue(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/auth/logout",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertTrue(str(response.json()["trace_id"]).startswith("launchplane_req_"))
+        self.assertIsNone(session_store.read_session(human_session.session_id))
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        self.assertIn("Max-Age=0", response.headers["Set-Cookie"])
+        self.assertIn("HttpOnly", response.headers["Set-Cookie"])
+        self.assertIn("SameSite=Lax", response.headers["Set-Cookie"])
+        self.assertNotIn("Secure", response.headers["Set-Cookie"])
+
+    async def test_logout_clears_cookie_when_auth_is_not_configured(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(app, "POST", "/auth/logout")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(
+            response.headers["Set-Cookie"],
+            "launchplane_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+        )
+
+    async def test_logout_clears_cookie_when_auth_is_configured_without_cookie(self) -> None:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_request(app, "POST", "/auth/logout")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        self.assertIn("Max-Age=0", response.headers["Set-Cookie"])
+        self.assertIn("HttpOnly", response.headers["Set-Cookie"])
+        self.assertIn("SameSite=Lax", response.headers["Set-Cookie"])
+
+    async def test_logout_native_route_precedes_wsgi_fallback(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        human_session = session_manager.issue(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+        fallback_calls: list[str] = []
+
+        def fallback_app(
+            environ: dict[str, object], start_response: Callable[..., object]
+        ) -> list[bytes]:
+            fallback_calls.append(str(environ.get("PATH_INFO", "")))
+            start_response("599 Legacy Fallback", [("Content-Type", "application/json")])
+            return [b'{"status":"legacy"}']
+
+        app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, fallback_app))))
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/auth/logout",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(fallback_calls, [])
+
+    async def test_openapi_includes_auth_session_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/auth/session"]["get"]
+        self.assertEqual(route["operationId"], "read_human_auth_session")
+        success_schema = route["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AuthSessionResponse")
+        rejected_schema = route["responses"]["401"]["content"]["application/json"]["schema"]
+        self.assertEqual(
+            rejected_schema["$ref"], "#/components/schemas/AuthSessionRequiredResponse"
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["AuthSessionResponse"]["additionalProperties"],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["AuthSessionRequiredResponse"]["additionalProperties"],
+            False,
+        )
+        logout_route = openapi["paths"]["/auth/logout"]["post"]
+        self.assertEqual(logout_route["operationId"], "logout_human_auth_session")
+        logout_schema = logout_route["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(logout_schema["$ref"], "#/components/schemas/AuthLogoutResponse")
+        self.assertEqual(
+            openapi["components"]["schemas"]["AuthLogoutResponse"]["additionalProperties"],
+            False,
+        )
+        login_route = openapi["paths"]["/auth/github/login"]["get"]
+        self.assertEqual(login_route["operationId"], "login_github_oauth")
+        self.assertIn("302", login_route["responses"])
+        login_rejected_schema = login_route["responses"]["503"]["content"]["application/json"][
+            "schema"
+        ]
+        self.assertEqual(
+            login_rejected_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse"
+        )
+        callback_route = openapi["paths"]["/auth/github/callback"]["get"]
+        self.assertEqual(callback_route["operationId"], "complete_github_oauth_callback")
+        self.assertIn("302", callback_route["responses"])
+        for status_code in ("400", "403", "503"):
+            callback_schema = callback_route["responses"][status_code]["content"][
+                "application/json"
+            ]["schema"]
+            self.assertEqual(
+                callback_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse"
+            )
 
 
 class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
@@ -4315,6 +5463,3389 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["admission"]["status"], "admitted")
+
+
+class _CountingMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
+    read_calls = 0
+
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        type(self).read_calls += 1
+        return super().read_merge_train_snapshot(repository=repository, base_branch=base_branch)
+
+
+class _StaleMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        raise MergeTrainGitHubStaleHeadError(
+            "Base branch moved outside the merge train snapshot.", status_code=409
+        )
+
+
+class _UnavailableMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        raise MergeTrainGitHubError(
+            "GitHub API request failed for /repos/example/repo", status_code=503
+        )
+
+
+class _UnsupportedStackMergeTrainSnapshotReader(_FakeStackedMergeTrainSnapshotReader):
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        snapshot = super().read_merge_train_snapshot(repository=repository, base_branch=base_branch)
+        return snapshot.model_copy(
+            update={
+                "pull_requests": tuple(
+                    pull_request.model_copy(update={"head_ref": "feature/root"})
+                    if pull_request.number == 2
+                    else pull_request
+                    for pull_request in snapshot.pull_requests
+                )
+            }
+        )
+
+
+class _UnavailableWorkerMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    def merge_pull_request(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        head_sha: str,
+        merge_method: str,
+    ) -> str:
+        raise MergeTrainGitHubError(
+            "GitHub API request failed for /repos/example/repo/pulls/1/merge",
+            status_code=503,
+        )
+
+
+class _CountingBatchCandidateMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
+    read_calls = 0
+
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        type(self).read_calls += 1
+        return super().read_merge_train_snapshot(repository=repository, base_branch=base_branch)
+
+
+class _UnavailableBatchCandidateMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    def build_batch_candidate(self, *, candidate: Any) -> Any:
+        raise MergeTrainGitHubError(
+            "GitHub API request failed for /repos/example/repo/git/refs",
+            status_code=503,
+        )
+
+
+class _UnexpectedBatchCandidateMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        raise AssertionError("batch candidate plan mode should not create a GitHub client")
+
+
+class _StackCollapseWithoutBatchCandidateStore:
+    backend_name = "test-stack-collapse-without-batch-candidate"
+
+    def __init__(self, *, state_dir: Path) -> None:
+        self.delegate = FilesystemRecordStore(state_dir=state_dir)
+
+    def close(self) -> None:
+        return None
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        return self.delegate.read_idempotency_record(
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object:
+        return self.delegate.write_idempotency_record(record)
+
+    def list_merge_train_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[MergeTrainPolicyRecord, ...]:
+        return self.delegate.list_merge_train_policy_records(status=status, limit=limit)
+
+    def write_merge_train_stack_collapse_plan_record(self, record: Any) -> object:
+        return self.delegate.write_merge_train_stack_collapse_plan_record(record)
+
+    def list_merge_train_stack_collapse_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[Any, ...]:
+        return self.delegate.list_merge_train_stack_collapse_plan_records(
+            repository=repository,
+            base_branch=base_branch,
+            status=status,
+            limit=limit,
+        )
+
+
+class _BatchLandingWithoutLandingPlanStore:
+    backend_name = "test-batch-landing-without-landing-plan"
+
+    def __init__(self, *, state_dir: Path) -> None:
+        self.delegate = FilesystemRecordStore(state_dir=state_dir)
+
+    def close(self) -> None:
+        return None
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        return self.delegate.read_idempotency_record(
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object:
+        return self.delegate.write_idempotency_record(record)
+
+    def list_merge_train_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[MergeTrainPolicyRecord, ...]:
+        return self.delegate.list_merge_train_policy_records(status=status, limit=limit)
+
+    def write_merge_train_batch_candidate_record(self, record: Any) -> object:
+        return self.delegate.write_merge_train_batch_candidate_record(record)
+
+    def list_merge_train_batch_candidate_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[Any, ...]:
+        return self.delegate.list_merge_train_batch_candidate_records(
+            repository=repository,
+            base_branch=base_branch,
+            status=status,
+            limit=limit,
+        )
+
+    def write_merge_train_stack_collapse_plan_record(self, record: Any) -> object:
+        return self.delegate.write_merge_train_stack_collapse_plan_record(record)
+
+    def list_merge_train_stack_collapse_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[Any, ...]:
+        return self.delegate.list_merge_train_stack_collapse_plan_records(
+            repository=repository,
+            base_branch=base_branch,
+            status=status,
+            limit=limit,
+        )
+
+
+class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plans_from_passed_candidate(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            passed_candidate_record = _seed_merge_train_batch_candidate_record(
+                state_dir,
+                status="passed",
+                required_checks_status="pass",
+                candidate_sha="candidate-built",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_merge_train_batch_landing_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "plan",
+                    "candidate_record_id": passed_candidate_record.record_id,
+                },
+            )
+            payload = response.json()
+            listed_records = store.list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "plan")
+        self.assertEqual(payload["result"]["landing_plan"]["entries"][0]["status"], "planned")
+        self.assertEqual(
+            listed_records[0].record_id,
+            payload["records"]["merge_train_batch_landing_plan_record_id"],
+        )
+
+    async def test_lands_existing_plan_and_cleans_candidate_ref(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            passed_candidate_record = _seed_merge_train_batch_candidate_record(
+                state_dir,
+                status="passed",
+                required_checks_status="pass",
+                candidate_sha="candidate-built",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_landing.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                plan_response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                        "candidate_record_id": passed_candidate_record.record_id,
+                    },
+                )
+                response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "land",
+                        "landing_plan_record_id": plan_response.json()["records"][
+                            "merge_train_batch_landing_plan_record_id"
+                        ],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["mode"], "land")
+        self.assertEqual(response.json()["result"]["candidate_ref_cleanup_status"], "deleted")
+        self.assertEqual(
+            response.json()["result"]["landing_plan"]["entries"][0]["status"], "merged"
+        )
+        self.assertEqual(
+            response.json()["result"]["landing_plan"]["entries"][0]["merge_commit_sha"],
+            "merge-1",
+        )
+
+    async def test_records_stale_plan_before_returning_stale_github_state(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            passed_candidate_record = _seed_merge_train_batch_candidate_record(
+                state_dir,
+                status="passed",
+                required_checks_status="pass",
+                candidate_sha="candidate-built",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_landing.GitHubMergeTrainClient",
+                _StaleLandingMergeTrainGitHubClient,
+            ):
+                plan_response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                        "candidate_record_id": passed_candidate_record.record_id,
+                    },
+                )
+                response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "land",
+                        "landing_plan_record_id": plan_response.json()["records"][
+                            "merge_train_batch_landing_plan_record_id"
+                        ],
+                    },
+                )
+            landing_records = store.list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "merge_train_github_stale_state")
+        self.assertTrue(
+            any(record.landing_plan.entries[0].status == "stale" for record in landing_records)
+        )
+
+    async def test_persists_land_before_cleanup_failure(self) -> None:
+        _CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            passed_candidate_record = _seed_merge_train_batch_candidate_record(
+                state_dir,
+                status="passed",
+                required_checks_status="pass",
+                candidate_sha="candidate-built",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_landing.GitHubMergeTrainClient",
+                _CleanupFailingMergeTrainGitHubClient,
+            ):
+                plan_response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                        "candidate_record_id": passed_candidate_record.record_id,
+                    },
+                )
+                response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "land",
+                        "landing_plan_record_id": plan_response.json()["records"][
+                            "merge_train_batch_landing_plan_record_id"
+                        ],
+                    },
+                )
+            landing_records = store.list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["candidate_ref_cleanup_status"], "failed")
+        self.assertEqual(
+            response.json()["result"]["candidate_ref_cleanup_message"],
+            "candidate ref cleanup unavailable",
+        )
+        self.assertEqual(response.json()["result"]["candidate_ref_cleanup_github_status_code"], 503)
+        self.assertEqual(_CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls, 1)
+        self.assertTrue(
+            any(
+                record.landing_plan.entries[0].status == "merged"
+                and record.landing_plan.entries[0].merge_commit_sha == "merge-1"
+                for record in landing_records
+            )
+        )
+
+    async def test_closes_stack_children_after_root_lands(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            executed_record_id = _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
+            admitted_candidate_record = _seed_admitted_merge_train_stack_collapse_candidate(
+                state_dir,
+                executed_record_id=executed_record_id,
+            )
+            passed_candidate_record = _mark_merge_train_batch_candidate_record_passed(
+                state_dir,
+                record_id=admitted_candidate_record.record_id,
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_landing.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                plan_response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                        "candidate_record_id": passed_candidate_record.record_id,
+                    },
+                )
+                response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "land",
+                        "landing_plan_record_id": plan_response.json()["records"][
+                            "merge_train_batch_landing_plan_record_id"
+                        ],
+                        "stack_collapse_plan_record_id": executed_record_id,
+                    },
+                )
+            disposition_record_id = response.json()["records"][
+                "merge_train_stack_collapse_plan_record_id"
+            ]
+            stack_records = store.list_merge_train_stack_collapse_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+            disposition_record = next(
+                record for record in stack_records if record.record_id == disposition_record_id
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            response.json()["result"]["stack_collapse_plan"]["status"], "ready_for_train"
+        )
+        self.assertEqual(
+            response.json()["result"]["stack_collapse_plan"]["child_dispositions"][0]["status"],
+            "closed",
+        )
+        self.assertEqual(disposition_record.plan.child_dispositions[0].status, "closed")
+        self.assertEqual(
+            disposition_record.plan.child_dispositions[0].comment_url,
+            "https://github.com/cbusillo/sellyouroutboard/pull/2#issuecomment-1",
+        )
+
+    async def test_persists_root_merge_before_child_record_failure(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            executed_record_id = _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
+            admitted_candidate_record = _seed_admitted_merge_train_stack_collapse_candidate(
+                state_dir,
+                executed_record_id=executed_record_id,
+            )
+            passed_candidate_record = _mark_merge_train_batch_candidate_record_passed(
+                state_dir,
+                record_id=admitted_candidate_record.record_id,
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_landing.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                plan_response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                        "candidate_record_id": passed_candidate_record.record_id,
+                    },
+                )
+            failing_store = _StackCollapseWriteFailingFilesystemRecordStore(state_dir)
+            failing_app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: failing_store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_landing.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                response = await _post_merge_train_batch_landing_run_once(
+                    failing_app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "land",
+                        "landing_plan_record_id": plan_response.json()["records"][
+                            "merge_train_batch_landing_plan_record_id"
+                        ],
+                        "stack_collapse_plan_record_id": executed_record_id,
+                    },
+                    capture_server_error_response=True,
+                )
+            landing_records = store.list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(
+            any(
+                record.landing_plan.entries[0].status == "merged"
+                and record.landing_plan.entries[0].merge_commit_sha == "merge-1"
+                for record in landing_records
+            )
+        )
+
+    async def test_validates_stack_before_root_merge(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            stale_stack_record_id = _seed_merge_train_stack_collapse_plan_record(state_dir)
+            executed_record_id = _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
+            admitted_candidate_record = _seed_admitted_merge_train_stack_collapse_candidate(
+                state_dir,
+                executed_record_id=executed_record_id,
+            )
+            passed_candidate_record = _mark_merge_train_batch_candidate_record_passed(
+                state_dir,
+                record_id=admitted_candidate_record.record_id,
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            _FakeMergeTrainGitHubClient.land_batch_candidate_calls = 0
+            with patch(
+                "control_plane.merge_train_batch_landing.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                plan_response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                        "candidate_record_id": passed_candidate_record.record_id,
+                    },
+                )
+                response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "land",
+                        "landing_plan_record_id": plan_response.json()["records"][
+                            "merge_train_batch_landing_plan_record_id"
+                        ],
+                        "stack_collapse_plan_record_id": stale_stack_record_id,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(_FakeMergeTrainGitHubClient.land_batch_candidate_calls, 0)
+
+    async def test_rejects_policy_digest_mismatch_before_root_merge(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            executed_record_id = _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
+            admitted_candidate_record = _seed_admitted_merge_train_stack_collapse_candidate(
+                state_dir,
+                executed_record_id=executed_record_id,
+            )
+            passed_candidate_record = _mark_merge_train_batch_candidate_record_passed(
+                state_dir,
+                record_id=admitted_candidate_record.record_id,
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_landing.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                plan_response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                        "candidate_record_id": passed_candidate_record.record_id,
+                    },
+                )
+            _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-20260513T220000Z-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T22:00:00Z",
+                    policy=build_test_merge_train_policy_with_codex_skills(),
+                ),
+            )
+            _FakeMergeTrainGitHubClient.land_batch_candidate_calls = 0
+            with patch(
+                "control_plane.merge_train_batch_landing.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                response = await _post_merge_train_batch_landing_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "land",
+                        "landing_plan_record_id": plan_response.json()["records"][
+                            "merge_train_batch_landing_plan_record_id"
+                        ],
+                        "stack_collapse_plan_record_id": executed_record_id,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(_FakeMergeTrainGitHubClient.land_batch_candidate_calls, 0)
+
+    async def test_replays_idempotent_plan_without_rewriting_landing_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            passed_candidate_record = _seed_merge_train_batch_candidate_record(
+                state_dir,
+                status="passed",
+                required_checks_status="pass",
+                candidate_sha="candidate-built",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mode": "plan",
+                "candidate_record_id": passed_candidate_record.record_id,
+            }
+            first_response = await _post_merge_train_batch_landing_run_once(
+                app,
+                request_payload,
+                idempotency_key="merge-train-batch-landing-plan",
+            )
+            replay_response = await _post_merge_train_batch_landing_run_once(
+                app,
+                request_payload,
+                idempotency_key="merge-train-batch-landing-plan",
+            )
+            landing_records = store.list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(len(landing_records), 1)
+
+    async def test_rejects_missing_landing_storage(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            passed_candidate_record = _seed_merge_train_batch_candidate_record(
+                state_dir,
+                status="passed",
+                required_checks_status="pass",
+                candidate_sha="candidate-built",
+            )
+            store = _BatchLandingWithoutLandingPlanStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            response = await _post_merge_train_batch_landing_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "plan",
+                    "candidate_record_id": passed_candidate_record.record_id,
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
+    async def test_fastapi_route_precedes_legacy_wsgi_fallback(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            _seed_merge_train_policy(state_dir)
+            passed_candidate_record = _seed_merge_train_batch_candidate_record(
+                state_dir,
+                status="passed",
+                required_checks_status="pass",
+                candidate_sha="candidate-built",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                local_record_store_for_tests=store,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+            response = await _post_merge_train_batch_landing_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "plan",
+                    "candidate_record_id": passed_candidate_record.record_id,
+                },
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["mode"], "plan")
+
+    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/merge-train/batch-landing/run-once",
+                payload={
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "plan",
+                    "candidate_record_id": "missing-candidate",
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_openapi_includes_batch_landing_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/work-graph/merge-train/batch-landing/run-once"][
+            "post"
+        ]
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        self.assertEqual(request_schema["title"], "MergeTrainBatchLandingRunOnceEnvelope")
+        self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
+
+
+class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_executes_existing_plan_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            plan_record_id = _seed_merge_train_stack_collapse_plan_record(state_dir)
+            with patch(
+                "control_plane.merge_train_stack_collapse.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                response = await _post_merge_train_stack_collapse_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "stack_collapse_plan_record_id": plan_record_id,
+                    },
+                )
+            payload = response.json()
+            executed_record_id = payload["records"]["merge_train_stack_collapse_plan_record_id"]
+            executed_records = store.list_merge_train_stack_collapse_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+            executed_record = next(
+                record for record in executed_records if record.record_id == executed_record_id
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "execute")
+        self.assertEqual(
+            payload["result"]["stack_collapse_plan"]["status"], "waiting_for_root_checks"
+        )
+        self.assertEqual(
+            payload["result"]["stack_collapse_plan"]["mutations"][0]["status"], "mutated"
+        )
+        self.assertEqual(
+            payload["result"]["stack_collapse_plan"]["mutations"][0]["merge_commit_sha"],
+            "stack-merge-2-into-1",
+        )
+        self.assertEqual(executed_record.plan.status, "waiting_for_root_checks")
+
+    async def test_admits_executed_root_only(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            plan_record_id = _seed_merge_train_stack_collapse_plan_record(state_dir)
+            with patch(
+                "control_plane.merge_train_stack_collapse.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                execute_response = await _post_merge_train_stack_collapse_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "execute",
+                        "stack_collapse_plan_record_id": plan_record_id,
+                    },
+                )
+            executed_record_id = execute_response.json()["records"][
+                "merge_train_stack_collapse_plan_record_id"
+            ]
+            with patch(
+                "control_plane.merge_train_stack_collapse.GitHubMergeTrainSnapshotReader",
+                _FakeCollapsedRootStackedMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_stack_collapse_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "admit",
+                        "stack_collapse_plan_record_id": executed_record_id,
+                    },
+                )
+            payload = response.json()
+            candidate_record_id = payload["records"]["merge_train_batch_candidate_record_id"]
+            candidate_records = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "admit")
+        self.assertEqual(payload["result"]["candidate"]["entries"][0]["pull_request_number"], 1)
+        self.assertEqual(len(payload["result"]["candidate"]["entries"]), 1)
+        candidate_record = next(
+            record for record in candidate_records if record.record_id == candidate_record_id
+        )
+        self.assertEqual(candidate_record.candidate.entries[0].pull_request_number, 1)
+
+    async def test_rejects_admit_when_root_head_moves(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            plan_record_id = _seed_merge_train_stack_collapse_plan_record(state_dir)
+            with patch(
+                "control_plane.merge_train_stack_collapse.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                execute_response = await _post_merge_train_stack_collapse_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "execute",
+                        "stack_collapse_plan_record_id": plan_record_id,
+                    },
+                )
+            with patch(
+                "control_plane.merge_train_stack_collapse.GitHubMergeTrainSnapshotReader",
+                _FakeMovedRootStackedMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_stack_collapse_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "admit",
+                        "stack_collapse_plan_record_id": execute_response.json()["records"][
+                            "merge_train_stack_collapse_plan_record_id"
+                        ],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(response.json()["error"]["message"], "Request could not be completed.")
+
+    async def test_rejects_admit_when_policy_digest_changes(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            plan_record_id = _seed_merge_train_stack_collapse_plan_record(state_dir)
+            with patch(
+                "control_plane.merge_train_stack_collapse.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                execute_response = await _post_merge_train_stack_collapse_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "execute",
+                        "stack_collapse_plan_record_id": plan_record_id,
+                    },
+                )
+            _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-20260513T220000Z-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T22:00:00Z",
+                    policy=build_test_merge_train_policy_with_codex_skills(),
+                ),
+            )
+            with patch(
+                "control_plane.merge_train_stack_collapse.GitHubMergeTrainSnapshotReader",
+                _FakeStackedMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_stack_collapse_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "admit",
+                        "stack_collapse_plan_record_id": execute_response.json()["records"][
+                            "merge_train_stack_collapse_plan_record_id"
+                        ],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(response.json()["error"]["message"], "Request could not be completed.")
+
+    async def test_replays_idempotent_execute_without_reexecuting_stack(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            plan_record_id = _seed_merge_train_stack_collapse_plan_record(state_dir)
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mode": "execute",
+                "stack_collapse_plan_record_id": plan_record_id,
+            }
+            with patch(
+                "control_plane.merge_train_stack_collapse.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                first_response = await _post_merge_train_stack_collapse_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-stack-collapse-execute",
+                )
+                replay_response = await _post_merge_train_stack_collapse_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-stack-collapse-execute",
+                )
+            stack_records = store.list_merge_train_stack_collapse_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(len(stack_records), 2)
+
+    async def test_rejects_missing_stack_collapse_storage(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = _MergeTrainPolicyOnlyStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            response = await _post_merge_train_stack_collapse_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "execute",
+                    "stack_collapse_plan_record_id": "missing-stack-collapse-plan",
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
+    async def test_rejects_missing_batch_candidate_storage_for_admit(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            plan_record_id = _seed_merge_train_stack_collapse_plan_record(state_dir)
+            full_store = FilesystemRecordStore(state_dir=state_dir)
+            executed_record = execute_merge_train_stack_collapse_plan(
+                plan=next(
+                    record
+                    for record in full_store.list_merge_train_stack_collapse_plan_records(
+                        repository="cbusillo/sellyouroutboard", base_branch="main"
+                    )
+                    if record.record_id == plan_record_id
+                ).plan,
+                branch_client=_FakeMergeTrainGitHubClient(transport=object()),
+                updated_at="2026-05-13T21:02:00Z",
+            )
+            executed_plan_record = build_merge_train_stack_collapse_plan_record(
+                plan=executed_record,
+                source="test:execute",
+                updated_at="2026-05-13T21:02:00Z",
+            )
+            full_store.write_merge_train_stack_collapse_plan_record(executed_plan_record)
+            store = _StackCollapseWithoutBatchCandidateStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            response = await _post_merge_train_stack_collapse_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "admit",
+                    "stack_collapse_plan_record_id": executed_plan_record.record_id,
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "Merge train stack collapse admission requires database-backed candidate records.",
+        )
+
+    async def test_fastapi_route_precedes_legacy_wsgi_fallback(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                local_record_store_for_tests=store,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+            plan_record_id = _seed_merge_train_stack_collapse_plan_record(state_dir)
+            with patch(
+                "control_plane.merge_train_stack_collapse.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                response = await _post_merge_train_stack_collapse_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "execute",
+                        "stack_collapse_plan_record_id": plan_record_id,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["mode"], "execute")
+
+    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/merge-train/stack-collapse/run-once",
+                payload={
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "execute",
+                    "stack_collapse_plan_record_id": "missing-stack-collapse-plan",
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_openapi_includes_stack_collapse_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/work-graph/merge-train/stack-collapse/run-once"][
+            "post"
+        ]
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        self.assertEqual(request_schema["title"], "MergeTrainStackCollapseRunOnceEnvelope")
+        self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
+
+
+class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_dry_run_from_policy_and_records_run(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            policy_record = _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.merge_train_run_once.GitHubMergeTrainClient") as github_client,
+            ):
+                response = await _post_merge_train_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                    },
+                )
+            payload = response.json()
+            run_id = payload["records"]["merge_train_run_id"]
+            loaded_record = FilesystemRecordStore(state_dir).read_merge_train_run_record(run_id)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertEqual(payload["result"]["repository"], "cbusillo/sellyouroutboard")
+        self.assertEqual(payload["result"]["base_branch"], "main")
+        self.assertEqual(payload["result"]["dry_run_result"]["intended_next_action"], "merge")
+        self.assertEqual(loaded_record.mode, "dry_run")
+        self.assertEqual(loaded_record.status, "merge")
+        self.assertEqual(loaded_record.selected_pr_number, 1)
+        self.assertEqual(loaded_record.selected_head_sha, "head-1")
+        self.assertEqual(loaded_record.policy_key, "cbusillo/sellyouroutboard:main")
+        self.assertEqual(loaded_record.policy_sha256, policy_record.policy_sha256)
+        self.assertEqual(loaded_record.worker_step_result, None)
+        github_client.assert_not_called()
+
+    async def test_mutates_one_worker_step_and_records_worker_result(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                response = await _post_merge_train_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            payload = response.json()
+            run_id = payload["records"]["merge_train_run_id"]
+            loaded_record = FilesystemRecordStore(state_dir).read_merge_train_run_record(run_id)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["status"], "merged")
+        self.assertEqual(payload["result"]["intended_next_action"], "merge")
+        self.assertEqual(payload["result"]["selected_pr_number"], 1)
+        self.assertEqual(loaded_record.mode, "mutate")
+        self.assertEqual(loaded_record.status, "merged")
+        self.assertTrue(loaded_record.reread_required)
+        self.assertFalse(loaded_record.poll_required)
+        self.assertIsNotNone(loaded_record.worker_step_result)
+
+    async def test_replays_idempotent_request_without_reexecuting_github_read(self) -> None:
+        request_payload = {
+            "schema_version": 1,
+            "repository": "cbusillo/sellyouroutboard",
+            "base_branch": "main",
+        }
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            _CountingMergeTrainSnapshotReader.read_calls = 0
+            with patch(
+                "control_plane.merge_train_run_once.GitHubMergeTrainSnapshotReader",
+                _CountingMergeTrainSnapshotReader,
+            ):
+                first_response = await _post_merge_train_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-run-once-dry-run",
+                )
+                replay_response = await _post_merge_train_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-run-once-dry-run",
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_run_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(
+            replay_response.json()["records"]["merge_train_run_id"],
+            first_response.json()["records"]["merge_train_run_id"],
+        )
+        self.assertEqual(_CountingMergeTrainSnapshotReader.read_calls, 1)
+        self.assertEqual(len(records), 1)
+
+    async def test_rejects_reused_idempotency_key_with_different_payload(self) -> None:
+        request_payload = {
+            "schema_version": 1,
+            "repository": "cbusillo/sellyouroutboard",
+            "base_branch": "main",
+        }
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_run_once.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                first_response = await _post_merge_train_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-run-once-conflict",
+                )
+                conflict_response = await _post_merge_train_run_once(
+                    app,
+                    {**request_payload, "base_branch": "release"},
+                    idempotency_key="merge-train-run-once-conflict",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: store,
+            )
+            with patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True):
+                response = await _post_merge_train_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_rejects_terminal_agent_bearer_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_merge_train_run_once_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-read-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+            )
+            response = await _post_merge_train_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                },
+                authorization="Bearer terminal-read-token",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_rejects_missing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                response = await _post_merge_train_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "github_token_not_configured")
+
+    async def test_rejects_unsupported_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            response = await _post_merge_train_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/other",
+                    "base_branch": "main",
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_rejects_invalid_payload_as_launchplane_invalid_request(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_merge_train_run_once(
+            app,
+            {"schema_version": 1, "repository": "cbusillo", "base_branch": "main"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_rejects_missing_policy_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            response = await _post_merge_train_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "merge_train_policy_not_configured")
+
+    async def test_uses_configured_codex_skills_policy(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-codex-skills-fastapi-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T21:00:00Z",
+                    policy=build_test_merge_train_policy_with_codex_skills(),
+                ),
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_run_once.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/codex-skills",
+                        "base_branch": "main",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["repository"], "cbusillo/codex-skills")
+        self.assertEqual(response.json()["result"]["base_branch"], "main")
+        self.assertEqual(
+            response.json()["result"]["dry_run_result"]["policy_key"],
+            "cbusillo/codex-skills:main",
+        )
+
+    async def test_maps_stale_github_state(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_run_once.GitHubMergeTrainSnapshotReader",
+                _StaleMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "merge_train_github_stale_state")
+        self.assertEqual(payload["details"]["github_status_code"], 409)
+
+    async def test_maps_github_request_failure(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_run_once.GitHubMergeTrainSnapshotReader",
+                _UnavailableMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 502)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "github_request_failed")
+        self.assertEqual(payload["details"]["github_status_code"], 503)
+
+    async def test_maps_mutating_worker_github_request_failure(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_run_once.GitHubMergeTrainClient",
+                    _UnavailableWorkerMergeTrainGitHubClient,
+                ),
+            ):
+                response = await _post_merge_train_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_run_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 502)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "github_request_failed")
+        self.assertEqual(payload["details"]["github_status_code"], 503)
+        self.assertEqual(records, ())
+
+    async def test_fastapi_route_precedes_legacy_wsgi_fallback(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                local_record_store_for_tests=store,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+            with patch(
+                "control_plane.merge_train_run_once.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["mode"], "dry-run")
+
+    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/merge-train/run-once",
+                payload={
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_openapi_includes_run_once_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/work-graph/merge-train/run-once"]["post"]
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        self.assertEqual(request_schema["title"], "MergeTrainRunOnceEnvelope")
+        self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
+
+
+class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_advances_unstacked_batch_flow(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                responses = [
+                    await _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                    for _ in range(5)
+                ]
+            payloads = [response.json() for response in responses]
+            landing_records = store.list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertTrue(all(response.status_code == 202 for response in responses))
+        self.assertEqual(payloads[0]["result"]["controller_action"], "plan_candidate")
+        self.assertEqual(payloads[1]["result"]["controller_action"], "build_candidate")
+        self.assertEqual(payloads[1]["result"]["candidate"]["status"], "ready_for_checks")
+        self.assertEqual(payloads[2]["result"]["controller_action"], "observe_candidate")
+        self.assertEqual(payloads[2]["result"]["candidate"]["status"], "passed")
+        self.assertEqual(payloads[3]["result"]["controller_action"], "plan_landing")
+        self.assertEqual(payloads[4]["result"]["controller_action"], "land_batch")
+        self.assertEqual(payloads[4]["result"]["candidate_ref_cleanup_status"], "deleted")
+        self.assertEqual(payloads[4]["result"]["landing_plan"]["entries"][0]["status"], "merged")
+        landed_record = next(
+            record
+            for record in landing_records
+            if record.record_id
+            == payloads[4]["records"]["merge_train_batch_landing_plan_record_id"]
+        )
+        self.assertTrue(landed_record.source.startswith("service:controller:land:"))
+
+    async def test_stale_landing_returns_accepted_result_and_replays_idempotently(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                for _ in range(4):
+                    await _post_merge_train_controller_run_once(app, request_payload)
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _StaleLandingMergeTrainGitHubClient,
+            ):
+                stale_response = await _post_merge_train_controller_run_once(
+                    app, request_payload, idempotency_key="controller-stale-landing"
+                )
+                replay_response = await _post_merge_train_controller_run_once(
+                    app, request_payload, idempotency_key="controller-stale-landing"
+                )
+            stale_payload = stale_response.json()
+            replay_payload = replay_response.json()
+            landing_records = store.list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(stale_response.status_code, 202)
+        self.assertEqual(stale_payload["result"]["mode"], "stale_landing")
+        self.assertEqual(stale_payload["result"]["error"]["code"], "merge_train_github_stale_state")
+        self.assertEqual(stale_payload["result"]["details"]["github_status_code"], 409)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(replay_payload["records"], stale_payload["records"])
+        stale_record = next(
+            record
+            for record in landing_records
+            if record.record_id
+            == stale_payload["records"]["merge_train_batch_landing_plan_record_id"]
+        )
+        self.assertEqual(stale_record.landing_plan.entries[0].status, "stale")
+        self.assertTrue(stale_record.source.startswith("service:controller:stale-landing:"))
+
+    async def test_reflows_failed_candidate_after_queue_changes(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                await _post_merge_train_controller_run_once(app, request_payload)
+                await _post_merge_train_controller_run_once(app, request_payload)
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _FakeFailingMergeTrainGitHubClient,
+            ):
+                await _post_merge_train_controller_run_once(app, request_payload)
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeExpandedMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                reflow_response = await _post_merge_train_controller_run_once(app, request_payload)
+                build_response = await _post_merge_train_controller_run_once(app, request_payload)
+
+        reflow_payload = reflow_response.json()
+        build_payload = build_response.json()
+        self.assertEqual(reflow_response.status_code, 202)
+        self.assertEqual(reflow_payload["result"]["controller_action"], "plan_candidate")
+        self.assertEqual(
+            [
+                entry["pull_request_number"]
+                for entry in reflow_payload["result"]["candidate"]["entries"]
+            ],
+            [1, 2],
+        )
+        self.assertIn("superseded_merge_train_batch_candidate_record_id", reflow_payload["result"])
+        self.assertEqual(build_response.status_code, 202)
+        self.assertEqual(build_payload["result"]["controller_action"], "build_candidate")
+        self.assertEqual(
+            [
+                entry["pull_request_number"]
+                for entry in build_payload["result"]["candidate"]["entries"]
+            ],
+            [1, 2],
+        )
+
+    async def test_advances_stacked_batch_flow(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeStackedMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                plan_response = await _post_merge_train_controller_run_once(app, request_payload)
+                execute_response = await _post_merge_train_controller_run_once(app, request_payload)
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeCollapsedRootStackedMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                admit_response = await _post_merge_train_controller_run_once(app, request_payload)
+                build_response = await _post_merge_train_controller_run_once(app, request_payload)
+                observe_response = await _post_merge_train_controller_run_once(app, request_payload)
+                landing_plan_response = await _post_merge_train_controller_run_once(app, request_payload)
+                land_response = await _post_merge_train_controller_run_once(app, request_payload)
+
+        plan_payload = plan_response.json()
+        execute_payload = execute_response.json()
+        admit_payload = admit_response.json()
+        build_payload = build_response.json()
+        observe_payload = observe_response.json()
+        landing_plan_payload = landing_plan_response.json()
+        land_payload = land_response.json()
+        self.assertEqual(plan_response.status_code, 202)
+        self.assertEqual(plan_payload["result"]["controller_action"], "plan_stack_collapse")
+        self.assertEqual(execute_response.status_code, 202)
+        self.assertEqual(execute_payload["result"]["controller_action"], "execute_stack_collapse")
+        self.assertEqual(admit_response.status_code, 202)
+        self.assertEqual(admit_payload["result"]["controller_action"], "admit_collapsed_root")
+        self.assertEqual(admit_payload["result"]["candidate"]["entries"][0]["pull_request_number"], 1)
+        self.assertEqual(build_response.status_code, 202)
+        self.assertEqual(build_payload["result"]["controller_action"], "build_candidate")
+        self.assertEqual(observe_response.status_code, 202)
+        self.assertEqual(observe_payload["result"]["candidate"]["status"], "passed")
+        self.assertEqual(landing_plan_response.status_code, 202)
+        self.assertEqual(landing_plan_payload["result"]["controller_action"], "plan_landing")
+        self.assertEqual(land_response.status_code, 202)
+        self.assertEqual(land_payload["result"]["controller_action"], "land_batch")
+        self.assertEqual(land_payload["result"]["stack_collapse_plan"]["status"], "ready_for_train")
+        self.assertEqual(
+            land_payload["result"]["stack_collapse_plan"]["child_dispositions"][0]["status"],
+            "closed",
+        )
+
+    async def test_cleanup_failure_after_landing_is_reported_without_rollback(self) -> None:
+        _CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _CleanupFailingMergeTrainGitHubClient,
+                ),
+            ):
+                responses = [
+                    await _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                    for _ in range(5)
+                ]
+            payload = responses[-1].json()
+            landing_records = store.list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(responses[-1].status_code, 202)
+        self.assertEqual(payload["result"]["controller_action"], "land_batch")
+        self.assertEqual(payload["result"]["candidate_ref_cleanup_status"], "failed")
+        self.assertEqual(payload["result"]["candidate_ref_cleanup_github_status_code"], 503)
+        self.assertEqual(_CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls, 1)
+        landed_record = next(
+            record
+            for record in landing_records
+            if record.record_id == payload["records"]["merge_train_batch_landing_plan_record_id"]
+        )
+        self.assertEqual(landed_record.landing_plan.entries[0].status, "merged")
+
+    async def test_invalid_controller_payload_uses_invalid_state_envelope(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=state_dir),
+            )
+            response = await _post_merge_train_controller_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "not-a-repository",
+                    "base_branch": "main",
+                    "mutate": False,
+                },
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["error"]["code"], "merge_train_controller_invalid_state")
+        self.assertIn("merge train repository must be owner/name", payload["error"]["message"])
+
+    async def test_legacy_wsgi_controller_route_fails_closed(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                legacy_app,
+                method="POST",
+                path="/v1/work-graph/merge-train/controller/run-once",
+                payload={
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mutate": False,
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_openapi_includes_controller_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("/tmp/unused")),
+        )
+        route = app.openapi()["paths"]["/v1/work-graph/merge-train/controller/run-once"]["post"]
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+
+        self.assertEqual(route["operationId"], "write_merge_train_controller_run_once")
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        self.assertEqual(request_schema["title"], "MergeTrainControllerRunOnceEnvelope")
+        self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
+
+
+class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plans_candidate_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            policy_record = _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_batch_candidate.GitHubMergeTrainClient",
+                    _UnexpectedBatchCandidateMergeTrainGitHubClient,
+                ),
+            ):
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            payload = response.json()
+            record_id = payload["records"]["merge_train_batch_candidate_record_id"]
+            listed_records = FilesystemRecordStore(
+                state_dir
+            ).list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "plan")
+        self.assertEqual(payload["result"]["candidate"]["status"], "planned")
+        self.assertEqual(payload["result"]["candidate"]["base_sha"], "current-base-main")
+        self.assertEqual(payload["result"]["candidate"]["entries"][0]["pull_request_number"], 1)
+        self.assertEqual(listed_records[0].record_id, record_id)
+        self.assertEqual(listed_records[0].candidate.policy_key, "cbusillo/sellyouroutboard:main")
+        self.assertEqual(listed_records[0].candidate.policy_sha256, policy_record.policy_sha256)
+
+    async def test_plans_stack_collapse_first_without_candidate_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
+                _FakeStackedMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            payload = response.json()
+            record_id = payload["records"]["merge_train_stack_collapse_plan_record_id"]
+            stack_records = store.list_merge_train_stack_collapse_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+            candidate_records = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "plan")
+        self.assertNotIn("candidate", payload["result"])
+        self.assertEqual(payload["result"]["stack_collapse_plan"]["status"], "planned")
+        self.assertEqual(
+            [
+                entry["pull_request_number"]
+                for entry in payload["result"]["stack_collapse_plan"]["entries"]
+            ],
+            [1, 2],
+        )
+        self.assertEqual(stack_records[0].record_id, record_id)
+        self.assertEqual(candidate_records, ())
+
+    async def test_reports_unsupported_stack_without_writing_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
+                _UnsupportedStackMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            candidate_records = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+            stack_records = store.list_merge_train_stack_collapse_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"], {})
+        self.assertEqual(payload["result"]["next_action"], "stack_unsupported")
+        self.assertEqual(payload["result"]["stack_discovery"]["status"], "unsupported")
+        self.assertEqual(candidate_records, ())
+        self.assertEqual(stack_records, ())
+
+    async def test_builds_existing_candidate_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                plan_response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "build",
+                        "candidate_record_id": plan_response.json()["records"][
+                            "merge_train_batch_candidate_record_id"
+                        ],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["mode"], "build")
+        self.assertEqual(response.json()["result"]["candidate"]["status"], "ready_for_checks")
+        self.assertEqual(response.json()["result"]["candidate"]["candidate_sha"], "candidate-built")
+
+    async def test_observes_existing_candidate_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                plan_response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                build_response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "build",
+                        "candidate_record_id": plan_response.json()["records"][
+                            "merge_train_batch_candidate_record_id"
+                        ],
+                    },
+                )
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "observe",
+                        "candidate_record_id": build_response.json()["records"][
+                            "merge_train_batch_candidate_record_id"
+                        ],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["mode"], "observe")
+        self.assertEqual(response.json()["result"]["candidate"]["status"], "passed")
+        self.assertEqual(response.json()["result"]["candidate"]["required_checks_status"], "pass")
+
+    async def test_replays_idempotent_plan_without_rereading_github(self) -> None:
+        request_payload = {
+            "schema_version": 1,
+            "repository": "cbusillo/sellyouroutboard",
+            "base_branch": "main",
+            "mode": "plan",
+        }
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            _CountingBatchCandidateMergeTrainSnapshotReader.read_calls = 0
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
+                _CountingBatchCandidateMergeTrainSnapshotReader,
+            ):
+                first_response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-batch-candidate-plan",
+                )
+                replay_response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-batch-candidate-plan",
+                )
+            records = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(_CountingBatchCandidateMergeTrainSnapshotReader.read_calls, 1)
+        self.assertEqual(len(records), 1)
+
+    async def test_rejects_reused_idempotency_key_with_different_payload(self) -> None:
+        request_payload = {
+            "schema_version": 1,
+            "repository": "cbusillo/sellyouroutboard",
+            "base_branch": "main",
+            "mode": "plan",
+        }
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                first_response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-batch-candidate-conflict",
+                )
+                conflict_response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {**request_payload, "base_branch": "release"},
+                    idempotency_key="merge-train-batch-candidate-conflict",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_rejects_invalid_payload_as_launchplane_invalid_request(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_merge_train_batch_candidate_run_once(
+            app,
+            {"schema_version": 1, "repository": "cbusillo", "base_branch": "main"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_build_requires_candidate_record_id(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_merge_train_batch_candidate_run_once(
+            app,
+            {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mode": "build",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_build_rejects_unknown_candidate_record_without_leaking_detail(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_merge_train_batch_candidate_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "build",
+                    "candidate_record_id": "missing-candidate-record",
+                },
+            )
+            records = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(response.json()["error"]["message"], "Request could not be completed.")
+        self.assertEqual(records, ())
+
+    async def test_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: store,
+            )
+            with patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True):
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_rejects_terminal_agent_bearer_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_merge_train_run_once_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-read-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+            )
+            response = await _post_merge_train_batch_candidate_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "plan",
+                },
+                authorization="Bearer terminal-read-token",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_rejects_missing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "github_token_not_configured")
+
+    async def test_rejects_missing_policy_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            response = await _post_merge_train_batch_candidate_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "plan",
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "merge_train_policy_not_configured")
+
+    async def test_maps_stale_github_state_without_writing_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
+                _StaleMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            records = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "merge_train_github_stale_state")
+        self.assertEqual(records, ())
+
+    async def test_maps_build_github_request_failure_without_writing_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                plan_response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainClient",
+                _UnavailableBatchCandidateMergeTrainGitHubClient,
+            ):
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "build",
+                        "candidate_record_id": plan_response.json()["records"][
+                            "merge_train_batch_candidate_record_id"
+                        ],
+                    },
+                )
+            records = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["error"]["code"], "github_request_failed")
+        self.assertEqual(len(records), 1)
+
+    async def test_rejects_missing_batch_candidate_storage(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = _MergeTrainPolicyOnlyStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            response = await _post_merge_train_batch_candidate_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "plan",
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "Merge train batch candidate storage requires database-backed records.",
+        )
+
+    async def test_fastapi_route_precedes_legacy_wsgi_fallback(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                local_record_store_for_tests=store,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+            with patch(
+                "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["mode"], "plan")
+
+    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/merge-train/batch-candidate/run-once",
+                payload={
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mode": "plan",
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_openapi_includes_batch_candidate_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/work-graph/merge-train/batch-candidate/run-once"][
+            "post"
+        ]
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        self.assertEqual(request_schema["title"], "MergeTrainBatchCandidateRunOnceEnvelope")
+        self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
+
+
+class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_creates_managed_comment_and_records_evidence(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            policy_record = _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ) as find_comment,
+                patch(
+                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    return_value={
+                        "id": 123,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-123",
+                    },
+                ) as create_comment,
+            ):
+                response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "waiting",
+                        "controller_action": "observe_candidate",
+                        "controller_record_id": "candidate-1",
+                        "message": "Waiting for required checks to settle.",
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        feedback = payload["result"]["feedback"]
+        self.assertEqual(feedback["delivery_status"], "delivered")
+        self.assertEqual(feedback["delivery_action"], "created_comment")
+        self.assertEqual(feedback["comment_id"], 123)
+        self.assertEqual(feedback["policy_sha256"], policy_record.policy_sha256)
+        self.assertIn("launchplane-merge-train", feedback["marker"])
+        self.assertIn("Waiting for required checks", feedback["comment_markdown"])
+        self.assertEqual(payload["records"]["merge_train_pr_feedback_id"], feedback["feedback_id"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].comment_id, 123)
+        self.assertEqual(records[0].delivery_action, "created_comment")
+        find_comment.assert_called_once()
+        create_comment.assert_called_once()
+
+    async def test_updates_managed_comment_and_records_evidence(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value={"id": 456, "body": "old body"},
+                ) as find_comment,
+                patch(
+                    "control_plane.merge_train_pr_feedback.update_github_issue_comment",
+                    return_value={
+                        "id": 456,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-456",
+                    },
+                ) as update_comment,
+                patch(
+                    "control_plane.merge_train_pr_feedback.create_github_issue_comment"
+                ) as create_comment,
+            ):
+                response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "completed",
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        feedback = response.json()["result"]["feedback"]
+        self.assertEqual(feedback["delivery_status"], "delivered")
+        self.assertEqual(feedback["delivery_action"], "updated_comment")
+        self.assertEqual(feedback["comment_id"], 456)
+        self.assertEqual(records[0].delivery_action, "updated_comment")
+        find_comment.assert_called_once()
+        update_comment.assert_called_once()
+        create_comment.assert_not_called()
+
+    async def test_rejects_comment_delivery_failure_but_records_evidence(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ),
+                patch(
+                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    side_effect=ClickException("GitHub API returned 502"),
+                ) as create_comment,
+            ):
+                response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "blocked",
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(response.status_code, 502)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "github_comment_delivery_failed")
+        self.assertIn("GitHub API returned 502", payload["error"]["message"])
+        feedback = payload["result"]["feedback"]
+        self.assertEqual(feedback["delivery_status"], "failed")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].delivery_status, "failed")
+        create_comment.assert_called_once()
+
+    async def test_replays_idempotent_request(self) -> None:
+        request_payload = {
+            "schema_version": 1,
+            "repository": "cbusillo/sellyouroutboard",
+            "base_branch": "main",
+            "pull_request_number": 7,
+            "event": "waiting",
+            "controller_action": "observe_candidate",
+            "controller_record_id": "candidate-1",
+            "message": "Waiting for required checks to settle.",
+        }
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ) as find_comment,
+                patch(
+                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    return_value={
+                        "id": 123,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-123",
+                    },
+                ) as create_comment,
+            ):
+                first_response = await _post_merge_train_pr_feedback(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-pr-feedback-7-waiting",
+                )
+                replay_response = await _post_merge_train_pr_feedback(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-pr-feedback-7-waiting",
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        first_payload = first_response.json()
+        replay_payload = replay_response.json()
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(
+            replay_payload["result"]["feedback"]["feedback_id"],
+            first_payload["result"]["feedback"]["feedback_id"],
+        )
+        self.assertEqual(len(records), 1)
+        find_comment.assert_called_once()
+        create_comment.assert_called_once()
+
+    async def test_rejects_reused_idempotency_key_with_different_payload(self) -> None:
+        request_payload = {
+            "schema_version": 1,
+            "repository": "cbusillo/sellyouroutboard",
+            "base_branch": "main",
+            "pull_request_number": 7,
+            "event": "waiting",
+        }
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ),
+                patch(
+                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    return_value={
+                        "id": 123,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-123",
+                    },
+                ),
+            ):
+                first_response = await _post_merge_train_pr_feedback(
+                    app,
+                    request_payload,
+                    idempotency_key="merge-train-pr-feedback-7-conflict",
+                )
+                conflict_response = await _post_merge_train_pr_feedback(
+                    app,
+                    {**request_payload, "event": "blocked"},
+                    idempotency_key="merge-train-pr-feedback-7-conflict",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_preserves_same_second_updates(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    return_value={"id": 456, "body": "old body"},
+                ),
+                patch(
+                    "control_plane.merge_train_pr_feedback.update_github_issue_comment",
+                    return_value={
+                        "id": 456,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-456",
+                    },
+                ),
+                patch(
+                    "control_plane.http_app.utc_now_timestamp",
+                    return_value="2026-05-20T15:00:00Z",
+                ),
+            ):
+                first_response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "waiting",
+                    },
+                )
+                second_response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "waiting",
+                        "message": "Still waiting after a rerun.",
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        self.assertNotEqual(
+            first_response.json()["result"]["feedback"]["feedback_id"],
+            second_response.json()["result"]["feedback"]["feedback_id"],
+        )
+        self.assertEqual(len(records), 2)
+
+    async def test_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: store,
+            )
+            with patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True):
+                response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "blocked",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_rejects_missing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                response = await _post_merge_train_pr_feedback(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "blocked",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "github_token_not_configured")
+
+    async def test_rejects_terminal_agent_bearer_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-pr-feedback-terminal-agent-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T21:00:00Z",
+                    policy=parse_merge_train_policy_toml(
+                        _merge_train_policy_table("cbusillo/sellyouroutboard").replace(
+                            'action = "merge_train.run_once"',
+                            'action = "merge_train.pr_feedback"',
+                        )
+                    ),
+                ),
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_merge_train_pr_feedback_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-read-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+            )
+            response = await _post_merge_train_pr_feedback(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "pull_request_number": 7,
+                    "event": "blocked",
+                },
+                authorization="Bearer terminal-read-token",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/merge-train/pr-feedback",
+                payload={
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "pull_request_number": 7,
+                    "event": "blocked",
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_openapi_includes_pr_feedback_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/work-graph/merge-train/pr-feedback"]["post"]
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
 
 
 class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
@@ -11138,6 +15669,403 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiPreviewDesiredStateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_desired_state_discovers_and_records_labeled_prs(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="preview_desired_state.discover",
+                    product="verireel",
+                    context="verireel-testing",
+                ),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+            record = PreviewDesiredStateRecord(
+                desired_state_id="preview-desired-state-verireel-testing-20260429T213000Z",
+                product="verireel",
+                context="verireel-testing",
+                source="launchplane-preview-lifecycle",
+                discovered_at="2026-04-29T21:30:00Z",
+                repository="every/verireel",
+                label="preview",
+                anchor_repo="verireel",
+                status="pass",
+                desired_count=1,
+                desired_previews=(
+                    PreviewLifecycleDesiredPreview(
+                        preview_slug="pr-42",
+                        anchor_repo="verireel",
+                        anchor_pr_number=42,
+                        anchor_pr_url="https://github.com/every/verireel/pull/42",
+                        head_sha="abc1234",
+                    ),
+                ),
+            )
+
+            with patch(
+                "control_plane.http_app.discover_github_preview_desired_state",
+                return_value=record,
+            ) as discover:
+                first_response = await _post_preview_desired_state(
+                    app,
+                    _preview_desired_state_payload(),
+                    idempotency_key="preview-desired-state:verireel-testing",
+                )
+                replay_response = await _post_preview_desired_state(
+                    app,
+                    _preview_desired_state_payload(),
+                    idempotency_key="preview-desired-state:verireel-testing",
+                )
+            records = store.list_preview_desired_state_records(context_name="verireel-testing")
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        payload = first_response.json()
+        self.assertEqual(
+            payload["records"]["preview_desired_state_id"],
+            "preview-desired-state-verireel-testing-20260429T213000Z",
+        )
+        self.assertEqual(payload["result"]["desired_previews"][0]["preview_slug"], "pr-42")
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(len(records), 1)
+        discover.assert_called_once()
+
+    async def test_preview_desired_state_rejects_unauthorized_workflow(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_notification_policy_apply_policy(
+                action="preview_lifecycle.plan",
+                product="verireel",
+                context="verireel-testing",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_preview_desired_state(app, _preview_desired_state_payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_generic_web_preview_desired_state_uses_profile_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_generic_web_preview_desired_state_identity()),
+                authz_policy=_generic_web_preview_desired_state_policy(
+                    context="sellyouroutboard-testing"
+                ),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+            record = PreviewDesiredStateRecord(
+                desired_state_id="preview-desired-state-syo-testing-1",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                source="generic-web-preview",
+                discovered_at="2026-04-30T21:00:00Z",
+                repository="cbusillo/sellyouroutboard",
+                label="preview",
+                anchor_repo="sellyouroutboard",
+                status="pass",
+                desired_count=0,
+            )
+
+            with patch(
+                "control_plane.http_app.discover_generic_web_preview_desired_state",
+                return_value=record,
+            ) as discover:
+                response = await _post_generic_web_preview_desired_state(
+                    app,
+                    _generic_web_preview_desired_state_payload(),
+                    idempotency_key="generic-web-preview-desired-state:syo",
+                )
+            records = store.list_preview_desired_state_records(
+                context_name="sellyouroutboard-testing"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            response.json()["records"]["preview_desired_state_id"],
+            "preview-desired-state-syo-testing-1",
+        )
+        discover.assert_called_once()
+        _, kwargs = discover.call_args
+        self.assertEqual(kwargs["profile"].preview.context, "sellyouroutboard-testing")
+        self.assertEqual(records[0].desired_state_id, "preview-desired-state-syo-testing-1")
+
+    async def test_generic_web_preview_desired_state_rejects_wrong_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_generic_web_preview_desired_state_identity()),
+                authz_policy=_generic_web_preview_desired_state_policy(context="different-context"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_generic_web_preview_desired_state(
+                app,
+                _generic_web_preview_desired_state_payload(),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_generic_web_preview_desired_state_keeps_profile_errors_invalid_request(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            profile_payload = _product_profile_payload()
+            profile_payload["preview"] = {
+                "enabled": False,
+                "context": "sellyouroutboard-testing",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_generic_web_preview_desired_state_identity()),
+                authz_policy=_generic_web_preview_desired_state_policy(
+                    context="sellyouroutboard-testing"
+                ),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            with patch(
+                "control_plane.http_app.discover_generic_web_preview_desired_state"
+            ) as discover:
+                response = await _post_generic_web_preview_desired_state(
+                    app,
+                    _generic_web_preview_desired_state_payload(),
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        discover.assert_not_called()
+
+    async def test_openapi_includes_preview_desired_state_routes(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        self.assertEqual(
+            openapi["paths"]["/v1/previews/desired-state"]["post"]["operationId"],
+            "apply_preview_desired_state",
+        )
+        self.assertEqual(
+            openapi["paths"]["/v1/drivers/generic-web/preview-desired-state"]["post"][
+                "operationId"
+            ],
+            "apply_generic_web_preview_desired_state",
+        )
+
+
+class FastApiPreviewPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_pr_feedback_records_skipped_delivery_without_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+            feedback_records = store.list_preview_pr_feedback_records(
+                context_name="verireel-testing"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["preview_pr_feedback_id"], feedback_records[0].feedback_id
+        )
+        self.assertEqual(payload["result"]["delivery_status"], "skipped")
+        self.assertIn("Launchplane preview is ready", payload["result"]["comment_markdown"])
+        self.assertIn("GITHUB_TOKEN", feedback_records[0].error_message)
+
+    async def test_preview_pr_feedback_replays_idempotent_notification(self) -> None:
+        sent_payloads: list[tuple[str, dict[str, object]]] = []
+
+        def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
+            sent_payloads.append((webhook_url, payload))
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ),
+        ):
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+                preview_pr_feedback_discord_sender=send_discord,
+            )
+            try:
+                secret_result = control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration="preview-pr-feedback-notifications",
+                    name="discord webhook",
+                    plaintext_value="https://discord.com/api/webhooks/test/webhook",
+                    binding_key="DISCORD_WEBHOOK",
+                    context_name="launchplane",
+                    instance_name="preview-feedback",
+                    actor="test",
+                    source_label="test",
+                )
+                store.write_preview_pr_feedback_notification_policy_record(
+                    _preview_pr_feedback_notification_policy_record(
+                        policy_id="preview-pr-feedback-notification-discord",
+                        product="verireel",
+                        context="verireel-testing",
+                        repository="every/verireel",
+                    ).model_copy(
+                        update={
+                            "destinations": (
+                                PreviewPrFeedbackNotificationDestination(
+                                    destination_id="discord",
+                                    kind="discord",
+                                    discord_webhook_secret=str(secret_result["secret_id"]),
+                                ),
+                            )
+                        }
+                    )
+                )
+                first_response = await _post_preview_pr_feedback(
+                    app,
+                    _preview_pr_feedback_payload(),
+                    idempotency_key="preview-pr-feedback:verireel:42",
+                )
+                replay_response = await _post_preview_pr_feedback(
+                    app,
+                    _preview_pr_feedback_payload(),
+                    idempotency_key="preview-pr-feedback:verireel:42",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(len(sent_payloads), 1)
+        first_payload = first_response.json()
+        self.assertEqual(
+            first_payload["result"]["notifications"][0]["delivery_status"], "delivered"
+        )
+        sent_embeds = cast(list[dict[str, object]], sent_payloads[0][1]["embeds"])
+        sent_embed = sent_embeds[0]
+        sent_embed_fields = cast(list[dict[str, str]], sent_embed["fields"])
+        sent_fields = {field["name"]: field["value"] for field in sent_embed_fields}
+        self.assertEqual(sent_fields["Pull request"], "https://github.com/every/verireel/pull/42")
+        self.assertEqual(
+            sent_fields["Workflow"], "https://github.com/every/verireel/actions/runs/123"
+        )
+
+    async def test_preview_pr_feedback_dry_run_authorizes_without_writing(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_preview_pr_feedback(
+                app,
+                _preview_pr_feedback_payload(dry_run=True),
+            )
+            feedback_records = store.list_preview_pr_feedback_records(
+                context_name="verireel-testing"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["preview_pr_feedback"], "authorized")
+        self.assertEqual(feedback_records, ())
+
+    async def test_preview_pr_feedback_accepts_lifecycle_refresh_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_refresh.execute"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+            feedback_records = store.list_preview_pr_feedback_records(
+                context_name="verireel-testing"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(feedback_records[0].status, "ready")
+
+    async def test_preview_pr_feedback_rejects_unauthorized_workflow(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_generation.write"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_openapi_includes_preview_pr_feedback_route(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/previews/pr-feedback"]["post"]
+        self.assertEqual(route["operationId"], "apply_preview_pr_feedback")
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+
+
 class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_ingress_route_dry_run_returns_plan_without_mutation(self) -> None:
         client = _FakeNpmplusIngressClient()
@@ -14025,7 +18953,7 @@ class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
             route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/AcceptedEvidenceResponse",
         )
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             self.assertIn("LaunchplaneErrorResponse", json.dumps(route["responses"][status_code]))
         self.assertEqual(
             openapi["components"]["schemas"]["BackupGateEvidenceRequest"]["additionalProperties"],
@@ -14674,7 +19602,7 @@ class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_schema["$ref"], "#/components/schemas/PromotionEvidenceRequest")
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         promotion_schema = openapi["components"]["schemas"]["PromotionEvidenceRequest"]
@@ -15016,7 +19944,7 @@ class FastApiPreviewGenerationEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"]["PreviewGenerationEvidenceEnvelope"]
@@ -15336,7 +20264,7 @@ class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"]["PreviewDestroyedEvidenceEnvelope"]
@@ -15658,7 +20586,7 @@ class FastApiRunnerHostHygieneAuditEvidenceTests(unittest.IsolatedAsyncioTestCas
         )
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"]["RunnerHostHygieneAuditEvidenceEnvelope"]
@@ -15988,7 +20916,7 @@ class FastApiRunnerLaneRegistrationAuditEvidenceTests(unittest.IsolatedAsyncioTe
         )
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"][
@@ -16163,6 +21091,335 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "invalid_request")
         self.assertNotIn("detail", payload)
 
+    async def test_deployment_evidence_requires_json_content_type(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "text/plain",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress requests require Content-Type: application/json.",
+        )
+
+    async def test_deployment_evidence_accepts_json_content_type_with_charset(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/evidence/deployments",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["status"], "accepted")
+
+    async def test_deployment_evidence_rejects_invalid_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "not-a-number",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress Content-Length must be an unsigned decimal integer.",
+        )
+
+    async def test_deployment_evidence_rejects_empty_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "   ",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress Content-Length must be an unsigned decimal integer.",
+        )
+
+    async def test_deployment_evidence_rejects_plus_prefixed_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "+2",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress Content-Length must be an unsigned decimal integer.",
+        )
+
+    async def test_deployment_evidence_rejects_duplicate_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "2",
+            },
+            extra_headers=[("Content-Length", "200")],
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress requests require exactly one Content-Length header.",
+        )
+
+    async def test_deployment_evidence_rejects_negative_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "-1",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress Content-Length must be an unsigned decimal integer.",
+        )
+
+    async def test_deployment_evidence_requires_bounded_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+            set_content_length=False,
+        )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "request_entity_too_large")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress requests require a bounded Content-Length.",
+        )
+
+    async def test_deployment_evidence_rejects_duplicate_chunked_transfer_encoding(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Transfer-Encoding": "identity",
+            },
+            extra_headers=[("Transfer-Encoding", "chunked")],
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+            set_content_length=False,
+        )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "request_entity_too_large")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress requests require a bounded Content-Length.",
+        )
+
+    async def test_deployment_evidence_rejects_chunked_transfer_encoding(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Transfer-Encoding": "chunked",
+            },
+            raw_body=json.dumps(_deployment_evidence_payload()).encode("utf-8"),
+            set_content_length=False,
+        )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "request_entity_too_large")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Evidence ingress requests require a bounded Content-Length.",
+        )
+
+    async def test_deployment_evidence_rejects_oversized_content_length(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": str(2 * 1024 * 1024 + 1),
+            },
+            raw_body=b"{}",
+        )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "request_entity_too_large")
+        self.assertEqual(payload["error"]["message"], "Evidence ingress request body is too large.")
+
+    async def test_deployment_evidence_rejects_stream_body_over_limit(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/evidence/deployments",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+                "Content-Length": "2",
+            },
+            raw_body=b"{" + (b" " * (2 * 1024 * 1024 + 1)),
+        )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "request_entity_too_large")
+        self.assertEqual(payload["error"]["message"], "Evidence ingress request body is too large.")
+
     async def test_deployment_evidence_replays_idempotent_write(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -16248,7 +21505,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/AcceptedEvidenceResponse",
         )
-        for status_code in ("400", "401", "403", "409", "503"):
+        for status_code in ("400", "401", "403", "409", "413", "503"):
             self.assertIn("LaunchplaneErrorResponse", json.dumps(route["responses"][status_code]))
         self.assertEqual(
             openapi["components"]["schemas"]["DeploymentEvidenceRequest"]["additionalProperties"],
@@ -16355,6 +21612,38 @@ def _terminal_agent_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
                     "products": ["launchplane"],
                     "contexts": ["launchplane"],
                     "actions": ["work_graph.rank"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_merge_train_pr_feedback_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["merge_train.pr_feedback"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_merge_train_run_once_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["merge_train.run_once"],
                 }
             ]
         }
@@ -18028,6 +23317,34 @@ def _notification_policy_apply_policy(
     )
 
 
+def _generic_web_preview_desired_state_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "cbusillo/sellyouroutboard",
+                    "workflow_refs": [
+                        "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["sellyouroutboard"],
+                    "contexts": [context],
+                    "actions": ["preview_desired_state.discover"],
+                }
+            ]
+        }
+    )
+
+
+def _generic_web_preview_desired_state_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="cbusillo/sellyouroutboard",
+        workflow_ref=(
+            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+        ),
+    )
+
+
 def _runtime_key_safety_policy_apply_policy(*, action: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -18168,6 +23485,60 @@ def _preview_pr_feedback_notification_policy_record(
             ),
         ),
     )
+
+
+def _preview_pr_feedback_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="every/verireel",
+        workflow_ref=(
+            "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge"
+        ),
+        event_name="pull_request",
+    )
+
+
+def _preview_pr_feedback_policy(*, action: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["verireel"],
+                    "contexts": ["verireel-testing"],
+                    "actions": [action],
+                }
+            ]
+        }
+    )
+
+
+def _preview_pr_feedback_payload(
+    *,
+    status: str = "ready",
+    dry_run: bool = False,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "product": "verireel",
+        "context": "verireel-testing",
+        "source": "preview-control-plane",
+        "repository": "every/verireel",
+        "anchor_repo": "verireel",
+        "anchor_pr_number": 42,
+        "anchor_pr_url": "https://github.com/every/verireel/pull/42",
+        "status": status,
+        "preview_url": "https://pr-42.preview.example",
+        "immutable_image_reference": "ghcr.io/every/verireel:pr-42-a1b2c3d4",
+        "refresh_image_reference": "ghcr.io/every/verireel:preview-pr-42",
+        "revision": "a1b2c3d4",
+        "run_url": "https://github.com/every/verireel/actions/runs/123",
+    }
+    if dry_run:
+        payload["dry_run"] = True
+    return payload
 
 
 def _ingress_route_audit_record(
@@ -19067,6 +24438,141 @@ async def _get_preview_pr_feedback_notification_attempts(
     )
 
 
+async def _post_preview_pr_feedback(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/previews/pr-feedback",
+        headers=headers,
+        payload=payload,
+    )
+
+
+async def _post_merge_train_pr_feedback(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/merge-train/pr-feedback",
+        headers=headers,
+        payload=payload,
+    )
+
+
+async def _post_merge_train_run_once(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/merge-train/run-once",
+        headers=headers,
+        payload=payload,
+    )
+
+
+async def _post_merge_train_batch_candidate_run_once(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/merge-train/batch-candidate/run-once",
+        headers=headers,
+        payload=payload,
+    )
+
+
+async def _post_merge_train_controller_run_once(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/merge-train/controller/run-once",
+        headers=headers,
+        payload=payload,
+    )
+
+
+async def _post_merge_train_batch_landing_run_once(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    capture_server_error_response: bool = False,
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/merge-train/batch-landing/run-once",
+        headers=headers,
+        payload=payload,
+        capture_server_error_response=capture_server_error_response,
+    )
+
+
+async def _post_merge_train_stack_collapse_run_once(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/merge-train/stack-collapse/run-once",
+        headers=headers,
+        payload=payload,
+    )
+
+
 def _query_params(**values: str) -> dict[str, str]:
     return {key: value for key, value in values.items() if value != ""}
 
@@ -19597,6 +25103,72 @@ async def _post_product_profile(
     )
 
 
+def _preview_desired_state_payload(*, label: str = "preview") -> dict[str, object]:
+    return {
+        "product": "verireel",
+        "context": "verireel-testing",
+        "source": "launchplane-preview-lifecycle",
+        "repository": "every/verireel",
+        "label": label,
+        "anchor_repo": "verireel",
+    }
+
+
+async def _post_preview_desired_state(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/previews/desired-state",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+def _generic_web_preview_desired_state_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "sellyouroutboard",
+        "desired_state": {
+            "schema_version": 1,
+            "product": "sellyouroutboard",
+        },
+    }
+
+
+async def _post_generic_web_preview_desired_state(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/drivers/generic-web/preview-desired-state",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _post_product_config_apply(
     app: FastAPI,
     payload: dict[str, object],
@@ -19983,8 +25555,11 @@ async def _asgi_request(
     path: str,
     *,
     headers: dict[str, str] | None = None,
+    extra_headers: list[tuple[str, str]] | None = None,
     payload: dict[str, object] | None = None,
     raw_body: bytes | None = None,
+    set_content_length: bool = True,
+    capture_server_error_response: bool = False,
 ) -> _AsgiResponse:
     request_path, separator, raw_query_string = path.partition("?")
     request_headers_dict = dict(headers or {})
@@ -19994,11 +25569,15 @@ async def _asgi_request(
     elif payload is not None:
         body = json.dumps(payload).encode("utf-8")
         request_headers_dict.setdefault("Content-Type", "application/json")
-    request_headers_dict.setdefault("Content-Length", str(len(body)))
+    if set_content_length:
+        request_headers_dict.setdefault("Content-Length", str(len(body)))
     request_headers = [
         (key.lower().encode("ascii"), value.encode("latin-1"))
         for key, value in request_headers_dict.items()
     ]
+    request_headers.extend(
+        (key.lower().encode("ascii"), value.encode("latin-1")) for key, value in extra_headers or []
+    )
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
@@ -20025,7 +25604,13 @@ async def _asgi_request(
     async def send(message: MutableMapping[str, Any]) -> None:
         sent.append(message)
 
-    await app(scope, receive, send)
+    try:
+        await app(scope, receive, send)
+    except Exception:
+        if not capture_server_error_response or not any(
+            message["type"] == "http.response.start" for message in sent
+        ):
+            raise
 
     start = next(message for message in sent if message["type"] == "http.response.start")
     body = b"".join(
@@ -20049,8 +25634,127 @@ class _CaseInsensitiveHeaders(dict[str, str]):
         return super().__getitem__(key.lower())
 
 
+class _StubFastApiGitHubOAuthClient:
+    def __init__(
+        self,
+        identity: GitHubHumanIdentity,
+        *,
+        fail_fetch: bool = False,
+        permission_error: bool = False,
+    ) -> None:
+        self.identity = identity
+        self.fail_fetch = fail_fetch
+        self.permission_error = permission_error
+        self.authorization_state = ""
+        self.code_verifier = ""
+
+    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+        self.authorization_state = state
+        return f"https://github.example/authorize?state={state}&challenge={code_challenge}"
+
+    def fetch_identity(
+        self,
+        *,
+        code: str,
+        code_verifier: str,
+        authz_policy: LaunchplaneAuthzPolicy,
+    ) -> GitHubHumanIdentity:
+        del authz_policy
+        self.code_verifier = code_verifier
+        if self.permission_error:
+            raise PermissionError("not authorized")
+        if self.fail_fetch or code != "github-code":
+            raise ValueError("unexpected code")
+        return self.identity
+
+
 class _MissingProductReadStore:
     pass
+
+
+class _MergeTrainPolicyOnlyStore:
+    backend_name = "test-merge-train-policy-only"
+
+    def __init__(self, *, state_dir: Path) -> None:
+        self.delegate = FilesystemRecordStore(state_dir=state_dir)
+
+    def close(self) -> None:
+        return None
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        return self.delegate.read_idempotency_record(
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object:
+        return self.delegate.write_idempotency_record(record)
+
+    def list_merge_train_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[MergeTrainPolicyRecord, ...]:
+        return self.delegate.list_merge_train_policy_records(status=status, limit=limit)
+
+
+class _PreviewLifecycleSweepProfileOnlyStore:
+    backend_name = "test-preview-lifecycle-sweep-profile-only"
+
+    def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
+        self.profile = profile
+
+    def close(self) -> None:
+        return None
+
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        return (self.profile,)
+
+
+class _PreviewLifecycleCleanupPlanOnlyStore:
+    backend_name = "test-preview-lifecycle-cleanup-plan-only"
+
+    def __init__(self, *, state_dir: Path) -> None:
+        self.delegate = FilesystemRecordStore(state_dir=state_dir)
+        self.cleanup_records: list[PreviewLifecycleCleanupRecord] = []
+
+    def close(self) -> None:
+        return None
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        return self.delegate.read_idempotency_record(
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object:
+        return self.delegate.write_idempotency_record(record)
+
+    def list_preview_lifecycle_plan_records(
+        self, *, context_name: str = "", limit: int | None = 25
+    ) -> tuple[PreviewLifecyclePlanRecord, ...]:
+        return self.delegate.list_preview_lifecycle_plan_records(
+            context_name=context_name,
+            limit=limit,
+        )
+
+    def write_preview_lifecycle_cleanup_record(
+        self, record: PreviewLifecycleCleanupRecord
+    ) -> object:
+        self.cleanup_records.append(record)
+        return f"preview-lifecycle-cleanup://{record.cleanup_id}"
 
 
 class _ConcurrentProductConfigDryRunMarkerStore:

@@ -1,5 +1,7 @@
 import hashlib
 import json
+import logging
+import os
 import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -10,9 +12,10 @@ from uuid import uuid4
 import click
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import dokploy as control_plane_dokploy
@@ -108,6 +111,41 @@ from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
 )
+from control_plane.merge_train_batch_landing import (
+    MergeTrainBatchLandingPlanRecordNotFoundError,
+    MergeTrainBatchLandingRunOnceEnvelope,
+    execute_merge_train_batch_landing_run_once,
+    require_merge_train_batch_landing_plan_record_store,
+)
+from control_plane.merge_train_batch_candidate import (
+    MergeTrainBatchCandidateRecordNotFoundError,
+    MergeTrainBatchCandidateRunOnceEnvelope,
+    execute_merge_train_batch_candidate_run_once,
+    require_merge_train_batch_candidate_record_store,
+)
+from control_plane.merge_train_controller_run_once import (
+    MergeTrainControllerRequestError,
+    MergeTrainControllerRunOnceEnvelope,
+    execute_merge_train_controller_run_once,
+)
+from control_plane.merge_train_github import MergeTrainGitHubError, MergeTrainGitHubStaleHeadError
+from control_plane.merge_train_pr_feedback import (
+    MergeTrainPrFeedbackEnvelope,
+    build_merge_train_pr_feedback_record,
+    require_merge_train_pr_feedback_record_store,
+)
+from control_plane.merge_train_run_once import (
+    MergeTrainRunOnceEnvelope,
+    execute_merge_train_run_once,
+    require_merge_train_run_record_store,
+)
+from control_plane.merge_train_stack_collapse import (
+    MergeTrainStackCollapseBatchCandidateStoreMissingError,
+    MergeTrainStackCollapsePlanRecordNotFoundError,
+    MergeTrainStackCollapseRunOnceEnvelope,
+    execute_merge_train_stack_collapse_run_once,
+    require_merge_train_stack_collapse_plan_record_store,
+)
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductActivityReadModel,
@@ -125,6 +163,7 @@ from control_plane.contracts.preview_evidence import (
     PreviewGenerationEvidenceEnvelope,
 )
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
@@ -133,6 +172,10 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
 from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationAttemptRecord,
     PreviewPrFeedbackNotificationPolicyRecord,
+)
+from control_plane.contracts.preview_pr_feedback_record import (
+    PreviewPrFeedbackRecord,
+    PreviewPrFeedbackStatus,
 )
 from control_plane.contracts.preview_readiness_read_model import (
     PreviewReadinessReadModel,
@@ -160,12 +203,31 @@ from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
 from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
+from control_plane.drivers.generic_web_preview_dispatch import (
+    GenericWebPreviewDesiredStateEnvelope,
+    _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
+)
 from control_plane.every_code_work_request_write import (
     EveryCodeWorkRequestCreateEnvelope,
     build_every_code_work_request_record,
 )
 from control_plane.every_code_notifications_delivery import deliver_every_code_blocked_notifications
 from control_plane.notifications import post_discord_webhook
+from control_plane.preview_pr_feedback_notifications import (
+    deliver_preview_pr_feedback_notifications,
+)
+from control_plane.preview_lifecycle_cleanup_routes import (
+    PreviewLifecycleCleanupEnvelope,
+    PreviewLifecycleSweepEnvelope,
+    build_preview_lifecycle_sweep,
+    latest_preview_lifecycle_plan,
+    preview_lifecycle_cleanup_profile_settings,
+    preview_lifecycle_sweep_profiles,
+    require_preview_lifecycle_cleanup_apply_store,
+    require_preview_lifecycle_cleanup_mutation_store,
+    require_preview_lifecycle_sweep_store,
+    write_preview_lifecycle_cleanup_apply_record,
+)
 from control_plane.product_config_http import (
     ProductConfigApplyEnvelope,
     product_config_live_target_next_actions,
@@ -187,6 +249,7 @@ from control_plane.runtime_key_safety import (
     runtime_key_safety_environment_class,
 )
 from control_plane.service_auth import (
+    AgentAuthzDecision,
     BearerIdentityConfig,
     GitHubActionsIdentity,
     GitHubHumanIdentity,
@@ -199,7 +262,14 @@ from control_plane.service_auth import (
     agent_authz_audit,
     bearer_identity_from_token,
 )
-from control_plane.service_human_auth import HumanSessionManager, LaunchplaneHumanSession
+from control_plane.service_human_auth import (
+    HumanSessionManager,
+    LaunchplaneHumanSession,
+    OAuthLoginState,
+    OAuthLoginStateStore,
+    build_pkce_verifier,
+    safe_oauth_return_to,
+)
 from control_plane.launchplane_mutations import (
     LaunchplaneDestroyPreviewStore,
     LaunchplaneMutationStore,
@@ -236,6 +306,20 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     reconcile_stale_odoo_stable_operation_records,
 )
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
+from control_plane.workflows.preview_lifecycle_cleanup import (
+    build_preview_lifecycle_cleanup_record,
+)
+from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
+from control_plane.workflows.preview_pr_feedback import (
+    DEFAULT_PREVIEW_FEEDBACK_MARKER,
+    EveryCodeWorkRequestReadStore,
+    build_preview_pr_feedback_record,
+)
+from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
+from control_plane.workflows.generic_web_preview import (
+    GenericWebPreviewProfileStore,
+    discover_generic_web_preview_desired_state,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.work_graph_issue_inbox import (
     GitHubIssueInboxReadModel,
@@ -257,6 +341,9 @@ EveryCodeGitHubWebhookHandler = Callable[
 ]
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
 _LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
 _LAUNCHPLANE_DRIVER_READ_CONTEXT = "launchplane"
@@ -267,6 +354,18 @@ _PREVIEW_GENERATION_EVIDENCE_ROUTE = "/v1/evidence/previews/generations"
 _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
 _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
+_EVIDENCE_INGRESS_MAX_BODY_BYTES = 2 * 1024 * 1024
+_EVIDENCE_INGRESS_ROUTES = frozenset(
+    {
+        _DEPLOYMENT_EVIDENCE_ROUTE,
+        _BACKUP_GATE_EVIDENCE_ROUTE,
+        _PROMOTION_EVIDENCE_ROUTE,
+        _PREVIEW_GENERATION_EVIDENCE_ROUTE,
+        _PREVIEW_DESTROYED_EVIDENCE_ROUTE,
+        _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE,
+        _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE,
+    }
+)
 _DOKPLOY_TARGET_SETUP_ROUTE = "/v1/dokploy-targets/setup"
 _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE = "/v1/products/public-ingress-monitor/run-once"
 _PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/public-ingress/notification-policies/apply"
@@ -274,7 +373,17 @@ _EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/every-code/notification-polic
 _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
     "/v1/previews/pr-feedback/notification-policies/apply"
 )
+_PREVIEW_PR_FEEDBACK_ROUTE = "/v1/previews/pr-feedback"
+_PREVIEW_DESIRED_STATE_ROUTE = "/v1/previews/desired-state"
 _PREVIEW_LIFECYCLE_PLAN_ROUTE = "/v1/previews/lifecycle-plan"
+_PREVIEW_LIFECYCLE_CLEANUP_ROUTE = "/v1/previews/lifecycle-cleanup"
+_PREVIEW_LIFECYCLE_SWEEP_ROUTE = "/v1/previews/lifecycle-sweep"
+_MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
+_MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
+_MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/controller/run-once"
+_MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
+_MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
+_MERGE_TRAIN_PR_FEEDBACK_ROUTE = "/v1/work-graph/merge-train/pr-feedback"
 _RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE = "/v1/runtime-key-safety/policies/apply"
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
 _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
@@ -294,6 +403,10 @@ _AUTHZ_POLICY_GITHUB_HUMANS_GRANTS_ROUTE = "/v1/authz-policies/github-humans/gra
 _AUTHZ_POLICY_TERMINAL_AGENTS_GRANTS_ROUTE = "/v1/authz-policies/terminal-agents/grants"
 _AUTHZ_POLICY_LOCAL_OPERATORS_GRANTS_ROUTE = "/v1/authz-policies/local-operators/grants"
 _AUTHZ_POLICY_LOCAL_ADMINS_GRANTS_ROUTE = "/v1/authz-policies/local-admins/grants"
+_AUTH_SESSION_ROUTE = "/v1/auth/session"
+_AUTH_GITHUB_LOGIN_ROUTE = "/auth/github/login"
+_AUTH_GITHUB_CALLBACK_ROUTE = "/auth/github/callback"
+_AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
@@ -353,6 +466,13 @@ class ProductProfileWriteStore(Protocol):
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> object: ...
 
 
+class PreviewDesiredStateWriteStore(Protocol):
+    def write_preview_desired_state_record(
+        self,
+        record: PreviewDesiredStateRecord,
+    ) -> object: ...
+
+
 class WorkGraphSnapshotReadStore(ProductReadModelStore, WorkGraphWorkRequestStore, Protocol):
     pass
 
@@ -369,6 +489,24 @@ class OdooStableTargetReplacementOperationReadStore(Protocol):
     ) -> OdooStableTargetReplacementOperationRecord: ...
 
 
+class GitHubOAuthLoginClient(Protocol):
+    def authorization_url(self, *, state: str, code_challenge: str) -> str: ...
+
+    def fetch_identity(
+        self,
+        *,
+        code: str,
+        code_verifier: str,
+        authz_policy: LaunchplaneAuthzPolicy,
+    ) -> GitHubHumanIdentity: ...
+
+
+class OAuthLoginStateRepository(Protocol):
+    def put(self, *, state: str, code_verifier: str, return_to: str) -> OAuthLoginState: ...
+
+    def pop(self, state: str) -> OAuthLoginState | None: ...
+
+
 class LaunchplaneErrorDetail(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -383,6 +521,7 @@ class LaunchplaneErrorResponse(BaseModel):
     trace_id: str
     error: LaunchplaneErrorDetail
     records: dict[str, str] | None = None
+    authz: dict[str, object] | None = None
 
 
 class HealthResponse(BaseModel):
@@ -402,6 +541,197 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     storage_backend: str
+
+
+class GitHubHumanIdentityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["github"] = "github"
+    login: str
+    github_id: int
+    name: str
+    email: str
+    organizations: tuple[str, ...]
+    teams: tuple[str, ...]
+    role: Literal["read_only", "admin"]
+
+
+class AuthSessionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    identity: GitHubHumanIdentityResponse
+
+
+class AuthSessionRequiredResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["rejected"] = "rejected"
+    trace_id: str
+    error: LaunchplaneErrorDetail
+    configured: bool
+
+
+class AuthLogoutResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+
+
+class EvidenceIngressRequestContractMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope.get("type") != "http"
+            or str(scope.get("method", "")).upper() != "POST"
+            or str(scope.get("path", "")) not in _EVIDENCE_INGRESS_ROUTES
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        content_type_values = _asgi_header_values(scope=scope, name="content-type")
+        content_type = content_type_values[0] if len(content_type_values) == 1 else ""
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=400,
+                code="invalid_request",
+                message="Evidence ingress requests require Content-Type: application/json.",
+            )
+            return
+
+        transfer_encoding_tokens = {
+            token.split(";", 1)[0].strip().lower()
+            for value in _asgi_header_values(scope=scope, name="transfer-encoding")
+            for token in value.split(",")
+            if token.strip()
+        }
+        if "chunked" in transfer_encoding_tokens:
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=413,
+                code="request_entity_too_large",
+                message="Evidence ingress requests require a bounded Content-Length.",
+            )
+            return
+
+        content_length_values = _asgi_header_values(scope=scope, name="content-length")
+        if not content_length_values:
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=413,
+                code="request_entity_too_large",
+                message="Evidence ingress requests require a bounded Content-Length.",
+            )
+            return
+        if len(content_length_values) != 1:
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=400,
+                code="invalid_request",
+                message="Evidence ingress requests require exactly one Content-Length header.",
+            )
+            return
+        content_length = content_length_values[0].strip()
+        if not content_length or not all("0" <= character <= "9" for character in content_length):
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=400,
+                code="invalid_request",
+                message="Evidence ingress Content-Length must be an unsigned decimal integer.",
+            )
+            return
+        declared_body_size = int(content_length)
+        if declared_body_size > _EVIDENCE_INGRESS_MAX_BODY_BYTES:
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=413,
+                code="request_entity_too_large",
+                message="Evidence ingress request body is too large.",
+            )
+            return
+
+        buffered_messages: list[Message] = []
+        observed_body_size = 0
+        while True:
+            message = await receive()
+            if message.get("type") != "http.request":
+                buffered_messages.append(message)
+                break
+            body = message.get("body", b"")
+            if isinstance(body, bytes):
+                observed_body_size += len(body)
+            if observed_body_size > _EVIDENCE_INGRESS_MAX_BODY_BYTES:
+                await _send_launchplane_error_response(
+                    scope=scope,
+                    receive=receive,
+                    send=send,
+                    status_code=413,
+                    code="request_entity_too_large",
+                    message="Evidence ingress request body is too large.",
+                )
+                return
+            buffered_messages.append(message)
+            if not message.get("more_body", False):
+                break
+
+        next_message_index = 0
+
+        async def replay_receive() -> Message:
+            nonlocal next_message_index
+            if next_message_index < len(buffered_messages):
+                message = buffered_messages[next_message_index]
+                next_message_index += 1
+                return message
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+
+def _asgi_header_values(*, scope: Scope, name: str) -> list[str]:
+    header_values: list[str] = []
+    normalized_name = name.lower().encode("latin-1")
+    for raw_name, raw_value in scope.get("headers", []):
+        if raw_name.lower() == normalized_name:
+            header_values.append(raw_value.decode("latin-1"))
+    return header_values
+
+
+async def _send_launchplane_error_response(
+    *,
+    scope: Scope,
+    receive: Receive,
+    send: Send,
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    payload = LaunchplaneErrorResponse(
+        trace_id=f"launchplane_req_{uuid4().hex}",
+        error=LaunchplaneErrorDetail(code=code, message=message),
+    )
+    response = JSONResponse(
+        status_code=status_code,
+        content=payload.model_dump(mode="json", exclude_none=True),
+    )
+    await response(scope, receive, send)
 
 
 class LaunchplaneRuntimeStatus(BaseModel):
@@ -1225,6 +1555,46 @@ class PreviewPrFeedbackNotificationPolicyApplyEnvelope(BaseModel):
         return self
 
 
+class PreviewPrFeedbackEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    source: str = "workflow"
+    repository: str
+    anchor_repo: str
+    anchor_pr_number: int = Field(ge=1)
+    anchor_pr_url: str
+    status: PreviewPrFeedbackStatus
+    marker: str = DEFAULT_PREVIEW_FEEDBACK_MARKER
+    preview_url: str = ""
+    immutable_image_reference: str = ""
+    refresh_image_reference: str = ""
+    revision: str = ""
+    run_url: str = ""
+    failure_summary: str = ""
+    dry_run: bool = False
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewPrFeedbackEnvelope":
+        if not self.product.strip():
+            raise ValueError("preview PR feedback requires product")
+        if not self.context.strip():
+            raise ValueError("preview PR feedback requires context")
+        if not self.source.strip():
+            raise ValueError("preview PR feedback requires source")
+        if not self.repository.strip():
+            raise ValueError("preview PR feedback requires repository")
+        if not self.anchor_repo.strip():
+            raise ValueError("preview PR feedback requires anchor_repo")
+        if not self.anchor_pr_url.strip():
+            raise ValueError("preview PR feedback requires anchor_pr_url")
+        if not self.marker.strip():
+            raise ValueError("preview PR feedback requires marker")
+        return self
+
+
 class PreviewLifecyclePlanEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1243,6 +1613,38 @@ class PreviewLifecyclePlanEnvelope(BaseModel):
             raise ValueError("preview lifecycle plan requires context")
         if not self.source.strip():
             raise ValueError("preview lifecycle plan requires source")
+        return self
+
+
+class PreviewDesiredStateEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    source: str = "workflow"
+    repository: str
+    label: str = "preview"
+    anchor_repo: str
+    preview_slug_prefix: str = "pr-"
+    max_pages: int = Field(default=10, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewDesiredStateEnvelope":
+        if not self.product.strip():
+            raise ValueError("preview desired state requires product")
+        if not self.context.strip():
+            raise ValueError("preview desired state requires context")
+        if not self.source.strip():
+            raise ValueError("preview desired state requires source")
+        if not self.repository.strip():
+            raise ValueError("preview desired state requires repository")
+        if not self.label.strip():
+            raise ValueError("preview desired state requires label")
+        if not self.anchor_repo.strip():
+            raise ValueError("preview desired state requires anchor_repo")
+        if not self.preview_slug_prefix.strip():
+            raise ValueError("preview desired state requires preview_slug_prefix")
         return self
 
 
@@ -1424,6 +1826,13 @@ class _PreviewPrFeedbackNotificationPolicyApplyStore(Protocol):
     def write_preview_pr_feedback_notification_policy_record(
         self,
         record: PreviewPrFeedbackNotificationPolicyRecord,
+    ) -> object: ...
+
+
+class _PreviewPrFeedbackWriteStore(Protocol):
+    def write_preview_pr_feedback_record(
+        self,
+        record: PreviewPrFeedbackRecord,
     ) -> object: ...
 
 
@@ -2337,6 +2746,95 @@ def require_preview_lifecycle_plan_apply_store(
     return cast(_PreviewLifecyclePlanApplyStore, record_store)
 
 
+def require_preview_desired_state_write_store(
+    record_store: object,
+) -> PreviewDesiredStateWriteStore:
+    write_record = getattr(record_store, "write_preview_desired_state_record", None)
+    if not callable(write_record):
+        raise TypeError(
+            "Launchplane record store does not support preview desired-state writes: "
+            "write_preview_desired_state_record"
+        )
+    return cast(PreviewDesiredStateWriteStore, record_store)
+
+
+def require_preview_pr_feedback_write_store(
+    record_store: object,
+) -> _PreviewPrFeedbackWriteStore:
+    write_record = getattr(record_store, "write_preview_pr_feedback_record", None)
+    if not callable(write_record):
+        raise TypeError(
+            "Launchplane record store does not support preview PR feedback writes: "
+            "write_preview_pr_feedback_record"
+        )
+    return cast(_PreviewPrFeedbackWriteStore, record_store)
+
+
+def supports_every_code_work_requests(record_store: object) -> bool:
+    return hasattr(record_store, "list_every_code_work_request_records")
+
+
+def allows_preview_pr_feedback_write(
+    *,
+    authz_policy: LaunchplaneAuthzPolicy,
+    identity: LaunchplaneIdentity,
+    product: str,
+    context: str,
+    status: PreviewPrFeedbackStatus,
+) -> bool:
+    if authz_policy.allows(
+        identity=identity,
+        action="preview_pr_feedback.write",
+        product=product,
+        context=context,
+    ):
+        return True
+
+    lifecycle_actions_by_status = {
+        "pending": ("preview_refresh.execute",),
+        "ready": ("preview_refresh.execute",),
+        "failed": ("preview_refresh.execute",),
+        "destroyed": ("preview_destroy.execute",),
+        "cleanup_failed": ("preview_destroy.execute",),
+        "cleared": ("preview_refresh.execute", "preview_destroy.execute"),
+    }
+    return any(
+        authz_policy.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+        )
+        for action in lifecycle_actions_by_status.get(status, ())
+    )
+
+
+def read_generic_web_preview_profile(
+    *, record_store: object, product: str
+) -> LaunchplaneProductProfileRecord:
+    try:
+        profile_store = require_product_profile_read_store(record_store)
+        profile = profile_store.read_product_profile_record(product.strip())
+    except TypeError as error:
+        raise TypeError(
+            "Launchplane record store does not support generic web preview desired-state "
+            "profile reads: read_product_profile_record"
+        ) from error
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            "Generic web preview desired-state requires an existing product profile."
+        ) from error
+    if not product_profile_uses_generic_web_base(profile):
+        raise ValueError(
+            "Product profile is not compatible with the generic-web preview desired-state route."
+        )
+    if not profile.preview.enabled:
+        raise ValueError("Product profile does not have generic-web previews enabled.")
+    if not profile.preview.context.strip():
+        raise ValueError("Product profile does not define a preview context.")
+    return profile
+
+
 def require_ingress_edge_endpoint_read_store(record_store: object) -> _IngressEdgeEndpointReadStore:
     required_methods = ("read_edge_endpoint_record",)
     missing_methods = [
@@ -2755,11 +3253,16 @@ def create_launchplane_fastapi_app(
     npmplus_ingress_client_factory: _NpmplusIngressClientFactory | None = None,
     bearer_identity_config: BearerIdentityConfig | None = None,
     human_session_manager: HumanSessionManager | None = None,
+    github_oauth_client: GitHubOAuthLoginClient | None = None,
+    oauth_login_state_store: OAuthLoginStateRepository | None = None,
     control_plane_root_path: FilePath | None = None,
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
     work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
+    preview_pr_feedback_discord_sender: Callable[
+        [str, dict[str, object]], object
+    ] = post_discord_webhook,
     every_code_github_webhook_handler: EveryCodeGitHubWebhookHandler | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -2806,6 +3309,10 @@ def create_launchplane_fastapi_app(
                 shared_record_store.close()
 
     app = FastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(EvidenceIngressRequestContractMiddleware)
+    resolved_oauth_login_state_store = (
+        oauth_login_state_store if oauth_login_state_store is not None else OAuthLoginStateStore()
+    )
 
     def next_trace_id() -> str:
         return f"launchplane_req_{uuid4().hex}"
@@ -2846,6 +3353,149 @@ def create_launchplane_fastapi_app(
             response.headers.append("Set-Cookie", session_cookie_header)
             request.state.launchplane_renewed_session_cookie = session_cookie_header
         return session.identity
+
+    def human_identity_response(identity: GitHubHumanIdentity) -> GitHubHumanIdentityResponse:
+        return GitHubHumanIdentityResponse(
+            login=identity.login,
+            github_id=identity.github_id,
+            name=identity.name,
+            email=identity.email,
+            organizations=tuple(sorted(identity.organizations)),
+            teams=tuple(sorted(identity.teams)),
+            role=identity.role,
+        )
+
+    def read_auth_session(
+        request: Request,
+        response: Response,
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> AuthSessionResponse | JSONResponse:
+        trace_id = next_trace_id()
+        session_result = read_human_session(cookie_header=cookie)
+        if session_result is None:
+            payload = AuthSessionRequiredResponse(
+                trace_id=trace_id,
+                error=LaunchplaneErrorDetail(
+                    code="authentication_required",
+                    message="Sign in with GitHub to access Launchplane.",
+                ),
+                configured=human_session_manager is not None,
+            )
+            return JSONResponse(
+                status_code=401,
+                content=payload.model_dump(mode="json"),
+            )
+        session, was_renewed = session_result
+        if was_renewed and human_session_manager is not None:
+            session_cookie_header = human_session_manager.session_cookie_header(session)
+            response.headers.append("Set-Cookie", session_cookie_header)
+            request.state.launchplane_renewed_session_cookie = session_cookie_header
+        return AuthSessionResponse(
+            trace_id=trace_id,
+            identity=human_identity_response(session.identity),
+        )
+
+    def reject_github_oauth_not_configured(trace_id: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content=LaunchplaneErrorResponse(
+                trace_id=trace_id,
+                error=LaunchplaneErrorDetail(
+                    code="auth_not_configured",
+                    message="GitHub OAuth is not configured for Launchplane.",
+                ),
+            ).model_dump(mode="json"),
+        )
+
+    def reject_invalid_github_oauth_callback(trace_id: str, message: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content=LaunchplaneErrorResponse(
+                trace_id=trace_id,
+                error=LaunchplaneErrorDetail(
+                    code="invalid_oauth_callback",
+                    message=message,
+                ),
+            ).model_dump(mode="json"),
+        )
+
+    def login_github_oauth(return_to: str = "/") -> Response:
+        trace_id = next_trace_id()
+        if human_session_manager is None or github_oauth_client is None:
+            return reject_github_oauth_not_configured(trace_id)
+        state = secrets.token_urlsafe(32)
+        code_verifier, code_challenge = build_pkce_verifier()
+        resolved_oauth_login_state_store.put(
+            state=state,
+            code_verifier=code_verifier,
+            return_to=safe_oauth_return_to(return_to),
+        )
+        return RedirectResponse(
+            url=github_oauth_client.authorization_url(
+                state=state,
+                code_challenge=code_challenge,
+            ),
+            status_code=302,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    def complete_github_oauth_callback(
+        code: str = "",
+        state: str = "",
+    ) -> Response:
+        trace_id = next_trace_id()
+        if human_session_manager is None or github_oauth_client is None:
+            return reject_github_oauth_not_configured(trace_id)
+        callback_code = code.strip()
+        callback_state = state.strip()
+        login_state = resolved_oauth_login_state_store.pop(callback_state)
+        if not callback_code or login_state is None:
+            return reject_invalid_github_oauth_callback(
+                trace_id,
+                "GitHub OAuth callback is missing a valid code or state.",
+            )
+        try:
+            human_identity = github_oauth_client.fetch_identity(
+                code=callback_code,
+                code_verifier=login_state.code_verifier,
+                authz_policy=resolved_authz_policy_runtime.policy,
+            )
+        except PermissionError:
+            return JSONResponse(
+                status_code=403,
+                content=LaunchplaneErrorResponse(
+                    trace_id=trace_id,
+                    error=LaunchplaneErrorDetail(
+                        code="authorization_denied",
+                        message="GitHub identity is not authorized for Launchplane.",
+                    ),
+                ).model_dump(mode="json"),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("GitHub OAuth callback failed", extra={"trace_id": trace_id})
+            return reject_invalid_github_oauth_callback(
+                trace_id,
+                "GitHub OAuth callback could not be completed.",
+            )
+        session = human_session_manager.issue(human_identity)
+        return RedirectResponse(
+            url=login_state.return_to,
+            status_code=302,
+            headers={"Set-Cookie": human_session_manager.session_cookie_header(session)},
+        )
+
+    def logout_auth_session(
+        response: Response,
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> AuthLogoutResponse:
+        trace_id = next_trace_id()
+        if human_session_manager is not None:
+            human_session_manager.delete_cookie_session(cookie)
+            clear_cookie = human_session_manager.clear_cookie_header()
+        else:
+            clear_cookie = "launchplane_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+        response.headers.append("Set-Cookie", clear_cookie)
+        return AuthLogoutResponse(trace_id=trace_id)
 
     def read_identity(
         request: Request,
@@ -4165,6 +4815,40 @@ def create_launchplane_fastapi_app(
             message=str(error),
         )
 
+    def merge_train_github_stale_state_response(
+        *, trace_id: str, error: MergeTrainGitHubStaleHeadError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "merge_train_github_stale_state",
+                    "message": "Merge train GitHub state changed; retry after rereading upstream state.",
+                },
+                "details": {"github_status_code": error.status_code},
+            },
+        )
+
+    def merge_train_github_request_failed_response(
+        *, trace_id: str, error: MergeTrainGitHubError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "github_request_failed",
+                    "message": "GitHub merge train request failed; retry after upstream recovers.",
+                },
+                "details": {
+                    "github_status_code": error.status_code,
+                },
+            },
+        )
+
     def merge_train_admission_query(
         *, repository: str, base_branch: str, trace_id: str
     ) -> MergeTrainAdmissionQuery:
@@ -4317,6 +5001,895 @@ def create_launchplane_fastapi_app(
             },
             targets=targets,
         )
+
+    async def write_merge_train_batch_candidate_run_once(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            batch_request = MergeTrainBatchCandidateRunOnceEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if normalized_idempotency_key:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+
+        try:
+            policy_record = resolve_merge_train_policy_record(record_store)
+        except MergeTrainPolicyStoreMissingError as error:
+            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
+        try:
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository=batch_request.repository,
+                base_branch=batch_request.base_branch,
+            )
+        except ValueError as error:
+            raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=repository_policy.service_authz.action,
+            product=repository_policy.service_authz.product,
+            context=repository_policy.service_authz.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot run the requested merge train policy.",
+            )
+        token_env = repository_policy.github_token.env_var
+        if not token_env:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Merge train policy does not define a GitHub token environment variable.",
+            )
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Configured merge train GitHub token is not available.",
+            )
+        try:
+            batch_store = require_merge_train_batch_candidate_record_store(record_store)
+            stack_collapse_store = require_merge_train_stack_collapse_plan_record_store(
+                record_store
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Merge train batch candidate storage requires database-backed records.",
+            ) from error
+        try:
+            batch_result = execute_merge_train_batch_candidate_run_once(
+                request=batch_request,
+                policy=policy_record.policy,
+                policy_sha256=policy_record.policy_sha256,
+                token=token,
+                trace_id=trace_id,
+                recorded_at=utc_now_timestamp(),
+                batch_store=batch_store,
+                stack_collapse_store=stack_collapse_store,
+            )
+        except MergeTrainGitHubStaleHeadError as error:
+            return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
+        except MergeTrainGitHubError as error:
+            return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except MergeTrainBatchCandidateRecordNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=batch_result.records,
+            result=batch_result.accepted_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def write_merge_train_controller_run_once(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="merge_train_controller_invalid_state",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="merge_train_controller_invalid_state",
+                message="Request payload failed validation.",
+            )
+        try:
+            controller_request = MergeTrainControllerRunOnceEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            message = str(error).strip() or "Request payload failed validation."
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="merge_train_controller_invalid_state",
+                message=message,
+            ) from error
+
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if normalized_idempotency_key:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+
+        try:
+            policy_record = resolve_merge_train_policy_record(record_store)
+        except MergeTrainPolicyStoreMissingError as error:
+            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
+        try:
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository=controller_request.repository,
+                base_branch=controller_request.base_branch,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="merge_train_controller_invalid_state",
+                message=str(error).strip()
+                or "Merge train controller request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=repository_policy.service_authz.action,
+            product=repository_policy.service_authz.product,
+            context=repository_policy.service_authz.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot run the requested merge train policy.",
+            )
+        token_env = repository_policy.github_token.env_var
+        if not token_env:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Merge train policy does not define a GitHub token environment variable.",
+            )
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Configured merge train GitHub token is not available.",
+            )
+        try:
+            candidate_store = require_merge_train_batch_candidate_record_store(record_store)
+            landing_store = require_merge_train_batch_landing_plan_record_store(record_store)
+            stack_collapse_store = require_merge_train_stack_collapse_plan_record_store(
+                record_store
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Merge train controller storage requires database-backed records.",
+            ) from error
+        try:
+            controller_result = execute_merge_train_controller_run_once(
+                request=controller_request,
+                policy=policy_record.policy,
+                policy_sha256=policy_record.policy_sha256,
+                repository_policy=repository_policy,
+                token=token,
+                trace_id=trace_id,
+                recorded_at=utc_now_timestamp(),
+                candidate_store=candidate_store,
+                landing_store=landing_store,
+                stack_collapse_store=stack_collapse_store,
+            )
+        except MergeTrainGitHubStaleHeadError as error:
+            return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
+        except MergeTrainGitHubError as error:
+            return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except (MergeTrainControllerRequestError, ValueError, click.ClickException) as error:
+            message = str(error).strip() or "Merge train controller request could not be completed."
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="merge_train_controller_invalid_state",
+                message=message,
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=controller_result.records,
+            result=controller_result.accepted_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def write_merge_train_stack_collapse_run_once(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            stack_request = MergeTrainStackCollapseRunOnceEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if normalized_idempotency_key:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+
+        try:
+            policy_record = resolve_merge_train_policy_record(record_store)
+        except MergeTrainPolicyStoreMissingError as error:
+            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
+        try:
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository=stack_request.repository,
+                base_branch=stack_request.base_branch,
+            )
+        except ValueError as error:
+            raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=repository_policy.service_authz.action,
+            product=repository_policy.service_authz.product,
+            context=repository_policy.service_authz.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot run the requested merge train policy.",
+            )
+        token_env = repository_policy.github_token.env_var
+        if not token_env:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Merge train policy does not define a GitHub token environment variable.",
+            )
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Configured merge train GitHub token is not available.",
+            )
+        try:
+            stack_collapse_store = require_merge_train_stack_collapse_plan_record_store(
+                record_store
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Merge train stack collapse storage requires database-backed records.",
+            ) from error
+        try:
+            batch_candidate_store = (
+                require_merge_train_batch_candidate_record_store(record_store)
+                if stack_request.mode == "admit"
+                else None
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Merge train stack collapse admission requires database-backed candidate records.",
+            ) from error
+        try:
+            stack_result = execute_merge_train_stack_collapse_run_once(
+                request=stack_request,
+                policy=policy_record.policy,
+                policy_sha256=policy_record.policy_sha256,
+                token=token,
+                trace_id=trace_id,
+                recorded_at=utc_now_timestamp(),
+                stack_collapse_store=stack_collapse_store,
+                batch_candidate_store=batch_candidate_store,
+            )
+        except MergeTrainGitHubStaleHeadError as error:
+            return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
+        except MergeTrainGitHubError as error:
+            return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except MergeTrainStackCollapseBatchCandidateStoreMissingError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Merge train stack collapse admission requires database-backed candidate records.",
+            ) from error
+        except MergeTrainStackCollapsePlanRecordNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=stack_result.records,
+            result=stack_result.accepted_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def write_merge_train_batch_landing_run_once(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            landing_request = MergeTrainBatchLandingRunOnceEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if normalized_idempotency_key:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+
+        try:
+            policy_record = resolve_merge_train_policy_record(record_store)
+        except MergeTrainPolicyStoreMissingError as error:
+            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
+        try:
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository=landing_request.repository,
+                base_branch=landing_request.base_branch,
+            )
+        except ValueError as error:
+            raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=repository_policy.service_authz.action,
+            product=repository_policy.service_authz.product,
+            context=repository_policy.service_authz.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot run the requested merge train policy.",
+            )
+        token_env = repository_policy.github_token.env_var
+        if not token_env:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Merge train policy does not define a GitHub token environment variable.",
+            )
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Configured merge train GitHub token is not available.",
+            )
+        try:
+            candidate_store = require_merge_train_batch_candidate_record_store(record_store)
+            landing_store = require_merge_train_batch_landing_plan_record_store(record_store)
+            stack_collapse_store = require_merge_train_stack_collapse_plan_record_store(
+                record_store
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Merge train batch landing storage requires database-backed records.",
+            ) from error
+        try:
+            landing_result = execute_merge_train_batch_landing_run_once(
+                request=landing_request,
+                repository_policy=repository_policy,
+                policy_sha256=policy_record.policy_sha256,
+                token=token,
+                trace_id=trace_id,
+                recorded_at=utc_now_timestamp(),
+                candidate_store=candidate_store,
+                landing_store=landing_store,
+                stack_collapse_store=stack_collapse_store,
+            )
+        except MergeTrainGitHubStaleHeadError as error:
+            return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
+        except MergeTrainGitHubError as error:
+            return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except (
+            MergeTrainBatchCandidateRecordNotFoundError,
+            MergeTrainBatchLandingPlanRecordNotFoundError,
+            MergeTrainStackCollapsePlanRecordNotFoundError,
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=landing_result.records,
+            result=landing_result.accepted_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def write_merge_train_run_once(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            merge_train_request = MergeTrainRunOnceEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if normalized_idempotency_key:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_RUN_ONCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+
+        try:
+            policy_record = resolve_merge_train_policy_record(record_store)
+        except MergeTrainPolicyStoreMissingError as error:
+            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
+        try:
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository=merge_train_request.repository,
+                base_branch=merge_train_request.base_branch,
+            )
+        except ValueError as error:
+            raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=repository_policy.service_authz.action,
+            product=repository_policy.service_authz.product,
+            context=repository_policy.service_authz.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot run the requested merge train policy.",
+            )
+        token_env = repository_policy.github_token.env_var
+        if not token_env:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Merge train policy does not define a GitHub token environment variable.",
+            )
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Configured merge train GitHub token is not available.",
+            )
+        try:
+            run_record_store = require_merge_train_run_record_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            run_once_result = execute_merge_train_run_once(
+                request=merge_train_request,
+                policy=policy_record.policy,
+                policy_sha256=policy_record.policy_sha256,
+                token=token,
+                trace_id=trace_id,
+                recorded_at=utc_now_timestamp(),
+            )
+        except MergeTrainGitHubStaleHeadError as error:
+            return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
+        except MergeTrainGitHubError as error:
+            return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        run_record_store.write_merge_train_run_record(run_once_result.run_record)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=run_once_result.records,
+            result=run_once_result.accepted_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_MERGE_TRAIN_RUN_ONCE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def write_merge_train_pr_feedback(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            feedback_request = MergeTrainPrFeedbackEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if normalized_idempotency_key:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_PR_FEEDBACK_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+
+        try:
+            policy_record = resolve_merge_train_policy_record(record_store)
+        except MergeTrainPolicyStoreMissingError as error:
+            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
+        try:
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository=feedback_request.repository,
+                base_branch=feedback_request.base_branch,
+            )
+        except ValueError as error:
+            raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=repository_policy.service_authz.action,
+            product=repository_policy.service_authz.product,
+            context=repository_policy.service_authz.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot write merge train PR feedback.",
+            )
+        token_env = repository_policy.github_token.env_var
+        if not token_env:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Merge train policy does not define a GitHub token environment variable.",
+            )
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Configured merge train GitHub token is not available.",
+            )
+        try:
+            feedback_store = require_merge_train_pr_feedback_record_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        feedback_record = build_merge_train_pr_feedback_record(
+            request=feedback_request,
+            policy_key=repository_policy.policy_key,
+            policy_sha256=policy_record.policy_sha256,
+            token=token,
+            recorded_at=utc_now_timestamp(),
+            response_trace_id=trace_id,
+        )
+        feedback_store.write_merge_train_pr_feedback_record(feedback_record)
+        result: dict[str, object] = {"feedback": feedback_record.model_dump(mode="json")}
+        if feedback_record.delivery_status == "failed":
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "github_comment_delivery_failed",
+                        "message": (
+                            feedback_record.error_message
+                            or "Merge train PR feedback comment delivery failed."
+                        ),
+                    },
+                    "records": {
+                        "merge_train_pr_feedback_id": feedback_record.feedback_id,
+                    },
+                    "result": result,
+                },
+            )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"merge_train_pr_feedback_id": feedback_record.feedback_id},
+            result=result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_MERGE_TRAIN_PR_FEEDBACK_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
 
     def read_every_code_summary(
         identity: Annotated[
@@ -8871,6 +10444,502 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_preview_lifecycle_cleanup(
+        request: Request,
+        cleanup_request: PreviewLifecycleCleanupEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview_lifecycle.cleanup",
+            product=cleanup_request.product,
+            context=cleanup_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot clean preview lifecycle for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_LIFECYCLE_CLEANUP_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            cleanup_store = require_preview_lifecycle_cleanup_apply_store(record_store)
+            cleanup_mutation_store = (
+                require_preview_lifecycle_cleanup_mutation_store(record_store)
+                if cleanup_request.apply
+                else cleanup_store
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        plan = latest_preview_lifecycle_plan(
+            record_store=cleanup_store,
+            context_name=cleanup_request.context,
+            plan_id=cleanup_request.plan_id,
+        )
+        if plan is None or plan.product != cleanup_request.product:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=(
+                    "Preview lifecycle cleanup requires an existing plan for the requested"
+                    " product/context."
+                ),
+            )
+        cleanup_driver_id, cleanup_slug_template = preview_lifecycle_cleanup_profile_settings(
+            record_store=record_store,
+            product=cleanup_request.product,
+        )
+        cleanup_record = build_preview_lifecycle_cleanup_record(
+            plan=plan,
+            requested_at=utc_now_timestamp(),
+            source=cleanup_request.source,
+            apply=cleanup_request.apply,
+            destroy_reason=cleanup_request.destroy_reason,
+            control_plane_root=resolved_control_plane_root,
+            record_store=cleanup_mutation_store,
+            timeout_seconds=cleanup_request.timeout_seconds,
+            driver_id=cleanup_driver_id,
+            preview_slug_template=cleanup_slug_template,
+        )
+        preview_lifecycle_cleanup_id = write_preview_lifecycle_cleanup_apply_record(
+            record_store=cleanup_store,
+            record=cleanup_record,
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"preview_lifecycle_cleanup_id": preview_lifecycle_cleanup_id},
+            result=cleanup_record.model_dump(mode="json"),
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_LIFECYCLE_CLEANUP_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def apply_preview_lifecycle_sweep(
+        request: Request,
+        sweep_request: PreviewLifecycleSweepEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            sweep_store = require_preview_lifecycle_sweep_store(record_store)
+            requested_sweep_profiles = preview_lifecycle_sweep_profiles(
+                record_store=sweep_store,
+                product=sweep_request.product,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        if sweep_request.product.strip() and not requested_sweep_profiles:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=(
+                    "Preview lifecycle sweep found no enabled preview profile for the"
+                    " requested product."
+                ),
+            )
+        denied_profile: LaunchplaneProductProfileRecord | None = None
+        denied_action = ""
+        for profile in requested_sweep_profiles:
+            for action in ("preview_lifecycle.plan", "preview_lifecycle.cleanup"):
+                if not resolved_authz_policy_runtime.policy.allows(
+                    identity=identity,
+                    action=action,
+                    product=profile.product,
+                    context=profile.preview.context,
+                ):
+                    denied_profile = profile
+                    denied_action = action
+                    break
+            if denied_profile is not None:
+                break
+        if denied_profile is not None:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot sweep preview lifecycle for one or more enabled"
+                    " product profiles."
+                ),
+                authz=_authz_diagnostic_payload(
+                    identity=identity,
+                    authz_policy_sha256_value=resolved_authz_policy_runtime.policy_sha256,
+                    authz_policy_source=resolved_authz_policy_runtime.source,
+                    action=denied_action,
+                    product=denied_profile.product,
+                    context=denied_profile.preview.context,
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_LIFECYCLE_SWEEP_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        sweep_result = build_preview_lifecycle_sweep(
+            control_plane_root=resolved_control_plane_root,
+            record_store=sweep_store,
+            request=sweep_request,
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result=sweep_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_LIFECYCLE_SWEEP_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def apply_preview_pr_feedback(
+        request: Request,
+        feedback_request: PreviewPrFeedbackEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not allows_preview_pr_feedback_write(
+            authz_policy=resolved_authz_policy_runtime.policy,
+            identity=identity,
+            product=feedback_request.product,
+            context=feedback_request.context,
+            status=feedback_request.status,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write preview PR feedback for the requested product/context."
+                ),
+            )
+        if feedback_request.dry_run:
+            preview_pr_feedback_dry_run_result: dict[str, object] = {
+                "dry_run": True,
+                "preview_pr_feedback": "authorized",
+                "product": feedback_request.product,
+                "context": feedback_request.context,
+                "status": feedback_request.status,
+                "anchor_pr_number": feedback_request.anchor_pr_number,
+            }
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={},
+                result=preview_pr_feedback_dry_run_result,
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_PR_FEEDBACK_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            feedback_store = require_preview_pr_feedback_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        every_code_record_store = (
+            cast(EveryCodeWorkRequestReadStore, record_store)
+            if supports_every_code_work_requests(record_store)
+            else None
+        )
+        feedback_record = build_preview_pr_feedback_record(
+            control_plane_root=resolved_control_plane_root,
+            product=feedback_request.product,
+            context=feedback_request.context,
+            source=feedback_request.source,
+            requested_at=utc_now_timestamp(),
+            repository=feedback_request.repository,
+            anchor_repo=feedback_request.anchor_repo,
+            anchor_pr_number=feedback_request.anchor_pr_number,
+            anchor_pr_url=feedback_request.anchor_pr_url,
+            status=feedback_request.status,
+            marker=feedback_request.marker,
+            preview_url=feedback_request.preview_url,
+            immutable_image_reference=feedback_request.immutable_image_reference,
+            refresh_image_reference=feedback_request.refresh_image_reference,
+            revision=feedback_request.revision,
+            run_url=feedback_request.run_url,
+            failure_summary=feedback_request.failure_summary,
+            every_code_record_store=every_code_record_store,
+        )
+        feedback_store.write_preview_pr_feedback_record(feedback_record)
+        notification_attempts = deliver_preview_pr_feedback_notifications(
+            record_store=record_store,
+            feedback=feedback_record,
+            attempted_at=feedback_record.requested_at,
+            discord_sender=preview_pr_feedback_discord_sender,
+        )
+        result_records: dict[str, str] = {"preview_pr_feedback_id": feedback_record.feedback_id}
+        response_result: dict[str, object] = feedback_record.model_dump(mode="json")
+        if notification_attempts:
+            response_result["notification_attempt_count"] = len(notification_attempts)
+            response_result["notifications"] = [
+                attempt.model_dump(mode="json") for attempt in notification_attempts
+            ]
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=result_records,
+            result=response_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_PR_FEEDBACK_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def apply_preview_desired_state(
+        request: Request,
+        desired_state_request: PreviewDesiredStateEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview_desired_state.discover",
+            product=desired_state_request.product,
+            context=desired_state_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot discover preview desired state for the requested "
+                    "product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_DESIRED_STATE_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            desired_state_store = require_preview_desired_state_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        driver_result = discover_github_preview_desired_state(
+            control_plane_root=resolved_control_plane_root,
+            product=desired_state_request.product,
+            context=desired_state_request.context,
+            source=desired_state_request.source,
+            discovered_at=utc_now_timestamp(),
+            repository=desired_state_request.repository,
+            label=desired_state_request.label,
+            anchor_repo=desired_state_request.anchor_repo,
+            preview_slug_prefix=desired_state_request.preview_slug_prefix,
+            max_pages=desired_state_request.max_pages,
+        )
+        desired_state_store.write_preview_desired_state_record(driver_result)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"preview_desired_state_id": driver_result.desired_state_id},
+            result=driver_result.model_dump(mode="json"),
+        )
+        if driver_result.status != "fail":
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_PREVIEW_DESIRED_STATE_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_generic_web_preview_desired_state(
+        request: Request,
+        desired_state_request: GenericWebPreviewDesiredStateEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            profile = read_generic_web_preview_profile(
+                record_store=record_store,
+                product=desired_state_request.product,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="driver_route_dependency_not_found",
+                message=(
+                    "Driver route is registered, but required product or runtime records "
+                    "were not found."
+                ),
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview_desired_state.discover",
+            product=profile.product,
+            context=profile.preview.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot discover generic web preview desired state "
+                    "for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            desired_state_store = require_preview_desired_state_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        driver_result = discover_generic_web_preview_desired_state(
+            control_plane_root=resolved_control_plane_root,
+            record_store=cast(GenericWebPreviewProfileStore, record_store),
+            request=desired_state_request.desired_state,
+            discovered_at=utc_now_timestamp(),
+            profile=profile,
+        )
+        desired_state_store.write_preview_desired_state_record(driver_result)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"preview_desired_state_id": driver_result.desired_state_id},
+            result=driver_result.model_dump(mode="json"),
+        )
+        if driver_result.status != "fail":
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
     async def apply_ingress_canary_route(
         request: Request,
         canary_request: IngressCanaryRouteApplyEnvelope,
@@ -10153,6 +12222,55 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _AUTH_SESSION_ROUTE,
+        read_auth_session,
+        methods=["GET"],
+        response_model=AuthSessionResponse,
+        response_model_exclude_none=True,
+        operation_id="read_human_auth_session",
+        summary="Read human auth session",
+        responses={401: {"model": AuthSessionRequiredResponse}},
+    )
+
+    app.add_api_route(
+        _AUTH_GITHUB_LOGIN_ROUTE,
+        login_github_oauth,
+        methods=["GET"],
+        status_code=302,
+        operation_id="login_github_oauth",
+        summary="Start GitHub OAuth login",
+        response_class=RedirectResponse,
+        response_model=None,
+        responses={503: {"model": LaunchplaneErrorResponse}},
+    )
+
+    app.add_api_route(
+        _AUTH_GITHUB_CALLBACK_ROUTE,
+        complete_github_oauth_callback,
+        methods=["GET"],
+        status_code=302,
+        operation_id="complete_github_oauth_callback",
+        summary="Complete GitHub OAuth callback",
+        response_class=RedirectResponse,
+        response_model=None,
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _AUTH_LOGOUT_ROUTE,
+        logout_auth_session,
+        methods=["POST"],
+        response_model=AuthLogoutResponse,
+        response_model_exclude_none=True,
+        operation_id="logout_human_auth_session",
+        summary="Logout human auth session",
+    )
+
+    app.add_api_route(
         "/v1/service/odoo-workers/status",
         read_odoo_stable_operation_worker_status,
         methods=["GET"],
@@ -10237,6 +12355,42 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _PREVIEW_PR_FEEDBACK_ROUTE,
+        apply_preview_pr_feedback,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_preview_pr_feedback",
+        summary="Apply preview PR feedback",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PREVIEW_DESIRED_STATE_ROUTE,
+        apply_preview_desired_state,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_preview_desired_state",
+        summary="Discover preview desired state",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _PREVIEW_LIFECYCLE_PLAN_ROUTE,
         apply_preview_lifecycle_plan,
         methods=["POST"],
@@ -10245,6 +12399,62 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="apply_preview_lifecycle_plan",
         summary="Plan preview lifecycle",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PREVIEW_LIFECYCLE_CLEANUP_ROUTE,
+        apply_preview_lifecycle_cleanup,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_preview_lifecycle_cleanup",
+        summary="Clean preview lifecycle",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PREVIEW_LIFECYCLE_SWEEP_ROUTE,
+        apply_preview_lifecycle_sweep,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_preview_lifecycle_sweep",
+        summary="Sweep preview lifecycle",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
+        apply_generic_web_preview_desired_state,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_generic_web_preview_desired_state",
+        summary="Discover generic web preview desired state",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
@@ -10692,6 +12902,14 @@ def create_launchplane_fastapi_app(
         409: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
+    evidence_ingress_error_responses: dict[int | str, dict[str, object]] = {
+        400: {"model": LaunchplaneErrorResponse},
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        409: {"model": LaunchplaneErrorResponse},
+        413: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
 
     app.add_api_route(
         _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
@@ -10902,6 +13120,176 @@ def create_launchplane_fastapi_app(
         operation_id="read_merge_train_policy_targets",
         summary="Read merge train policy targets",
         responses=merge_train_read_error_responses,
+    )
+
+    app.add_api_route(
+        _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,
+        write_merge_train_batch_landing_run_once,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": MergeTrainBatchLandingRunOnceEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="write_merge_train_batch_landing_run_once",
+        summary="Run one merge train batch landing worker pass",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            502: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
+        write_merge_train_batch_candidate_run_once,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": MergeTrainBatchCandidateRunOnceEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="write_merge_train_batch_candidate_run_once",
+        summary="Run one merge train batch candidate worker pass",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            502: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
+        write_merge_train_controller_run_once,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": MergeTrainControllerRunOnceEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="write_merge_train_controller_run_once",
+        summary="Run one merge train controller pass",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            502: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
+        write_merge_train_stack_collapse_run_once,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": MergeTrainStackCollapseRunOnceEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="write_merge_train_stack_collapse_run_once",
+        summary="Run one merge train stack collapse worker pass",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            502: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _MERGE_TRAIN_RUN_ONCE_ROUTE,
+        write_merge_train_run_once,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": MergeTrainRunOnceEnvelope.model_json_schema()}
+                },
+            }
+        },
+        operation_id="write_merge_train_run_once",
+        summary="Run one merge train worker pass",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            502: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _MERGE_TRAIN_PR_FEEDBACK_ROUTE,
+        write_merge_train_pr_feedback,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": MergeTrainPrFeedbackEnvelope.model_json_schema()}
+                },
+            }
+        },
+        operation_id="write_merge_train_pr_feedback",
+        summary="Write merge train PR feedback",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            502: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(
@@ -11629,13 +14017,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_backup_gate_evidence",
         summary="Write backup gate evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11647,13 +14029,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_promotion_evidence",
         summary="Write promotion evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11665,13 +14041,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_preview_generation_evidence",
         summary="Write preview generation evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11683,13 +14053,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_preview_destroyed_evidence",
         summary="Write preview destroyed evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11701,13 +14065,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_runner_host_hygiene_audit_evidence",
         summary="Write runner host hygiene audit evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11719,13 +14077,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_runner_lane_registration_audit_evidence",
         summary="Write runner lane registration audit evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     app.add_api_route(
@@ -11737,13 +14089,7 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_deployment_evidence",
         summary="Write deployment evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+        responses=evidence_ingress_error_responses,
     )
 
     def launchplane_http_exception_handler(request: Request, error: Exception) -> JSONResponse:
@@ -11758,13 +14104,16 @@ def create_launchplane_fastapi_app(
             code = str(detail.get("code", code))
             message = str(detail.get("message", "Launchplane request failed."))
             records = detail.get("records")
+            authz = detail.get("authz")
         else:
             message = str(http_error.detail)
             records = None
+            authz = None
         payload = LaunchplaneErrorResponse(
             trace_id=trace_id,
             error=LaunchplaneErrorDetail(code=code, message=message),
             records=records if isinstance(records, dict) else None,
+            authz=authz if isinstance(authz, dict) else None,
         )
         response = JSONResponse(
             status_code=http_error.status_code,
@@ -11816,12 +14165,94 @@ def create_launchplane_fastapi_app(
 
 
 def _launchplane_http_error(
-    *, status_code: int, trace_id: str, code: str, message: str
+    *,
+    status_code: int,
+    trace_id: str,
+    code: str,
+    message: str,
+    authz: dict[str, object] | None = None,
 ) -> HTTPException:
+    detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
+    if authz is not None:
+        detail["authz"] = authz
     return HTTPException(
         status_code=status_code,
-        detail={"trace_id": trace_id, "code": code, "message": message},
+        detail=detail,
     )
+
+
+def _authz_diagnostic_payload(
+    *,
+    identity: LaunchplaneIdentity,
+    authz_policy_sha256_value: str,
+    authz_policy_source: str,
+    action: str = "",
+    product: str = "",
+    context: str = "",
+    decision: str = "denied",
+    reason_code: str = "authorization_denied",
+) -> dict[str, object]:
+    if isinstance(identity, GitHubHumanIdentity):
+        identity_payload: dict[str, object] = {
+            "type": "github_human",
+            "login": identity.login,
+            "role": identity.role,
+        }
+    elif isinstance(identity, TerminalAgentIdentity):
+        identity_payload = {
+            "type": "terminal_agent",
+            "subject": identity.subject,
+            "token_label": identity.token_label,
+        }
+    elif isinstance(identity, LocalOperatorIdentity):
+        identity_payload = {
+            "type": "local_operator",
+            "subject": identity.subject,
+            "token_label": identity.token_label,
+        }
+    elif isinstance(identity, LocalAdminIdentity):
+        identity_payload = {
+            "type": "local_admin",
+            "subject": identity.subject,
+            "token_label": identity.token_label,
+        }
+    else:
+        identity_payload = {
+            "type": "github_actions",
+            "repository": identity.repository,
+            "workflow_ref": identity.workflow_ref,
+            "job_workflow_ref": identity.job_workflow_ref,
+            "event_name": identity.event_name,
+            "ref": identity.ref,
+            "ref_type": identity.ref_type,
+            "environment": identity.environment,
+            "subject": identity.subject,
+        }
+    normalized_decision: AgentAuthzDecision = "allowed" if decision == "allowed" else "denied"
+    audit = agent_authz_audit(
+        identity=identity,
+        action=action,
+        product=product,
+        context=context,
+        decision=normalized_decision,
+        reason_code=reason_code,
+        policy_source=authz_policy_source,
+        policy_sha256=authz_policy_sha256_value,
+    )
+    payload: dict[str, object] = {
+        "identity": identity_payload,
+        "agent_consumer": audit.subject.model_dump(mode="json"),
+        "agent_audit": audit.model_dump(mode="json"),
+        "policy_source": authz_policy_source,
+        "policy_sha256": authz_policy_sha256_value,
+    }
+    if action or product or context:
+        payload["request"] = {
+            "action": action,
+            "product": product,
+            "context": context,
+        }
+    return payload
 
 
 def _record_slug(value: str) -> str:
