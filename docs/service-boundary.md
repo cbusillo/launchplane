@@ -274,6 +274,7 @@ VeriReel product paths:
   - `POST /v1/work-graph/github/issues/reconcile` (native FastAPI)
   - `POST /v1/work-graph/merge-train/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/batch-candidate/run-once` (native FastAPI)
+  - `POST /v1/work-graph/merge-train/stack-collapse/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/pr-feedback` (native FastAPI)
   - `POST /v1/work-graph/merge-train/controller/run-once`
 - product driver routes:
@@ -599,6 +600,17 @@ whether the candidate is still pending, passed, or failed. The legacy WSGI
 fallback branch is deleted, and direct fallback calls fail closed. The route
 never lands original PRs; PR-native landing remains a later phase with separate
 records and pre-merge invariants.
+
+`POST /v1/work-graph/merge-train/stack-collapse/run-once` executes one
+policy-backed stack-collapse phase for a requested repository/base branch. The
+native FastAPI route accepts `mode: execute` with an existing stack-collapse plan
+record id, merges supported stack children into the root PR, and persists a
+waiting-for-root-checks stack-collapse plan record. `mode: admit` requires that
+executed record, verifies the active policy digest and the root PR head against
+fresh GitHub evidence, then writes a root-only batch-candidate record for the
+normal candidate build/observe/landing phases. The legacy WSGI fallback branch
+is deleted, direct fallback calls fail closed, and accepted calls support
+optional `Idempotency-Key` replay/conflict handling.
 
 `POST /v1/work-graph/merge-train/batch-landing/run-once` executes one
 policy-backed batch-landing phase for a requested repository/base branch. The
