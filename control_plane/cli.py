@@ -48,6 +48,7 @@ from control_plane.cli_dokploy_targets import (
     summarize_dokploy_target_record,
     target_id_map,
 )
+from control_plane.cli_ci import register_ci_commands
 from control_plane.cli_every_code import register_every_code_commands
 from control_plane.cli_ingress import IngressCliCallbacks, register_ingress_commands
 from control_plane.cli_runner_lanes import register_runner_lane_commands
@@ -3646,6 +3647,7 @@ def work_graph() -> None:
 register_runner_lane_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
 register_preview_workflow_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
 register_work_graph_core_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
+register_ci_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_every_code_commands(cast(click.Group, main), store_factory=_store)  # type: ignore[redundant-cast]
 register_ingress_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]
