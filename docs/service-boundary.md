@@ -277,7 +277,7 @@ VeriReel product paths:
   - `POST /v1/work-graph/merge-train/batch-landing/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/stack-collapse/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/pr-feedback` (native FastAPI)
-  - `POST /v1/work-graph/merge-train/controller/run-once`
+  - `POST /v1/work-graph/merge-train/controller/run-once` (native FastAPI)
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
@@ -574,7 +574,9 @@ SHA/check state, and compact entry counts without invoking a worker mutation.
 one-action controller for the full batch train. Request payloads name
 `repository`, `base_branch`, and optional `mutate`; the route uses the same
 policy, authorization, and GitHub token boundary as the lower-level merge-train
-routes. Each call advances at most one safe phase from DB-backed records and
+routes. The native FastAPI route supports optional `Idempotency-Key`
+replay/conflict handling and direct legacy WSGI fallback calls fail closed.
+Each call advances at most one safe phase from DB-backed records and
 fresh GitHub evidence: plan stack collapse, execute stack collapse, admit the
 collapsed root PR, plan/build/observe a batch candidate, plan landing, or land
 the original PRs. Dry-run calls return the next controller action without
