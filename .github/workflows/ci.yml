@@ -254,6 +254,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-python-3.13-unittest-timings-
 
+      - name: Show unit test shard plan
+        run: >-
+          uv run launchplane ci unittest-shard plan
+          --shard-count 6
+          --timings-file "${RUNNER_TEMP}/unittest-timings/history.json"
+
       - name: Run unit test shard
         run: >-
           uv run launchplane ci unittest-shard run
