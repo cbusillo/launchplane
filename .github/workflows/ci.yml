@@ -21,6 +21,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install Python
         run: uv python install 3.13
@@ -49,6 +52,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install Python
         run: uv python install 3.13
@@ -104,13 +110,26 @@ jobs:
           load: true
           tags: ${{ env.LAUNCHPLANE_CI_IMAGE_TAG }}
           cache-from: >-
-            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+            type=gha,scope=launchplane-ci
+          cache-to: >-
+            type=gha,scope=launchplane-ci,mode=max
+
+      - name: Restore Trivy cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/trivy-cache
+          key: ${{ runner.os }}-trivy-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-trivy-
 
       - name: Scan runtime image
+        env:
+          LAUNCHPLANE_TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
         run: |
+          mkdir -p "$LAUNCHPLANE_TRIVY_CACHE_DIR"
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "${RUNNER_TEMP}/trivy-cache:/root/.cache" \
+            -v "${LAUNCHPLANE_TRIVY_CACHE_DIR}:/root/.cache" \
             ghcr.io/aquasecurity/trivy:0.70.0 \
             image \
             --scanners vulnerability \
@@ -144,6 +163,19 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.10.0 --activate
 
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: >-
+            ${{ runner.os }}-node-22-pnpm-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-node-22-pnpm-
+
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
 
@@ -169,6 +201,19 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.10.0 --activate
 
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: >-
+            ${{ runner.os }}-node-22-pnpm-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-node-22-pnpm-
+
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
 
@@ -188,6 +233,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install Python
         run: uv python install 3.13
@@ -206,6 +254,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install Python
         run: uv python install 3.13
