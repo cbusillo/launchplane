@@ -220,13 +220,18 @@ jobs:
       - name: Validate frontend
         run: pnpm --dir frontend validate
 
-  test:
+  test_shards:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
+    name: test_shard (${{ matrix.shard_index }})
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index: [0, 1, 2, 3, 4, 5]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -240,8 +245,80 @@ jobs:
       - name: Install Python
         run: uv python install 3.13
 
-      - name: Run unit tests
-        run: uv run python -m unittest
+      - name: Restore unittest timings
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/unittest-timings/history.json
+          key: >-
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}
+          restore-keys: |
+            ${{ runner.os }}-python-3.13-unittest-timings-
+
+      - name: Run unit test shard
+        run: >-
+          uv run launchplane ci unittest-shard run
+          --shard-count 6
+          --shard-index ${{ matrix.shard_index }}
+          --timings-file "${RUNNER_TEMP}/unittest-timings/history.json"
+          --timings-output "${RUNNER_TEMP}/unittest-timings/shard-${{ matrix.shard_index }}.json"
+
+      - name: Upload unittest timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unittest-timings-${{ matrix.shard_index }}
+          path: ${{ runner.temp }}/unittest-timings/shard-${{ matrix.shard_index }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    needs: test_shards
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Require successful test shards
+        run: |
+          if [ "${{ needs.test_shards.result }}" != "success" ]; then
+            echo "test_shards result: ${{ needs.test_shards.result }}" >&2
+            exit 1
+          fi
+
+      - name: Download unittest timings
+        uses: actions/download-artifact@v7
+        with:
+          pattern: unittest-timings-*
+          path: ${{ runner.temp }}/unittest-timings
+          merge-multiple: true
+
+      - name: Aggregate unittest timings
+        run: >-
+          uv run launchplane ci unittest-shard aggregate
+          --shard-count 6
+          --results-dir "${RUNNER_TEMP}/unittest-timings"
+          --timings-output "${RUNNER_TEMP}/unittest-timings/history.json"
+
+      - name: Save unittest timings
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/unittest-timings/history.json
+          key: >-
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}
 
   test_fork:
     if: >-
