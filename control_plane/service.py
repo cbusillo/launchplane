@@ -361,7 +361,6 @@ from control_plane.workflows.verireel_preview_driver import (
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _WHOLE_PRODUCT_CONTEXT = "*"
-_MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
 _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/controller/run-once"
@@ -372,33 +371,6 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         "/v1/drivers/ingress/route-apply",
     }
 )
-
-
-class MergeTrainBatchCandidateRunOnceEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    repository: str
-    base_branch: str = "main"
-    mode: Literal["plan", "build", "observe"] = "plan"
-    candidate_record_id: str = ""
-    github_api_base_url: str = "https://api.github.com"
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "MergeTrainBatchCandidateRunOnceEnvelope":
-        self.repository = self.repository.strip()
-        self.base_branch = self.base_branch.strip()
-        self.candidate_record_id = self.candidate_record_id.strip()
-        self.github_api_base_url = self.github_api_base_url.strip() or "https://api.github.com"
-        if not self.repository:
-            raise ValueError("merge train batch candidate requires repository")
-        if "/" not in self.repository:
-            raise ValueError("merge train repository must be owner/name")
-        if not self.base_branch:
-            raise ValueError("merge train batch candidate requires base_branch")
-        if self.mode in {"build", "observe"} and not self.candidate_record_id:
-            raise ValueError("build and observe require candidate_record_id")
-        return self
 
 
 class MergeTrainBatchLandingRunOnceEnvelope(BaseModel):
@@ -3068,7 +3040,6 @@ def _driver_write_routes_from_descriptors() -> frozenset[str]:
 
 def _build_write_routes() -> frozenset[str]:
     launchplane_write_routes = {
-        _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
@@ -6099,177 +6070,7 @@ def create_launchplane_service_app(
             effective_idempotency_route_path = path
             driver_result: BaseModel | dict[str, object] | None = None
             result: dict[str, object] = {}
-            if path == _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE:
-                batch_request = MergeTrainBatchCandidateRunOnceEnvelope.model_validate(payload)
-                policy_record = resolve_merge_train_policy_record(record_store)
-                policy = policy_record.policy
-                repository_policy = policy.find_repository_policy(
-                    repository=batch_request.repository,
-                    base_branch=batch_request.base_branch,
-                )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action=repository_policy.service_authz.action,
-                    product=repository_policy.service_authz.product,
-                    context=repository_policy.service_authz.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot run the requested merge train policy.",
-                            },
-                        },
-                    )
-                token_env = repository_policy.github_token.env_var
-                if not token_env:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "github_token_not_configured",
-                                "message": "Merge train policy does not define a GitHub token environment variable.",
-                            },
-                        },
-                    )
-                token = os.environ.get(token_env, "").strip()
-                if not token:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "github_token_not_configured",
-                                "message": "Configured merge train GitHub token is not available.",
-                            },
-                        },
-                    )
-                batch_store = _merge_train_batch_candidate_record_store(record_store)
-                stack_collapse_store = _merge_train_stack_collapse_plan_record_store(record_store)
-                transport = UrllibMergeTrainGitHubTransport(
-                    token=token,
-                    api_base_url=batch_request.github_api_base_url,
-                )
-                github_client = GitHubMergeTrainClient(transport=transport)
-                recorded_at = _utc_now_timestamp()
-                candidate: MergeTrainBatchCandidate | None = None
-                if batch_request.mode == "plan":
-                    snapshot = GitHubMergeTrainSnapshotReader(
-                        transport=transport
-                    ).read_merge_train_snapshot(
-                        repository=batch_request.repository,
-                        base_branch=batch_request.base_branch,
-                    )
-                    dry_run_result = build_merge_train_dry_run_result(
-                        policy=policy, snapshot=snapshot
-                    )
-                    selected_pr = dry_run_result.selected_pr
-                    if selected_pr is not None and _merge_train_snapshot_has_stack_topology(
-                        snapshot=snapshot, dry_run_result=dry_run_result
-                    ):
-                        stack_discovery = discover_merge_train_stack(
-                            snapshot=snapshot,
-                            root_pull_request_number=selected_pr.number,
-                        )
-                    else:
-                        stack_discovery = None
-                    if (
-                        stack_discovery is not None
-                        and stack_discovery.status == "ready_for_collapse"
-                    ):
-                        stack_collapse_plan = build_merge_train_stack_collapse_plan(
-                            discovery_result=stack_discovery,
-                            policy_key=dry_run_result.policy_key,
-                            policy_sha256=policy_record.policy_sha256,
-                            created_at=recorded_at,
-                        )
-                        stack_collapse_record = build_merge_train_stack_collapse_plan_record(
-                            plan=stack_collapse_plan,
-                            source=f"service:{batch_request.mode}:{request_trace_id}",
-                            updated_at=recorded_at,
-                        )
-                        stack_collapse_store.write_merge_train_stack_collapse_plan_record(
-                            stack_collapse_record
-                        )
-                        result = {
-                            "merge_train_stack_collapse_plan_record_id": stack_collapse_record.record_id,
-                            "repository": stack_collapse_plan.repository,
-                            "base_branch": stack_collapse_plan.base_branch,
-                            "mode": batch_request.mode,
-                            "stack_collapse_plan": stack_collapse_plan.model_dump(mode="json"),
-                        }
-                        driver_result = {
-                            "mode": batch_request.mode,
-                            "dry_run_result": dry_run_result.model_dump(mode="json"),
-                            "stack_discovery": stack_discovery.model_dump(mode="json"),
-                            "stack_collapse_plan": stack_collapse_plan.model_dump(mode="json"),
-                        }
-                    elif stack_discovery is not None and stack_discovery.status == "unsupported":
-                        result = {
-                            "repository": batch_request.repository,
-                            "base_branch": batch_request.base_branch,
-                            "mode": batch_request.mode,
-                        }
-                        driver_result = {
-                            "mode": batch_request.mode,
-                            "dry_run_result": dry_run_result.model_dump(mode="json"),
-                            "stack_discovery": stack_discovery.model_dump(mode="json"),
-                            "next_action": "stack_unsupported",
-                        }
-                    else:
-                        candidate = build_merge_train_batch_candidate(
-                            dry_run_result=dry_run_result,
-                            base_sha=snapshot.base_sha,
-                            policy_sha256=policy_record.policy_sha256,
-                            created_at=recorded_at,
-                        )
-                        driver_result = {
-                            "mode": batch_request.mode,
-                            "dry_run_result": dry_run_result.model_dump(mode="json"),
-                            "candidate": candidate.model_dump(mode="json"),
-                        }
-                else:
-                    existing_record = _read_merge_train_batch_candidate_record(
-                        record_store=batch_store,
-                        repository=batch_request.repository,
-                        base_branch=batch_request.base_branch,
-                        record_id=batch_request.candidate_record_id,
-                    )
-                    candidate = existing_record.candidate
-                    if batch_request.mode == "build":
-                        candidate = github_client.build_batch_candidate(candidate=candidate)
-                    else:
-                        candidate = github_client.observe_batch_candidate_checks(
-                            candidate=candidate
-                        )
-                    driver_result = {
-                        "mode": batch_request.mode,
-                        "candidate": candidate.model_dump(mode="json"),
-                    }
-                if candidate is not None:
-                    candidate_record = build_merge_train_batch_candidate_record(
-                        candidate=candidate,
-                        source=f"service:{batch_request.mode}:{request_trace_id}",
-                        updated_at=recorded_at,
-                    )
-                    batch_store.write_merge_train_batch_candidate_record(candidate_record)
-                    result = {
-                        "merge_train_batch_candidate_record_id": candidate_record.record_id,
-                        "repository": candidate.repository,
-                        "base_branch": candidate.base_branch,
-                        "mode": batch_request.mode,
-                        "candidate": candidate.model_dump(mode="json"),
-                    }
-            elif path == _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE:
+            if path == _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE:
                 landing_request = MergeTrainBatchLandingRunOnceEnvelope.model_validate(payload)
                 policy_record = resolve_merge_train_policy_record(record_store)
                 policy = policy_record.policy
