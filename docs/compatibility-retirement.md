@@ -120,8 +120,10 @@ Keep a compatibility surface only when it is one of these:
   dry-runs remain repeatable.
 - Merge-train admission, controller-status, and policy-target reads use native
   FastAPI routes. Their legacy WSGI read branches are deleted. Merge-train
-  run-once and PR feedback also use native FastAPI write routes; controller
-  mutation and phase runner routes remain on the retained fallback until their
+  run-once, batch-candidate run-once, and PR feedback also use native FastAPI
+  write routes. The batch-candidate legacy WSGI branch is deleted and direct
+  fallback calls fail closed; controller mutation, batch landing, and
+  stack-collapse phase runner routes remain on the retained fallback until their
   native write replacements land.
 - Work graph snapshot, work-graph rank, GitHub issue-inbox reads, and GitHub
   issue-inbox reconcile use native FastAPI routes. Their legacy WSGI

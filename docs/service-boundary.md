@@ -273,6 +273,7 @@ VeriReel product paths:
   - `POST /v1/work-graph/rank` (native FastAPI)
   - `POST /v1/work-graph/github/issues/reconcile` (native FastAPI)
   - `POST /v1/work-graph/merge-train/run-once` (native FastAPI)
+  - `POST /v1/work-graph/merge-train/batch-candidate/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/pr-feedback` (native FastAPI)
   - `POST /v1/work-graph/merge-train/controller/run-once`
 - product driver routes:
@@ -584,16 +585,20 @@ matrix and public-safe reporting fields.
 
 `POST /v1/work-graph/merge-train/batch-candidate/run-once` executes one
 policy-backed batch-candidate phase for a requested repository/base branch. The
-route accepts `mode: plan`, `mode: build`, or `mode: observe`. Plan mode reads a
-fresh GitHub snapshot, derives one deterministic batch candidate from the
-currently eligible queued PRs, and writes a
-`launchplane_merge_train_batch_candidates` record. Build mode requires a prior
-candidate record id, creates or resets the Launchplane train ref, merges queued
-PR heads into that ref in order, and records the resulting candidate SHA. Observe
-mode requires a prior candidate record id, reads required checks for that exact
-candidate SHA, and records whether the candidate is still pending, passed, or
-failed. The route never lands original PRs; PR-native landing remains a later
-phase with separate records and pre-merge invariants.
+native FastAPI route accepts `mode: plan`, `mode: build`, or `mode: observe`.
+Plan mode reads a fresh GitHub snapshot, derives one deterministic batch
+candidate from the currently eligible queued PRs, and writes a
+`launchplane_merge_train_batch_candidates` record. When the selected PR is the
+root of a supported stack, plan mode writes a stack-collapse plan record instead
+of a batch candidate; unsupported stack topologies return accepted evidence with
+no record write. Build mode requires a prior candidate record id, creates or
+resets the Launchplane train ref, merges queued PR heads into that ref in order,
+and records the resulting candidate SHA. Observe mode requires a prior candidate
+record id, reads required checks for that exact candidate SHA, and records
+whether the candidate is still pending, passed, or failed. The legacy WSGI
+fallback branch is deleted, and direct fallback calls fail closed. The route
+never lands original PRs; PR-native landing remains a later phase with separate
+records and pre-merge invariants.
 
 `POST /v1/work-graph/merge-train/batch-landing/run-once` executes one
 policy-backed batch-landing phase for a requested repository/base branch. The
