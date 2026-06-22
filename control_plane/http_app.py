@@ -116,7 +116,6 @@ from control_plane.merge_train_batch_candidate import (
     MergeTrainBatchCandidateRunOnceEnvelope,
     execute_merge_train_batch_candidate_run_once,
     require_merge_train_batch_candidate_record_store,
-    require_merge_train_stack_collapse_plan_record_store,
 )
 from control_plane.merge_train_github import MergeTrainGitHubError, MergeTrainGitHubStaleHeadError
 from control_plane.merge_train_pr_feedback import (
@@ -128,6 +127,13 @@ from control_plane.merge_train_run_once import (
     MergeTrainRunOnceEnvelope,
     execute_merge_train_run_once,
     require_merge_train_run_record_store,
+)
+from control_plane.merge_train_stack_collapse import (
+    MergeTrainStackCollapseBatchCandidateStoreMissingError,
+    MergeTrainStackCollapsePlanRecordNotFoundError,
+    MergeTrainStackCollapseRunOnceEnvelope,
+    execute_merge_train_stack_collapse_run_once,
+    require_merge_train_stack_collapse_plan_record_store,
 )
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
@@ -362,6 +368,7 @@ _PREVIEW_LIFECYCLE_PLAN_ROUTE = "/v1/previews/lifecycle-plan"
 _PREVIEW_LIFECYCLE_CLEANUP_ROUTE = "/v1/previews/lifecycle-cleanup"
 _PREVIEW_LIFECYCLE_SWEEP_ROUTE = "/v1/previews/lifecycle-sweep"
 _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
+_MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
 _MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
 _MERGE_TRAIN_PR_FEEDBACK_ROUTE = "/v1/work-graph/merge-train/pr-feedback"
 _RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE = "/v1/runtime-key-safety/policies/apply"
@@ -5116,6 +5123,173 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             identity=identity,
             route_path=_MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def write_merge_train_stack_collapse_run_once(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            stack_request = MergeTrainStackCollapseRunOnceEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if normalized_idempotency_key:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+
+        try:
+            policy_record = resolve_merge_train_policy_record(record_store)
+        except MergeTrainPolicyStoreMissingError as error:
+            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
+        try:
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository=stack_request.repository,
+                base_branch=stack_request.base_branch,
+            )
+        except ValueError as error:
+            raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=repository_policy.service_authz.action,
+            product=repository_policy.service_authz.product,
+            context=repository_policy.service_authz.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot run the requested merge train policy.",
+            )
+        token_env = repository_policy.github_token.env_var
+        if not token_env:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Merge train policy does not define a GitHub token environment variable.",
+            )
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_not_configured",
+                message="Configured merge train GitHub token is not available.",
+            )
+        try:
+            stack_collapse_store = require_merge_train_stack_collapse_plan_record_store(
+                record_store
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Merge train stack collapse storage requires database-backed records.",
+            ) from error
+        try:
+            batch_candidate_store = (
+                require_merge_train_batch_candidate_record_store(record_store)
+                if stack_request.mode == "admit"
+                else None
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Merge train stack collapse admission requires database-backed candidate records.",
+            ) from error
+        try:
+            stack_result = execute_merge_train_stack_collapse_run_once(
+                request=stack_request,
+                policy=policy_record.policy,
+                policy_sha256=policy_record.policy_sha256,
+                token=token,
+                trace_id=trace_id,
+                recorded_at=utc_now_timestamp(),
+                stack_collapse_store=stack_collapse_store,
+                batch_candidate_store=batch_candidate_store,
+            )
+        except MergeTrainGitHubStaleHeadError as error:
+            return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
+        except MergeTrainGitHubError as error:
+            return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except MergeTrainStackCollapseBatchCandidateStoreMissingError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Merge train stack collapse admission requires database-backed candidate records.",
+            ) from error
+        except MergeTrainStackCollapsePlanRecordNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=stack_result.records,
+            result=stack_result.accepted_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
             idempotency_key=normalized_idempotency_key,
             request_fingerprint_value=payload_fingerprint,
             trace_id=trace_id,
@@ -12648,6 +12822,35 @@ def create_launchplane_fastapi_app(
         },
         operation_id="write_merge_train_batch_candidate_run_once",
         summary="Run one merge train batch candidate worker pass",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            502: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
+        write_merge_train_stack_collapse_run_once,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": MergeTrainStackCollapseRunOnceEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="write_merge_train_stack_collapse_run_once",
+        summary="Run one merge train stack collapse worker pass",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
