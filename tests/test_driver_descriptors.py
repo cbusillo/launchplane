@@ -27,6 +27,10 @@ from control_plane.odoo_artifact_publish_inputs_http import (
     ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
     OdooArtifactPublishInputsEnvelope,
 )
+from control_plane.odoo_preview_apply_http import (
+    OdooPreviewApplyEnvelope,
+    OdooPreviewApplyInputsEnvelope,
+)
 from control_plane.drivers.registry import (
     build_driver_context_view,
     effective_driver_actions,
@@ -802,22 +806,28 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertFalse(stable_bootstrap_context.use_resolved_profile_product_for_authorization)
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_odoo_preview_apply_inputs_registered_in_descriptor_dispatch(self) -> None:
+    def test_odoo_preview_apply_inputs_is_native_fastapi_dispatch_exempt(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        route_path = control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path
 
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
         self.assertIn(
-            control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
-            dispatch_routes,
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
         )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_odoo_preview_apply_registered_in_descriptor_dispatch(self) -> None:
+    def test_odoo_preview_apply_is_native_fastapi_dispatch_exempt(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        route_path = control_plane_service._ODOO_PREVIEW_APPLY_ROUTE.route_path
 
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
         self.assertIn(
-            control_plane_service._ODOO_PREVIEW_APPLY_ROUTE.route_path,
-            dispatch_routes,
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
         )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_verireel_preview_verification_registered_in_descriptor_dispatch(
@@ -1745,15 +1755,23 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
                 control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_odoo_preview_lifecycle_descriptor_requires_dispatch_registration(
+    def test_odoo_preview_lifecycle_descriptor_routes_are_native_fastapi_exempt(
         self,
     ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._ODOO_PREVIEW_APPLY_ROUTE.route_path)
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+        for route_path in (
+            control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
+            control_plane_service._ODOO_PREVIEW_APPLY_ROUTE.route_path,
+        ):
+            self.assertIn(
+                route_path, control_plane_service._driver_route_metadata_from_descriptors()
+            )
+            self.assertIn(
+                route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
+            )
+            self.assertNotIn(route_path, dispatch_routes)
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_verireel_preview_verification_descriptor_requires_dispatch_registration(
         self,
@@ -2037,12 +2055,12 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             route_metadata_by_action={
                 "preview_apply": (
                     control_plane_service._ODOO_PREVIEW_APPLY_ROUTE,
-                    control_plane_service.OdooPreviewApplyEnvelope,
+                    OdooPreviewApplyEnvelope,
                     "apply Odoo preview",
                 ),
                 "preview_apply_inputs": (
                     control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
-                    control_plane_service.OdooPreviewApplyInputsEnvelope,
+                    OdooPreviewApplyInputsEnvelope,
                     "preview apply inputs",
                 ),
             },

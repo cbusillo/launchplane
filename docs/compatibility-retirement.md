@@ -131,6 +131,17 @@ Keep a compatibility surface only when it is one of these:
   classification, and handler-side `404` file-miss parity. The descriptor route
   remains discoverable, but the legacy WSGI descriptor dispatch path is exempted
   and direct fallback calls fail closed.
+- Odoo preview apply inputs and preview apply use native FastAPI routes:
+  `POST /v1/drivers/odoo/preview-apply-inputs` and
+  `POST /v1/drivers/odoo/preview-apply`. They preserve preview-profile
+  resolution, preview-context authorization, preview apply input derivation,
+  destroy-without-image apply behavior, and `odoo_preview_runtime_config_incomplete`
+  details for incomplete template runtime records. Preview apply inputs remain
+  uncached/non-idempotent like the legacy descriptor route. Preview apply keeps
+  optional `Idempotency-Key` replay/conflict behavior for non-blocked results and
+  skips blocked-result storage so retries can observe changed runtime/provider
+  state. Their descriptor routes remain discoverable, but legacy WSGI descriptor
+  dispatch is exempted and direct fallback calls fail closed.
 - Merge-train admission, controller-status, and policy-target reads use native
   FastAPI routes. Their legacy WSGI read branches are deleted. Merge-train
   run-once, batch-candidate run-once, batch-landing run-once, stack-collapse

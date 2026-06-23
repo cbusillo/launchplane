@@ -22,7 +22,6 @@ from control_plane.http_app import (
     create_launchplane_fastapi_app,
     resolve_launchplane_authz_policy,
 )
-from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.every_code_work_request import (
@@ -165,6 +164,13 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _write_preview_desired_state_if_supported as _write_preview_desired_state_if_supported,
     _write_preview_inventory_scan_if_supported as _write_preview_inventory_scan_if_supported,
 )
+from control_plane.odoo_preview_apply_http import (
+    ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+    ODOO_PREVIEW_APPLY_ROUTE,
+    OdooPreviewApplyConfigError,
+    OdooPreviewApplyEnvelope,
+    OdooPreviewApplyInputsEnvelope,
+)
 from control_plane.launchplane_mutations import (
     LaunchplaneMutationStore,
     apply_launchplane_destroy_preview,
@@ -216,13 +222,6 @@ from control_plane.merge_train_github import (
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     apply_deployment_evidence,
-)
-from control_plane.workflows.odoo_preview_runtime import (
-    ODOO_PREVIEW_REQUIRED_ENV_KEYS,
-    OdooPreviewApplyInputsRequest,
-    OdooPreviewDokployApplyRequest,
-    build_odoo_preview_apply_inputs,
-    execute_odoo_preview_dokploy_apply,
 )
 from control_plane.workflows.preview_pr_feedback import (
     handle_every_code_preview_validation_comment,
@@ -326,6 +325,8 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         "/v1/drivers/generic-web/preview-desired-state",
         "/v1/drivers/ingress/route-apply",
         "/v1/drivers/odoo/artifact-publish-inputs",
+        ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+        ODOO_PREVIEW_APPLY_ROUTE,
     }
 )
 
@@ -426,111 +427,6 @@ _EveryCodeWebhookResponse = tuple[int, dict[str, object]]
 
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    apply: OdooPreviewDokployApplyRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooPreviewApplyEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo preview apply")
-        if self.product.strip() != self.apply.dry_run_plan.product.strip():
-            raise ValueError("Odoo preview apply requires matching product values.")
-        return self
-
-
-class OdooPreviewApplyInputsEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    inputs: OdooPreviewApplyInputsRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooPreviewApplyInputsEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo preview apply inputs")
-        if self.product.strip() != self.inputs.product.strip():
-            raise ValueError("Odoo preview apply inputs require matching product values.")
-        return self
-
-
-class OdooPreviewApplyConfigError(click.ClickException):
-    def __init__(self, *, context: str, instance: str, missing_keys: tuple[str, ...]) -> None:
-        super().__init__("Odoo preview apply runtime environment is incomplete.")
-        self.context = context
-        self.instance = instance
-        self.missing_keys = tuple(sorted(missing_keys))
-
-
-def _odoo_preview_service_environment_values(
-    *,
-    control_plane_root_path: Path,
-    profile: LaunchplaneProductProfileRecord,
-    apply_request: OdooPreviewDokployApplyRequest,
-    database_url: str | None,
-) -> dict[str, str]:
-    plan = apply_request.dry_run_plan
-    if plan.operation == "destroy":
-        return {}
-    preview_profile = profile.preview
-    template_instance = preview_profile.template_instance.strip()
-    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-        control_plane_root=control_plane_root_path,
-        context_name=preview_profile.context,
-        instance_name=template_instance,
-        database_url=database_url,
-    )
-    environment_values.update(preview_profile.override_env)
-    environment_values["ODOO_PROJECT_NAME"] = plan.compose_name
-    environment_values["ODOO_STACK_NAME"] = plan.compose_name
-    environment_values["ODOO_DB_NAME"] = _odoo_preview_identifier(plan.compose_name, suffix="db")
-    environment_values["ODOO_DATA_VOLUME"] = _odoo_preview_identifier(
-        plan.compose_name, suffix="data"
-    )
-    environment_values["ODOO_LOG_VOLUME"] = _odoo_preview_identifier(
-        plan.compose_name, suffix="logs"
-    )
-    environment_values["ODOO_DB_VOLUME"] = _odoo_preview_identifier(
-        plan.compose_name, suffix="db-volume"
-    )
-    for key in preview_profile.preview_url_env_keys:
-        environment_values[key] = plan.preview_url
-    for key in preview_profile.preview_domain_env_keys:
-        environment_values[key] = plan.domain_host
-    missing_env_keys = tuple(
-        key for key in ODOO_PREVIEW_REQUIRED_ENV_KEYS if not environment_values.get(key, "").strip()
-    )
-    if missing_env_keys:
-        raise OdooPreviewApplyConfigError(
-            context=preview_profile.context,
-            instance=template_instance,
-            missing_keys=missing_env_keys,
-        )
-    return environment_values
-
-
-def _odoo_preview_identifier(value: str, *, suffix: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip()).strip("_").lower()
-    if not normalized:
-        normalized = "odoo_preview"
-    suffix_identifier = re.sub(r"[^a-zA-Z0-9]+", "_", suffix.strip()).strip("_").lower()
-    return f"{normalized}_{suffix_identifier}" if suffix_identifier else normalized
-
-
-def _odoo_preview_apply_inputs_response_result(
-    *,
-    control_plane_root: Path,
-    record_store: object,
-    profile: LaunchplaneProductProfileRecord,
-    request: OdooPreviewApplyInputsRequest,
-    database_url: str | None,
-) -> dict[str, object]:
-    driver_result = build_odoo_preview_apply_inputs(
-        control_plane_root=control_plane_root,
-        record_store=cast(Any, record_store),
-        profile=profile,
-        request=request,
-        database_url=database_url,
-    )
-    return driver_result.model_dump(mode="json")
 
 
 _ODOO_PREVIEW_APPLY_ROUTE = _DriverRouteExecutionMetadata(
@@ -1775,82 +1671,6 @@ def _handle_odoo_website_bootstrap_override(
     return _DescriptorDriverDispatchResult(result=result, driver_result=result)
 
 
-def _validate_odoo_preview_apply_inputs_profile(
-    request: OdooPreviewApplyInputsEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> None:
-    del request, record_store, control_plane_root_path
-    if resolved_context.profile is None:
-        raise ProductDriverMismatchError("Odoo preview apply inputs require a product profile.")
-
-
-def _handle_odoo_preview_apply_inputs(
-    request: OdooPreviewApplyInputsEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    database_url = getattr(record_store, "database_url", None)
-    driver_result = _odoo_preview_apply_inputs_response_result(
-        control_plane_root=control_plane_root_path,
-        record_store=record_store,
-        profile=resolved_context.profile,
-        request=request.inputs,
-        database_url=database_url,
-    )
-    return _DescriptorDriverDispatchResult(result=driver_result, driver_result=driver_result)
-
-
-def _validate_odoo_preview_apply_profile(
-    request: OdooPreviewApplyEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> None:
-    del record_store, control_plane_root_path
-    profile = resolved_context.profile
-    if profile is None:
-        raise ProductDriverMismatchError("Odoo preview apply requires a product profile.")
-    preview_profile = profile.preview
-    if not preview_profile.enabled or not preview_profile.context.strip():
-        raise ProductDriverMismatchError(
-            "Odoo preview apply requires an enabled product preview profile."
-        )
-    if request.apply.dry_run_plan.repository.strip() != profile.repository.strip():
-        raise ValueError("Odoo preview apply repository does not match product profile.")
-
-
-def _handle_odoo_preview_apply(
-    request: OdooPreviewApplyEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    database_url = getattr(record_store, "database_url", None)
-    resolved_environment_values = _odoo_preview_service_environment_values(
-        control_plane_root_path=control_plane_root_path,
-        profile=resolved_context.profile,
-        apply_request=request.apply,
-        database_url=database_url,
-    )
-    service_apply_request = request.apply.model_copy(
-        update={"environment_values": resolved_environment_values}
-    )
-    driver_result = execute_odoo_preview_dokploy_apply(
-        control_plane_root=control_plane_root_path,
-        request=service_apply_request,
-        database_url=database_url,
-    )
-    return _DescriptorDriverDispatchResult(
-        result=driver_result.model_dump(mode="json"),
-        driver_result=driver_result,
-    )
-
-
 def _handle_verireel_preview_verification(
     request: VeriReelPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -2364,28 +2184,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             custom_dispatch_handler=_dispatch_odoo_stable_bootstrap,
         ),
-        _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                use_preview_context_for_authorization=True,
-                require_profile=True,
-            ),
-            handler=_handle_odoo_preview_apply_inputs,
-            pre_idempotency_validator=_validate_odoo_preview_apply_inputs_profile,
-        ),
-        _ODOO_PREVIEW_APPLY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_PREVIEW_APPLY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                use_preview_context_for_authorization=True,
-                require_profile=True,
-            ),
-            handler=_handle_odoo_preview_apply,
-            pre_idempotency_validator=_validate_odoo_preview_apply_profile,
-        ),
         _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -2534,8 +2332,6 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
             _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path,
             _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
-            _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
-            _ODOO_PREVIEW_APPLY_ROUTE.route_path,
             _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
             _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
             _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
