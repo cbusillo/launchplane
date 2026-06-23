@@ -304,8 +304,8 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/website-bootstrap-override`
   - `POST /v1/drivers/odoo/target-replacement-plan`
   - `POST /v1/drivers/odoo/target-replacement-apply`
-  - `POST /v1/drivers/odoo/preview-apply-inputs`
-  - `POST /v1/drivers/odoo/preview-apply`
+  - `POST /v1/drivers/odoo/preview-apply-inputs` (native FastAPI)
+  - `POST /v1/drivers/odoo/preview-apply` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-backup-gate`
   - `POST /v1/drivers/odoo/prod-promotion`
   - `POST /v1/drivers/odoo/prod-rollback`
@@ -1829,12 +1829,19 @@ for those artifact-publish inputs are classified as
 `driver_route_dependency_not_found`, not as route-missing or generic invalid
 requests. The artifact-publish inputs route is owned by native FastAPI; the
 legacy WSGI descriptor dispatcher is exempted from the path, and direct fallback
-calls fail closed. The smoke also sends authenticated GitHub OIDC probes to
-`/v1/drivers/odoo/preview-apply-inputs`,
-`/v1/drivers/odoo/preview-apply`, and `/v1/previews/pr-feedback`. Mutation-capable
-routes are proven by pre-mutation classification: preview apply uses a blocked
-destroy plan and rejects any non-blocked acceptance, while preview feedback uses
-the route's `dry_run` request mode so Launchplane evaluates the same
+calls fail closed. Odoo preview apply inputs and preview apply are also owned by
+native FastAPI. They preserve preview-context authorization,
+runtime-environment dependency classification, and the
+`odoo_preview_runtime_config_incomplete` details envelope for apply requests
+whose template runtime records are incomplete. Preview apply inputs remains
+uncached/non-idempotent, while preview apply keeps optional `Idempotency-Key`
+replay/conflict behavior for non-blocked results and skips blocked-result
+storage so retries can observe changed runtime/provider state. The smoke also
+sends authenticated GitHub OIDC probes to `/v1/drivers/odoo/preview-apply-inputs`,
+`/v1/drivers/odoo/preview-apply`, and `/v1/previews/pr-feedback`.
+Mutation-capable routes are proven by pre-mutation classification: preview apply
+uses a blocked destroy plan and rejects any non-blocked acceptance, while preview
+feedback uses the route's `dry_run` request mode so Launchplane evaluates the same
 `preview_pr_feedback.write` authorization without writing records or comments.
 Product repos should use that reusable smoke or Launchplane-owned reusable
 workflows instead of adding repo-local route setup or copied driver request
@@ -1963,7 +1970,8 @@ retries do not collide. The regular cleanup workflow uses
 - generic-web preview destroy driver:
   `generic-web-preview-destroy:<product>:<anchor_pr_number>`
 - Odoo isolated preview apply-inputs driver:
-  `odoo-preview-apply-inputs:<product>:<preview_slug>:<sha>`
+  none; apply-inputs remains uncached/non-idempotent so blocked input derivation
+  can be retried against changed runtime/provider records.
 - Odoo isolated preview apply driver:
   `odoo-preview-apply:<product>:<preview_slug>:<operation>:<sha-or-destroy>`
 
@@ -2107,8 +2115,10 @@ If the service-side runtime contract is incomplete before any provider mutation,
 the route returns `odoo_preview_runtime_config_incomplete` with the affected
 context, instance, and missing key names only; it never returns runtime values or
 secret material.
-The route is idempotency-keyed and intended for approved non-production Odoo
-preview targets while the isolated runtime migration is being exercised.
+The route is idempotency-keyed for non-blocked apply results and intended for
+approved non-production Odoo preview targets while the isolated runtime migration
+is being exercised. Blocked apply results are not stored as idempotency responses
+so retries can recompute after runtime or provider dependencies recover.
 
 For Odoo preview smoke follow-ups,
 `POST /v1/drivers/generic-web/preview-verification` accepts the product,
