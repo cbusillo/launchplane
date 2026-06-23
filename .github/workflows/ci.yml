@@ -225,6 +225,8 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     name: test_shard (${{ matrix.shard_index }})
+    env:
+      UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
@@ -248,7 +250,7 @@ jobs:
       - name: Restore unittest timings
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}/unittest-timings/history.json
+          path: ${{ env.UNITTEST_TIMINGS_CACHE }}
           key: >-
             ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
@@ -260,14 +262,14 @@ jobs:
         run: >-
           uv run launchplane ci unittest-shard plan
           --shard-count 6
-          --timings-file "${RUNNER_TEMP}/unittest-timings/history.json"
+          --timings-file "${UNITTEST_TIMINGS_CACHE}"
 
       - name: Run unit test shard
         run: >-
           uv run launchplane ci unittest-shard run
           --shard-count 6
           --shard-index ${{ matrix.shard_index }}
-          --timings-file "${RUNNER_TEMP}/unittest-timings/history.json"
+          --timings-file "${UNITTEST_TIMINGS_CACHE}"
           --timings-output "${RUNNER_TEMP}/unittest-timings/shard-${{ matrix.shard_index }}.json"
 
       - name: Upload unittest timings
@@ -286,6 +288,8 @@ jobs:
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
+    env:
+      UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -318,13 +322,13 @@ jobs:
           uv run launchplane ci unittest-shard aggregate
           --shard-count 6
           --results-dir "${RUNNER_TEMP}/unittest-timings"
-          --timings-output "${RUNNER_TEMP}/unittest-timings/history.json"
+          --timings-output "${UNITTEST_TIMINGS_CACHE}"
 
       - name: Save unittest timings
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@v4
         with:
-          path: ${{ runner.temp }}/unittest-timings/history.json
+          path: ${{ env.UNITTEST_TIMINGS_CACHE }}
           key: >-
             ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
