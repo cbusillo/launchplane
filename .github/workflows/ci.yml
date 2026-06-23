@@ -305,6 +305,17 @@ jobs:
       - name: Install Python
         run: uv python install 3.13
 
+      - name: Restore unittest timings
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.UNITTEST_TIMINGS_CACHE }}
+          key: >-
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-
+            ${{ runner.os }}-python-3.13-unittest-timings-
+
       - name: Require successful test shards
         run: |
           if [ "${{ needs.test_shards.result }}" != "success" ]; then
@@ -324,6 +335,7 @@ jobs:
           uv run launchplane ci unittest-shard aggregate
           --shard-count 6
           --results-dir "${RUNNER_TEMP}/unittest-timings"
+          --timings-file "${UNITTEST_TIMINGS_CACHE}"
           --timings-output "${UNITTEST_TIMINGS_CACHE}"
 
       - name: Save unittest timings

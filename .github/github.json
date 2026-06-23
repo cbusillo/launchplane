@@ -35,7 +35,8 @@
       "default": "uv run python -m unittest",
       "targeted": "uv run python -m unittest {modules}",
       "shardPlan": "uv run launchplane ci unittest-shard plan --shard-count {shard_count}",
-      "shardRun": "uv run launchplane ci unittest-shard run --shard-count {shard_count} --shard-index {shard_index} --timings-output {timings_output}"
+      "shardRun": "uv run launchplane ci unittest-shard run --shard-count {shard_count} --shard-index {shard_index} --timings-output {timings_output}",
+      "shardGranularity": "whole modules by default; large modules may split into unittest target IDs"
     },
     "lint": {
       "default": "uv run --extra dev ruff check .",
