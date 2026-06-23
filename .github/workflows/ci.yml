@@ -250,8 +250,10 @@ jobs:
         with:
           path: ${{ runner.temp }}/unittest-timings/history.json
           key: >-
-            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-
             ${{ runner.os }}-python-3.13-unittest-timings-
 
       - name: Show unit test shard plan
@@ -324,7 +326,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/unittest-timings/history.json
           key: >-
-            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   test_fork:
     if: >-
