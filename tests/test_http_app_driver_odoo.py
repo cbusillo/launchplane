@@ -8,6 +8,11 @@ from unittest.mock import patch
 from click import ClickException
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooConfigParameterOverride,
+    OdooInstanceOverrideRecord,
+    OdooOverrideValue,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -15,13 +20,17 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
 from tests.http_app_test_support import (
     _asgi_get,
     _MissingProductReadStore,
     _post_odoo_artifact_publish_inputs,
+    _post_odoo_config_parameter_override,
+    _post_odoo_post_deploy,
     _post_odoo_preview_apply,
     _post_odoo_preview_apply_inputs,
+    _post_odoo_website_bootstrap_override,
 )
 from tests.test_service import (
     _identity,
@@ -1513,6 +1522,664 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inputs_payload["error"]["code"], "not_found")
         self.assertEqual(apply_status_code, 404)
         self.assertEqual(apply_payload["error"]["code"], "not_found")
+
+
+class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
+    def _identity(
+        self,
+        *,
+        repository: str = "every/tenant-opw",
+        workflow_ref: str = ("every/tenant-opw/.github/workflows/deploy-odoo.yml@refs/heads/main"),
+    ) -> GitHubActionsIdentity:
+        return _identity(
+            repository=repository,
+            workflow_ref=workflow_ref,
+            event_name="workflow_dispatch",
+        )
+
+    def _policy(
+        self,
+        *,
+        product: str = "odoo",
+        context: str = "opw",
+        action: str = "odoo_post_deploy.execute",
+        repository: str = "every/tenant-opw",
+        workflow_ref: str = ("every/tenant-opw/.github/workflows/deploy-odoo.yml@refs/heads/main"),
+    ) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": repository,
+                        "workflow_refs": [workflow_ref],
+                        "event_names": ["workflow_dispatch"],
+                        "products": [product],
+                        "contexts": [context],
+                        "actions": [action],
+                    }
+                ]
+            }
+        )
+
+    def _tenant_identity(self, *, workflow_name: str) -> GitHubActionsIdentity:
+        workflow_ref = f"cbusillo/launchplane/.github/workflows/{workflow_name}@refs/heads/main"
+        return self._identity(
+            repository="cbusillo/launchplane",
+            workflow_ref=workflow_ref,
+        )
+
+    def _tenant_policy(
+        self,
+        *,
+        action: str,
+        workflow_name: str,
+    ) -> LaunchplaneAuthzPolicy:
+        workflow_ref = f"cbusillo/launchplane/.github/workflows/{workflow_name}@refs/heads/main"
+        return self._policy(
+            product="odoo-tenant-cm",
+            context="cm",
+            action=action,
+            repository="cbusillo/launchplane",
+            workflow_ref=workflow_ref,
+        )
+
+    def _store_with_tenant_profile(self, state_dir: Path) -> FilesystemRecordStore:
+        store = FilesystemRecordStore(state_dir=state_dir)
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        )
+        return store
+
+    def _store_with_non_odoo_tenant_profile(self, state_dir: Path) -> FilesystemRecordStore:
+        store = FilesystemRecordStore(state_dir=state_dir)
+        profile_payload = _odoo_preview_profile_payload()
+        profile_payload["driver_id"] = "generic-web"
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        )
+        return store
+
+    def _config_override_payload(self, *, key: str = "web.base.url") -> dict[str, object]:
+        return {
+            "product": "odoo-tenant-cm",
+            "override": {
+                "product": "odoo-tenant-cm",
+                "context": "cm",
+                "instance": "testing",
+                "key": key,
+                "value": "https://cm-testing.shinycomputers.com",
+            },
+        }
+
+    def _website_override_payload(self) -> dict[str, object]:
+        return {
+            "product": "odoo-tenant-cm",
+            "override": {
+                "product": "odoo-tenant-cm",
+                "context": "cm",
+                "instance": "testing",
+                "website_bootstrap": {
+                    "tenant": "cm",
+                    "name": "Cell Mechanic",
+                    "canonical_url": "https://cm-testing.shinycomputers.com",
+                    "homepage_url": "/cell-mechanic",
+                    "logo_path": "addons/cm_website/static/src/img/logo.png",
+                    "logo_alt": "Cell Mechanic",
+                    "routes": [
+                        {
+                            "name": "Cell Mechanic",
+                            "url": "/cell-mechanic",
+                            "module": "cm_website",
+                            "homepage": True,
+                        }
+                    ],
+                },
+            },
+        }
+
+    async def test_odoo_post_deploy_executes_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="opw",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                    override_status="pass",
+                    override_record_found=True,
+                    override_payload_rendered=True,
+                    applied_at="2026-04-26T12:05:00Z",
+                ),
+            ) as execute_mock:
+                response = await _post_odoo_post_deploy(
+                    app,
+                    {
+                        "product": "odoo",
+                        "post_deploy": {
+                            "context": "opw",
+                            "instance": "testing",
+                            "phase": "deploy",
+                        },
+                    },
+                    idempotency_key="odoo-post-deploy:opw-testing-deploy",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"],
+            {"transition": "odoo-post-deploy:opw:testing:deploy"},
+        )
+        self.assertEqual(payload["result"]["post_deploy_status"], "pass")
+        self.assertEqual(payload["result"]["override_status"], "pass")
+        execute_mock.assert_called_once()
+
+    async def test_odoo_post_deploy_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="opw",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                    override_status="pass",
+                    override_record_found=True,
+                    override_payload_rendered=True,
+                    applied_at="2026-04-26T12:05:00Z",
+                ),
+            ) as execute_mock:
+                request_payload: dict[str, object] = {
+                    "product": "odoo",
+                    "post_deploy": {"context": "opw", "instance": "testing"},
+                }
+                first_response = await _post_odoo_post_deploy(
+                    app,
+                    request_payload,
+                    idempotency_key="odoo-post-deploy:replay",
+                )
+                replay_response = await _post_odoo_post_deploy(
+                    app,
+                    request_payload,
+                    idempotency_key="odoo-post-deploy:replay",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        execute_mock.assert_called_once()
+
+    async def test_odoo_post_deploy_rejects_idempotency_key_reuse(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="opw",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                    override_status="pass",
+                    override_record_found=True,
+                    override_payload_rendered=True,
+                    applied_at="2026-04-26T12:05:00Z",
+                ),
+            ):
+                first_response = await _post_odoo_post_deploy(
+                    app,
+                    {
+                        "product": "odoo",
+                        "post_deploy": {"context": "opw", "instance": "testing"},
+                    },
+                    idempotency_key="odoo-post-deploy:conflict",
+                )
+                conflict_response = await _post_odoo_post_deploy(
+                    app,
+                    {
+                        "product": "odoo",
+                        "post_deploy": {"context": "opw", "instance": "prod"},
+                    },
+                    idempotency_key="odoo-post-deploy:conflict",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_odoo_post_deploy_handler_file_miss_is_not_found(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy",
+                side_effect=FileNotFoundError("missing manifest"),
+            ):
+                response = await _post_odoo_post_deploy(
+                    app,
+                    {
+                        "product": "odoo",
+                        "post_deploy": {"context": "opw", "instance": "testing"},
+                    },
+                    idempotency_key="odoo-post-deploy:file-miss",
+                )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_odoo_post_deploy_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="deployment.write"),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_post_deploy(
+                app,
+                {
+                    "product": "odoo",
+                    "post_deploy": {"context": "opw", "instance": "testing"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_odoo_config_parameter_override_writes_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._tenant_identity(workflow_name="odoo-config-parameter-override.yml")
+                ),
+                authz_policy=self._tenant_policy(
+                    action="odoo_config_parameter_override.write",
+                    workflow_name="odoo-config-parameter-override.yml",
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_config_parameter_override(
+                app,
+                self._config_override_payload(),
+                idempotency_key="odoo-cm-testing-web-base-url",
+            )
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+
+            self.assertEqual(response.status_code, 202)
+            payload = response.json()
+            self.assertEqual(payload["records"], {})
+            self.assertEqual(payload["result"]["context"], "cm")
+            self.assertEqual(payload["result"]["instance"], "testing")
+            self.assertEqual(payload["result"]["config_parameter_keys"], ["web.base.url"])
+            self.assertEqual(stored_record.config_parameters[0].key, "web.base.url")
+            self.assertEqual(
+                stored_record.config_parameters[0].value.value,
+                "https://cm-testing.shinycomputers.com",
+            )
+            self.assertEqual(stored_record.apply_on, ("deploy", "promotion"))
+
+    async def test_odoo_config_parameter_override_preserves_existing_phases(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="cm",
+                    instance="testing",
+                    apply_on=("manual",),
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal", value="https://old.example.com"
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-05-10T20:00:00Z",
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._tenant_identity(workflow_name="odoo-config-parameter-override.yml")
+                ),
+                authz_policy=self._tenant_policy(
+                    action="odoo_config_parameter_override.write",
+                    workflow_name="odoo-config-parameter-override.yml",
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_config_parameter_override(
+                app,
+                self._config_override_payload(),
+                idempotency_key="odoo-cm-testing-web-base-url",
+            )
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(stored_record.apply_on, ("manual", "deploy", "promotion"))
+            self.assertEqual(
+                stored_record.config_parameters[0].value.value,
+                "https://cm-testing.shinycomputers.com",
+            )
+
+    async def test_odoo_config_parameter_override_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._tenant_identity(workflow_name="odoo-config-parameter-override.yml")
+                ),
+                authz_policy=self._tenant_policy(
+                    action="odoo_config_parameter_override.write",
+                    workflow_name="odoo-config-parameter-override.yml",
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            first_response = await _post_odoo_config_parameter_override(
+                app,
+                self._config_override_payload(),
+                idempotency_key="odoo-cm-testing-web-base-url:replay",
+            )
+            replay_response = await _post_odoo_config_parameter_override(
+                app,
+                self._config_override_payload(),
+                idempotency_key="odoo-cm-testing-web-base-url:replay",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+
+    async def test_odoo_config_parameter_override_rejects_unauthorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._tenant_identity(workflow_name="odoo-config-parameter-override.yml")
+                ),
+                authz_policy=self._tenant_policy(
+                    action="odoo_post_deploy.execute",
+                    workflow_name="odoo-config-parameter-override.yml",
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_config_parameter_override(
+                app,
+                self._config_override_payload(),
+                idempotency_key="odoo-cm-testing-web-base-url:unauthorized",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_odoo_config_parameter_override_dependency_miss_is_dependency_503(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._tenant_identity(workflow_name="odoo-config-parameter-override.yml")
+                ),
+                authz_policy=self._tenant_policy(
+                    action="odoo_config_parameter_override.write",
+                    workflow_name="odoo-config-parameter-override.yml",
+                ),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_config_parameter_override(
+                app,
+                self._config_override_payload(),
+                idempotency_key="odoo-cm-testing-web-base-url:dependency-miss",
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(payload["error"]["code"], "driver_route_dependency_not_found")
+        self.assertEqual(
+            payload["details"]["route_path"],
+            "/v1/drivers/odoo/config-parameter-override",
+        )
+
+    async def test_odoo_config_parameter_override_rejects_non_odoo_product_profile(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_non_odoo_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._tenant_identity(workflow_name="odoo-config-parameter-override.yml")
+                ),
+                authz_policy=self._tenant_policy(
+                    action="odoo_config_parameter_override.write",
+                    workflow_name="odoo-config-parameter-override.yml",
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_config_parameter_override(
+                app,
+                self._config_override_payload(),
+                idempotency_key="odoo-cm-testing-web-base-url:non-odoo",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+
+    async def test_odoo_config_parameter_override_rejects_unsupported_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._tenant_identity(workflow_name="odoo-config-parameter-override.yml")
+                ),
+                authz_policy=self._tenant_policy(
+                    action="odoo_config_parameter_override.write",
+                    workflow_name="odoo-config-parameter-override.yml",
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_config_parameter_override(
+                app,
+                self._config_override_payload(key="database.secret"),
+                idempotency_key="odoo-cm-testing-unsupported",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_odoo_website_bootstrap_override_writes_typed_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="cm",
+                    instance="testing",
+                    apply_on=("manual",),
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal",
+                                value="https://cm-testing.shinycomputers.com",
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-05-10T20:00:00Z",
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._tenant_identity(workflow_name="odoo-website-bootstrap-override.yml")
+                ),
+                authz_policy=self._tenant_policy(
+                    action="odoo_website_bootstrap_override.write",
+                    workflow_name="odoo-website-bootstrap-override.yml",
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_website_bootstrap_override(
+                app,
+                self._website_override_payload(),
+                idempotency_key="odoo-cm-testing-website-bootstrap",
+            )
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(response.json()["result"]["website_bootstrap"], True)
+            self.assertEqual(stored_record.apply_on, ("manual", "deploy", "promotion"))
+            self.assertEqual(stored_record.config_parameters[0].key, "web.base.url")
+            self.assertIsNotNone(stored_record.website_bootstrap)
+            assert stored_record.website_bootstrap is not None
+            self.assertEqual(stored_record.website_bootstrap.name, "Cell Mechanic")
+            self.assertEqual(
+                stored_record.website_bootstrap.canonical_url,
+                "https://cm-testing.shinycomputers.com",
+            )
+
+    async def test_openapi_includes_odoo_post_deploy_override_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=self._policy(),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        paths = response.json()["paths"]
+        expected_routes = {
+            "/v1/drivers/odoo/post-deploy": (
+                "write_odoo_post_deploy",
+                "OdooPostDeployEnvelope",
+            ),
+            "/v1/drivers/odoo/config-parameter-override": (
+                "write_odoo_config_parameter_override",
+                "OdooConfigParameterOverrideEnvelope",
+            ),
+            "/v1/drivers/odoo/website-bootstrap-override": (
+                "write_odoo_website_bootstrap_override",
+                "OdooWebsiteBootstrapOverrideEnvelope",
+            ),
+        }
+        for route_path, (operation_id, schema_title) in expected_routes.items():
+            route = paths[route_path]["post"]
+            self.assertEqual(route["operationId"], operation_id)
+            self.assertEqual(
+                route["requestBody"]["content"]["application/json"]["schema"]["title"],
+                schema_title,
+            )
+            self.assertEqual(
+                route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/AcceptedEvidenceResponse",
+            )
+            for status_code in ("400", "401", "403", "404", "409", "503"):
+                self.assertIn(status_code, route["responses"])
+
+    def test_legacy_wsgi_odoo_post_deploy_override_routes_are_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                control_plane_root_path=root,
+            )
+            requests = (
+                (
+                    "/v1/drivers/odoo/post-deploy",
+                    {
+                        "product": "odoo",
+                        "post_deploy": {"context": "opw", "instance": "testing"},
+                    },
+                ),
+                (
+                    "/v1/drivers/odoo/config-parameter-override",
+                    self._config_override_payload(),
+                ),
+                (
+                    "/v1/drivers/odoo/website-bootstrap-override",
+                    self._website_override_payload(),
+                ),
+            )
+
+            responses = [
+                _invoke_app(
+                    legacy_app,
+                    method="POST",
+                    path=route_path,
+                    payload=payload,
+                )
+                for route_path, payload in requests
+            ]
+
+        for status_code, payload in responses:
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["error"]["code"], "not_found")
 
 
 if __name__ == "__main__":

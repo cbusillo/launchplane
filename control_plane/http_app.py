@@ -175,6 +175,24 @@ from control_plane.odoo_preview_apply_http import (
     execute_odoo_preview_apply_result,
     resolve_odoo_preview_apply_profile,
 )
+from control_plane.odoo_post_deploy_http import (
+    ODOO_CONFIG_PARAMETER_OVERRIDE_ACTION,
+    ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE as _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
+    ODOO_POST_DEPLOY_ACTION,
+    ODOO_POST_DEPLOY_ROUTE as _ODOO_POST_DEPLOY_ROUTE,
+    ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ACTION,
+    ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE as _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
+    OdooConfigParameterOverrideEnvelope,
+    OdooInstanceOverrideStore,
+    OdooPostDeployEnvelope,
+    OdooPostDeployProductMismatchError,
+    OdooPostDeployRouteDependencyError,
+    OdooWebsiteBootstrapOverrideEnvelope,
+    execute_odoo_post_deploy_result,
+    resolve_odoo_post_deploy_product_route,
+    write_odoo_config_parameter_override_result,
+    write_odoo_website_bootstrap_override_result,
+)
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductActivityReadModel,
@@ -5722,6 +5740,395 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=response,
             )
+        return response
+
+    async def write_odoo_post_deploy(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            post_deploy_request = OdooPostDeployEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        try:
+            product_profile = resolve_odoo_post_deploy_product_route(
+                record_store=record_store,
+                product=post_deploy_request.product,
+            )
+        except OdooPostDeployRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_POST_DEPLOY_ROUTE,
+            )
+        except OdooPostDeployProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        authorization_product = (
+            product_profile.product if product_profile is not None else post_deploy_request.product
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=ODOO_POST_DEPLOY_ACTION,
+            product=authorization_product,
+            context=post_deploy_request.post_deploy.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the Odoo post-deploy driver for the requested"
+                    " product/context."
+                ),
+            )
+
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_POST_DEPLOY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+
+        try:
+            records, driver_result = execute_odoo_post_deploy_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=post_deploy_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_ODOO_POST_DEPLOY_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={key: str(value) for key, value in records.items()},
+            result=driver_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_POST_DEPLOY_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def write_odoo_config_parameter_override(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            override_request = OdooConfigParameterOverrideEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        try:
+            product_profile = resolve_odoo_post_deploy_product_route(
+                record_store=record_store,
+                product=override_request.product,
+                context=override_request.override.context,
+                instance=override_request.override.instance,
+            )
+        except OdooPostDeployRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
+            )
+        except OdooPostDeployProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        authorization_product = (
+            product_profile.product if product_profile is not None else override_request.product
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=ODOO_CONFIG_PARAMETER_OVERRIDE_ACTION,
+            product=authorization_product,
+            context=override_request.override.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write Odoo config-parameter overrides for the requested"
+                    " product/context."
+                ),
+            )
+
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+
+        try:
+            driver_result = write_odoo_config_parameter_override_result(
+                record_store=cast(OdooInstanceOverrideStore, record_store),
+                request=override_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result=driver_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def write_odoo_website_bootstrap_override(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            override_request = OdooWebsiteBootstrapOverrideEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        try:
+            product_profile = resolve_odoo_post_deploy_product_route(
+                record_store=record_store,
+                product=override_request.product,
+                context=override_request.override.context,
+                instance=override_request.override.instance,
+            )
+        except OdooPostDeployRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
+            )
+        except OdooPostDeployProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        authorization_product = (
+            product_profile.product if product_profile is not None else override_request.product
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ACTION,
+            product=authorization_product,
+            context=override_request.override.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write Odoo website-bootstrap overrides for the requested"
+                    " product/context."
+                ),
+            )
+
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+
+        try:
+            driver_result = write_odoo_website_bootstrap_override_result(
+                record_store=cast(OdooInstanceOverrideStore, record_store),
+                request=override_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result=driver_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
         return response
 
     async def write_launchplane_self_deploy(
@@ -13208,6 +13615,91 @@ def create_launchplane_fastapi_app(
         },
         operation_id="write_odoo_preview_apply",
         summary="Apply Odoo preview provider state",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_POST_DEPLOY_ROUTE,
+        write_odoo_post_deploy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": OdooPostDeployEnvelope.model_json_schema()}
+                },
+            }
+        },
+        operation_id="write_odoo_post_deploy",
+        summary="Execute Odoo post-deploy maintenance",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
+        write_odoo_config_parameter_override,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": OdooConfigParameterOverrideEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="write_odoo_config_parameter_override",
+        summary="Write Odoo config-parameter override",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
+        write_odoo_website_bootstrap_override,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": OdooWebsiteBootstrapOverrideEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="write_odoo_website_bootstrap_override",
+        summary="Write Odoo website-bootstrap override",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

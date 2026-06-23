@@ -299,9 +299,9 @@ VeriReel product paths:
   - `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}`
     (native FastAPI)
   - `POST /v1/drivers/odoo/target-replacement-apply`
-  - `POST /v1/drivers/odoo/post-deploy`
-  - `POST /v1/drivers/odoo/config-parameter-override`
-  - `POST /v1/drivers/odoo/website-bootstrap-override`
+  - `POST /v1/drivers/odoo/post-deploy` (native FastAPI)
+  - `POST /v1/drivers/odoo/config-parameter-override` (native FastAPI)
+  - `POST /v1/drivers/odoo/website-bootstrap-override` (native FastAPI)
   - `POST /v1/drivers/odoo/target-replacement-plan`
   - `POST /v1/drivers/odoo/target-replacement-apply`
   - `POST /v1/drivers/odoo/preview-apply-inputs` (native FastAPI)
@@ -1783,7 +1783,9 @@ keys/status.
 
 These use the same authn/authz boundary as evidence ingress:
 
-- `POST /v1/drivers/odoo/post-deploy`
+- `POST /v1/drivers/odoo/post-deploy` (native FastAPI)
+- `POST /v1/drivers/odoo/config-parameter-override` (native FastAPI)
+- `POST /v1/drivers/odoo/website-bootstrap-override` (native FastAPI)
 - `POST /v1/drivers/odoo/artifact-publish`
 - `POST /v1/drivers/odoo/target-replacement-apply`
 - `POST /v1/drivers/odoo/prod-backup-gate`
@@ -1796,10 +1798,8 @@ The first driver route handlers now in service are admitted from descriptor
 action route paths rather than a separate product-driver router allowlist. The
 current legacy WSGI descriptor handlers include:
 
-- `POST /v1/drivers/odoo/post-deploy`
 - `POST /v1/drivers/odoo/artifact-publish`
 - `POST /v1/drivers/odoo/target-replacement-apply`
-- `POST /v1/drivers/odoo/website-bootstrap-override`
 - `POST /v1/drivers/odoo/prod-backup-gate`
 - `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/odoo/prod-rollback`
@@ -1829,7 +1829,12 @@ for those artifact-publish inputs are classified as
 `driver_route_dependency_not_found`, not as route-missing or generic invalid
 requests. The artifact-publish inputs route is owned by native FastAPI; the
 legacy WSGI descriptor dispatcher is exempted from the path, and direct fallback
-calls fail closed. Odoo preview apply inputs and preview apply are also owned by
+calls fail closed. Odoo post-deploy, config-parameter override, and
+website-bootstrap override are native FastAPI routes too. They preserve
+product-profile driver validation, lane-scoped authorization, optional
+`Idempotency-Key` replay/conflict behavior, post-deploy transition records, and
+Odoo instance override record merge behavior while direct WSGI fallback calls
+fail closed. Odoo preview apply inputs and preview apply are also owned by
 native FastAPI. They preserve preview-context authorization,
 runtime-environment dependency classification, and the
 `odoo_preview_runtime_config_incomplete` details envelope for apply requests
