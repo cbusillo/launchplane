@@ -10,6 +10,7 @@ from control_plane.unittest_sharding import (
     UnittestShardingError,
     aggregate_shard_timings,
     discover_test_modules,
+    discover_test_targets,
     plan_shards,
     read_module_timings,
     run_test_modules,
@@ -64,16 +65,34 @@ def list_unittest_modules(start_directory: Path, pattern: str) -> None:
     show_default=True,
 )
 @click.option("--pattern", default="test*.py", show_default=True)
+@click.option("--max-tests-per-target", type=int, default=100, show_default=True)
+@click.option("--max-seconds-per-target", type=float, default=60.0, show_default=True)
+@click.option(
+    "--import-root",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("."),
+    show_default=True,
+)
 def plan_unittest_shards(
     shard_count: int,
     timings_file: Path | None,
     start_directory: Path,
     pattern: str,
+    max_tests_per_target: int,
+    max_seconds_per_target: float,
+    import_root: Path,
 ) -> None:
     """Print a deterministic unittest shard plan."""
     try:
-        modules = discover_test_modules(start_directory=start_directory, pattern=pattern)
         timings = read_module_timings(timings_file)
+        modules = discover_test_targets(
+            start_directory=start_directory,
+            pattern=pattern,
+            import_root=import_root,
+            max_tests_per_target=max_tests_per_target,
+            max_seconds_per_target=max_seconds_per_target,
+            module_seconds=timings,
+        )
         shard_plan = plan_shards(modules, shard_count=shard_count, module_seconds=timings)
     except UnittestShardingError as error:
         raise click.ClickException(str(error)) from error
@@ -100,6 +119,8 @@ def plan_unittest_shards(
     show_default=True,
 )
 @click.option("--pattern", default="test*.py", show_default=True)
+@click.option("--max-tests-per-target", type=int, default=100, show_default=True)
+@click.option("--max-seconds-per-target", type=float, default=60.0, show_default=True)
 @click.option(
     "--import-root",
     type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
@@ -114,13 +135,22 @@ def run_unittest_shard(
     timings_output: Path,
     start_directory: Path,
     pattern: str,
+    max_tests_per_target: int,
+    max_seconds_per_target: float,
     import_root: Path,
     verbosity: int,
 ) -> None:
     """Run one unittest shard and write its timing artifact."""
     try:
-        modules = discover_test_modules(start_directory=start_directory, pattern=pattern)
         timings = read_module_timings(timings_file)
+        modules = discover_test_targets(
+            start_directory=start_directory,
+            pattern=pattern,
+            import_root=import_root,
+            max_tests_per_target=max_tests_per_target,
+            max_seconds_per_target=max_seconds_per_target,
+            module_seconds=timings,
+        )
         shard = plan_shards(modules, shard_count=shard_count, module_seconds=timings).shard(
             shard_index
         )
@@ -164,22 +194,47 @@ def run_unittest_shard(
     required=True,
 )
 @click.option(
+    "--timings-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+)
+@click.option(
     "--start-directory",
     type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
     default=Path("tests"),
     show_default=True,
 )
 @click.option("--pattern", default="test*.py", show_default=True)
+@click.option("--max-tests-per-target", type=int, default=100, show_default=True)
+@click.option("--max-seconds-per-target", type=float, default=60.0, show_default=True)
+@click.option(
+    "--import-root",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("."),
+    show_default=True,
+)
 def aggregate_unittest_shards(
     shard_count: int,
     results_dir: Path,
     timings_output: Path,
+    timings_file: Path | None,
     start_directory: Path,
     pattern: str,
+    max_tests_per_target: int,
+    max_seconds_per_target: float,
+    import_root: Path,
 ) -> None:
     """Aggregate shard timing artifacts into a next-run timing file."""
     try:
-        modules = discover_test_modules(start_directory=start_directory, pattern=pattern)
+        timings = read_module_timings(timings_file)
+        modules = discover_test_targets(
+            start_directory=start_directory,
+            pattern=pattern,
+            import_root=import_root,
+            max_tests_per_target=max_tests_per_target,
+            max_seconds_per_target=max_seconds_per_target,
+            module_seconds=timings,
+        )
         payload = aggregate_shard_timings(
             results_directory=results_dir,
             shard_count=shard_count,

@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import Any, TextIO
+from typing import Any, Iterable, TextIO
 import unittest
 
 TIMING_SCHEMA_VERSION = 1
@@ -37,10 +37,13 @@ class ShardPlan:
         return self.shards[shard_index]
 
     def as_payload(self) -> dict[str, object]:
+        all_targets = [module_name for shard in self.shards for module_name in shard.modules]
         return {
             "schema_version": TIMING_SCHEMA_VERSION,
             "record_type": "unittest_shard_plan",
             "shard_count": self.shard_count,
+            "target_count": len(all_targets),
+            "target_granularity": "module_or_unittest_target",
             "shards": [
                 {
                     "index": shard.index,
@@ -141,6 +144,124 @@ def discover_test_modules(*, start_directory: Path, pattern: str = "test*.py") -
     return tuple(dict.fromkeys(modules))
 
 
+def discover_test_targets(
+    *,
+    start_directory: Path,
+    import_root: Path,
+    pattern: str = "test*.py",
+    max_tests_per_target: int = 40,
+    max_seconds_per_target: float = 60.0,
+    module_seconds: dict[str, float] | None = None,
+) -> tuple[str, ...]:
+    modules = discover_test_modules(start_directory=start_directory, pattern=pattern)
+    if max_tests_per_target < 1:
+        raise UnittestShardingError("max tests per target must be at least 1")
+    if max_seconds_per_target <= 0:
+        raise UnittestShardingError("max seconds per target must be greater than zero")
+    seconds_by_module = module_seconds or {}
+
+    loader = unittest.TestLoader()
+    targets: list[str] = []
+    with TemporaryImportRoot(import_root):
+        for module_name in modules:
+            suite = loader.loadTestsFromName(module_name)
+            if contains_failed_test(suite):
+                targets.append(module_name)
+                continue
+            test_case_targets = tuple(iter_test_case_target_ids(suite))
+            module_targets = tuple(iter_test_target_ids(suite))
+            if not test_case_targets and not module_targets:
+                targets.append(module_name)
+                continue
+            should_split = should_split_module_target(
+                module_name=module_name,
+                module_targets=module_targets,
+                max_tests_per_target=max_tests_per_target,
+                max_seconds_per_target=max_seconds_per_target,
+                seconds_by_module=seconds_by_module,
+            )
+            if not should_split:
+                targets.append(module_name)
+                continue
+            targets.extend(split_module_targets(test_case_targets, module_targets, max_tests_per_target))
+    return tuple(dict.fromkeys(targets))
+
+
+def split_module_targets(
+    test_case_targets: tuple[str, ...],
+    method_targets: tuple[str, ...],
+    max_tests_per_target: int,
+) -> tuple[str, ...]:
+    tests_by_case: dict[str, list[str]] = {test_case_target: [] for test_case_target in test_case_targets}
+    for method_target in method_targets:
+        case_target = ".".join(method_target.split(".")[:-1])
+        tests_by_case.setdefault(case_target, []).append(method_target)
+
+    split_targets: list[str] = []
+    for test_case_target in sorted(tests_by_case):
+        case_methods = tuple(sorted(tests_by_case[test_case_target]))
+        if len(case_methods) > max_tests_per_target:
+            split_targets.extend(case_methods)
+            continue
+        split_targets.append(test_case_target)
+    return tuple(split_targets)
+
+
+def iter_test_case_target_ids(suite: unittest.TestSuite) -> Iterable[str]:
+    case_target_ids: set[str] = set()
+    for test_id in iter_test_target_ids(suite):
+        parts = test_id.split(".")
+        if len(parts) < 4:
+            continue
+        case_target_ids.add(".".join(parts[:-1]))
+    return tuple(sorted(case_target_ids))
+
+
+def should_split_module_target(
+    *,
+    module_name: str,
+    module_targets: tuple[str, ...],
+    max_tests_per_target: int,
+    max_seconds_per_target: float,
+    seconds_by_module: dict[str, float],
+) -> bool:
+    if len(module_targets) > max_tests_per_target:
+        return True
+    module_seconds = seconds_by_module.get(module_name)
+    if module_seconds is not None and module_seconds > max_seconds_per_target:
+        return True
+    target_prefix = f"{module_name}."
+    return any(target_name.startswith(target_prefix) for target_name in seconds_by_module)
+
+
+def iter_test_target_ids(suite: unittest.TestSuite) -> Iterable[str]:
+    for test in suite:
+        if isinstance(test, unittest.TestSuite):
+            yield from iter_test_target_ids(test)
+            continue
+        test_id = test.id()
+        if is_failed_test(test):
+            continue
+        yield test_id
+
+
+def contains_failed_test(suite: unittest.TestSuite) -> bool:
+    for test in suite:
+        if isinstance(test, unittest.TestSuite):
+            if contains_failed_test(test):
+                return True
+            continue
+        if is_failed_test(test):
+            return True
+    return False
+
+
+def is_failed_test(test: unittest.TestCase) -> bool:
+    return test.__class__.__name__ == "_FailedTest" or test.id().startswith(
+        "unittest.loader._FailedTest."
+    )
+
+
 def module_name_for_test_file(test_file: Path, *, start_directory: Path) -> str:
     try:
         relative_file = test_file.resolve().relative_to(start_directory.resolve().parent)
@@ -179,17 +300,18 @@ def plan_shards(
 ) -> ShardPlan:
     validate_shard_count(shard_count)
     seconds_by_module = module_seconds or {}
+    estimated_seconds_by_target = estimate_target_seconds(modules, seconds_by_module)
     shard_modules: list[list[str]] = [[] for _ in range(shard_count)]
     shard_estimates = [0.0 for _ in range(shard_count)]
 
     weighted_modules = sorted(
         tuple(dict.fromkeys(modules)),
-        key=lambda module_name: (-seconds_by_module.get(module_name, DEFAULT_MODULE_SECONDS), module_name),
+        key=lambda module_name: (-estimated_seconds_by_target[module_name], module_name),
     )
     for module_name in weighted_modules:
         shard_index = min(range(shard_count), key=lambda index: (shard_estimates[index], index))
         shard_modules[shard_index].append(module_name)
-        shard_estimates[shard_index] += seconds_by_module.get(module_name, DEFAULT_MODULE_SECONDS)
+        shard_estimates[shard_index] += estimated_seconds_by_target[module_name]
 
     return ShardPlan(
         shard_count=shard_count,
@@ -204,6 +326,42 @@ def plan_shards(
     )
 
 
+def estimate_target_seconds(
+    targets: tuple[str, ...],
+    seconds_by_target: dict[str, float],
+) -> dict[str, float]:
+    unique_targets = tuple(dict.fromkeys(targets))
+    child_counts_by_module: dict[str, int] = {}
+    for target in unique_targets:
+        module_name = parent_module_name(target)
+        if module_name != target and module_name in seconds_by_target:
+            child_counts_by_module[module_name] = child_counts_by_module.get(module_name, 0) + 1
+
+    estimates: dict[str, float] = {}
+    for target in unique_targets:
+        exact_seconds = seconds_by_target.get(target)
+        if exact_seconds is not None:
+            estimates[target] = exact_seconds
+            continue
+        module_name = parent_module_name(target)
+        module_seconds = seconds_by_target.get(module_name)
+        child_count = child_counts_by_module.get(module_name, 0)
+        if module_seconds is not None and child_count > 0:
+            estimates[target] = module_seconds / child_count
+            continue
+        estimates[target] = DEFAULT_MODULE_SECONDS
+    return estimates
+
+
+def parent_module_name(target: str) -> str:
+    parts = target.split(".")
+    if len(parts) >= 4 and parts[-1].startswith("test_") and parts[-2][:1].isupper():
+        return ".".join(parts[:-2])
+    if len(parts) >= 3 and parts[-1][:1].isupper():
+        return ".".join(parts[:-1])
+    return target
+
+
 def run_test_modules(
     modules: tuple[str, ...],
     *,
@@ -215,7 +373,7 @@ def run_test_modules(
 ) -> ShardRunSummary:
     validate_shard_index(shard_count=shard_count, shard_index=shard_index)
     if not modules:
-        raise UnittestShardingError(f"shard {shard_index} has no test modules")
+        raise UnittestShardingError(f"shard {shard_index} has no test targets")
 
     loader = unittest.TestLoader()
     module_timings: list[ModuleRunTiming] = []
@@ -223,6 +381,8 @@ def run_test_modules(
     with TemporaryImportRoot(import_root):
         for module_name in modules:
             suite = loader.loadTestsFromName(module_name)
+            if contains_failed_test(suite):
+                raise UnittestShardingError(f"failed to load unittest target: {module_name}")
             started_at = time.monotonic()
             result = unittest.TextTestRunner(stream=stream, verbosity=verbosity).run(suite)
             elapsed_seconds = time.monotonic() - started_at
@@ -254,6 +414,11 @@ def aggregate_shard_timings(
 ) -> dict[str, object]:
     validate_shard_count(shard_count)
     discovered_module_set = set(discovered_modules)
+    discovered_by_parent_module: dict[str, list[str]] = {}
+    for discovered_module in discovered_modules:
+        parent_module = parent_module_name(discovered_module)
+        if parent_module != discovered_module:
+            discovered_by_parent_module.setdefault(parent_module, []).append(discovered_module)
     aggregate_modules: dict[str, dict[str, object]] = {}
 
     for shard_index in range(shard_count):
@@ -272,15 +437,27 @@ def aggregate_shard_timings(
         if not isinstance(modules_payload, dict):
             raise UnittestShardingError(f"shard timing modules must be an object: {shard_file}")
         for module_name, module_payload in modules_payload.items():
-            if module_name not in discovered_module_set:
+            target_names: tuple[str, ...]
+            if module_name in discovered_module_set:
+                target_names = (module_name,)
+            else:
+                target_names = tuple(discovered_by_parent_module.get(module_name, ()))
+            if not target_names:
                 continue
-            if module_name in aggregate_modules:
-                raise UnittestShardingError(f"duplicate module timing: {module_name}")
-            aggregate_modules[module_name] = normalize_module_timing_payload(
+            normalized_payload = normalize_module_timing_payload(
                 module_name=module_name,
                 module_payload=module_payload,
                 timings_file=shard_file,
             )
+            if len(target_names) > 1:
+                normalized_payload = split_module_timing_payload(
+                    normalized_payload,
+                    split_count=len(target_names),
+                )
+            for target_name in target_names:
+                if target_name in aggregate_modules:
+                    raise UnittestShardingError(f"duplicate module timing: {target_name}")
+                aggregate_modules[target_name] = normalized_payload
 
     missing_modules = sorted(discovered_module_set.difference(aggregate_modules))
     if missing_modules:
@@ -315,6 +492,25 @@ def normalize_module_timing_payload(
     if not isinstance(tests_run_value, int) or tests_run_value < 0:
         raise UnittestShardingError(f"invalid tests_run for module {module_name} in {timings_file}")
     return {"seconds": round(float(seconds_value), 6), "tests_run": tests_run_value}
+
+
+def split_module_timing_payload(
+    module_payload: dict[str, object],
+    *,
+    split_count: int,
+) -> dict[str, object]:
+    seconds_value = module_payload["seconds"]
+    tests_run_value = module_payload["tests_run"]
+    if not isinstance(seconds_value, int | float):
+        raise UnittestShardingError("module seconds must be numeric")
+    if not isinstance(tests_run_value, int):
+        raise UnittestShardingError("module tests_run must be an integer")
+    if split_count < 1:
+        raise UnittestShardingError("split count must be at least 1")
+    return {
+        "seconds": round(float(seconds_value) / split_count, 6),
+        "tests_run": max(1, round(tests_run_value / split_count)),
+    }
 
 
 def read_json_object(input_file: Path) -> dict[str, Any]:
