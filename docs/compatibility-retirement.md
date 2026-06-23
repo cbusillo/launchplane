@@ -124,6 +124,13 @@ Keep a compatibility surface only when it is one of these:
   `Idempotency-Key` replay/conflict behavior, and executes the Launchplane-owned
   Dokploy self-deploy workflow only. Its legacy WSGI branch is deleted, and
   direct fallback calls fail closed.
+- Odoo artifact publish inputs use native FastAPI
+  `POST /v1/drivers/odoo/artifact-publish-inputs`, preserve
+  `odoo_artifact_publish_inputs.read` authorization, optional
+  `Idempotency-Key` replay/conflict behavior, dependency-miss `503`
+  classification, and handler-side `404` file-miss parity. The descriptor route
+  remains discoverable, but the legacy WSGI descriptor dispatch path is exempted
+  and direct fallback calls fail closed.
 - Merge-train admission, controller-status, and policy-target reads use native
   FastAPI routes. Their legacy WSGI read branches are deleted. Merge-train
   run-once, batch-candidate run-once, batch-landing run-once, stack-collapse

@@ -236,9 +236,6 @@ from control_plane.workflows.launchplane import (
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishEvidenceStore,
     OdooArtifactPublishEvidenceRequest,
-    OdooArtifactPublishInputsDependencyNotFoundError,
-    OdooArtifactPublishInputsRequest,
-    build_odoo_artifact_publish_inputs,
     ingest_odoo_artifact_publish_evidence,
 )
 from control_plane.workflows.odoo_post_deploy import (
@@ -328,6 +325,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
     {
         "/v1/drivers/generic-web/preview-desired-state",
         "/v1/drivers/ingress/route-apply",
+        "/v1/drivers/odoo/artifact-publish-inputs",
     }
 )
 
@@ -699,16 +697,6 @@ class OdooArtifactPublishEnvelope(_ProductRouteEnvelope):
         return self
 
 
-class OdooArtifactPublishInputsEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    inputs: OdooArtifactPublishInputsRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooArtifactPublishInputsEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo artifact publish inputs")
-        return self
-
-
 _ODOO_POST_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/post-deploy",
     envelope_model=OdooPostDeployEnvelope,
@@ -750,15 +738,6 @@ _ODOO_ARTIFACT_PUBLISH_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=OdooArtifactPublishEnvelope,
     denial_message=(
         "Workflow cannot write Odoo artifact publish evidence for the requested product/context."
-    ),
-)
-
-
-_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/artifact-publish-inputs",
-    envelope_model=OdooArtifactPublishInputsEnvelope,
-    denial_message=(
-        "Workflow cannot read Odoo artifact publish inputs for the requested product/context."
     ),
 )
 
@@ -908,9 +887,7 @@ _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
     | {_ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path}
 )
 _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
-    _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS
-    | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
-    | {_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path}
+    _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
 )
 
 
@@ -1341,24 +1318,6 @@ def _handle_odoo_artifact_publish(
         },
         driver_result=driver_result,
     )
-
-
-def _handle_odoo_artifact_publish_inputs(
-    request: OdooArtifactPublishInputsEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del record_store
-    try:
-        driver_result = build_odoo_artifact_publish_inputs(
-            control_plane_root=control_plane_root_path,
-            request=request.inputs,
-            product_profile=resolved_context.profile,
-        )
-    except OdooArtifactPublishInputsDependencyNotFoundError as error:
-        raise DriverRouteDependencyNotFoundError from error
-    return _DescriptorDriverDispatchResult(result=driver_result, driver_result=driver_result)
 
 
 def _handle_odoo_prod_promotion_inputs(
@@ -2302,15 +2261,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_artifact_publish,
         ),
-        _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.inputs.context,
-                instance=request.inputs.instance,
-            ),
-            handler=_handle_odoo_artifact_publish_inputs,
-        ),
         _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_PROD_PROMOTION_INPUTS_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -2573,7 +2523,6 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
             _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
-            _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path,
             _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
             _ODOO_PROD_BACKUP_GATE_ROUTE.route_path,
             _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,

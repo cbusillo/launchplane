@@ -151,6 +151,15 @@ from control_plane.launchplane_self_deploy_http import (
     LaunchplaneSelfDeployEnvelope,
     launchplane_self_deploy_records,
 )
+from control_plane.odoo_artifact_publish_inputs_http import (
+    ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
+    ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE as _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+    OdooArtifactPublishInputsEnvelope,
+    OdooArtifactPublishInputsProductMismatchError,
+    OdooArtifactPublishInputsRouteDependencyError,
+    build_odoo_artifact_publish_inputs_result,
+    resolve_odoo_artifact_publish_inputs_profile,
+)
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductActivityReadModel,
@@ -5294,6 +5303,156 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             identity=identity,
             route_path=_MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    def driver_route_dependency_not_found_response(
+        *, trace_id: str, route_path: str
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "driver_route_dependency_not_found",
+                    "message": (
+                        "Driver route is registered, but required product or runtime"
+                        " records were not found."
+                    ),
+                },
+                "details": {"route_path": route_path},
+            },
+        )
+
+    async def write_odoo_artifact_publish_inputs(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            inputs_request = OdooArtifactPublishInputsEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        try:
+            product_profile = resolve_odoo_artifact_publish_inputs_profile(
+                record_store=record_store,
+                request=inputs_request,
+            )
+        except OdooArtifactPublishInputsRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+            )
+        except OdooArtifactPublishInputsProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
+            product=inputs_request.product,
+            context=inputs_request.inputs.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot read Odoo artifact publish inputs for the requested"
+                    " product/context."
+                ),
+            )
+
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+
+        try:
+            driver_result = build_odoo_artifact_publish_inputs_result(
+                control_plane_root=resolved_control_plane_root,
+                request=inputs_request,
+                product_profile=product_profile,
+            )
+        except OdooArtifactPublishInputsRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result=driver_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
             idempotency_key=normalized_idempotency_key,
             request_fingerprint_value=payload_fingerprint,
             trace_id=trace_id,
@@ -12707,6 +12866,35 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+        write_odoo_artifact_publish_inputs,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": OdooArtifactPublishInputsEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="write_odoo_artifact_publish_inputs",
+        summary="Resolve Odoo artifact publish inputs",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
         },
     )
 

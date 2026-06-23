@@ -292,7 +292,7 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/preview-readiness`
   - `POST /v1/drivers/generic-web/preview-verification`
   - `POST /v1/drivers/generic-web/preview-destroy`
-  - `POST /v1/drivers/odoo/artifact-publish-inputs`
+  - `POST /v1/drivers/odoo/artifact-publish-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/artifact-publish`
   - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`
     (native FastAPI)
@@ -1794,10 +1794,9 @@ These use the same authn/authz boundary as evidence ingress:
 
 The first driver route handlers now in service are admitted from descriptor
 action route paths rather than a separate product-driver router allowlist. The
-current handlers include:
+current legacy WSGI descriptor handlers include:
 
 - `POST /v1/drivers/odoo/post-deploy`
-- `POST /v1/drivers/odoo/artifact-publish-inputs`
 - `POST /v1/drivers/odoo/artifact-publish`
 - `POST /v1/drivers/odoo/target-replacement-apply`
 - `POST /v1/drivers/odoo/website-bootstrap-override`
@@ -1828,8 +1827,10 @@ identities resolved from Launchplane runtime records; product repos should not
 keep those dependency repo defaults in workflow files. Missing runtime records
 for those artifact-publish inputs are classified as
 `driver_route_dependency_not_found`, not as route-missing or generic invalid
-requests. The smoke also sends
-authenticated GitHub OIDC probes to `/v1/drivers/odoo/preview-apply-inputs`,
+requests. The artifact-publish inputs route is owned by native FastAPI; the
+legacy WSGI descriptor dispatcher is exempted from the path, and direct fallback
+calls fail closed. The smoke also sends authenticated GitHub OIDC probes to
+`/v1/drivers/odoo/preview-apply-inputs`,
 `/v1/drivers/odoo/preview-apply`, and `/v1/previews/pr-feedback`. Mutation-capable
 routes are proven by pre-mutation classification: preview apply uses a blocked
 destroy plan and rejects any non-blocked acceptance, while preview feedback uses
