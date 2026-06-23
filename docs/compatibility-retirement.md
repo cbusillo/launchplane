@@ -118,6 +118,12 @@ Keep a compatibility surface only when it is one of these:
   Their legacy WSGI branches are deleted, and direct fallback calls fail
   closed. Setup keeps the apply-only idempotency replay/conflict contract while
   dry-runs remain repeatable.
+- Launchplane self-deploy uses native FastAPI
+  `POST /v1/drivers/launchplane/self-deploy`, preserves
+  `launchplane_service_deploy.execute` authorization and optional
+  `Idempotency-Key` replay/conflict behavior, and executes the Launchplane-owned
+  Dokploy self-deploy workflow only. Its legacy WSGI branch is deleted, and
+  direct fallback calls fail closed.
 - Merge-train admission, controller-status, and policy-target reads use native
   FastAPI routes. Their legacy WSGI read branches are deleted. Merge-train
   run-once, batch-candidate run-once, batch-landing run-once, stack-collapse
