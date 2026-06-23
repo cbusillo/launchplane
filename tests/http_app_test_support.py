@@ -1,15 +1,19 @@
 import hashlib
 import json
+import shutil
+from functools import lru_cache
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Literal
 from unittest.mock import patch
 from urllib.parse import urlencode
 
 from fastapi import FastAPI
 from jwt import InvalidTokenError
+from sqlalchemy.engine import make_url
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.agent_write_intent import (
@@ -320,6 +324,42 @@ class _BatchLandingWithoutLandingPlanStore:
             status=status,
             limit=limit,
         )
+
+
+_SQLITE_TEMPLATE_DIRS: list[TemporaryDirectory[str]] = []
+
+
+def _sqlite_database_path(database_url: str) -> Path | None:
+    parsed_url = make_url(database_url)
+    if (
+        not parsed_url.drivername.startswith("sqlite")
+        or not parsed_url.database
+        or parsed_url.database == ":memory:"
+    ):
+        return None
+    return Path(parsed_url.database)
+
+
+def _seed_sqlite_template(
+    *, fixture_name: str,
+    database_url: str,
+    write_records: Callable[[str], None],
+) -> bool:
+    database_path = _sqlite_database_path(database_url)
+    if database_path is None:
+        return False
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(_sqlite_template_path(fixture_name, write_records), database_path)
+    return True
+
+
+@lru_cache(maxsize=None)
+def _sqlite_template_path(fixture_name: str, write_records: Callable[[str], None]) -> Path:
+    template_directory = TemporaryDirectory(prefix=f"launchplane-{fixture_name}-")
+    _SQLITE_TEMPLATE_DIRS.append(template_directory)
+    template_path = Path(template_directory.name) / "template.sqlite3"
+    write_records(f"sqlite+pysqlite:///{template_path}")
+    return template_path
 
 
 def _product_environment_read_policy(
@@ -1508,6 +1548,16 @@ def _write_context_cutover_audit_records(database_url: str) -> None:
 
 
 def _seed_product_environment_read_records(database_url: str) -> None:
+    if _seed_sqlite_template(
+        fixture_name="product-environment-read",
+        database_url=database_url,
+        write_records=_write_product_environment_read_records,
+    ):
+        return
+    _write_product_environment_read_records(database_url)
+
+
+def _write_product_environment_read_records(database_url: str) -> None:
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
     try:
@@ -1649,6 +1699,16 @@ def _seed_empty_agent_context_read_store(database_url: str) -> None:
 
 
 def _seed_agent_context_read_records(database_url: str) -> None:
+    if _seed_sqlite_template(
+        fixture_name="agent-context-read",
+        database_url=database_url,
+        write_records=_write_agent_context_read_records,
+    ):
+        return
+    _write_agent_context_read_records(database_url)
+
+
+def _write_agent_context_read_records(database_url: str) -> None:
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
     try:

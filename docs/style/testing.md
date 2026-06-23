@@ -6,6 +6,9 @@ title: Testing Style
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
 - Test fail-closed behavior explicitly.
 - Keep fixtures small and inline unless they are reused heavily.
+- For repeated DB-backed read fixtures, prefer copying a preseeded test
+  template into each test temp directory over rerunning schema creation and
+  identical seed writes in every method.
 - Default test entrypoint is `uv run python -m unittest`.
 
 ## Local test loop
