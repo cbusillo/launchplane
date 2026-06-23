@@ -48,6 +48,7 @@ state/
 tmp/*
 !tmp/README.md
 scratch/
+.ci-cache/
 
 # Tooling internals
 .code/
