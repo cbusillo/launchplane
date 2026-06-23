@@ -3538,6 +3538,50 @@ async def _post_odoo_website_bootstrap_override(
     )
 
 
+async def _post_odoo_prod_promotion_inputs(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/drivers/odoo/prod-promotion-inputs",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+async def _post_odoo_prod_promotion_run(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/drivers/odoo/prod-promotion-run",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _get_products(
     app: FastAPI,
     *,

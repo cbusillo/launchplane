@@ -239,6 +239,12 @@ from control_plane.odoo_post_deploy_http import (
     OdooPostDeployEnvelope as OdooPostDeployEnvelope,
     OdooWebsiteBootstrapOverrideEnvelope as OdooWebsiteBootstrapOverrideEnvelope,
 )
+from control_plane.odoo_prod_promotion_http import (
+    ODOO_PROD_PROMOTION_INPUTS_ROUTE,
+    ODOO_PROD_PROMOTION_RUN_ROUTE,
+    OdooProdPromotionInputsEnvelope as OdooProdPromotionInputsEnvelope,
+    OdooProdPromotionRunEnvelope as OdooProdPromotionRunEnvelope,
+)
 from control_plane.contracts.odoo_stable_bootstrap import (
     OdooStableBootstrapRequest,
 )
@@ -251,16 +257,6 @@ from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionRequest,
     OdooProdPromotionStore,
     execute_odoo_prod_promotion,
-)
-from control_plane.workflows.odoo_prod_promotion_inputs import (
-    OdooProdPromotionInputsRequest,
-    OdooProdPromotionInputsStore,
-    resolve_odoo_prod_promotion_inputs,
-)
-from control_plane.workflows.odoo_prod_promotion_run import (
-    OdooProdPromotionRunRequest,
-    OdooProdPromotionRunStore,
-    execute_odoo_prod_promotion_run,
 )
 from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
@@ -327,6 +323,8 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         ODOO_POST_DEPLOY_ROUTE,
         ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
         ODOO_PREVIEW_APPLY_ROUTE,
+        ODOO_PROD_PROMOTION_INPUTS_ROUTE,
+        ODOO_PROD_PROMOTION_RUN_ROUTE,
         ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
     }
 )
@@ -574,26 +572,6 @@ class OdooProdPromotionEnvelope(_ProductRouteEnvelope):
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooProdPromotionEnvelope":
         _validate_driver_envelope_product(self.product, label="Odoo prod promotion")
-        return self
-
-
-class OdooProdPromotionInputsEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    inputs: OdooProdPromotionInputsRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooProdPromotionInputsEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo prod promotion inputs")
-        return self
-
-
-class OdooProdPromotionRunEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    run: OdooProdPromotionRunRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooProdPromotionRunEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo prod promotion run")
         return self
 
 
@@ -1125,31 +1103,6 @@ def _handle_odoo_artifact_publish(
     )
 
 
-def _handle_odoo_prod_promotion_inputs(
-    request: OdooProdPromotionInputsEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context, control_plane_root_path
-    driver_result = resolve_odoo_prod_promotion_inputs(
-        record_store=cast(OdooProdPromotionInputsStore, record_store),
-        request=request.inputs,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={
-            "artifact_id": driver_result.artifact_id,
-            "backup_record_id": driver_result.backup_record_id,
-            "release_tuple_id": driver_result.release_tuple_id,
-            "source_git_ref": driver_result.source_git_ref,
-            "image_repository": driver_result.image_repository,
-            "image_digest": driver_result.image_digest,
-            "input_status": driver_result.input_status,
-        },
-        driver_result=driver_result,
-    )
-
-
 def _handle_odoo_prod_backup_gate(
     request: OdooProdBackupGateEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -1173,40 +1126,6 @@ def _handle_odoo_prod_backup_gate(
         },
         driver_result=driver_result,
     )
-
-
-def _dispatch_odoo_prod_promotion_run(
-    request: OdooProdPromotionRunEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-    state_dir: Path,
-    database_url: str | None,
-    identity: LaunchplaneIdentity,
-    request_scope: str,
-    request_idempotency_key: str,
-    request_fingerprint: str,
-    start_response: _StartResponse,
-    trace_id: str,
-) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
-    run_request = request.run.model_copy(update={"product": request.product})
-    del (
-        resolved_context,
-        identity,
-        request_scope,
-        request_idempotency_key,
-        request_fingerprint,
-        start_response,
-        trace_id,
-    )
-    driver_result = execute_odoo_prod_promotion_run(
-        control_plane_root=control_plane_root_path,
-        state_dir=state_dir,
-        database_url=database_url,
-        record_store=cast(OdooProdPromotionRunStore, record_store),
-        request=run_request,
-    )
-    return driver_result.model_dump(mode="json"), driver_result
 
 
 def _dispatch_odoo_prod_promotion(
@@ -1928,15 +1847,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_artifact_publish,
         ),
-        _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_PROD_PROMOTION_INPUTS_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.inputs.context,
-            ),
-            handler=_handle_odoo_prod_promotion_inputs,
-        ),
         _ODOO_PROD_BACKUP_GATE_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_PROD_BACKUP_GATE_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -1945,15 +1855,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
                 instance=request.backup_gate.instance,
             ),
             handler=_handle_odoo_prod_backup_gate,
-        ),
-        _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_PROD_PROMOTION_RUN_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.run.context,
-            ),
-            custom_dispatch_handler=_dispatch_odoo_prod_promotion_run,
         ),
         _ODOO_PROD_PROMOTION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_PROD_PROMOTION_ROUTE,
@@ -2126,43 +2027,46 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
 
 
 def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
-    return frozenset(
-        (
-            _GENERIC_WEB_DEPLOY_ROUTE.route_path,
-            _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
-            _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
-            _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
-            _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
-            _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
-            _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
-            _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
-            _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
-            _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
-            _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
-            _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
-            _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
-            _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
-            _ODOO_PROD_BACKUP_GATE_ROUTE.route_path,
-            _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,
-            _ODOO_PROD_PROMOTION_ROUTE.route_path,
-            _ODOO_PROD_ROLLBACK_ROUTE.route_path,
-            _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
-            _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
-            _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
-            _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
-            _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
-            _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
-            _VERIREEL_PREVIEW_REFRESH_ROUTE.route_path,
-            _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
-            _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
-            _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
-            _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path,
-            _VERIREEL_PROD_PROMOTION_ROUTE.route_path,
-            _VERIREEL_PROD_ROLLBACK_ROUTE.route_path,
-            _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
-            _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
-            _VERIREEL_APP_MAINTENANCE_ROUTE.route_path,
+    return (
+        frozenset(
+            (
+                _GENERIC_WEB_DEPLOY_ROUTE.route_path,
+                _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
+                _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
+                _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
+                _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
+                _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
+                _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
+                _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
+                _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
+                _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
+                _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
+                _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
+                _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
+                _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
+                _ODOO_PROD_BACKUP_GATE_ROUTE.route_path,
+                _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,
+                _ODOO_PROD_PROMOTION_ROUTE.route_path,
+                _ODOO_PROD_ROLLBACK_ROUTE.route_path,
+                _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
+                _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
+                _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
+                _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
+                _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
+                _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
+                _VERIREEL_PREVIEW_REFRESH_ROUTE.route_path,
+                _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
+                _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
+                _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
+                _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path,
+                _VERIREEL_PROD_PROMOTION_ROUTE.route_path,
+                _VERIREEL_PROD_ROLLBACK_ROUTE.route_path,
+                _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
+                _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
+                _VERIREEL_APP_MAINTENANCE_ROUTE.route_path,
+            )
         )
+        - _descriptor_driver_dispatch_exempt_route_paths()
     )
 
 
@@ -5162,6 +5066,7 @@ def serve_launchplane_service(
         github_oauth_client=github_oauth_client,
         oauth_login_state_store=oauth_login_state_store,
         control_plane_root_path=control_plane_root(),
+        state_dir=state_dir,
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
         work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
         work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
