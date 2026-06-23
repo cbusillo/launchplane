@@ -1,6 +1,5 @@
 import json
 import os
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import (
@@ -32,6 +31,7 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _AGENT_WRITE_INTENT_SOURCE_URL,
     _agent_write_intent_payload,
@@ -82,7 +82,7 @@ from tests.test_service import (
 )
 
 
-class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
+class FastApiNotificationPolicyApplyTests(AsyncTestCase):
     async def test_public_ingress_notification_policy_apply_writes_db_policy(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
@@ -1062,7 +1062,7 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/v1/previews/pr-feedback/notification-policies/apply", paths)
 
 
-class FastApiRuntimeKeySafetyPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
+class FastApiRuntimeKeySafetyPolicyApplyTests(AsyncTestCase):
     async def test_runtime_key_safety_policy_apply_reconciles_rules_and_replays(
         self,
     ) -> None:
@@ -1328,7 +1328,7 @@ class FastApiRuntimeKeySafetyPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("LaunchplaneErrorResponse", json.dumps(route["responses"][status_code]))
 
 
-class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
+class FastApiAgentWriteIntentEvaluateTests(AsyncTestCase):
     async def test_evaluate_returns_allowed_dry_run_without_execution(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1801,7 +1801,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["result"]["intent"]["status"], "allowed")
 
 
-class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
+class FastApiProductConfigApplyTests(AsyncTestCase):
     async def test_product_config_dry_run_returns_redacted_plan_without_writes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -2622,7 +2622,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(status_code, route["responses"])
 
 
-class FastApiProductContextCutoverTests(unittest.IsolatedAsyncioTestCase):
+class FastApiProductContextCutoverTests(AsyncTestCase):
     async def test_context_cutover_apply_updates_profile_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

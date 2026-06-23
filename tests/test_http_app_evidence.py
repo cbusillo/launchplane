@@ -1,6 +1,5 @@
-import unittest
-
 from control_plane.http_app import create_launchplane_fastapi_app
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _backup_gate_evidence_payload,
     _backup_gate_write_identity,
@@ -46,7 +45,7 @@ from tests.http_app_test_support import (
 from tests.test_service import _StubVerifier
 
 
-class FastApiDeploymentEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+class FastApiDeploymentEvidenceStoreGateTests(AsyncTestCase):
     async def test_deployment_evidence_accepts_store_without_promotion_methods(self) -> None:
         store = _DeploymentEvidenceOnlyStore()
         app = create_launchplane_fastapi_app(
@@ -104,7 +103,7 @@ class FastApiDeploymentEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.write_environment_inventory_calls, 1)
 
 
-class FastApiBackupGateEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+class FastApiBackupGateEvidenceStoreGateTests(AsyncTestCase):
     async def test_backup_gate_evidence_accepts_store_with_only_backup_gate_method(self) -> None:
         store = _BackupGateEvidenceOnlyStore()
         app = create_launchplane_fastapi_app(
@@ -172,7 +171,7 @@ class FastApiBackupGateEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.write_backup_gate_calls, 1)
 
 
-class FastApiPromotionEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPromotionEvidenceStoreGateTests(AsyncTestCase):
     async def test_promotion_evidence_accepts_record_only_store_without_deployment_methods(
         self,
     ) -> None:
@@ -264,7 +263,7 @@ class FastApiPromotionEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.write_promotion_calls, 1)
 
 
-class FastApiPreviewGenerationEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPreviewGenerationEvidenceStoreGateTests(AsyncTestCase):
     async def test_preview_generation_evidence_requires_preview_generation_store(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_preview_generation_write_identity()),
@@ -316,7 +315,7 @@ class FastApiPreviewGenerationEvidenceStoreGateTests(unittest.IsolatedAsyncioTes
         self.assertEqual(store.write_preview_generation_evidence_calls, 1)
 
 
-class FastApiPreviewDestroyedEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPreviewDestroyedEvidenceStoreGateTests(AsyncTestCase):
     async def test_preview_destroyed_evidence_requires_preview_destroyed_store(
         self,
     ) -> None:
@@ -371,7 +370,7 @@ class FastApiPreviewDestroyedEvidenceStoreGateTests(unittest.IsolatedAsyncioTest
         self.assertEqual(store.write_preview_record_calls, 1)
 
 
-class FastApiRunnerHostHygieneAuditEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+class FastApiRunnerHostHygieneAuditEvidenceStoreGateTests(AsyncTestCase):
     async def test_runner_host_hygiene_audit_evidence_requires_audit_store(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
@@ -424,7 +423,7 @@ class FastApiRunnerHostHygieneAuditEvidenceStoreGateTests(unittest.IsolatedAsync
         self.assertEqual(store.write_runner_host_hygiene_audit_calls, 1)
 
 
-class FastApiRunnerLaneRegistrationAuditEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+class FastApiRunnerLaneRegistrationAuditEvidenceStoreGateTests(AsyncTestCase):
     async def test_runner_lane_registration_audit_evidence_requires_audit_store(
         self,
     ) -> None:

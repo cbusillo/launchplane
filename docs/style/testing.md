@@ -7,6 +7,8 @@ title: Testing Style
 - Test fail-closed behavior explicitly.
 - Keep fixtures small and inline unless they are reused heavily.
 - Default test entrypoint is `uv run python -m unittest`.
+- Use `tests.async_case.AsyncTestCase` for async test classes. It keeps
+  per-test event-loop isolation without enabling asyncio debug-mode overhead.
 
 ## Local test loop
 

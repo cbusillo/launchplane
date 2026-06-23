@@ -1,7 +1,6 @@
 import base64
 import hashlib
 import json
-import unittest
 from collections.abc import Callable
 from datetime import (
     datetime,
@@ -40,6 +39,7 @@ from control_plane.service_human_auth import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -71,7 +71,7 @@ from tests.test_service import (
 )
 
 
-class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
+class FastApiHealthContractTests(AsyncTestCase):
     async def test_health_returns_typed_public_safe_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -116,7 +116,7 @@ class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("shinycomputers", example_text)
 
 
-class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiAuthSessionReadTests(AsyncTestCase):
     async def test_github_oauth_login_redirects_to_authorization_url(self) -> None:
         oauth_client = _StubFastApiGitHubOAuthClient(_github_human_identity())
         app = create_launchplane_fastapi_app(
@@ -718,7 +718,7 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
             )
 
 
-class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiServiceRuntimeReadTests(AsyncTestCase):
     async def test_runtime_reports_current_image_and_policy_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             policy = _local_operator_launchplane_service_read_policy()
@@ -1144,7 +1144,7 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
-class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiOdooOperationStatusReadTests(AsyncTestCase):
     async def test_stable_bootstrap_operation_status_returns_native_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

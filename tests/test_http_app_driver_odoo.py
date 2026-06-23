@@ -11,6 +11,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _asgi_get,
     _MissingProductReadStore,
@@ -25,7 +26,7 @@ from tests.test_service import (
 )
 
 
-class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
+class FastApiOdooArtifactPublishInputsTests(AsyncTestCase):
     def _policy(
         self,
         *,

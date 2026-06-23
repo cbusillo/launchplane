@@ -1,5 +1,4 @@
 import json
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import (
@@ -28,6 +27,7 @@ from control_plane.service_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -71,7 +71,7 @@ from tests.test_service import (
 )
 
 
-class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiEveryCodeReadTests(AsyncTestCase):
     async def test_every_code_work_request_create_queues_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

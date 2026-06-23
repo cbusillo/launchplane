@@ -1,5 +1,4 @@
 import json
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import (
@@ -27,6 +26,7 @@ from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorResult,
     public_ingress_managed_secret_resolver,
 )
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -108,7 +108,7 @@ from tests.test_service import (
 )
 
 
-class FastApiDeploymentPromotionReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiDeploymentPromotionReadTests(AsyncTestCase):
     async def test_deployment_read_returns_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -392,7 +392,7 @@ class FastApiDeploymentPromotionReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(promotion_response.json()["status"], "ok")
 
 
-class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiEnvironmentInventoryReadTests(AsyncTestCase):
     async def test_inventory_read_returns_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -543,7 +543,7 @@ class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
-class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiRecentOperationsReadTests(AsyncTestCase):
     async def test_recent_operations_returns_operator_read_model(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -682,7 +682,7 @@ class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
-class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiSecretStatusReadTests(AsyncTestCase):
     async def test_secret_status_routes_return_metadata_only_models(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -929,7 +929,7 @@ class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(show_response.json()["status"], "ok")
 
 
-class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiBackupGateEvidenceTests(AsyncTestCase):
     async def test_backup_gate_evidence_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1174,7 +1174,7 @@ class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPublicIngressMonitorTests(AsyncTestCase):
     async def test_public_ingress_monitor_runs_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -1510,7 +1510,7 @@ class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
         run_monitor.assert_called_once()
 
 
-class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPromotionEvidenceTests(AsyncTestCase):
     async def test_promotion_evidence_writes_record_and_inventory_for_authorized_workflow(
         self,
     ) -> None:
@@ -1822,7 +1822,7 @@ class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FastApiPreviewGenerationEvidenceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPreviewGenerationEvidenceTests(AsyncTestCase):
     async def test_preview_generation_evidence_writes_records_for_authorized_workflow(
         self,
     ) -> None:
@@ -2171,7 +2171,7 @@ class FastApiPreviewGenerationEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPreviewDestroyedEvidenceTests(AsyncTestCase):
     async def test_preview_destroyed_evidence_writes_record_for_authorized_workflow(
         self,
     ) -> None:
@@ -2489,7 +2489,7 @@ class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"]["transition"], "destroyed")
 
 
-class FastApiRunnerHostHygieneAuditEvidenceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiRunnerHostHygieneAuditEvidenceTests(AsyncTestCase):
     async def test_runner_host_hygiene_audit_evidence_writes_record_for_authorized_workflow(
         self,
     ) -> None:
@@ -2813,7 +2813,7 @@ class FastApiRunnerHostHygieneAuditEvidenceTests(unittest.IsolatedAsyncioTestCas
         )
 
 
-class FastApiRunnerLaneRegistrationAuditEvidenceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiRunnerLaneRegistrationAuditEvidenceTests(AsyncTestCase):
     async def test_runner_lane_registration_audit_evidence_writes_record_for_authorized_workflow(
         self,
     ) -> None:
@@ -3145,7 +3145,7 @@ class FastApiRunnerLaneRegistrationAuditEvidenceTests(unittest.IsolatedAsyncioTe
         )
 
 
-class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiDeploymentEvidenceTests(AsyncTestCase):
     async def test_deployment_evidence_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"

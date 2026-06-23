@@ -1,5 +1,4 @@
 import json
-import unittest
 from datetime import (
     datetime,
     timedelta,
@@ -26,6 +25,7 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -57,7 +57,7 @@ from tests.test_service import (
 )
 
 
-class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
+class FastApiDriverDescriptorTests(AsyncTestCase):
     async def test_driver_descriptors_return_provider_neutral_metadata(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -406,7 +406,7 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("authz", payload)
 
 
-class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
+class FastApiDriverContextViewTests(AsyncTestCase):
     async def test_driver_instance_view_returns_lane_summary(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = _driver_context_store(Path(temporary_directory_name) / "state")
@@ -572,7 +572,7 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiDokployTargetInspectReadTests(AsyncTestCase):
     async def test_dokploy_target_inspect_reads_redacted_provider_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -823,7 +823,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
-class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
+class FastApiLaunchplaneSelfDeployTests(AsyncTestCase):
     def _policy(self) -> LaunchplaneAuthzPolicy:
         return LaunchplaneAuthzPolicy.model_validate(
             {
@@ -1189,7 +1189,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "not_found")
 
 
-class FastApiDokployTargetSetupTests(unittest.IsolatedAsyncioTestCase):
+class FastApiDokployTargetSetupTests(AsyncTestCase):
     async def test_openapi_includes_dokploy_target_setup_contract(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -1315,7 +1315,7 @@ class FastApiDokployTargetSetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["result"]["mode"], "dry-run")
 
 
-class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiTrackedTargetLogsReadTests(AsyncTestCase):
     async def test_tracked_target_logs_returns_redacted_application_logs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

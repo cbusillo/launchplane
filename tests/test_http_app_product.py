@@ -1,5 +1,4 @@
 import json
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import (
@@ -30,6 +29,7 @@ from control_plane.work_graph_issue_inbox import (
     GitHubIssueInboxReadModel,
     GitHubIssueInboxReconcileResult,
 )
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -84,7 +84,7 @@ from tests.test_service import (
 )
 
 
-class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCase):
+class FastApiProductEnvironmentConfigStatusTests(AsyncTestCase):
     async def test_config_status_redacts_expected_config_status(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -469,7 +469,7 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         self.assertIn("trace_id", health_payload)
 
 
-class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiProductEnvironmentReadTests(AsyncTestCase):
     async def test_repo_product_mapping_returns_managed_and_awareness_repos(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -1630,7 +1630,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config_status_response.status_code, 200)
 
 
-class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
+class FastApiProductProfileTests(AsyncTestCase):
     async def test_list_product_profiles_returns_profiles_for_driver(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -2137,7 +2137,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored_profile.driver_id, "generic-web")
 
 
-class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
+class FastApiProtectedArtifactsTests(AsyncTestCase):
     async def test_protected_artifacts_returns_launchplane_inventory(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(Path(temporary_directory_name) / "state")

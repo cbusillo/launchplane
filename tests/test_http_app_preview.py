@@ -1,6 +1,5 @@
 import json
 import os
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import (
@@ -32,6 +31,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewInventoryItem,
     GenericWebPreviewInventoryResult,
 )
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -69,7 +69,7 @@ from tests.test_service import (
 )
 
 
-class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPreviewLifecycleCleanupTests(AsyncTestCase):
     def _cleanup_policy(self, actions: list[str]) -> LaunchplaneAuthzPolicy:
         return LaunchplaneAuthzPolicy.model_validate(
             {
@@ -581,7 +581,7 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "not_found")
 
 
-class FastApiPreviewDesiredStateTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPreviewDesiredStateTests(AsyncTestCase):
     async def test_preview_desired_state_discovers_and_records_labeled_prs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -794,7 +794,7 @@ class FastApiPreviewDesiredStateTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FastApiPreviewPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPreviewPrFeedbackTests(AsyncTestCase):
     async def test_preview_pr_feedback_records_skipped_delivery_without_token(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -978,7 +978,7 @@ class FastApiPreviewPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FastApiPreviewReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPreviewReadTests(AsyncTestCase):
     async def test_preview_read_returns_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

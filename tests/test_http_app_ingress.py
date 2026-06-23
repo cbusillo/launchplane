@@ -1,5 +1,4 @@
 import json
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import (
@@ -22,6 +21,7 @@ from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyResult,
     NpmplusIngressOperation,
 )
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -62,7 +62,7 @@ from tests.test_service import (
 )
 
 
-class FastApiEdgeEndpointReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiEdgeEndpointReadTests(AsyncTestCase):
     async def test_edge_endpoint_read_returns_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -259,7 +259,7 @@ class FastApiEdgeEndpointReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
-class FastApiPrivateHealthEndpointReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiPrivateHealthEndpointReadTests(AsyncTestCase):
     async def test_private_health_endpoint_read_returns_record_for_authorized_workflow(
         self,
     ) -> None:
@@ -511,7 +511,7 @@ class FastApiPrivateHealthEndpointReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
-class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
+class FastApiEndpointApplyTests(AsyncTestCase):
     async def test_edge_endpoint_apply_writes_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -1002,7 +1002,7 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
+class FastApiIngressRouteApplyTests(AsyncTestCase):
     async def test_ingress_route_dry_run_returns_plan_without_mutation(self) -> None:
         client = _FakeNpmplusIngressClient()
         with TemporaryDirectory() as temporary_directory_name:
@@ -1557,7 +1557,7 @@ class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FastApiIngressCanaryRouteApplyTests(unittest.IsolatedAsyncioTestCase):
+class FastApiIngressCanaryRouteApplyTests(AsyncTestCase):
     async def test_ingress_canary_route_record_apply_writes_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -2133,7 +2133,7 @@ class FastApiIngressCanaryRouteApplyTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FastApiIngressCanaryRouteReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiIngressCanaryRouteReadTests(AsyncTestCase):
     async def test_ingress_canary_route_read_returns_record_for_authorized_workflow(
         self,
     ) -> None:
@@ -2353,7 +2353,7 @@ class FastApiIngressCanaryRouteReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
-class FastApiIngressRouteAuditReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiIngressRouteAuditReadTests(AsyncTestCase):
     async def test_ingress_route_audit_reads_return_native_payloads(self) -> None:
         planned_record = _ingress_route_audit_record()
         newer_applied_record = _ingress_route_audit_record(

@@ -1,4 +1,3 @@
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import (
@@ -25,6 +24,7 @@ from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
+from tests.async_case import AsyncTestCase
 from tests.http_app_test_support import (
     _asgi_get,
     _BatchLandingWithoutLandingPlanStore,
@@ -79,7 +79,7 @@ from tests.test_service import (
 )
 
 
-class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiMergeTrainReadTests(AsyncTestCase):
     async def test_admission_reads_store_decision(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -302,7 +302,7 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["admission"]["status"], "admitted")
 
 
-class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiMergeTrainBatchLandingRunOnceTests(AsyncTestCase):
     async def test_plans_from_passed_candidate(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -961,7 +961,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
         self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
 
 
-class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiMergeTrainStackCollapseRunOnceTests(AsyncTestCase):
     async def test_executes_existing_plan_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -1388,7 +1388,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
         self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
 
 
-class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiMergeTrainRunOnceTests(AsyncTestCase):
     async def test_returns_dry_run_from_policy_and_records_run(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -1924,7 +1924,7 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
 
 
-class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiMergeTrainControllerRunOnceTests(AsyncTestCase):
     async def test_advances_unstacked_batch_flow(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -2314,7 +2314,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
 
 
-class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCase):
+class FastApiMergeTrainBatchCandidateRunOnceTests(AsyncTestCase):
     async def test_plans_candidate_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -3009,7 +3009,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
         self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
 
 
-class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
+class FastApiMergeTrainPrFeedbackTests(AsyncTestCase):
     async def test_creates_managed_comment_and_records_evidence(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
