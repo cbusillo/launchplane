@@ -142,6 +142,15 @@ Keep a compatibility surface only when it is one of these:
   skips blocked-result storage so retries can observe changed runtime/provider
   state. Their descriptor routes remain discoverable, but legacy WSGI descriptor
   dispatch is exempted and direct fallback calls fail closed.
+- Odoo post-deploy and override writes use native FastAPI routes:
+  `POST /v1/drivers/odoo/post-deploy`,
+  `POST /v1/drivers/odoo/config-parameter-override`, and
+  `POST /v1/drivers/odoo/website-bootstrap-override`. They preserve
+  product-profile driver validation, lane-scoped authorization, optional
+  `Idempotency-Key` replay/conflict behavior, post-deploy result records, and
+  Odoo instance override record merge behavior. Their descriptor routes remain
+  discoverable, but legacy WSGI descriptor dispatch is exempted and direct
+  fallback calls fail closed.
 - Merge-train admission, controller-status, and policy-target reads use native
   FastAPI routes. Their legacy WSGI read branches are deleted. Merge-train
   run-once, batch-candidate run-once, batch-landing run-once, stack-collapse

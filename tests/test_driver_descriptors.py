@@ -774,15 +774,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
             dispatch_routes,
         )
-        self.assertIn(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path, dispatch_routes)
-        self.assertIn(
-            control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
-            dispatch_routes,
-        )
-        self.assertIn(
-            control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path,
-            dispatch_routes,
-        )
         self.assertIn(
             control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
             dispatch_routes,
@@ -821,6 +812,46 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_odoo_preview_apply_is_native_fastapi_dispatch_exempt(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
         route_path = control_plane_service._ODOO_PREVIEW_APPLY_ROUTE.route_path
+
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
+        self.assertIn(
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
+        )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_odoo_post_deploy_is_native_fastapi_dispatch_exempt(self) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        route_path = control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path
+
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
+        self.assertIn(
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
+        )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_odoo_config_parameter_override_is_native_fastapi_dispatch_exempt(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        route_path = control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path
+
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
+        self.assertIn(
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
+        )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_odoo_website_bootstrap_override_is_native_fastapi_dispatch_exempt(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        route_path = control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path
 
         self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
         self.assertIn(
@@ -1567,9 +1598,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         dispatch_routes.pop(control_plane_service._ODOO_PROD_ROLLBACK_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path)
 
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
@@ -1763,6 +1791,9 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         for route_path in (
             control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
             control_plane_service._ODOO_PREVIEW_APPLY_ROUTE.route_path,
+            control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path,
+            control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
+            control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path,
         ):
             self.assertIn(
                 route_path, control_plane_service._driver_route_metadata_from_descriptors()
