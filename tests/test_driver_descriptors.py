@@ -739,15 +739,25 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
+    def test_odoo_prod_backup_gate_is_native_fastapi_dispatch_exempt(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+
+        route_path = control_plane_service._ODOO_PROD_BACKUP_GATE_METADATA.route_path
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
+        self.assertIn(
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
+        )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
     def test_odoo_routes_registered_in_descriptor_dispatch(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
         self.assertIn(
             control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
-            dispatch_routes,
-        )
-        self.assertIn(
-            control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE.route_path,
             dispatch_routes,
         )
         self.assertIn(
@@ -1607,7 +1617,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_odoo_descriptor_requires_dispatch_registration(self) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_PROMOTION_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_ROLLBACK_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path)
@@ -2007,7 +2016,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             driver_id="odoo",
             route_metadata_by_action={
                 "prod_backup_gate": (
-                    control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE,
+                    control_plane_service._ODOO_PROD_BACKUP_GATE_METADATA,
                     control_plane_service.OdooProdBackupGateEnvelope,
                     "prod backup-gate driver",
                 ),

@@ -22,6 +22,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
+from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
 from control_plane.workflows.odoo_prod_promotion_run import OdooProdPromotionRunResult
 from tests.http_app_test_support import (
@@ -32,6 +33,7 @@ from tests.http_app_test_support import (
     _post_odoo_post_deploy,
     _post_odoo_preview_apply,
     _post_odoo_preview_apply_inputs,
+    _post_odoo_prod_backup_gate,
     _post_odoo_prod_promotion_inputs,
     _post_odoo_prod_promotion_run,
     _post_odoo_website_bootstrap_override,
@@ -2126,6 +2128,431 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inputs_payload["error"]["code"], "not_found")
         self.assertEqual(run_status_code, 404)
         self.assertEqual(run_payload["error"]["code"], "not_found")
+
+
+class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
+    def _identity(
+        self,
+        *,
+        repository: str = "every/tenant-cm",
+        workflow_ref: str = "every/tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main",
+    ) -> GitHubActionsIdentity:
+        return _identity(
+            repository=repository,
+            workflow_ref=workflow_ref,
+            event_name="workflow_dispatch",
+        )
+
+    def _policy(
+        self,
+        *,
+        product: str = "odoo",
+        context: str = "cm",
+        action: str = "odoo_prod_backup_gate.execute",
+        repository: str = "every/tenant-cm",
+        workflow_ref: str = "every/tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main",
+    ) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": repository,
+                        "workflow_refs": [workflow_ref],
+                        "event_names": ["workflow_dispatch"],
+                        "products": [product],
+                        "contexts": [context],
+                        "actions": [action],
+                    }
+                ]
+            }
+        )
+
+    def _store_with_tenant_profile(self, state_dir: Path) -> FilesystemRecordStore:
+        store = FilesystemRecordStore(state_dir=state_dir)
+        profile_payload = _odoo_preview_profile_payload()
+        lanes = list(cast(tuple[dict[str, object], ...], profile_payload["lanes"]))
+        lanes.append(
+            {
+                "instance": "prod",
+                "context": "cm",
+                "base_url": "https://cm.example.com",
+                "health_url": "https://cm.example.com/web/health",
+            }
+        )
+        profile_payload["lanes"] = tuple(lanes)
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        )
+        return store
+
+    def _store_with_non_odoo_profile(self, state_dir: Path) -> FilesystemRecordStore:
+        store = self._store_with_tenant_profile(state_dir)
+        profile_payload = _odoo_preview_profile_payload()
+        profile_payload["driver_id"] = "generic-web"
+        lanes = list(cast(tuple[dict[str, object], ...], profile_payload["lanes"]))
+        lanes.append(
+            {
+                "instance": "prod",
+                "context": "cm",
+                "base_url": "https://cm.example.com",
+                "health_url": "https://cm.example.com/web/health",
+            }
+        )
+        profile_payload["lanes"] = tuple(lanes)
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        )
+        return store
+
+    def _payload(
+        self,
+        *,
+        product: str = "odoo",
+        backup_record_id: str = "backup-gate-cm-prod-run-1",
+    ) -> dict[str, object]:
+        return {
+            "product": product,
+            "backup_gate": {
+                "context": "cm",
+                "instance": "prod",
+                "backup_record_id": backup_record_id,
+            },
+        }
+
+    def _result(
+        self,
+        *,
+        backup_record_id: str = "backup-gate-cm-prod-run-1",
+        backup_status: Literal["pass", "fail"] = "pass",
+    ) -> OdooProdBackupGateResult:
+        return OdooProdBackupGateResult(
+            context="cm",
+            instance="prod",
+            backup_record_id=backup_record_id,
+            backup_status=backup_status,
+            backup_root="/volumes/data/backups/launchplane",
+            database_dump_path=f"/volumes/data/backups/launchplane/cm/{backup_record_id}/cm.dump",
+            filestore_archive_path=(
+                f"/volumes/data/backups/launchplane/cm/{backup_record_id}/cm-filestore.tar.gz"
+            ),
+            manifest_path=f"/volumes/data/backups/launchplane/cm/{backup_record_id}/manifest.json",
+            error_message="backup failed" if backup_status == "fail" else "",
+        )
+
+    async def test_odoo_prod_backup_gate_executes_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_backup_gate_http.execute_odoo_prod_backup_gate",
+                return_value=self._result(),
+            ) as execute_mock:
+                response = await _post_odoo_prod_backup_gate(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-backup-gate-cm",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"], {"backup_record_id": "backup-gate-cm-prod-run-1"})
+        self.assertEqual(
+            set(payload["result"]),
+            {
+                "backup_record_id",
+                "backup_status",
+                "backup_root",
+                "database_dump_path",
+                "filestore_archive_path",
+                "manifest_path",
+            },
+        )
+        self.assertEqual(payload["result"]["backup_status"], "pass")
+        self.assertEqual(
+            payload["result"]["database_dump_path"],
+            "/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-run-1/cm.dump",
+        )
+        execute_mock.assert_called_once()
+
+    async def test_odoo_prod_backup_gate_accepts_product_profile_driver_id(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = self._store_with_tenant_profile(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(product="odoo-tenant-cm"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_backup_gate_http.execute_odoo_prod_backup_gate",
+                return_value=self._result(),
+            ) as execute_mock:
+                response = await _post_odoo_prod_backup_gate(
+                    app,
+                    self._payload(product="odoo-tenant-cm"),
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            response.json()["records"]["backup_record_id"], "backup-gate-cm-prod-run-1"
+        )
+        execute_mock.assert_called_once()
+
+    async def test_odoo_prod_backup_gate_rejects_non_odoo_product_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = self._store_with_non_odoo_profile(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(product="odoo-tenant-cm"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_backup_gate_http.execute_odoo_prod_backup_gate"
+            ) as execute_mock:
+                response = await _post_odoo_prod_backup_gate(
+                    app,
+                    self._payload(product="odoo-tenant-cm"),
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+        execute_mock.assert_not_called()
+
+    async def test_odoo_prod_backup_gate_rejects_profile_lane_mismatch(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = self._store_with_tenant_profile(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(product="odoo-tenant-cm", context="opw"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            payload = self._payload(product="odoo-tenant-cm")
+            backup_gate = cast(dict[str, object], payload["backup_gate"])
+            backup_gate["context"] = "opw"
+            with patch(
+                "control_plane.odoo_prod_backup_gate_http.execute_odoo_prod_backup_gate"
+            ) as execute_mock:
+                response = await _post_odoo_prod_backup_gate(app, payload)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+        execute_mock.assert_not_called()
+
+    async def test_odoo_prod_backup_gate_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_post_deploy.execute"),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_prod_backup_gate(app, self._payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_odoo_prod_backup_gate_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_backup_gate_http.execute_odoo_prod_backup_gate",
+                return_value=self._result(),
+            ) as execute_mock:
+                first_response = await _post_odoo_prod_backup_gate(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-backup-gate:replay",
+                )
+                replay_response = await _post_odoo_prod_backup_gate(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-backup-gate:replay",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        execute_mock.assert_called_once()
+
+    async def test_odoo_prod_backup_gate_rejects_idempotency_key_reuse(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_backup_gate_http.execute_odoo_prod_backup_gate",
+                return_value=self._result(),
+            ):
+                first_response = await _post_odoo_prod_backup_gate(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-backup-gate:conflict",
+                )
+                conflict_response = await _post_odoo_prod_backup_gate(
+                    app,
+                    self._payload(backup_record_id="backup-gate-cm-prod-run-2"),
+                    idempotency_key="odoo-prod-backup-gate:conflict",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_odoo_prod_backup_gate_does_not_replay_failed_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_backup_gate_http.execute_odoo_prod_backup_gate",
+                side_effect=(self._result(backup_status="fail"), self._result()),
+            ) as execute_mock:
+                first_response = await _post_odoo_prod_backup_gate(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-backup-gate:retry-after-fail",
+                )
+                retry_response = await _post_odoo_prod_backup_gate(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-backup-gate:retry-after-fail",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(first_response.json()["result"]["backup_status"], "fail")
+        self.assertEqual(retry_response.status_code, 202)
+        self.assertEqual(retry_response.json()["result"]["backup_status"], "pass")
+        self.assertNotIn("replayed", retry_response.json())
+        execute_mock.assert_called()
+        self.assertEqual(execute_mock.call_count, 2)
+
+    async def test_odoo_prod_backup_gate_product_route_dependency_miss_is_503(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(product="odoo-tenant-cm"),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_prod_backup_gate(
+                app,
+                self._payload(product="odoo-tenant-cm"),
+            )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "driver_route_dependency_not_found")
+        self.assertEqual(
+            payload["details"]["route_path"],
+            "/v1/drivers/odoo/prod-backup-gate",
+        )
+
+    async def test_odoo_prod_backup_gate_handler_file_miss_is_not_found(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.http_app.execute_odoo_prod_backup_gate_result",
+                side_effect=FileNotFoundError,
+            ):
+                response = await _post_odoo_prod_backup_gate(app, self._payload())
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_openapi_includes_odoo_prod_backup_gate_contract(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        operation = response.json()["paths"]["/v1/drivers/odoo/prod-backup-gate"]["post"]
+        self.assertEqual(operation["operationId"], "write_odoo_prod_backup_gate")
+        self.assertEqual(
+            operation["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "OdooProdBackupGateEnvelope",
+        )
+        self.assertEqual(
+            operation["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "404", "409", "503"):
+            self.assertIn(status_code, operation["responses"])
+
+    async def test_legacy_wsgi_odoo_prod_backup_gate_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                legacy_app,
+                method="POST",
+                path="/v1/drivers/odoo/prod-backup-gate",
+                payload=self._payload(),
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
 
 class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):

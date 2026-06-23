@@ -239,6 +239,10 @@ from control_plane.odoo_post_deploy_http import (
     OdooPostDeployEnvelope as OdooPostDeployEnvelope,
     OdooWebsiteBootstrapOverrideEnvelope as OdooWebsiteBootstrapOverrideEnvelope,
 )
+from control_plane.odoo_prod_backup_gate_http import (
+    ODOO_PROD_BACKUP_GATE_ROUTE,
+    OdooProdBackupGateEnvelope as OdooProdBackupGateEnvelope,
+)
 from control_plane.odoo_prod_promotion_http import (
     ODOO_PROD_PROMOTION_INPUTS_ROUTE,
     ODOO_PROD_PROMOTION_RUN_ROUTE,
@@ -247,11 +251,6 @@ from control_plane.odoo_prod_promotion_http import (
 )
 from control_plane.contracts.odoo_stable_bootstrap import (
     OdooStableBootstrapRequest,
-)
-from control_plane.workflows.odoo_prod_backup_gate import (
-    OdooProdBackupGateRequest,
-    OdooProdBackupGateStore,
-    execute_odoo_prod_backup_gate,
 )
 from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionRequest,
@@ -323,6 +322,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         ODOO_POST_DEPLOY_ROUTE,
         ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
         ODOO_PREVIEW_APPLY_ROUTE,
+        ODOO_PROD_BACKUP_GATE_ROUTE,
         ODOO_PROD_PROMOTION_INPUTS_ROUTE,
         ODOO_PROD_PROMOTION_RUN_ROUTE,
         ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
@@ -555,16 +555,6 @@ class OdooProdRollbackEnvelope(_ProductRouteEnvelope):
         return self
 
 
-class OdooProdBackupGateEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    backup_gate: OdooProdBackupGateRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooProdBackupGateEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo prod backup gate")
-        return self
-
-
 class OdooProdPromotionEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     promotion: OdooProdPromotionRequest
@@ -575,8 +565,8 @@ class OdooProdPromotionEnvelope(_ProductRouteEnvelope):
         return self
 
 
-_ODOO_PROD_BACKUP_GATE_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/prod-backup-gate",
+_ODOO_PROD_BACKUP_GATE_METADATA = _DriverRouteExecutionMetadata(
+    route_path=ODOO_PROD_BACKUP_GATE_ROUTE,
     envelope_model=OdooProdBackupGateEnvelope,
     denial_message=(
         "Workflow cannot execute the Odoo prod backup-gate driver"
@@ -1098,31 +1088,6 @@ def _handle_odoo_artifact_publish(
             "image_repository": driver_result.image_repository,
             "image_digest": driver_result.image_digest,
             "source_commit": driver_result.source_commit,
-        },
-        driver_result=driver_result,
-    )
-
-
-def _handle_odoo_prod_backup_gate(
-    request: OdooProdBackupGateEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    driver_result = execute_odoo_prod_backup_gate(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(OdooProdBackupGateStore, record_store),
-        request=request.backup_gate,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={
-            "backup_record_id": driver_result.backup_record_id,
-            "backup_status": driver_result.backup_status,
-            "backup_root": driver_result.backup_root,
-            "database_dump_path": driver_result.database_dump_path,
-            "filestore_archive_path": driver_result.filestore_archive_path,
-            "manifest_path": driver_result.manifest_path,
         },
         driver_result=driver_result,
     )
@@ -1847,15 +1812,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_artifact_publish,
         ),
-        _ODOO_PROD_BACKUP_GATE_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_PROD_BACKUP_GATE_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.backup_gate.context,
-                instance=request.backup_gate.instance,
-            ),
-            handler=_handle_odoo_prod_backup_gate,
-        ),
         _ODOO_PROD_PROMOTION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_PROD_PROMOTION_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -2044,7 +2000,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
                 _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
                 _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
                 _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
-                _ODOO_PROD_BACKUP_GATE_ROUTE.route_path,
+                _ODOO_PROD_BACKUP_GATE_METADATA.route_path,
                 _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,
                 _ODOO_PROD_PROMOTION_ROUTE.route_path,
                 _ODOO_PROD_ROLLBACK_ROUTE.route_path,
