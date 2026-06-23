@@ -307,6 +307,8 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/preview-apply-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/preview-apply` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-backup-gate`
+  - `POST /v1/drivers/odoo/prod-promotion-inputs` (native FastAPI)
+  - `POST /v1/drivers/odoo/prod-promotion-run` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion`
   - `POST /v1/drivers/odoo/prod-rollback`
   - `POST /v1/drivers/verireel/testing-deploy`
@@ -2022,6 +2024,9 @@ immutable image reference, and deterministic backup-gate record ID required by
 the backup-gate and promotion routes. Blocked responses are not cached as
 idempotent successes and explain which Launchplane record is missing, so a
 tenant workflow does not have to accept hand-entered artifact or source facts.
+The route is owned by native FastAPI; its descriptor remains discoverable, the
+legacy WSGI descriptor dispatcher is exempted from the path, and direct fallback
+calls fail closed.
 
 `POST /v1/drivers/odoo/prod-promotion-run` is the preferred thin-workflow
 mutation route for Odoo prod promotion. The tenant workflow supplies product,
@@ -2030,6 +2035,11 @@ artifact, captures the prod backup gate, executes the testing-to-prod promotion,
 and returns the phase statuses and written record IDs. The lower-level inputs,
 backup-gate, and promotion routes remain available for diagnostics and explicit
 operator workflows, but product repos should not own the chain.
+The route is owned by native FastAPI and preserves request-context authorization,
+reusable Launchplane workflow identity matching, optional `Idempotency-Key`
+replay/conflict behavior, and no-cache retry behavior for blocked or failed
+driver results. Its descriptor remains discoverable, legacy WSGI descriptor
+dispatch is exempted, and direct fallback calls fail closed.
 
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still

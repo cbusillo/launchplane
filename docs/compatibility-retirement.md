@@ -151,6 +151,15 @@ Keep a compatibility surface only when it is one of these:
   Odoo instance override record merge behavior. Their descriptor routes remain
   discoverable, but legacy WSGI descriptor dispatch is exempted and direct
   fallback calls fail closed.
+- Odoo prod-promotion inputs and prod-promotion run use native FastAPI routes:
+  `POST /v1/drivers/odoo/prod-promotion-inputs` and
+  `POST /v1/drivers/odoo/prod-promotion-run`. They preserve product/profile
+  driver validation, request-context authorization, reusable Launchplane
+  workflow identity matching, dependency-miss `503` classification,
+  handler-side `404` file-miss parity, optional `Idempotency-Key`
+  replay/conflict behavior, and blocked/failed-result no-cache retry behavior.
+  Their descriptor routes remain discoverable, but legacy WSGI descriptor
+  dispatch is exempted and direct fallback calls fail closed.
 - Merge-train admission, controller-status, and policy-target reads use native
   FastAPI routes. Their legacy WSGI read branches are deleted. Merge-train
   run-once, batch-candidate run-once, batch-landing run-once, stack-collapse
