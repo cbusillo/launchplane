@@ -22,6 +22,11 @@ from control_plane.drivers import registry
 from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewDesiredStateEnvelope,
 )
+from control_plane.odoo_artifact_publish_inputs_http import (
+    ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
+    ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+    OdooArtifactPublishInputsEnvelope,
+)
 from control_plane.drivers.registry import (
     build_driver_context_view,
     effective_driver_actions,
@@ -716,15 +721,25 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
+    def test_odoo_artifact_publish_inputs_is_native_fastapi_dispatch_exempt(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+
+        route_path = ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
+        self.assertIn(
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
+        )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
     def test_odoo_routes_registered_in_descriptor_dispatch(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
         self.assertIn(
             control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
-            dispatch_routes,
-        )
-        self.assertIn(
-            control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path,
             dispatch_routes,
         )
         self.assertIn(
@@ -1535,7 +1550,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_odoo_descriptor_requires_dispatch_registration(self) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_PROMOTION_RUN_ROUTE.route_path)
@@ -1918,14 +1932,23 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
 
     def test_odoo_artifact_execution_metadata_matches_descriptors(self) -> None:
+        odoo_descriptor = read_driver_descriptor("odoo")
+        odoo_actions = {action.action_id: action for action in odoo_descriptor.actions}
+        self.assertEqual(
+            odoo_actions["artifact_publish_inputs"].route_path,
+            ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+        )
+        self.assertEqual(
+            odoo_actions["artifact_publish_inputs"].authz_action,
+            ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
+        )
+        self.assertEqual(
+            OdooArtifactPublishInputsEnvelope.model_json_schema()["title"],
+            "OdooArtifactPublishInputsEnvelope",
+        )
         self.assert_route_metadata_matches_descriptor(
             driver_id="odoo",
             route_metadata_by_action={
-                "artifact_publish_inputs": (
-                    control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-                    control_plane_service.OdooArtifactPublishInputsEnvelope,
-                    "artifact publish inputs",
-                ),
                 "artifact_publish": (
                     control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE,
                     control_plane_service.OdooArtifactPublishEnvelope,
