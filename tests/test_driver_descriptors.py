@@ -397,7 +397,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             self.assertEqual(
                 control_plane_service._descriptor_driver_authz_action(route_path), authz_action
             )
-        self.assertIn(
+        self.assertNotIn(
             "/v1/drivers/launchplane/self-deploy",
             control_plane_service._build_write_routes(),
         )
