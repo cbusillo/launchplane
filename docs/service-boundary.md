@@ -279,6 +279,7 @@ VeriReel product paths:
   - `POST /v1/work-graph/merge-train/pr-feedback` (native FastAPI)
   - `POST /v1/work-graph/merge-train/controller/run-once` (native FastAPI)
 - product driver routes:
+  - `POST /v1/drivers/launchplane/self-deploy` (native FastAPI)
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
   - `POST /v1/drivers/generic-web/prod-promotion-workflow`
@@ -1440,6 +1441,17 @@ projections; existing rows and conflicts are reported rather than overwritten.
 Its legacy WSGI fallback branch is deleted; direct fallback calls fail closed.
 The manual `Provider Target Operations` workflow is the supported shared and
 production caller for Phase Two backfill evidence.
+
+Launchplane self-deploy uses the native FastAPI
+`POST /v1/drivers/launchplane/self-deploy` route. The route executes only the
+Launchplane-owned self-deploy workflow, requires
+`launchplane_service_deploy.execute` authority for product/context
+`launchplane`, and preserves optional `Idempotency-Key` replay/conflict
+behavior for retry-safe deploy requests. Its legacy WSGI fallback branch is
+deleted; direct fallback calls fail closed. Runtime target identity, image
+references, OAuth environment changes, and provider credentials remain
+operator-supplied runtime inputs or managed secrets rather than checked-in
+authority.
 
 Dokploy target setup uses the native FastAPI
 `POST /v1/dokploy-targets/setup` route. The route is the service-owned path for

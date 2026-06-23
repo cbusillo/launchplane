@@ -18,7 +18,7 @@ from click import ClickException
 from starlette.types import ASGIApp
 
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import (
     HumanSessionManager,
     InMemoryHumanSessionStore,
@@ -42,12 +42,14 @@ from tests.http_app_test_support import (
     _github_oauth_config,
     _local_operator_bearer_config,
     _MissingProductReadStore,
+    _post_launchplane_self_deploy,
     _record_read_policy,
     _RejectingVerifier,
     _seed_dokploy_target_inspect_records,
 )
 from tests.test_service import (
     _identity,
+    _invoke_app,
     _seed_tracked_target_records,
     _sqlite_database_url,
     _StubVerifier,
@@ -819,6 +821,372 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+
+class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
+    def _policy(self) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["launchplane_service_deploy.execute"],
+                    }
+                ]
+            }
+        )
+
+    def _identity(self) -> GitHubActionsIdentity:
+        return _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+
+    def _payload(
+        self,
+        *,
+        image_reference: str = "ghcr.io/cbusillo/launchplane@sha256:new",
+        oauth_env: dict[str, str] | None = None,
+        oauth_env_removals: list[str] | None = None,
+    ) -> dict[str, object]:
+        deploy: dict[str, object] = {
+            "target_type": "compose",
+            "target_id": "compose-123",
+            "image_reference": image_reference,
+        }
+        if oauth_env is not None:
+            deploy["oauth_env"] = oauth_env
+        if oauth_env_removals is not None:
+            deploy["oauth_env_removals"] = oauth_env_removals
+        return {"product": "launchplane", "deploy": deploy}
+
+    async def test_self_deploy_updates_target_env_and_triggers_dokploy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                ) as update_env_mock,
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                ) as trigger_mock,
+            ):
+                response = await _post_launchplane_self_deploy(
+                    app,
+                    self._payload(
+                        oauth_env={"LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example"}
+                    ),
+                    idempotency_key="launchplane-self-deploy:test",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"]["target_id"], "compose-123")
+        self.assertEqual(payload["records"]["target_type"], "compose")
+        self.assertEqual(
+            payload["records"]["image_reference"],
+            "ghcr.io/cbusillo/launchplane@sha256:new",
+        )
+        self.assertIn("oauth_env_keys_removed", payload["records"])
+        self.assertEqual(payload["result"]["target_id"], "compose-123")
+        update_env_mock.assert_called_once()
+        updated_env_text = update_env_mock.call_args.kwargs["env_text"]
+        self.assertIn(
+            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:new",
+            updated_env_text,
+        )
+        self.assertIn("LAUNCHPLANE_PUBLIC_URL=https://launchplane.example", updated_env_text)
+        trigger_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="token-123",
+            target_type="compose",
+            target_id="compose-123",
+            no_cache=False,
+        )
+
+    async def test_self_deploy_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                ) as trigger_mock,
+            ):
+                first_response = await _post_launchplane_self_deploy(
+                    app,
+                    self._payload(),
+                    idempotency_key="launchplane-self-deploy:replay",
+                )
+                replay_response = await _post_launchplane_self_deploy(
+                    app,
+                    self._payload(),
+                    idempotency_key="launchplane-self-deploy:replay",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(trigger_mock.call_count, 1)
+
+    async def test_self_deploy_rejects_idempotency_key_reuse(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                ),
+            ):
+                first_response = await _post_launchplane_self_deploy(
+                    app,
+                    self._payload(),
+                    idempotency_key="launchplane-self-deploy:conflict",
+                )
+                conflict_response = await _post_launchplane_self_deploy(
+                    app,
+                    self._payload(image_reference="ghcr.io/cbusillo/launchplane@sha256:other"),
+                    idempotency_key="launchplane-self-deploy:conflict",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_self_deploy_rejects_unknown_oauth_env_keys(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=self._policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_launchplane_self_deploy(
+            app,
+            self._payload(oauth_env={"DOKPLOY_TOKEN": "nope"}),
+            idempotency_key="launchplane-self-deploy:bad-oauth-env",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_self_deploy_rejects_remove_and_update_same_oauth_env_key(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=self._policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_launchplane_self_deploy(
+            app,
+            self._payload(
+                oauth_env={"LAUNCHPLANE_NPMPLUS_BASE_URL": "https://npmplus.example"},
+                oauth_env_removals=["LAUNCHPLANE_NPMPLUS_BASE_URL"],
+            ),
+            idempotency_key="launchplane-self-deploy:bad-removal",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_self_deploy_removes_requested_oauth_env_keys(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "env": "DOCKER_IMAGE_REFERENCE=old\n"
+                        "LAUNCHPLANE_NPMPLUS_BASE_URL=https://npmplus.example\n"
+                        "LAUNCHPLANE_NPMPLUS_IDENTITY=automation@example.com\n"
+                        "LAUNCHPLANE_NPMPLUS_SECRET=npmplus-secret\n"
+                    },
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                ) as update_env_mock,
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                ),
+            ):
+                response = await _post_launchplane_self_deploy(
+                    app,
+                    self._payload(
+                        oauth_env_removals=[
+                            "LAUNCHPLANE_NPMPLUS_BASE_URL",
+                            "LAUNCHPLANE_NPMPLUS_IDENTITY",
+                            "LAUNCHPLANE_NPMPLUS_SECRET",
+                        ]
+                    ),
+                    idempotency_key="launchplane-self-deploy:remove-oauth-env",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        removed_keys = str(response.json()["records"]["oauth_env_keys_removed"])
+        self.assertIn("LAUNCHPLANE_NPMPLUS_BASE_URL", removed_keys)
+        self.assertIn("LAUNCHPLANE_NPMPLUS_IDENTITY", removed_keys)
+        self.assertIn("LAUNCHPLANE_NPMPLUS_SECRET", removed_keys)
+        update_env_mock.assert_called_once()
+        updated_env_text = update_env_mock.call_args.kwargs["env_text"]
+        self.assertNotIn("LAUNCHPLANE_NPMPLUS_BASE_URL=", updated_env_text)
+        self.assertNotIn("LAUNCHPLANE_NPMPLUS_IDENTITY=", updated_env_text)
+        self.assertNotIn("LAUNCHPLANE_NPMPLUS_SECRET=", updated_env_text)
+
+    async def test_self_deploy_rejects_unauthorized_workflow(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_launchplane_self_deploy(app, self._payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_openapi_includes_self_deploy_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=self._policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/drivers/launchplane/self-deploy"]["post"]
+        self.assertEqual(route["operationId"], "write_launchplane_self_deploy")
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["title"], "LaunchplaneSelfDeployEnvelope")
+        self.assertIn("400", route["responses"])
+        self.assertIn("401", route["responses"])
+        self.assertIn("403", route["responses"])
+        self.assertIn("409", route["responses"])
+
+    async def test_fastapi_self_deploy_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                ),
+            ):
+                response = await _post_launchplane_self_deploy(app, self._payload())
+
+        self.assertEqual(response.status_code, 202)
+
+    async def test_legacy_wsgi_self_deploy_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/launchplane/self-deploy",
+                payload=self._payload(),
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
 
 class FastApiDokployTargetSetupTests(unittest.IsolatedAsyncioTestCase):

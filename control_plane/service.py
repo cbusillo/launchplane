@@ -209,10 +209,6 @@ from control_plane.work_graph_issue_inbox import (
     load_github_issue_inbox_config_from_env,
     reconcile_github_issue_inbox,
 )
-from control_plane.workflows.launchplane_self_deploy import (
-    LaunchplaneSelfDeployRequest,
-    execute_launchplane_self_deploy,
-)
 from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
@@ -1250,20 +1246,6 @@ _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
     }
 )
 _PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES = frozenset({_VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path})
-
-
-class LaunchplaneSelfDeployEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    deploy: LaunchplaneSelfDeployRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "LaunchplaneSelfDeployEnvelope":
-        if self.product.strip() != "launchplane":
-            raise ValueError("Launchplane self deploy requires product 'launchplane'.")
-        return self
 
 
 def _driver_route_authorization_response(
@@ -2915,10 +2897,7 @@ def _driver_write_routes_from_descriptors() -> frozenset[str]:
 
 
 def _build_write_routes() -> frozenset[str]:
-    launchplane_write_routes = {
-        "/v1/drivers/launchplane/self-deploy",
-    }
-    return frozenset(launchplane_write_routes | set(_driver_write_routes_from_descriptors()))
+    return _driver_write_routes_from_descriptors()
 
 
 def _secret_capable_store(record_store: object) -> control_plane_secrets.SecretReadStore | None:
@@ -3088,7 +3067,6 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EveryCodeWorkRequestStore, record_store)
     raise TypeError("record store does not support Every Code work requests")
-
 
 
 def _supports_every_code_work_requests(record_store: object) -> bool:
@@ -4252,8 +4230,6 @@ def _accepted_payload(
 
 
 def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
-    if route_path == "/v1/drivers/launchplane/self-deploy":
-        return frozenset({"oauth_env_keys_removed"})
     if route_path == _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path:
         return frozenset({"deployment_record_id", "release_tuple_id"})
     if route_path == _GENERIC_WEB_ROLLBACK_ROUTE.route_path:
@@ -5417,41 +5393,6 @@ def create_launchplane_service_app(
                 if isinstance(dispatch_response, list):
                     return dispatch_response
                 result, driver_result = dispatch_response
-            elif path == "/v1/drivers/launchplane/self-deploy":
-                self_deploy_request = LaunchplaneSelfDeployEnvelope.model_validate(payload)
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="launchplane_service_deploy.execute",
-                    product=self_deploy_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot execute Launchplane self deploy.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                result = execute_launchplane_self_deploy(
-                    control_plane_root_path=resolved_root,
-                    request=self_deploy_request.deploy,
-                ).model_dump(mode="json")
             elif path.startswith("/v1/drivers/"):
                 return _json_response(
                     start_response=start_response,

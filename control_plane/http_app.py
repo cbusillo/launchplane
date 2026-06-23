@@ -146,6 +146,11 @@ from control_plane.merge_train_stack_collapse import (
     execute_merge_train_stack_collapse_run_once,
     require_merge_train_stack_collapse_plan_record_store,
 )
+from control_plane.launchplane_self_deploy_http import (
+    LAUNCHPLANE_SELF_DEPLOY_ROUTE as _LAUNCHPLANE_SELF_DEPLOY_ROUTE,
+    LaunchplaneSelfDeployEnvelope,
+    launchplane_self_deploy_records,
+)
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductActivityReadModel,
@@ -320,6 +325,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewProfileStore,
     discover_generic_web_preview_desired_state,
 )
+from control_plane.workflows.launchplane_self_deploy import execute_launchplane_self_deploy
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.work_graph_issue_inbox import (
     GitHubIssueInboxReadModel,
@@ -5288,6 +5294,100 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             identity=identity,
             route_path=_MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def write_launchplane_self_deploy(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            self_deploy_request = LaunchplaneSelfDeployEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="launchplane_service_deploy.execute",
+            product=self_deploy_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot execute Launchplane self deploy.",
+            )
+
+        if normalized_idempotency_key:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_LAUNCHPLANE_SELF_DEPLOY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+
+        try:
+            driver_result = execute_launchplane_self_deploy(
+                control_plane_root_path=resolved_control_plane_root,
+                request=self_deploy_request.deploy,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=launchplane_self_deploy_records(driver_result),
+            result=driver_result.model_dump(mode="json"),
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_LAUNCHPLANE_SELF_DEPLOY_ROUTE,
             idempotency_key=normalized_idempotency_key,
             request_fingerprint_value=payload_fingerprint,
             trace_id=trace_id,
@@ -12580,6 +12680,33 @@ def create_launchplane_fastapi_app(
         responses={
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _LAUNCHPLANE_SELF_DEPLOY_ROUTE,
+        write_launchplane_self_deploy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": LaunchplaneSelfDeployEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="write_launchplane_self_deploy",
+        summary="Deploy the Launchplane service image",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
         },
     )
 
