@@ -21,8 +21,8 @@ CI may shard same-repo unittest runs through Launchplane's helper while keeping
 the canonical framework as stdlib `unittest`:
 
 ```bash
-uv run launchplane ci unittest-shard plan --shard-count 6
-uv run launchplane ci unittest-shard run --shard-count 6 --shard-index 0 --timings-output tmp/shard-0.json
+uv run launchplane ci unittest-shard plan --shard-count 4
+uv run launchplane ci unittest-shard run --shard-count 4 --shard-index 0 --timings-output tmp/shard-0.json
 ```
 
 Shard planning discovers `tests/test*.py` dynamically. Small files run as whole

@@ -233,7 +233,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard_index: [0, 1, 2, 3, 4, 5]
+        shard_index: [0, 1, 2, 3]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -261,13 +261,13 @@ jobs:
       - name: Show unit test shard plan
         run: >-
           uv run launchplane ci unittest-shard plan
-          --shard-count 6
+          --shard-count 4
           --timings-file "${UNITTEST_TIMINGS_CACHE}"
 
       - name: Run unit test shard
         run: >-
           uv run launchplane ci unittest-shard run
-          --shard-count 6
+          --shard-count 4
           --shard-index ${{ matrix.shard_index }}
           --timings-file "${UNITTEST_TIMINGS_CACHE}"
           --timings-output "${RUNNER_TEMP}/unittest-timings/shard-${{ matrix.shard_index }}.json"
@@ -333,7 +333,7 @@ jobs:
       - name: Aggregate unittest timings
         run: >-
           uv run launchplane ci unittest-shard aggregate
-          --shard-count 6
+          --shard-count 4
           --results-dir "${RUNNER_TEMP}/unittest-timings"
           --timings-file "${UNITTEST_TIMINGS_CACHE}"
           --timings-output "${UNITTEST_TIMINGS_CACHE}"
