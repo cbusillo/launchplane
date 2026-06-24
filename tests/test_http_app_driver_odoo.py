@@ -25,6 +25,7 @@ from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApply
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
 from control_plane.workflows.odoo_prod_promotion_run import OdooProdPromotionRunResult
+from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
 from tests.http_app_test_support import (
     _asgi_get,
     _MissingProductReadStore,
@@ -36,6 +37,7 @@ from tests.http_app_test_support import (
     _post_odoo_prod_backup_gate,
     _post_odoo_prod_promotion_inputs,
     _post_odoo_prod_promotion_run,
+    _post_odoo_prod_rollback,
     _post_odoo_website_bootstrap_override,
 )
 from tests.test_service import (
@@ -2548,6 +2550,384 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
                 legacy_app,
                 method="POST",
                 path="/v1/drivers/odoo/prod-backup-gate",
+                payload=self._payload(),
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+
+class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
+    def _identity(
+        self,
+        *,
+        repository: str = "every/tenant-opw",
+        workflow_ref: str = "every/tenant-opw/.github/workflows/deploy-odoo.yml@refs/heads/main",
+    ) -> GitHubActionsIdentity:
+        return _identity(
+            repository=repository,
+            workflow_ref=workflow_ref,
+            event_name="workflow_dispatch",
+        )
+
+    def _policy(
+        self,
+        *,
+        product: str = "odoo",
+        context: str = "opw",
+        action: str = "odoo_prod_rollback.execute",
+        repository: str = "every/tenant-opw",
+        workflow_ref: str = "every/tenant-opw/.github/workflows/deploy-odoo.yml@refs/heads/main",
+    ) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": repository,
+                        "workflow_refs": [workflow_ref],
+                        "event_names": ["workflow_dispatch"],
+                        "products": [product],
+                        "contexts": [context],
+                        "actions": [action],
+                    }
+                ]
+            }
+        )
+
+    def _store_with_tenant_profile(self, state_dir: Path) -> FilesystemRecordStore:
+        store = FilesystemRecordStore(state_dir=state_dir)
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        )
+        return store
+
+    def _store_with_non_odoo_profile(self, state_dir: Path) -> FilesystemRecordStore:
+        store = FilesystemRecordStore(state_dir=state_dir)
+        profile_payload = _odoo_preview_profile_payload()
+        profile_payload["driver_id"] = "generic-web"
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        )
+        return store
+
+    def _payload(self, *, product: str = "odoo") -> dict[str, object]:
+        return {
+            "product": product,
+            "rollback": {
+                "context": "opw",
+                "instance": "prod",
+            },
+        }
+
+    def _result(
+        self,
+        *,
+        rollback_status: Literal["pass", "fail"] = "pass",
+        deployment_record_id: str = "deployment-opw-prod-rollback",
+        release_tuple_id: str = "opw-prod-artifact-opw-847c71c1db61785c",
+    ) -> OdooProdRollbackResult:
+        return OdooProdRollbackResult(
+            context="opw",
+            instance="prod",
+            source_channel="testing",
+            artifact_id="artifact-opw-847c71c1db61785c",
+            promotion_record_id="promotion-opw-testing-to-prod",
+            deployment_record_id=deployment_record_id,
+            release_tuple_id=release_tuple_id,
+            rollback_status=rollback_status,
+            rollback_health_status="pass" if rollback_status == "pass" else "fail",
+            post_deploy_status="pass" if rollback_status == "pass" else "skipped",
+            error_message="rollback failed" if rollback_status == "fail" else "",
+        )
+
+    async def test_odoo_prod_rollback_executes_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback",
+                return_value=self._result(),
+            ) as execute_mock:
+                response = await _post_odoo_prod_rollback(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-rollback-opw",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"],
+            {
+                "promotion_record_id": "promotion-opw-testing-to-prod",
+                "deployment_record_id": "deployment-opw-prod-rollback",
+                "release_tuple_id": "opw-prod-artifact-opw-847c71c1db61785c",
+            },
+        )
+        self.assertEqual(
+            set(payload["result"]),
+            {
+                "promotion_record_id",
+                "deployment_record_id",
+                "release_tuple_id",
+                "rollback_status",
+                "rollback_health_status",
+                "post_deploy_status",
+            },
+        )
+        self.assertEqual(payload["result"]["rollback_status"], "pass")
+        self.assertEqual(payload["result"]["rollback_health_status"], "pass")
+        self.assertEqual(payload["result"]["post_deploy_status"], "pass")
+        execute_mock.assert_called_once()
+
+    async def test_odoo_prod_rollback_accepts_product_profile_driver_id(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(product="odoo-tenant-cm"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback",
+                return_value=self._result(),
+            ) as execute_mock:
+                response = await _post_odoo_prod_rollback(
+                    app,
+                    self._payload(product="odoo-tenant-cm"),
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["rollback_status"], "pass")
+        execute_mock.assert_called_once()
+
+    async def test_odoo_prod_rollback_rejects_non_odoo_product_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_non_odoo_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(product="odoo-tenant-cm"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback"
+            ) as execute_mock:
+                response = await _post_odoo_prod_rollback(
+                    app,
+                    self._payload(product="odoo-tenant-cm"),
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+        execute_mock.assert_not_called()
+
+    async def test_odoo_prod_rollback_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_post_deploy.execute"),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_prod_rollback(app, self._payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_odoo_prod_rollback_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback",
+                return_value=self._result(),
+            ) as execute_mock:
+                first_response = await _post_odoo_prod_rollback(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-rollback:replay",
+                )
+                replay_response = await _post_odoo_prod_rollback(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-rollback:replay",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(
+            replay_response.json()["original_trace_id"], first_response.json()["trace_id"]
+        )
+        execute_mock.assert_called_once()
+
+    async def test_odoo_prod_rollback_rejects_idempotency_key_reuse(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback",
+                return_value=self._result(),
+            ):
+                first_response = await _post_odoo_prod_rollback(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-rollback:conflict",
+                )
+                changed_payload = self._payload()
+                rollback = cast(dict[str, object], changed_payload["rollback"])
+                rollback["promotion_record_id"] = "promotion-opw-previous"
+                conflict_response = await _post_odoo_prod_rollback(
+                    app,
+                    changed_payload,
+                    idempotency_key="odoo-prod-rollback:conflict",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_odoo_prod_rollback_does_not_replay_failed_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback",
+                side_effect=(self._result(rollback_status="fail"), self._result()),
+            ) as execute_mock:
+                first_response = await _post_odoo_prod_rollback(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-rollback:retry-after-fail",
+                )
+                retry_response = await _post_odoo_prod_rollback(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-rollback:retry-after-fail",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(first_response.json()["result"]["rollback_status"], "fail")
+        self.assertEqual(retry_response.status_code, 202)
+        self.assertEqual(retry_response.json()["result"]["rollback_status"], "pass")
+        self.assertNotIn("replayed", retry_response.json())
+        self.assertEqual(execute_mock.call_count, 2)
+
+    async def test_odoo_prod_rollback_product_route_dependency_miss_is_503(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(product="odoo-tenant-cm"),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_prod_rollback(
+                app,
+                self._payload(product="odoo-tenant-cm"),
+            )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "driver_route_dependency_not_found")
+        self.assertEqual(payload["details"]["route_path"], "/v1/drivers/odoo/prod-rollback")
+
+    async def test_odoo_prod_rollback_handler_file_miss_is_not_found(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.http_app.execute_odoo_prod_rollback_result",
+                side_effect=FileNotFoundError,
+            ):
+                response = await _post_odoo_prod_rollback(app, self._payload())
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_openapi_includes_odoo_prod_rollback_contract(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        operation = response.json()["paths"]["/v1/drivers/odoo/prod-rollback"]["post"]
+        self.assertEqual(operation["operationId"], "write_odoo_prod_rollback")
+        self.assertEqual(
+            operation["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "OdooProdRollbackEnvelope",
+        )
+        self.assertEqual(
+            operation["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "404", "409", "503"):
+            self.assertIn(status_code, operation["responses"])
+
+    async def test_legacy_wsgi_odoo_prod_rollback_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                legacy_app,
+                method="POST",
+                path="/v1/drivers/odoo/prod-rollback",
                 payload=self._payload(),
             )
 

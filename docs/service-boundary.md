@@ -310,7 +310,7 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/prod-promotion-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion-run` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion`
-  - `POST /v1/drivers/odoo/prod-rollback`
+  - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
   - `POST /v1/drivers/verireel/testing-deploy`
   - `POST /v1/drivers/verireel/testing-verification`
   - `POST /v1/drivers/verireel/stable-environment`
@@ -1792,7 +1792,7 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/target-replacement-apply`
 - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
 - `POST /v1/drivers/odoo/prod-promotion`
-- `POST /v1/drivers/odoo/prod-rollback`
+- `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-promotion`
 - `POST /v1/drivers/verireel/...`
 
@@ -1803,7 +1803,6 @@ current legacy WSGI descriptor handlers include:
 - `POST /v1/drivers/odoo/artifact-publish`
 - `POST /v1/drivers/odoo/target-replacement-apply`
 - `POST /v1/drivers/odoo/prod-promotion`
-- `POST /v1/drivers/odoo/prod-rollback`
 - `POST /v1/drivers/generic-web/prod-promotion`
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/testing-verification`
