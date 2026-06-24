@@ -97,12 +97,10 @@ from control_plane.drivers.generic_web_dispatch import (
     _GENERIC_WEB_ROLLBACK_ROUTE as _GENERIC_WEB_ROLLBACK_ROUTE,
     _GENERIC_WEB_STABLE_VERIFICATION_ROUTE as _GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
     _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE as _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
-    _apply_generic_web_stable_verification_records as _apply_generic_web_stable_verification_records,
     _generic_web_post_deploy_executor_for_profile as _generic_web_post_deploy_executor_for_profile,
     _handle_generic_web_deploy as _handle_generic_web_deploy,
     _handle_generic_web_prod_promotion as _handle_generic_web_prod_promotion,
     _handle_generic_web_promotion_workflow as _handle_generic_web_promotion_workflow,
-    _handle_generic_web_stable_verification as _handle_generic_web_stable_verification,
     _handle_generic_web_source_ref_deploy as _handle_generic_web_source_ref_deploy,
     _stable_verification_health_evidence as _stable_verification_health_evidence,
     _reject_human_live_generic_web_prod_promotion as _reject_human_live_generic_web_prod_promotion,
@@ -139,7 +137,6 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _handle_generic_web_preview_inventory as _handle_generic_web_preview_inventory,
     _handle_generic_web_preview_readiness as _handle_generic_web_preview_readiness,
     _handle_generic_web_preview_refresh as _handle_generic_web_preview_refresh,
-    _handle_generic_web_preview_verification as _handle_generic_web_preview_verification,
     _validate_generic_web_preview_profile as _validate_generic_web_preview_profile,
     _write_preview_desired_state_if_supported as _write_preview_desired_state_if_supported,
     _write_preview_inventory_scan_if_supported as _write_preview_inventory_scan_if_supported,
@@ -304,8 +301,10 @@ _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHO
 _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
     {
         "/v1/drivers/generic-web/preview-desired-state",
+        _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
+        _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
         "/v1/drivers/ingress/route-apply",
         "/v1/drivers/odoo/artifact-publish-inputs",
         ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
@@ -1296,15 +1295,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             pre_authorization_validator=_reject_human_live_generic_web_prod_promotion,
             handler=_handle_generic_web_prod_promotion,
         ),
-        _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.verification.context,
-                instance=request.verification.instance,
-            ),
-            handler=_handle_generic_web_stable_verification,
-        ),
         _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -1349,17 +1339,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
                 require_profile=True,
             ),
             handler=_handle_generic_web_preview_destroy,
-            pre_idempotency_validator=_validate_generic_web_preview_profile,
-        ),
-        _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.verification.context,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_preview_verification,
             pre_idempotency_validator=_validate_generic_web_preview_profile,
         ),
         _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path: _DescriptorDriverDispatchRoute(

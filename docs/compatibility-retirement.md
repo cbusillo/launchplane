@@ -214,6 +214,15 @@ Keep a compatibility surface only when it is one of these:
   failed are cached because provider mutation already occurred. Legacy WSGI
   descriptor dispatch is exempted for both paths, and direct fallback calls fail
   closed.
+- Generic-web stable and preview verification use native FastAPI routes:
+  `POST /v1/drivers/generic-web/stable-verification` and
+  `POST /v1/drivers/generic-web/preview-verification`. They preserve
+  product/profile validation before authorization, stable lane ownership checks,
+  preview-profile validation, optional `Idempotency-Key` replay/conflict
+  behavior, evidence-only record writes, and Odoo-based product profile
+  acceptance through the generic-web base driver. Their descriptor routes remain
+  discoverable, but legacy WSGI descriptor dispatch is exempted and direct
+  fallback calls fail closed.
 - Odoo prod-promotion inputs, prod-promotion run, and the older monolithic
   prod-promotion compatibility route use native FastAPI routes:
   `POST /v1/drivers/odoo/prod-promotion-inputs`,

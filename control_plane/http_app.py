@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import secrets
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
@@ -164,6 +164,22 @@ from control_plane.generic_web_rollback_http import (
     execute_generic_web_rollback_result,
     resolve_generic_web_rollback_lane,
     should_store_generic_web_rollback_idempotency,
+)
+from control_plane.generic_web_verification_http import (
+    GENERIC_WEB_PREVIEW_VERIFICATION_ACTION,
+    GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE as _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
+    GENERIC_WEB_STABLE_VERIFICATION_ACTION,
+    GENERIC_WEB_STABLE_VERIFICATION_ROUTE as _GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
+    GenericWebPreviewVerificationEnvelope,
+    GenericWebStableVerificationEnvelope,
+    GenericWebVerificationProductMismatchError,
+    GenericWebVerificationRouteDependencyError,
+    apply_generic_web_preview_verification_result,
+    apply_generic_web_stable_verification_result,
+    generic_web_verification_response_records,
+    resolve_generic_web_preview_verification_profile,
+    resolve_generic_web_stable_verification_lane,
+    should_store_generic_web_verification_idempotency,
 )
 from control_plane.odoo_artifact_publish_inputs_http import (
     ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
@@ -1613,7 +1629,7 @@ class AcceptedEvidenceResponse(BaseModel):
 
     status: Literal["accepted"] = "accepted"
     trace_id: str
-    records: dict[str, str]
+    records: dict[str, object]
     result: dict[str, object] | None = None
     replayed: bool | None = None
     original_trace_id: str | None = None
@@ -10762,14 +10778,14 @@ def create_launchplane_fastapi_app(
     def accepted_evidence_response(
         *,
         trace_id: str,
-        records: dict[str, str],
+        records: Mapping[str, object],
         result: dict[str, object] | None = None,
         replayed: bool = False,
         original_trace_id: str = "",
     ) -> AcceptedEvidenceResponse:
         return AcceptedEvidenceResponse(
             trace_id=trace_id,
-            records=records,
+            records=dict(records),
             result=result,
             replayed=True if replayed else None,
             original_trace_id=original_trace_id or None,
@@ -10779,7 +10795,9 @@ def create_launchplane_fastapi_app(
         *, trace_id: str, stored_record: LaunchplaneIdempotencyRecord
     ) -> AcceptedEvidenceResponse:
         stored_records = {
-            str(key): str(value)
+            str(key): value
+            if str(key).endswith("_preview_verification") and isinstance(value, dict)
+            else str(value)
             for key, value in dict(stored_record.response_payload.get("records") or {}).items()
         }
         stored_result = stored_record.response_payload.get("result")
@@ -13248,6 +13266,192 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def apply_generic_web_stable_verification(
+        request: Request,
+        verification_request: GenericWebStableVerificationEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            profile, lane = resolve_generic_web_stable_verification_lane(
+                record_store=record_store,
+                product=verification_request.product,
+                context=verification_request.verification.context,
+                instance=verification_request.verification.instance,
+            )
+        except GenericWebVerificationRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
+            )
+        except GenericWebVerificationProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=GENERIC_WEB_STABLE_VERIFICATION_ACTION,
+            product=profile.product,
+            context=lane.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write generic web stable verification"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            result = apply_generic_web_stable_verification_result(
+                record_store=record_store,
+                request=verification_request,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=generic_web_verification_response_records(result),
+            result=result,
+        )
+        if should_store_generic_web_verification_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_generic_web_preview_verification(
+        request: Request,
+        verification_request: GenericWebPreviewVerificationEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            profile = resolve_generic_web_preview_verification_profile(
+                record_store=record_store,
+                product=verification_request.product,
+                context=verification_request.verification.context,
+            )
+        except GenericWebVerificationRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
+            )
+        except GenericWebVerificationProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=GENERIC_WEB_PREVIEW_VERIFICATION_ACTION,
+            product=profile.product,
+            context=profile.preview.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write generic web preview verification"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            result = apply_generic_web_preview_verification_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=verification_request,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=generic_web_verification_response_records(result),
+            result=result,
+        )
+        if should_store_generic_web_verification_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
     async def apply_ingress_canary_route(
         request: Request,
         canary_request: IngressCanaryRouteApplyEnvelope,
@@ -14763,6 +14967,62 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="apply_generic_web_preview_desired_state",
         summary="Discover generic web preview desired state",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
+        apply_generic_web_stable_verification,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": GenericWebStableVerificationEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_generic_web_stable_verification",
+        summary="Write generic web stable verification",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
+        apply_generic_web_preview_verification,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": GenericWebPreviewVerificationEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_generic_web_preview_verification",
+        summary="Write generic web preview verification",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

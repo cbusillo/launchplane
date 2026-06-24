@@ -202,8 +202,9 @@ deployment record, optional promotion record, checked URLs, and pass/fail status
 Launchplane updates deployment, promotion, and inventory evidence without
 mutating provider state. Odoo stable smoke follow-ups use this generic-web route;
 the former Odoo-shaped stable verification alias is retired. This route is
-registered through descriptor-backed dispatch, so descriptor/handler drift fails
-closed before the service starts.
+executed by native FastAPI. Its descriptor remains discoverable for driver views
+and authz metadata, while legacy WSGI descriptor-backed dispatch is exempted so
+direct fallback calls fail closed.
 Stable verification may also include the checked endpoint's bounded
 `health_payload`. Launchplane records recognized non-secret fields such as
 `status`, `version`, `source_git_ref`, and `image_reference`, and compares any
@@ -233,9 +234,10 @@ product health path. Inventory and destroy scan and delete Dokploy applications
 by the product profile's preview application-name prefix. Verification records
 common post-refresh smoke evidence against the latest Launchplane preview
 generation and is available to any product profile that uses the generic-web
-base driver. Generic-web preview verification is registered through
-descriptor-backed dispatch, so descriptor/handler drift fails closed before the
-service starts.
+base driver. Generic-web preview verification is executed by native FastAPI.
+Its descriptor remains discoverable for driver views and authz metadata, while
+legacy WSGI descriptor-backed dispatch is exempted so direct fallback calls fail
+closed.
 
 Preview resource cleanup uses a shared Launchplane destroy helper for Dokploy
 applications and compose previews. The generic helper owns domain lookup,

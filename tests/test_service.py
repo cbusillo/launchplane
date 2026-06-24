@@ -1568,12 +1568,23 @@ def create_launchplane_service_app(
 def create_launchplane_fastapi_wsgi_app(
     **kwargs: object,
 ) -> Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]]:
-    kwargs.pop("state_dir", None)
+    state_dir = kwargs.pop("state_dir", None)
+    local_record_store = kwargs.pop("local_record_store_for_tests", None)
     database_url = kwargs.get("database_url")
     if isinstance(database_url, str) and database_url.startswith("sqlite"):
         store = PostgresRecordStore(database_url=database_url)
         store.ensure_schema()
         store.close()
+    if "record_store_factory" not in kwargs and not isinstance(database_url, str):
+        if local_record_store is None:
+            if not isinstance(state_dir, Path):
+                raise AssertionError("service tests must pass a pathlib state_dir")
+            local_record_store = FilesystemRecordStore(state_dir=state_dir)
+
+        def record_store_factory() -> object:
+            return local_record_store
+
+        kwargs["record_store_factory"] = record_store_factory
     factory = cast(Any, create_launchplane_fastapi_app)
     app = factory(**kwargs)
     return cast(
@@ -13168,7 +13179,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -13249,7 +13260,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -13265,7 +13276,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch._apply_generic_web_preview_verification_records",
+                "control_plane.generic_web_verification_http._apply_generic_web_preview_verification_records",
                 return_value={
                     "transition": "ready",
                     "preview_state": "active",
@@ -13323,7 +13334,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -13339,7 +13350,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch._apply_generic_web_preview_verification_records",
+                "control_plane.generic_web_verification_http._apply_generic_web_preview_verification_records",
                 return_value={"transition": "ready"},
             ) as apply_records:
                 status_code, payload = _invoke_app(
@@ -13363,6 +13374,74 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+        apply_records.assert_not_called()
+
+    def test_generic_web_preview_verification_rejects_context_not_owned_by_profile(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["other-context"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.generic_web_verification_http._apply_generic_web_preview_verification_records",
+                return_value={"transition": "ready"},
+            ) as apply_records:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-verification",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "verification": {
+                            "schema_version": 1,
+                            "context": "other-context",
+                            "anchor_repo": "sellyouroutboard",
+                            "anchor_pr_number": 42,
+                            "verification_status": "pass",
+                            "verified_at": "2026-05-09T15:08:00Z",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-preview-verification:syo:42:bad-context"},
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
         apply_records.assert_not_called()
 
     def test_generic_web_preview_verification_replay_revalidates_preview_profile(
@@ -13392,7 +13471,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -13420,7 +13499,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch._apply_generic_web_preview_verification_records",
+                "control_plane.generic_web_verification_http._apply_generic_web_preview_verification_records",
                 return_value={"transition": "ready"},
             ) as apply_records:
                 first_status_code, first_payload = _invoke_app(
@@ -13448,6 +13527,87 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(second_status_code, 400)
         self.assertEqual(second_payload["error"]["code"], "invalid_request")
         apply_records.assert_called_once()
+
+    def test_generic_web_preview_verification_failed_result_is_not_cached(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "verification": {
+                    "schema_version": 1,
+                    "context": "sellyouroutboard-testing",
+                    "anchor_repo": "sellyouroutboard",
+                    "anchor_pr_number": 42,
+                    "verification_status": "fail",
+                    "verified_at": "2026-05-09T15:08:00Z",
+                },
+            }
+
+            with patch(
+                "control_plane.generic_web_verification_http._apply_generic_web_preview_verification_records",
+                side_effect=(
+                    {"transition": "failed", "verification_status": "fail"},
+                    {"transition": "ready", "verification_status": "pass"},
+                ),
+            ) as apply_records:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-verification",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-preview-verification:syo:42:fail-retry"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-verification",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-preview-verification:syo:42:fail-retry"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(first_payload["records"]["verification_status"], "fail")
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(second_payload["records"]["verification_status"], "pass")
+        self.assertNotIn("replayed", second_payload)
+        self.assertEqual(apply_records.call_count, 2)
 
     def test_generic_web_preview_verification_request_accepts_explicit_url_collections(
         self,
@@ -16564,6 +16724,63 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 404)
             self.assertEqual(payload["error"]["code"], "not_found")
 
+    def test_generic_web_verification_routes_are_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+            )
+
+            requests = (
+                (
+                    "/v1/drivers/generic-web/stable-verification",
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "verification": {
+                            "schema_version": 1,
+                            "context": "sellyouroutboard-testing",
+                            "instance": "testing",
+                            "deployment_record_id": "deployment-20260420T153000Z-syo-testing",
+                            "verification_status": "pass",
+                            "verified_at": "2026-04-20T15:35:00Z",
+                        },
+                    },
+                ),
+                (
+                    "/v1/drivers/generic-web/preview-verification",
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "verification": {
+                            "schema_version": 1,
+                            "context": "sellyouroutboard-testing",
+                            "anchor_repo": "sellyouroutboard",
+                            "anchor_pr_number": 42,
+                            "verification_status": "pass",
+                            "verified_at": "2026-05-09T15:08:00Z",
+                        },
+                    },
+                ),
+            )
+
+            for route_path, payload in requests:
+                with self.subTest(route_path=route_path):
+                    status_code, response_payload = _invoke_app(
+                        app,
+                        method="POST",
+                        path=route_path,
+                        payload=payload,
+                        headers={"Idempotency-Key": f"legacy-retired:{route_path}"},
+                    )
+
+                    self.assertEqual(status_code, 404)
+                    self.assertEqual(response_payload["error"]["code"], "not_found")
+
     def test_generic_web_stable_verification_route_accepts_odoo_base_driver_profile(
         self,
     ) -> None:
@@ -16609,7 +16826,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -16718,7 +16935,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -16829,7 +17046,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -16933,7 +17150,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -17032,7 +17249,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -17122,7 +17339,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -17202,7 +17419,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -17308,7 +17525,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -17362,6 +17579,111 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(inventory.deployment_record_id, deployment.record_id)
         self.assertEqual(inventory.promotion_record_id, promotion.record_id)
         self.assertEqual(inventory.promoted_from_instance, "prod")
+
+    def test_generic_web_stable_verification_failed_result_is_not_cached(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T153000Z-cm-testing",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
+                    context="cm",
+                    instance="testing",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    deploy=DeploymentEvidence(
+                        target_name="cm-testing",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        deployment_id="delegated-compose-ship",
+                        status="pass",
+                    ),
+                    destination_health=HealthcheckEvidence(status="pending"),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-cm",
+                            "workflow_refs": [
+                                "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            base_verification: dict[str, object] = {
+                "schema_version": 1,
+                "context": "cm",
+                "instance": "testing",
+                "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
+                "verified_at": "2026-04-20T15:35:00Z",
+            }
+            base_payload = {
+                "schema_version": 1,
+                "product": "odoo-tenant-cm",
+                "verification": base_verification,
+            }
+            failed_payload = {
+                **base_payload,
+                "verification": {
+                    **base_verification,
+                    "verification_status": "fail",
+                },
+            }
+            passed_payload = {
+                **base_payload,
+                "verification": {
+                    **base_verification,
+                    "verification_status": "pass",
+                },
+            }
+
+            first_status_code, first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload=failed_payload,
+                headers={"Idempotency-Key": "generic-stable-verification:cm:testing:fail-retry"},
+            )
+            second_status_code, second_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload=passed_payload,
+                headers={"Idempotency-Key": "generic-stable-verification:cm:testing:fail-retry"},
+            )
+
+        self.assertEqual(first_status_code, 202, msg=json.dumps(first_payload, indent=2))
+        self.assertEqual(first_payload["result"]["deployment_health_status"], "fail")
+        self.assertEqual(second_status_code, 202, msg=json.dumps(second_payload, indent=2))
+        self.assertEqual(second_payload["result"]["deployment_health_status"], "pass")
+        self.assertNotIn("replayed", second_payload)
 
     def test_generic_web_stable_verification_evaluates_health_payload_runtime_identity(
         self,
@@ -17420,7 +17742,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -17531,7 +17853,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -17630,7 +17952,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(

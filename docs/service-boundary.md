@@ -285,12 +285,12 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/prod-promotion-workflow`
   - `POST /v1/drivers/generic-web/prod-rollback-plan` (native FastAPI)
   - `POST /v1/drivers/generic-web/prod-rollback` (native FastAPI)
-  - `POST /v1/drivers/generic-web/stable-verification`
+  - `POST /v1/drivers/generic-web/stable-verification` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-desired-state` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-refresh`
   - `POST /v1/drivers/generic-web/preview-inventory`
   - `POST /v1/drivers/generic-web/preview-readiness`
-  - `POST /v1/drivers/generic-web/preview-verification`
+  - `POST /v1/drivers/generic-web/preview-verification` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-destroy`
   - `POST /v1/drivers/odoo/artifact-publish-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/artifact-publish`

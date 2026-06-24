@@ -413,25 +413,6 @@ def _apply_generic_web_stable_verification_records(
     return result
 
 
-def _handle_generic_web_stable_verification(
-    request: GenericWebStableVerificationEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del control_plane_root_path
-    if resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web stable verification requires a product profile lane."
-        )
-    return _DescriptorDriverDispatchResult(
-        result=_apply_generic_web_stable_verification_records(
-            record_store=record_store,
-            request=request.verification,
-        )
-    )
-
-
 def _handle_generic_web_deploy(
     request: GenericWebDeployEnvelope,
     resolved_context: _ResolvedProductDriverContext,

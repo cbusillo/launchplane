@@ -264,22 +264,6 @@ def _preview_generation_mutation_store(
     raise TypeError("record store does not support Launchplane preview generation mutations")
 
 
-def _handle_generic_web_preview_verification(
-    request: GenericWebPreviewVerificationEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    return _DescriptorDriverDispatchResult(
-        result=_apply_generic_web_preview_verification_records(
-            control_plane_root_path=control_plane_root_path,
-            record_store=record_store,
-            request=request.verification,
-        )
-    )
-
-
 def _validate_generic_web_preview_profile(
     request: _ProductRouteEnvelope,
     resolved_context: _ResolvedProductDriverContext,
