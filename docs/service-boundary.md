@@ -294,6 +294,7 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/preview-destroy`
   - `POST /v1/drivers/odoo/artifact-publish-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/artifact-publish`
+  - `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI)
   - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`
     (native FastAPI)
   - `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}`
@@ -1626,6 +1627,8 @@ only after a passing plan and a matching stored preview record are present.
   write identity path with `launchplane_service.reconcile_odoo_workers`)
 - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` (native
   FastAPI for bearer-token and human-session callers)
+- `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI on the bearer/OIDC
+  write identity path with `odoo_stable_bootstrap.execute`)
 - `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}` (native
   FastAPI for bearer-token and human-session callers)
 - `GET /v1/edge-endpoints/records` (native FastAPI for bearer-token and
@@ -1789,6 +1792,7 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/config-parameter-override` (native FastAPI)
 - `POST /v1/drivers/odoo/website-bootstrap-override` (native FastAPI)
 - `POST /v1/drivers/odoo/artifact-publish`
+- `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI)
 - `POST /v1/drivers/odoo/target-replacement-apply`
 - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
 - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI compatibility route)
@@ -1843,6 +1847,15 @@ replay/conflict behavior for non-blocked results and skips blocked-result
 storage so retries can observe changed runtime/provider state. The smoke also
 sends authenticated GitHub OIDC probes to `/v1/drivers/odoo/preview-apply-inputs`,
 `/v1/drivers/odoo/preview-apply`, and `/v1/previews/pr-feedback`.
+
+`POST /v1/drivers/odoo/stable-bootstrap` is owned by native FastAPI. It
+preserves product-profile driver validation before authorization,
+lane-scoped `odoo_stable_bootstrap.execute` authorization, required
+`Idempotency-Key` operation-record replay/conflict behavior, active-lane
+operation rejection with the existing operation payload, dependency-miss `503`
+classification, and the stable-bootstrap operation `poll_url`. Its descriptor
+remains discoverable, legacy WSGI descriptor dispatch is exempted, and direct
+fallback calls fail closed.
 Mutation-capable routes are proven by pre-mutation classification: preview apply
 uses a blocked destroy plan and rejects any non-blocked acceptance, while preview
 feedback uses the route's `dry_run` request mode so Launchplane evaluates the same
