@@ -204,14 +204,18 @@ from control_plane.odoo_prod_backup_gate_http import (
     should_store_odoo_prod_backup_gate_idempotency,
 )
 from control_plane.odoo_prod_promotion_http import (
+    ODOO_PROD_PROMOTION_ACTION,
     ODOO_PROD_PROMOTION_INPUTS_ACTION,
     ODOO_PROD_PROMOTION_INPUTS_ROUTE as _ODOO_PROD_PROMOTION_INPUTS_ROUTE,
+    ODOO_PROD_PROMOTION_ROUTE as _ODOO_PROD_PROMOTION_ROUTE,
     ODOO_PROD_PROMOTION_RUN_ACTION,
     ODOO_PROD_PROMOTION_RUN_ROUTE as _ODOO_PROD_PROMOTION_RUN_ROUTE,
+    OdooProdPromotionEnvelope,
     OdooProdPromotionInputsEnvelope,
     OdooProdPromotionProductMismatchError,
     OdooProdPromotionRouteDependencyError,
     OdooProdPromotionRunEnvelope,
+    execute_odoo_prod_promotion_result,
     execute_odoo_prod_promotion_run_result,
     resolve_odoo_prod_promotion_inputs_result,
     resolve_odoo_prod_promotion_product_route,
@@ -6424,6 +6428,138 @@ def create_launchplane_fastapi_app(
                 record_store=record_store,
                 identity=identity,
                 route_path=_ODOO_PROD_ROLLBACK_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def write_odoo_prod_promotion(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            promotion_request = OdooProdPromotionEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        try:
+            product_profile = resolve_odoo_prod_promotion_product_route(
+                record_store=record_store,
+                product=promotion_request.product,
+            )
+        except OdooProdPromotionRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_PROD_PROMOTION_ROUTE,
+            )
+        except OdooProdPromotionProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        authorization_product = (
+            product_profile.product if product_profile is not None else promotion_request.product
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=ODOO_PROD_PROMOTION_ACTION,
+            product=authorization_product,
+            context=promotion_request.promotion.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the Odoo prod promotion driver for the"
+                    " requested product/context."
+                ),
+            )
+
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_PROD_PROMOTION_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+
+        try:
+            records, driver_result = execute_odoo_prod_promotion_result(
+                control_plane_root=resolved_control_plane_root,
+                state_dir=resolved_state_dir,
+                database_url=getattr(record_store, "database_url", database_url),
+                record_store=record_store,
+                request=promotion_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_ODOO_PROD_PROMOTION_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={key: str(value) for key, value in records.items()},
+            result=driver_result,
+        )
+        if should_store_prod_promotion_idempotency(driver_result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_ODOO_PROD_PROMOTION_ROUTE,
                 idempotency_key=normalized_idempotency_key,
                 request_fingerprint_value=payload_fingerprint,
                 trace_id=trace_id,
@@ -14240,6 +14376,33 @@ def create_launchplane_fastapi_app(
         },
         operation_id="write_odoo_prod_rollback",
         summary="Execute Odoo prod rollback",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_PROD_PROMOTION_ROUTE,
+        write_odoo_prod_promotion,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": OdooProdPromotionEnvelope.model_json_schema()}
+                },
+            }
+        },
+        operation_id="write_odoo_prod_promotion",
+        summary="Execute Odoo prod promotion compatibility route",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

@@ -168,15 +168,19 @@ Keep a compatibility surface only when it is one of these:
   retries can observe recovered deployment/provider state. The descriptor route
   remains discoverable, but legacy WSGI descriptor dispatch is exempted and
   direct fallback calls fail closed.
-- Odoo prod-promotion inputs and prod-promotion run use native FastAPI routes:
-  `POST /v1/drivers/odoo/prod-promotion-inputs` and
-  `POST /v1/drivers/odoo/prod-promotion-run`. They preserve product/profile
-  driver validation, request-context authorization, reusable Launchplane
-  workflow identity matching, dependency-miss `503` classification,
+- Odoo prod-promotion inputs, prod-promotion run, and the older monolithic
+  prod-promotion compatibility route use native FastAPI routes:
+  `POST /v1/drivers/odoo/prod-promotion-inputs`,
+  `POST /v1/drivers/odoo/prod-promotion-run`, and
+  `POST /v1/drivers/odoo/prod-promotion`. They preserve product/profile driver
+  validation, request-context authorization, reusable Launchplane workflow
+  identity matching where applicable, dependency-miss `503` classification,
   handler-side `404` file-miss parity, optional `Idempotency-Key`
   replay/conflict behavior, and blocked/failed-result no-cache retry behavior.
   Their descriptor routes remain discoverable, but legacy WSGI descriptor
-  dispatch is exempted and direct fallback calls fail closed.
+  dispatch is exempted and direct fallback calls fail closed. Product workflows
+  should continue to prefer the thin `prod-promotion-run` route; the monolithic
+  route is retained for explicit operator workflows and diagnostics.
 - Merge-train admission, controller-status, and policy-target reads use native
   FastAPI routes. Their legacy WSGI read branches are deleted. Merge-train
   run-once, batch-candidate run-once, batch-landing run-once, stack-collapse

@@ -245,7 +245,9 @@ from control_plane.odoo_prod_backup_gate_http import (
 )
 from control_plane.odoo_prod_promotion_http import (
     ODOO_PROD_PROMOTION_INPUTS_ROUTE,
+    ODOO_PROD_PROMOTION_ROUTE,
     ODOO_PROD_PROMOTION_RUN_ROUTE,
+    OdooProdPromotionEnvelope as OdooProdPromotionEnvelope,
     OdooProdPromotionInputsEnvelope as OdooProdPromotionInputsEnvelope,
     OdooProdPromotionRunEnvelope as OdooProdPromotionRunEnvelope,
 )
@@ -255,11 +257,6 @@ from control_plane.odoo_prod_rollback_http import (
 )
 from control_plane.contracts.odoo_stable_bootstrap import (
     OdooStableBootstrapRequest,
-)
-from control_plane.workflows.odoo_prod_promotion import (
-    OdooProdPromotionRequest,
-    OdooProdPromotionStore,
-    execute_odoo_prod_promotion,
 )
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
@@ -324,6 +321,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         ODOO_PREVIEW_APPLY_ROUTE,
         ODOO_PROD_BACKUP_GATE_ROUTE,
         ODOO_PROD_PROMOTION_INPUTS_ROUTE,
+        ODOO_PROD_PROMOTION_ROUTE,
         ODOO_PROD_PROMOTION_RUN_ROUTE,
         ODOO_PROD_ROLLBACK_ROUTE,
         ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
@@ -544,16 +542,6 @@ _ODOO_ARTIFACT_PUBLISH_ROUTE = _DriverRouteExecutionMetadata(
         "Workflow cannot write Odoo artifact publish evidence for the requested product/context."
     ),
 )
-
-
-class OdooProdPromotionEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    promotion: OdooProdPromotionRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooProdPromotionEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo prod promotion")
-        return self
 
 
 _ODOO_PROD_BACKUP_GATE_METADATA = _DriverRouteExecutionMetadata(
@@ -1081,51 +1069,6 @@ def _handle_odoo_artifact_publish(
             "source_commit": driver_result.source_commit,
         },
         driver_result=driver_result,
-    )
-
-
-def _dispatch_odoo_prod_promotion(
-    request: OdooProdPromotionEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-    state_dir: Path,
-    database_url: str | None,
-    identity: LaunchplaneIdentity,
-    request_scope: str,
-    request_idempotency_key: str,
-    request_fingerprint: str,
-    start_response: _StartResponse,
-    trace_id: str,
-) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
-    del (
-        resolved_context,
-        identity,
-        request_scope,
-        request_idempotency_key,
-        request_fingerprint,
-        start_response,
-        trace_id,
-    )
-    driver_result = execute_odoo_prod_promotion(
-        control_plane_root=control_plane_root_path,
-        state_dir=state_dir,
-        database_url=database_url,
-        record_store=cast(OdooProdPromotionStore, record_store),
-        request=request.promotion,
-    )
-    return (
-        {
-            "promotion_record_id": driver_result.promotion_record_id,
-            "deployment_record_id": driver_result.deployment_record_id,
-            "backup_record_id": driver_result.backup_record_id,
-            "release_tuple_id": driver_result.release_tuple_id,
-            "promotion_status": driver_result.promotion_status,
-            "deployment_status": driver_result.deployment_status,
-            "post_deploy_status": driver_result.post_deploy_status,
-            "destination_health_status": driver_result.destination_health_status,
-        },
-        driver_result,
     )
 
 
@@ -1777,15 +1720,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
                 authorization_context=request.publish.context,
             ),
             handler=_handle_odoo_artifact_publish,
-        ),
-        _ODOO_PROD_PROMOTION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_PROD_PROMOTION_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.promotion.context,
-            ),
-            custom_dispatch_handler=_dispatch_odoo_prod_promotion,
         ),
         _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
