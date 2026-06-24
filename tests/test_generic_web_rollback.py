@@ -1,12 +1,16 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal, cast
 from unittest.mock import patch
 
+from fastapi import FastAPI
 from pydantic import ValidationError
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.generic_web_rollback import GenericWebRollbackBlocker
 from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
     build_generic_web_rollback_plan,
@@ -20,12 +24,27 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployResult,
     GenericWebPostDeployExecutor,
 )
-from control_plane.workflows.generic_web_rollback import execute_generic_web_rollback
+from control_plane.workflows.generic_web_rollback import (
+    GenericWebRollbackApplyResult,
+    execute_generic_web_rollback,
+)
+from control_plane.workflows.odoo_generic_web_post_deploy import (
+    execute_odoo_generic_web_post_deploy,
+)
 from control_plane.workflows.ship import build_deployment_record
+from tests.http_app_test_support import (
+    _asgi_get,
+    _post_generic_web_rollback,
+    _post_generic_web_rollback_plan,
+)
+from tests.test_service import _StubVerifier, _identity, _invoke_app, create_launchplane_service_app
 
 
 class _GenericWebRollbackStore:
@@ -172,6 +191,93 @@ def _backup_gate(**overrides: object) -> BackupGateRecord:
     }
     payload.update(overrides)
     return BackupGateRecord.model_validate(payload)
+
+
+def _rollback_route_policy(
+    *actions: str,
+    product: str = "sellyouroutboard",
+    context: str = "sellyouroutboard-testing",
+    repository: str = "every/verireel",
+    workflow_ref: str = "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
+    event_name: str = "pull_request",
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": repository,
+                    "workflow_refs": [workflow_ref],
+                    "event_names": [event_name],
+                    "products": [product],
+                    "contexts": [context],
+                    "actions": list(actions),
+                }
+            ]
+        }
+    )
+
+
+def _rollback_plan_payload(**overrides: object) -> dict[str, object]:
+    rollback_plan: dict[str, object] = {
+        "schema_version": 1,
+        "product": "sellyouroutboard",
+        "instance": "prod",
+        "rollback_deployment_record_id": "deployment-syo-prod-previous",
+    }
+    rollback_plan.update(cast(dict[str, object], overrides.pop("rollback_plan", {})))
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "product": "sellyouroutboard",
+        "rollback_plan": rollback_plan,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _rollback_payload(**overrides: object) -> dict[str, object]:
+    rollback: dict[str, object] = {
+        "schema_version": 1,
+        "product": "sellyouroutboard",
+        "instance": "prod",
+        "rollback_deployment_record_id": "deployment-syo-prod-previous",
+    }
+    rollback.update(cast(dict[str, object], overrides.pop("rollback", {})))
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "product": "sellyouroutboard",
+        "rollback": rollback,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _fastapi_rollback_identity(
+    *,
+    repository: str = "every/verireel",
+    workflow_ref: str = "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
+    event_name: str = "pull_request",
+) -> GitHubActionsIdentity:
+    return _identity(
+        repository=repository,
+        workflow_ref=workflow_ref,
+        event_name=event_name,
+    )
+
+
+def _odoo_inherited_profile() -> LaunchplaneProductProfileRecord:
+    return _profile().model_copy(
+        update={
+            "product": "odoo-tenant-cm",
+            "driver_id": "odoo",
+            "lanes": (
+                ProductLaneProfile(
+                    instance="prod",
+                    context="cm",
+                    base_url="https://cm.example.com",
+                ),
+            ),
+        }
+    )
 
 
 class GenericWebRollbackPlanTests(unittest.TestCase):
@@ -426,6 +532,654 @@ class GenericWebRollbackPlanTests(unittest.TestCase):
         self.assertEqual(
             [blocker.code for blocker in plan.blockers], ["mutable_artifact_reference"]
         )
+
+
+class FastApiGenericWebRollbackTests(unittest.IsolatedAsyncioTestCase):
+    def _app(
+        self,
+        *,
+        root: Path,
+        store: FilesystemRecordStore,
+        policy: LaunchplaneAuthzPolicy,
+        identity: GitHubActionsIdentity | None = None,
+    ) -> FastAPI:
+        return create_launchplane_fastapi_app(
+            verifier=_StubVerifier(identity or _fastapi_rollback_identity()),
+            authz_policy=policy,
+            record_store_factory=lambda: store,
+            control_plane_root_path=root,
+        )
+
+    def _write_profile_and_previous_deployment(
+        self,
+        store: FilesystemRecordStore,
+        *,
+        profile: LaunchplaneProductProfileRecord | None = None,
+        deployment: DeploymentRecord | None = None,
+    ) -> None:
+        store.write_product_profile_record(profile or _profile())
+        store.write_deployment_record(deployment or _deployment_record())
+
+    async def test_rollback_plan_route_writes_plan_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            self._write_profile_and_previous_deployment(store)
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.plan"),
+            )
+
+            response = await _post_generic_web_rollback_plan(
+                app,
+                _rollback_plan_payload(),
+                idempotency_key="generic-web-rollback-plan-syo-prod",
+            )
+            plans = store.list_generic_web_rollback_plan_records(
+                context_name="sellyouroutboard-testing",
+                instance_name="prod",
+                limit=1,
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(payload["records"]["generic_web_rollback_plan_id"], plans[0].plan_id)
+        self.assertEqual(payload["result"]["status"], "ready")
+        self.assertEqual(plans[0].product, "sellyouroutboard")
+        self.assertEqual(plans[0].context, "sellyouroutboard-testing")
+
+    async def test_rollback_plan_route_rejects_unknown_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.plan"),
+            )
+
+            response = await _post_generic_web_rollback_plan(
+                app,
+                _rollback_plan_payload(rollback_plan={"instance": "missing"}),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+
+    async def test_rollback_plan_route_rejects_non_generic_web_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                _profile().model_copy(update={"driver_id": "ingress"})
+            )
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.plan"),
+            )
+
+            response = await _post_generic_web_rollback_plan(
+                app,
+                _rollback_plan_payload(),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+
+    async def test_rollback_plan_route_reports_missing_profile_dependency(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.plan"),
+            )
+
+            response = await _post_generic_web_rollback_plan(
+                app,
+                _rollback_plan_payload(),
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "driver_route_dependency_not_found")
+
+    async def test_rollback_plan_route_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy(
+                    "generic_web_prod_rollback.plan", context="other-context"
+                ),
+            )
+
+            response = await _post_generic_web_rollback_plan(
+                app,
+                _rollback_plan_payload(),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_rollback_plan_route_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            self._write_profile_and_previous_deployment(store)
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.plan"),
+            )
+            request_payload = _rollback_plan_payload()
+
+            first = await _post_generic_web_rollback_plan(
+                app,
+                request_payload,
+                idempotency_key="generic-web-rollback-plan-replay-syo-prod",
+            )
+            second = await _post_generic_web_rollback_plan(
+                app,
+                request_payload,
+                idempotency_key="generic-web-rollback-plan-replay-syo-prod",
+            )
+            plans = store.list_generic_web_rollback_plan_records(
+                context_name="sellyouroutboard-testing",
+                instance_name="prod",
+                limit=10,
+            )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(first.json()["records"], second.json()["records"])
+        self.assertTrue(second.json()["replayed"])
+        self.assertEqual(len(plans), 1)
+
+    async def test_rollback_plan_route_does_not_cache_blocked_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.plan"),
+            )
+            request_payload = _rollback_plan_payload()
+
+            first = await _post_generic_web_rollback_plan(
+                app,
+                request_payload,
+                idempotency_key="generic-web-rollback-plan-blocked-syo-prod",
+            )
+            second = await _post_generic_web_rollback_plan(
+                app,
+                request_payload,
+                idempotency_key="generic-web-rollback-plan-blocked-syo-prod",
+            )
+            plans = store.list_generic_web_rollback_plan_records(
+                context_name="sellyouroutboard-testing",
+                instance_name="prod",
+                limit=10,
+            )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(first.json()["result"]["status"], "blocked")
+        self.assertNotIn("replayed", second.json())
+        self.assertEqual(len(plans), 1)
+
+    async def test_rollback_plan_route_returns_404_for_workflow_file_miss(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            self._write_profile_and_previous_deployment(store)
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.plan"),
+            )
+
+            with patch(
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback_plan",
+                side_effect=FileNotFoundError("missing rollback source"),
+            ):
+                response = await _post_generic_web_rollback_plan(
+                    app,
+                    _rollback_plan_payload(),
+                )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_rollback_route_applies_ready_plan(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.execute"),
+            )
+            driver_result = GenericWebRollbackApplyResult(
+                plan_id="generic-web-rollback-syo-prod",
+                deployment_record_id="deployment-syo-prod-rollback",
+                rollback_status="pass",
+                deploy_status="pass",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                rollback_deployment_record_id="deployment-syo-prod-previous",
+            )
+
+            with patch(
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
+                return_value=driver_result,
+            ) as rollback:
+                response = await _post_generic_web_rollback(
+                    app,
+                    _rollback_payload(),
+                    idempotency_key="generic-web-rollback-syo-prod",
+                )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            payload["records"]["generic_web_rollback_plan_id"],
+            "generic-web-rollback-syo-prod",
+        )
+        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-syo-prod-rollback")
+        self.assertEqual(payload["records"]["rollback_status"], "pass")
+        self.assertEqual(payload["records"]["deploy_status"], "pass")
+        self.assertEqual(payload["records"]["post_deploy_status"], "skipped")
+        rollback.assert_called_once()
+        self.assertEqual(rollback.call_args.kwargs["request"].product, "sellyouroutboard")
+        self.assertIsNone(rollback.call_args.kwargs["post_deploy_executor"])
+
+    async def test_rollback_route_reports_missing_profile_dependency(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.execute"),
+            )
+
+            response = await _post_generic_web_rollback(app, _rollback_payload())
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "driver_route_dependency_not_found")
+
+    async def test_rollback_route_returns_404_for_workflow_file_miss(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.execute"),
+            )
+
+            with patch(
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
+                side_effect=FileNotFoundError("missing rollback plan"),
+            ):
+                response = await _post_generic_web_rollback(app, _rollback_payload())
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_rollback_route_passes_odoo_post_deploy_adapter_for_odoo_profile(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_odoo_inherited_profile())
+            identity = _fastapi_rollback_identity(
+                repository="cbusillo/odoo-tenant-cm",
+                workflow_ref=(
+                    "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                ),
+                event_name="workflow_dispatch",
+            )
+            app = self._app(
+                root=root,
+                store=store,
+                identity=identity,
+                policy=_rollback_route_policy(
+                    "generic_web_prod_rollback.execute",
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    repository="cbusillo/odoo-tenant-cm",
+                    workflow_ref=(
+                        "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                    ),
+                    event_name="workflow_dispatch",
+                ),
+            )
+            driver_result = GenericWebRollbackApplyResult(
+                plan_id="generic-web-rollback-cm-prod",
+                deployment_record_id="deployment-cm-prod-rollback",
+                rollback_status="pass",
+                deploy_status="pass",
+                product="odoo-tenant-cm",
+                context="cm",
+                instance="prod",
+                rollback_deployment_record_id="deployment-cm-prod-previous",
+            )
+
+            with patch(
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
+                return_value=driver_result,
+            ) as rollback:
+                response = await _post_generic_web_rollback(
+                    app,
+                    _rollback_payload(
+                        product="odoo-tenant-cm",
+                        rollback={
+                            "product": "odoo-tenant-cm",
+                            "rollback_deployment_record_id": "deployment-cm-prod-previous",
+                        },
+                    ),
+                    idempotency_key="generic-web-rollback-cm-prod",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            response.json()["records"]["deployment_record_id"], "deployment-cm-prod-rollback"
+        )
+        rollback.assert_called_once()
+        self.assertIs(
+            rollback.call_args.kwargs["post_deploy_executor"],
+            execute_odoo_generic_web_post_deploy,
+        )
+
+    async def test_rollback_route_replays_idempotent_response_shape(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.execute"),
+            )
+            driver_result = GenericWebRollbackApplyResult(
+                plan_id="generic-web-rollback-syo-prod",
+                deployment_record_id="deployment-syo-prod-rollback",
+                rollback_status="pass",
+                deploy_status="pass",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                rollback_deployment_record_id="deployment-syo-prod-previous",
+            )
+            request_payload = _rollback_payload()
+
+            with patch(
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
+                return_value=driver_result,
+            ) as rollback:
+                first = await _post_generic_web_rollback(
+                    app,
+                    request_payload,
+                    idempotency_key="generic-web-rollback-replay-syo-prod",
+                )
+                second = await _post_generic_web_rollback(
+                    app,
+                    request_payload,
+                    idempotency_key="generic-web-rollback-replay-syo-prod",
+                )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(first.json()["records"], second.json()["records"])
+        self.assertEqual(second.json()["records"]["rollback_status"], "pass")
+        self.assertEqual(second.json()["records"]["deploy_status"], "pass")
+        self.assertEqual(second.json()["records"]["post_deploy_status"], "skipped")
+        self.assertTrue(second.json()["replayed"])
+        rollback.assert_called_once()
+
+    async def test_rollback_route_does_not_cache_blocked_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.execute"),
+            )
+            driver_result = GenericWebRollbackApplyResult(
+                plan_id="generic-web-rollback-syo-prod-blocked",
+                rollback_status="blocked",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                rollback_deployment_record_id="deployment-syo-prod-previous",
+                blockers=(
+                    GenericWebRollbackBlocker(
+                        code="missing_rollback_target",
+                        message="No rollback deployment record found.",
+                    ),
+                ),
+            )
+            request_payload = _rollback_payload()
+
+            with patch(
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
+                return_value=driver_result,
+            ) as rollback:
+                first = await _post_generic_web_rollback(
+                    app,
+                    request_payload,
+                    idempotency_key="generic-web-rollback-blocked-syo-prod",
+                )
+                second = await _post_generic_web_rollback(
+                    app,
+                    request_payload,
+                    idempotency_key="generic-web-rollback-blocked-syo-prod",
+                )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(first.json()["records"]["rollback_status"], "blocked")
+        self.assertNotIn("replayed", second.json())
+        self.assertEqual(rollback.call_count, 2)
+
+    async def test_rollback_route_does_not_cache_failed_deploy_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.execute"),
+            )
+            driver_result = GenericWebRollbackApplyResult(
+                plan_id="generic-web-rollback-syo-prod-fail",
+                deployment_record_id="deployment-syo-prod-rollback",
+                rollback_status="fail",
+                deploy_status="fail",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                rollback_deployment_record_id="deployment-syo-prod-previous",
+                error_message="deploy failed",
+            )
+            request_payload = _rollback_payload()
+
+            with patch(
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
+                return_value=driver_result,
+            ) as rollback:
+                first = await _post_generic_web_rollback(
+                    app,
+                    request_payload,
+                    idempotency_key="generic-web-rollback-fail-syo-prod",
+                )
+                second = await _post_generic_web_rollback(
+                    app,
+                    request_payload,
+                    idempotency_key="generic-web-rollback-fail-syo-prod",
+                )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(first.json()["records"]["deploy_status"], "fail")
+        self.assertNotIn("replayed", second.json())
+        self.assertEqual(rollback.call_count, 2)
+
+    async def test_rollback_route_caches_post_deploy_failure_after_deploy_passes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy("generic_web_prod_rollback.execute"),
+            )
+            driver_result = GenericWebRollbackApplyResult(
+                plan_id="generic-web-rollback-syo-prod-post-deploy-fail",
+                deployment_record_id="deployment-syo-prod-rollback",
+                rollback_status="fail",
+                deploy_status="pass",
+                post_deploy_status="fail",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                rollback_deployment_record_id="deployment-syo-prod-previous",
+                error_message="post deploy failed",
+            )
+            request_payload = _rollback_payload()
+
+            with patch(
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
+                return_value=driver_result,
+            ) as rollback:
+                first = await _post_generic_web_rollback(
+                    app,
+                    request_payload,
+                    idempotency_key="generic-web-rollback-post-deploy-fail-syo-prod",
+                )
+                second = await _post_generic_web_rollback(
+                    app,
+                    request_payload,
+                    idempotency_key="generic-web-rollback-post-deploy-fail-syo-prod",
+                )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(second.json()["records"]["post_deploy_status"], "fail")
+        self.assertTrue(second.json()["replayed"])
+        rollback.assert_called_once()
+
+    async def test_rollback_route_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
+            app = self._app(
+                root=root,
+                store=store,
+                policy=_rollback_route_policy(
+                    "generic_web_prod_rollback.execute", context="other-context"
+                ),
+            )
+
+            response = await _post_generic_web_rollback(app, _rollback_payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_routes_are_in_openapi(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = self._app(
+                root=root,
+                store=store,
+                policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+            )
+
+            response = await _asgi_get(app, "/openapi.json")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("/v1/drivers/generic-web/prod-rollback-plan", payload["paths"])
+        self.assertIn("/v1/drivers/generic-web/prod-rollback", payload["paths"])
+
+    def test_legacy_wsgi_routes_are_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_fastapi_rollback_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            plan_status_code, plan_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-rollback-plan",
+                payload=_rollback_plan_payload(),
+            )
+            rollback_status_code, rollback_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-rollback",
+                payload=_rollback_payload(),
+            )
+
+        self.assertEqual(plan_status_code, 404)
+        self.assertEqual(plan_payload["error"]["code"], "not_found")
+        self.assertEqual(rollback_status_code, 404)
+        self.assertEqual(rollback_payload["error"]["code"], "not_found")
+
+    def test_odoo_rollback_plan_alias_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_fastapi_rollback_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/prod-rollback-plan",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "rollback_plan": {
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "instance": "prod",
+                        "rollback_deployment_record_id": "deployment-cm-prod-previous",
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-rollback-plan-cm-prod"},
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
 
 if __name__ == "__main__":

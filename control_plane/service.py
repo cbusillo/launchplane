@@ -102,8 +102,6 @@ from control_plane.drivers.generic_web_dispatch import (
     _handle_generic_web_deploy as _handle_generic_web_deploy,
     _handle_generic_web_prod_promotion as _handle_generic_web_prod_promotion,
     _handle_generic_web_promotion_workflow as _handle_generic_web_promotion_workflow,
-    _handle_generic_web_rollback as _handle_generic_web_rollback,
-    _handle_generic_web_rollback_plan as _handle_generic_web_rollback_plan,
     _handle_generic_web_stable_verification as _handle_generic_web_stable_verification,
     _handle_generic_web_source_ref_deploy as _handle_generic_web_source_ref_deploy,
     _stable_verification_health_evidence as _stable_verification_health_evidence,
@@ -306,6 +304,8 @@ _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHO
 _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
     {
         "/v1/drivers/generic-web/preview-desired-state",
+        _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
+        _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
         "/v1/drivers/ingress/route-apply",
         "/v1/drivers/odoo/artifact-publish-inputs",
         ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
@@ -1295,26 +1295,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             pre_idempotency_validator=_validate_generic_web_prod_promotion_lanes,
             pre_authorization_validator=_reject_human_live_generic_web_prod_promotion,
             handler=_handle_generic_web_prod_promotion,
-        ),
-        _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                instance=request.rollback_plan.instance,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_rollback_plan,
-        ),
-        _GENERIC_WEB_ROLLBACK_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_ROLLBACK_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.rollback.product,
-                context="",
-                instance=request.rollback.instance,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_rollback,
         ),
         _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
@@ -3094,8 +3074,6 @@ def _accepted_payload(
 def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
     if route_path == _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path:
         return frozenset({"deployment_record_id", "release_tuple_id"})
-    if route_path == _GENERIC_WEB_ROLLBACK_ROUTE.route_path:
-        return frozenset({"rollback_status", "deploy_status", "post_deploy_status"})
     return frozenset()
 
 

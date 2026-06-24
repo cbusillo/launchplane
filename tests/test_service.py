@@ -10863,10 +10863,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
+                record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
 
@@ -10925,10 +10926,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
+                record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
 
@@ -10975,10 +10977,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
+                record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
 
@@ -11051,10 +11054,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
+                record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
             request_payload = {
@@ -11147,10 +11151,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
+                record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
             driver_result = GenericWebRollbackApplyResult(
@@ -11165,7 +11170,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_rollback",
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
                 return_value=driver_result,
             ) as rollback:
                 status_code, payload = _invoke_app(
@@ -11226,7 +11231,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -11238,6 +11243,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     )
                 ),
                 authz_policy=policy,
+                record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
             driver_result = GenericWebRollbackApplyResult(
@@ -11252,7 +11258,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_rollback",
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
                 return_value=driver_result,
             ) as rollback:
                 status_code, payload = _invoke_app(
@@ -11305,10 +11311,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
+                record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
             driver_result = GenericWebRollbackApplyResult(
@@ -11333,7 +11340,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_rollback",
+                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
                 return_value=driver_result,
             ) as rollback:
                 first_status_code, first_payload = _invoke_app(
@@ -11384,10 +11391,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
+                record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
 

@@ -201,6 +201,19 @@ Keep a compatibility surface only when it is one of these:
   retries can observe recovered deployment/provider state. The descriptor route
   remains discoverable, but legacy WSGI descriptor dispatch is exempted and
   direct fallback calls fail closed.
+- Generic-web prod rollback planning and apply use native FastAPI routes:
+  `POST /v1/drivers/generic-web/prod-rollback-plan` and
+  `POST /v1/drivers/generic-web/prod-rollback`. Both routes preserve
+  product/profile and lane validation, lane-context authorization,
+  dependency-miss `503` classification, handler-side `404` file-miss parity,
+  raw-payload `Idempotency-Key` replay/conflict behavior, and descriptor
+  discoverability. Rollback apply preserves the generic deploy post-deploy
+  extension hook for Odoo-based profiles. Blocked plan/apply results and
+  ordinary failed apply results are not cached so retries can observe recovered
+  Launchplane/provider state; apply results where deploy passed but post-deploy
+  failed are cached because provider mutation already occurred. Legacy WSGI
+  descriptor dispatch is exempted for both paths, and direct fallback calls fail
+  closed.
 - Odoo prod-promotion inputs, prod-promotion run, and the older monolithic
   prod-promotion compatibility route use native FastAPI routes:
   `POST /v1/drivers/odoo/prod-promotion-inputs`,
