@@ -45,13 +45,6 @@ from control_plane.contracts.verireel_prod_backup_gate import (
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
 )
-from control_plane.contracts.odoo_stable_target_replacement import (
-    OdooStableTargetReplacementApplyRequest,
-)
-from control_plane.contracts.odoo_stable_target_replacement_operation import (
-    OdooStableTargetReplacementOperationRecord,
-    build_odoo_stable_target_replacement_operation_id,
-)
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -258,6 +251,10 @@ from control_plane.odoo_target_replacement_plan_http import (
     ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
     OdooTargetReplacementPlanEnvelope as OdooTargetReplacementPlanEnvelope,
 )
+from control_plane.odoo_target_replacement_apply_http import (
+    ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+    OdooTargetReplacementApplyEnvelope as OdooTargetReplacementApplyEnvelope,
+)
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
     VeriReelStableDeployStore,
@@ -321,6 +318,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         ODOO_PROD_PROMOTION_RUN_ROUTE,
         ODOO_PROD_ROLLBACK_ROUTE,
         ODOO_STABLE_BOOTSTRAP_ROUTE,
+        ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
         ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
         ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
     }
@@ -364,32 +362,6 @@ class _TestLaunchplaneServiceRecordStore(Protocol):
     def backend_name(self) -> str: ...
 
     def close(self) -> None: ...
-
-
-class _OdooStableTargetReplacementOperationStore(Protocol):
-    def write_odoo_stable_target_replacement_operation_record(
-        self, record: OdooStableTargetReplacementOperationRecord
-    ) -> object: ...
-
-    def create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
-        self, record: OdooStableTargetReplacementOperationRecord
-    ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]: ...
-
-    def read_odoo_stable_target_replacement_operation_record(
-        self, operation_id: str
-    ) -> OdooStableTargetReplacementOperationRecord: ...
-
-    def list_odoo_stable_target_replacement_operation_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        instance_name: str = "",
-        idempotency_key: str = "",
-        idempotency_scope: str = "",
-        statuses: tuple[str, ...] = (),
-        limit: int | None = None,
-    ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]: ...
 
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
@@ -560,20 +532,8 @@ _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-class OdooTargetReplacementApplyEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    replacement: OdooStableTargetReplacementApplyRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooTargetReplacementApplyEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo target replacement apply")
-        if self.product.strip() != self.replacement.product.strip():
-            raise ValueError("Odoo target replacement apply requires matching product values.")
-        return self
-
-
 _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/target-replacement-apply",
+    route_path=ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
     envelope_model=OdooTargetReplacementApplyEnvelope,
     denial_message=(
         "Workflow cannot apply Odoo target replacement for the requested product/context."
@@ -1021,112 +981,6 @@ def _handle_odoo_artifact_publish(
     )
 
 
-def _dispatch_odoo_target_replacement_apply(
-    request: OdooTargetReplacementApplyEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-    state_dir: Path,
-    database_url: str | None,
-    identity: LaunchplaneIdentity,
-    request_scope: str,
-    request_idempotency_key: str,
-    request_fingerprint: str,
-    start_response: _StartResponse,
-    trace_id: str,
-) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
-    del state_dir, database_url, identity
-    if resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Odoo target replacement apply requires a known product lane."
-        )
-    if not request_idempotency_key:
-        return _json_response(
-            start_response=start_response,
-            status_code=400,
-            payload={
-                "status": "rejected",
-                "trace_id": trace_id,
-                "error": {
-                    "code": "idempotency_key_required",
-                    "message": "Odoo target replacement operations require an Idempotency-Key header.",
-                },
-            },
-        )
-
-    replacement_operation_store = _odoo_stable_target_replacement_operation_store(record_store)
-    existing_replacement_operation = (
-        _find_odoo_stable_target_replacement_operation_by_idempotency_key(
-            operation_store=replacement_operation_store,
-            idempotency_key=request_idempotency_key,
-            idempotency_scope=request_scope,
-        )
-    )
-    result: dict[str, object]
-    if existing_replacement_operation is not None:
-        if existing_replacement_operation.request_fingerprint != request_fingerprint:
-            return _json_response(
-                start_response=start_response,
-                status_code=409,
-                payload={
-                    "status": "rejected",
-                    "trace_id": trace_id,
-                    "error": {
-                        "code": "idempotency_key_reused",
-                        "message": "Idempotency-Key was already used for a different Odoo target replacement request.",
-                    },
-                },
-            )
-        driver_result = _target_replacement_operation_payload(existing_replacement_operation)
-        result = {
-            "odoo_stable_target_replacement_operation_id": existing_replacement_operation.operation_id,
-            **(
-                {"deployment_record_id": existing_replacement_operation.deployment_record_id}
-                if existing_replacement_operation.deployment_record_id
-                else {}
-            ),
-        }
-    else:
-        replacement_operation = _build_odoo_stable_target_replacement_operation_record(
-            replacement_request=request.replacement,
-            context=resolved_context.lane.context,
-            idempotency_key=request_idempotency_key,
-            idempotency_scope=request_scope,
-            request_fingerprint=request_fingerprint,
-            created_at=_utc_now_timestamp(),
-        )
-        replacement_operation, created_replacement_operation = (
-            replacement_operation_store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
-                replacement_operation
-            )
-        )
-        if not created_replacement_operation:
-            return _json_response(
-                start_response=start_response,
-                status_code=409,
-                payload={
-                    "status": "rejected",
-                    "trace_id": trace_id,
-                    "error": {
-                        "code": "odoo_stable_target_replacement_operation_active",
-                        "message": "An Odoo target replacement operation is already active for this product/context/instance.",
-                    },
-                    "operation": _target_replacement_operation_payload(replacement_operation),
-                },
-            )
-        driver_result = _target_replacement_operation_payload(replacement_operation)
-        result = {"odoo_stable_target_replacement_operation_id": replacement_operation.operation_id}
-        if replacement_operation.deployment_record_id:
-            result["deployment_record_id"] = replacement_operation.deployment_record_id
-        if (
-            replacement_operation.result is not None
-            and replacement_operation.result.release_tuple_id
-        ):
-            result["release_tuple_id"] = replacement_operation.result.release_tuple_id
-
-    return result, driver_result
-
-
 def _handle_verireel_preview_verification(
     request: VeriReelPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -1537,16 +1391,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_artifact_publish,
         ),
-        _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                instance=request.replacement.instance,
-                require_profile=True,
-            ),
-            custom_dispatch_handler=_dispatch_odoo_target_replacement_apply,
-        ),
         _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -1690,7 +1534,6 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
                 _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,
                 _ODOO_PROD_PROMOTION_ROUTE.route_path,
                 _ODOO_PROD_ROLLBACK_METADATA.route_path,
-                _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
                 _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
                 _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
                 _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
@@ -3272,34 +3115,6 @@ def _driver_result_payload_for_idempotency_replay(
     return replay_payload
 
 
-def _target_replacement_operation_payload(
-    operation: OdooStableTargetReplacementOperationRecord,
-) -> dict[str, object]:
-    payload = operation.model_dump(mode="json")
-    payload["poll_url"] = _odoo_stable_target_replacement_operation_poll_url(operation.operation_id)
-    return payload
-
-
-def _odoo_stable_target_replacement_operation_poll_url(operation_id: str) -> str:
-    return f"/v1/drivers/odoo/target-replacement/operations/{operation_id.strip()}"
-
-
-def _odoo_stable_target_replacement_operation_store(
-    record_store: object,
-) -> _OdooStableTargetReplacementOperationStore:
-    required_methods = (
-        "write_odoo_stable_target_replacement_operation_record",
-        "create_odoo_stable_target_replacement_operation_record_if_no_active_lane",
-        "read_odoo_stable_target_replacement_operation_record",
-        "list_odoo_stable_target_replacement_operation_records",
-    )
-    if all(hasattr(record_store, method_name) for method_name in required_methods):
-        return cast(_OdooStableTargetReplacementOperationStore, record_store)
-    raise click.ClickException(
-        "Odoo stable target replacement operations require Launchplane operation-record storage."
-    )
-
-
 def _query_string_value(query: dict[str, list[str]], key: str) -> str:
     return str((query.get(key) or [""])[0] or "").strip()
 
@@ -3324,52 +3139,6 @@ def _query_int_value(
     if maximum is not None and value > maximum:
         raise ValueError(f"Query parameter {key} must be at most {maximum}")
     return value
-
-
-def _find_odoo_stable_target_replacement_operation_by_idempotency_key(
-    *,
-    operation_store: _OdooStableTargetReplacementOperationStore,
-    idempotency_key: str,
-    idempotency_scope: str,
-) -> OdooStableTargetReplacementOperationRecord | None:
-    records = operation_store.list_odoo_stable_target_replacement_operation_records(
-        idempotency_key=idempotency_key,
-        idempotency_scope=idempotency_scope,
-        limit=1,
-    )
-    return records[0] if records else None
-
-
-def _build_odoo_stable_target_replacement_operation_record(
-    *,
-    replacement_request: OdooStableTargetReplacementApplyRequest,
-    context: str,
-    idempotency_key: str,
-    idempotency_scope: str,
-    request_fingerprint: str,
-    created_at: str,
-) -> OdooStableTargetReplacementOperationRecord:
-    return OdooStableTargetReplacementOperationRecord(
-        operation_id=build_odoo_stable_target_replacement_operation_id(
-            product=replacement_request.product,
-            context=context,
-            instance=replacement_request.instance,
-            created_at=created_at,
-            idempotency_key=idempotency_key,
-            idempotency_scope=idempotency_scope,
-        ),
-        product=replacement_request.product,
-        context=context,
-        instance=replacement_request.instance,
-        idempotency_key=idempotency_key,
-        idempotency_scope=idempotency_scope,
-        request_fingerprint=request_fingerprint,
-        request=replacement_request,
-        status="pending",
-        phase="created",
-        created_at=created_at,
-        updated_at=created_at,
-    )
 
 
 def _replay_idempotent_response(

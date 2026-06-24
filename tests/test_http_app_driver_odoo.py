@@ -44,6 +44,7 @@ from tests.http_app_test_support import (
     _post_odoo_prod_promotion_run,
     _post_odoo_prod_rollback,
     _post_odoo_stable_bootstrap,
+    _post_odoo_target_replacement_apply,
     _post_odoo_target_replacement_plan,
     _post_odoo_website_bootstrap_override,
 )
@@ -3324,6 +3325,561 @@ class FastApiOdooTargetReplacementPlanTests(unittest.IsolatedAsyncioTestCase):
                 legacy_app,
                 method="POST",
                 path="/v1/drivers/odoo/target-replacement-plan",
+                payload=self._payload(),
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+
+class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
+    def _identity(
+        self,
+        *,
+        repository: str = "cbusillo/launchplane",
+        workflow_ref: str = (
+            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+        ),
+    ) -> GitHubActionsIdentity:
+        return _identity(
+            repository=repository,
+            workflow_ref=workflow_ref,
+            event_name="workflow_dispatch",
+        )
+
+    def _policy(
+        self,
+        *,
+        product: str = "odoo-tenant-cm",
+        context: str = "cm",
+        action: str = "odoo_target_replacement_apply.execute",
+        repository: str = "cbusillo/launchplane",
+        workflow_refs: tuple[str, ...] = (
+            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main",
+        ),
+    ) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": repository,
+                        "workflow_refs": list(workflow_refs),
+                        "event_names": ["workflow_dispatch"],
+                        "products": [product],
+                        "contexts": [context],
+                        "actions": [action],
+                    }
+                ]
+            }
+        )
+
+    def _store_with_tenant_profile(
+        self, state_dir: Path, *, include_prod_lane: bool = False
+    ) -> FilesystemRecordStore:
+        store = FilesystemRecordStore(state_dir=state_dir)
+        profile_payload = _odoo_preview_profile_payload()
+        if include_prod_lane:
+            lanes = list(cast(tuple[dict[str, object], ...], profile_payload["lanes"]))
+            lanes.append(
+                {
+                    "instance": "prod",
+                    "context": "cm",
+                    "base_url": "https://cm.example.com",
+                    "health_url": "https://cm.example.com/web/health",
+                }
+            )
+            profile_payload["lanes"] = tuple(lanes)
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        )
+        return store
+
+    def _store_with_non_odoo_profile(self, state_dir: Path) -> FilesystemRecordStore:
+        store = FilesystemRecordStore(state_dir=state_dir)
+        profile_payload = _odoo_preview_profile_payload()
+        profile_payload["driver_id"] = "generic-web"
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        )
+        return store
+
+    def _payload(
+        self,
+        *,
+        product: str = "odoo-tenant-cm",
+        instance: str = "testing",
+        allow_empty_data: bool = False,
+        verify_health: bool = False,
+        verify_canonical: bool = False,
+        verify_logo: bool = False,
+    ) -> dict[str, object]:
+        return {
+            "product": product,
+            "replacement": {
+                "product": product,
+                "instance": instance,
+                "strategy": "recreate-in-place",
+                "allow_empty_data": allow_empty_data,
+                "verify_health": verify_health,
+                "verify_canonical": verify_canonical,
+                "verify_logo": verify_logo,
+            },
+        }
+
+    async def test_odoo_target_replacement_apply_enqueues_operation_without_execution(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(
+                    verify_health=True,
+                    verify_canonical=True,
+                    verify_logo=True,
+                ),
+                idempotency_key="apply-cm-testing",
+            )
+
+            self.assertEqual(response.status_code, 202)
+            payload = response.json()
+            self.assertEqual(payload["status"], "accepted")
+            operation_id = payload["records"]["odoo_stable_target_replacement_operation_id"]
+            self.assertTrue(str(operation_id).startswith("odoo-target-replacement-cm-testing-"))
+            self.assertEqual(payload["result"]["status"], "pending")
+            self.assertEqual(payload["result"]["phase"], "created")
+            self.assertEqual(
+                payload["result"]["poll_url"],
+                f"/v1/drivers/odoo/target-replacement/operations/{operation_id}",
+            )
+            stored_operation = store.read_odoo_stable_target_replacement_operation_record(
+                str(operation_id)
+            )
+            self.assertEqual(stored_operation.status, "pending")
+            self.assertEqual(stored_operation.phase, "created")
+            self.assertTrue(stored_operation.request.verify_health)
+            self.assertFalse(stored_operation.request.allow_empty_data)
+            self.assertEqual(stored_operation.started_at, "")
+            self.assertEqual(stored_operation.finished_at, "")
+            self.assertEqual(stored_operation.deployment_record_id, "")
+            self.assertIsNone(stored_operation.result)
+
+    async def test_odoo_target_replacement_apply_replays_existing_operation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = self._payload()
+
+            first_response = await _post_odoo_target_replacement_apply(
+                app,
+                request_payload,
+                idempotency_key="apply-cm-testing",
+            )
+            second_response = await _post_odoo_target_replacement_apply(
+                app,
+                request_payload,
+                idempotency_key="apply-cm-testing",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        self.assertEqual(
+            first_response.json()["records"]["odoo_stable_target_replacement_operation_id"],
+            second_response.json()["records"]["odoo_stable_target_replacement_operation_id"],
+        )
+
+    async def test_odoo_target_replacement_apply_requires_idempotency_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(app, self._payload())
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
+
+    async def test_odoo_target_replacement_apply_rejects_reused_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            first_response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(allow_empty_data=False),
+                idempotency_key="apply-cm-testing",
+            )
+            second_response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(allow_empty_data=True),
+                idempotency_key="apply-cm-testing",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        self.assertEqual(second_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_odoo_target_replacement_apply_scopes_replay_to_caller(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state", include_prod_lane=True)
+            policy = self._policy(
+                workflow_refs=(
+                    "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main",
+                    "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply-other.yml@refs/heads/main",
+                )
+            )
+            first_app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            second_app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._identity(
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply-other.yml@refs/heads/main"
+                        )
+                    )
+                ),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            first_response = await _post_odoo_target_replacement_apply(
+                first_app,
+                self._payload(instance="testing"),
+                idempotency_key="shared-target-replacement-key",
+            )
+            first_operation_id = first_response.json()["records"][
+                "odoo_stable_target_replacement_operation_id"
+            ]
+            first_operation = store.read_odoo_stable_target_replacement_operation_record(
+                first_operation_id
+            )
+            store.write_odoo_stable_target_replacement_operation_record(
+                first_operation.model_copy(
+                    update={
+                        "status": "pass",
+                        "phase": "completed",
+                        "finished_at": "2026-05-17T00:05:00Z",
+                        "updated_at": "2026-05-17T00:05:00Z",
+                    }
+                )
+            )
+            second_response = await _post_odoo_target_replacement_apply(
+                second_app,
+                self._payload(instance="prod"),
+                idempotency_key="shared-target-replacement-key",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        self.assertNotEqual(
+            first_response.json()["records"]["odoo_stable_target_replacement_operation_id"],
+            second_response.json()["records"]["odoo_stable_target_replacement_operation_id"],
+        )
+
+    async def test_odoo_target_replacement_apply_cross_caller_active_key_conflicts(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            policy = self._policy(
+                workflow_refs=(
+                    "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main",
+                    "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply-other.yml@refs/heads/main",
+                )
+            )
+            first_app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            second_app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._identity(
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply-other.yml@refs/heads/main"
+                        )
+                    )
+                ),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = self._payload()
+
+            first_response = await _post_odoo_target_replacement_apply(
+                first_app,
+                request_payload,
+                idempotency_key="shared-active-key",
+            )
+            second_response = await _post_odoo_target_replacement_apply(
+                second_app,
+                request_payload,
+                idempotency_key="shared-active-key",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(
+            payload["error"]["code"], "odoo_stable_target_replacement_operation_active"
+        )
+        self.assertEqual(
+            payload["operation"]["operation_id"],
+            first_response.json()["records"]["odoo_stable_target_replacement_operation_id"],
+        )
+        self.assertEqual(payload["operation"]["status"], "pending")
+
+    async def test_odoo_target_replacement_apply_blocks_second_active_lane_operation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = self._payload()
+
+            first_response = await _post_odoo_target_replacement_apply(
+                app,
+                request_payload,
+                idempotency_key="apply-cm-testing-1",
+            )
+            second_response = await _post_odoo_target_replacement_apply(
+                app,
+                request_payload,
+                idempotency_key="apply-cm-testing-2",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(
+            payload["error"]["code"], "odoo_stable_target_replacement_operation_active"
+        )
+        self.assertEqual(payload["operation"]["status"], "pending")
+
+    async def test_odoo_target_replacement_apply_rejects_unauthorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_target_replacement_plan.read"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(),
+                idempotency_key="apply-cm-testing",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_odoo_target_replacement_apply_rejects_wrong_lane_context_grant(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(context="other"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(),
+                idempotency_key="apply-cm-testing",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_odoo_target_replacement_apply_rejects_product_mismatch_payload(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = self._payload()
+            replacement = cast(dict[str, object], request_payload["replacement"])
+            replacement["product"] = "odoo-tenant-other"
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                request_payload,
+                idempotency_key="apply-cm-testing",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_odoo_target_replacement_apply_rejects_unknown_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(instance="missing"),
+                idempotency_key="apply-cm-testing",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+
+    async def test_odoo_target_replacement_apply_rejects_non_odoo_product_profile(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_non_odoo_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(),
+                idempotency_key="apply-cm-testing",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+
+    async def test_odoo_target_replacement_apply_product_route_dependency_miss_is_503(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(),
+                idempotency_key="apply-cm-testing",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "driver_route_dependency_not_found")
+        self.assertEqual(
+            payload["details"]["route_path"], "/v1/drivers/odoo/target-replacement-apply"
+        )
+
+    async def test_openapi_includes_odoo_target_replacement_apply_contract(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        operation = response.json()["paths"]["/v1/drivers/odoo/target-replacement-apply"]["post"]
+        self.assertEqual(operation["operationId"], "write_odoo_target_replacement_apply")
+        idempotency_parameters = [
+            parameter
+            for parameter in operation["parameters"]
+            if parameter["name"] == "Idempotency-Key" and parameter["in"] == "header"
+        ]
+        self.assertEqual(len(idempotency_parameters), 1)
+        self.assertTrue(idempotency_parameters[0]["required"])
+        self.assertEqual(
+            operation["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "OdooTargetReplacementApplyEnvelope",
+        )
+        self.assertEqual(
+            operation["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "409", "503"):
+            self.assertIn(status_code, operation["responses"])
+
+    async def test_legacy_wsgi_odoo_target_replacement_apply_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                legacy_app,
+                method="POST",
+                path="/v1/drivers/odoo/target-replacement-apply",
                 payload=self._payload(),
             )
 

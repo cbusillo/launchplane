@@ -299,12 +299,11 @@ VeriReel product paths:
     (native FastAPI)
   - `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}`
     (native FastAPI)
-  - `POST /v1/drivers/odoo/target-replacement-apply`
   - `POST /v1/drivers/odoo/post-deploy` (native FastAPI)
   - `POST /v1/drivers/odoo/config-parameter-override` (native FastAPI)
   - `POST /v1/drivers/odoo/website-bootstrap-override` (native FastAPI)
   - `POST /v1/drivers/odoo/target-replacement-plan` (native FastAPI)
-  - `POST /v1/drivers/odoo/target-replacement-apply`
+  - `POST /v1/drivers/odoo/target-replacement-apply` (native FastAPI)
   - `POST /v1/drivers/odoo/preview-apply-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/preview-apply` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
@@ -1794,7 +1793,7 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/artifact-publish`
 - `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI)
 - `POST /v1/drivers/odoo/target-replacement-plan` (native FastAPI)
-- `POST /v1/drivers/odoo/target-replacement-apply`
+- `POST /v1/drivers/odoo/target-replacement-apply` (native FastAPI)
 - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
 - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI compatibility route)
 - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
@@ -1806,7 +1805,6 @@ action route paths rather than a separate product-driver router allowlist. The
 current legacy WSGI descriptor handlers include:
 
 - `POST /v1/drivers/odoo/artifact-publish`
-- `POST /v1/drivers/odoo/target-replacement-apply`
 - `POST /v1/drivers/generic-web/prod-promotion`
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/testing-verification`
@@ -1865,9 +1863,18 @@ requested instance to the owning product lane context, authorizes
 product profiles as `driver_route_dependency_not_found`, and remains
 non-idempotent so repeated plan reads can observe changed runtime/provider state.
 Its descriptor remains discoverable, legacy WSGI descriptor dispatch is exempted,
-and direct fallback calls fail closed. `POST /v1/drivers/odoo/target-replacement-apply`
-continues to use the retained fallback until the apply operation enqueue slice is
-migrated.
+and direct fallback calls fail closed.
+
+`POST /v1/drivers/odoo/target-replacement-apply` is owned by native FastAPI. It
+preserves product-profile driver validation before authorization, resolves the
+requested instance to the owning product lane context, authorizes
+`odoo_target_replacement_apply.execute` against that lane context, requires
+`Idempotency-Key`, replays matching operation records for the same caller scope,
+rejects changed payload reuse with `409 idempotency_key_reused`, rejects a second
+active operation for the same lane with the active operation payload, and returns
+the pending operation record plus poll URL in the accepted response. Its
+descriptor remains discoverable, legacy WSGI descriptor dispatch is exempted,
+and direct fallback calls fail closed.
 Mutation-capable routes are proven by pre-mutation classification: preview apply
 uses a blocked destroy plan and rejects any non-blocked acceptance, while preview
 feedback uses the route's `dry_run` request mode so Launchplane evaluates the same
