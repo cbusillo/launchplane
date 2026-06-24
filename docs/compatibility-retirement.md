@@ -159,6 +159,15 @@ Keep a compatibility surface only when it is one of these:
   results are not cached so retries can observe changed backup/provider state.
   The descriptor route remains discoverable, but legacy WSGI descriptor dispatch
   is exempted and direct fallback calls fail closed.
+- Odoo prod rollback uses native FastAPI
+  `POST /v1/drivers/odoo/prod-rollback`, preserves product/profile driver
+  validation, request-context authorization, dependency-miss `503`
+  classification, handler-side `404` file-miss parity, narrow rollback result
+  payloads, and optional `Idempotency-Key` replay/conflict behavior. Passed
+  results are cached for replay; failed rollback results are not cached so
+  retries can observe recovered deployment/provider state. The descriptor route
+  remains discoverable, but legacy WSGI descriptor dispatch is exempted and
+  direct fallback calls fail closed.
 - Odoo prod-promotion inputs and prod-promotion run use native FastAPI routes:
   `POST /v1/drivers/odoo/prod-promotion-inputs` and
   `POST /v1/drivers/odoo/prod-promotion-run`. They preserve product/profile

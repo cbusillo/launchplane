@@ -249,6 +249,10 @@ from control_plane.odoo_prod_promotion_http import (
     OdooProdPromotionInputsEnvelope as OdooProdPromotionInputsEnvelope,
     OdooProdPromotionRunEnvelope as OdooProdPromotionRunEnvelope,
 )
+from control_plane.odoo_prod_rollback_http import (
+    ODOO_PROD_ROLLBACK_ROUTE,
+    OdooProdRollbackEnvelope as OdooProdRollbackEnvelope,
+)
 from control_plane.contracts.odoo_stable_bootstrap import (
     OdooStableBootstrapRequest,
 )
@@ -256,10 +260,6 @@ from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionRequest,
     OdooProdPromotionStore,
     execute_odoo_prod_promotion,
-)
-from control_plane.workflows.odoo_prod_rollback import (
-    OdooProdRollbackRequest,
-    execute_odoo_prod_rollback,
 )
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
@@ -325,6 +325,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         ODOO_PROD_BACKUP_GATE_ROUTE,
         ODOO_PROD_PROMOTION_INPUTS_ROUTE,
         ODOO_PROD_PROMOTION_RUN_ROUTE,
+        ODOO_PROD_ROLLBACK_ROUTE,
         ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
     }
 )
@@ -545,16 +546,6 @@ _ODOO_ARTIFACT_PUBLISH_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-class OdooProdRollbackEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    rollback: OdooProdRollbackRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooProdRollbackEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo prod rollback")
-        return self
-
-
 class OdooProdPromotionEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     promotion: OdooProdPromotionRequest
@@ -602,8 +593,8 @@ _ODOO_PROD_PROMOTION_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-_ODOO_PROD_ROLLBACK_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/prod-rollback",
+_ODOO_PROD_ROLLBACK_METADATA = _DriverRouteExecutionMetadata(
+    route_path=ODOO_PROD_ROLLBACK_ROUTE,
     envelope_model=OdooProdRollbackEnvelope,
     denial_message=(
         "Workflow cannot execute the Odoo prod rollback driver for the requested product/context."
@@ -1135,31 +1126,6 @@ def _dispatch_odoo_prod_promotion(
             "destination_health_status": driver_result.destination_health_status,
         },
         driver_result,
-    )
-
-
-def _handle_odoo_prod_rollback(
-    request: OdooProdRollbackEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    driver_result = execute_odoo_prod_rollback(
-        control_plane_root=control_plane_root_path,
-        record_store=record_store,
-        request=request.rollback,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={
-            "promotion_record_id": driver_result.promotion_record_id,
-            "deployment_record_id": driver_result.deployment_record_id,
-            "release_tuple_id": driver_result.release_tuple_id,
-            "rollback_status": driver_result.rollback_status,
-            "rollback_health_status": driver_result.rollback_health_status,
-            "post_deploy_status": driver_result.post_deploy_status,
-        },
-        driver_result=driver_result,
     )
 
 
@@ -1821,15 +1787,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             custom_dispatch_handler=_dispatch_odoo_prod_promotion,
         ),
-        _ODOO_PROD_ROLLBACK_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_PROD_ROLLBACK_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.rollback.context,
-            ),
-            handler=_handle_odoo_prod_rollback,
-        ),
         _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -2003,7 +1960,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
                 _ODOO_PROD_BACKUP_GATE_METADATA.route_path,
                 _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,
                 _ODOO_PROD_PROMOTION_ROUTE.route_path,
-                _ODOO_PROD_ROLLBACK_ROUTE.route_path,
+                _ODOO_PROD_ROLLBACK_METADATA.route_path,
                 _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
                 _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
                 _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
