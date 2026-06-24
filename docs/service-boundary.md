@@ -309,7 +309,7 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion-run` (native FastAPI)
-  - `POST /v1/drivers/odoo/prod-promotion`
+  - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI compatibility route)
   - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
   - `POST /v1/drivers/verireel/testing-deploy`
   - `POST /v1/drivers/verireel/testing-verification`
@@ -1791,7 +1791,7 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/artifact-publish`
 - `POST /v1/drivers/odoo/target-replacement-apply`
 - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
-- `POST /v1/drivers/odoo/prod-promotion`
+- `POST /v1/drivers/odoo/prod-promotion` (native FastAPI compatibility route)
 - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-promotion`
 - `POST /v1/drivers/verireel/...`
@@ -1802,7 +1802,6 @@ current legacy WSGI descriptor handlers include:
 
 - `POST /v1/drivers/odoo/artifact-publish`
 - `POST /v1/drivers/odoo/target-replacement-apply`
-- `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/generic-web/prod-promotion`
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/testing-verification`
@@ -2037,7 +2036,10 @@ The route is owned by native FastAPI and preserves request-context authorization
 reusable Launchplane workflow identity matching, optional `Idempotency-Key`
 replay/conflict behavior, and no-cache retry behavior for blocked or failed
 driver results. Its descriptor remains discoverable, legacy WSGI descriptor
-dispatch is exempted, and direct fallback calls fail closed.
+dispatch is exempted, and direct fallback calls fail closed. The older
+`POST /v1/drivers/odoo/prod-promotion` compatibility route is also native
+FastAPI for explicit operator workflows and diagnostics, but product repos
+should prefer the thin `prod-promotion-run` path.
 
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still

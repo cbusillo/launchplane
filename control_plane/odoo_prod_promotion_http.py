@@ -15,6 +15,12 @@ from control_plane.workflows.odoo_prod_promotion_inputs import (
     OdooProdPromotionInputsStore,
     resolve_odoo_prod_promotion_inputs,
 )
+from control_plane.workflows.odoo_prod_promotion import (
+    OdooProdPromotionRequest,
+    OdooProdPromotionResult,
+    OdooProdPromotionStore,
+    execute_odoo_prod_promotion,
+)
 from control_plane.workflows.odoo_prod_promotion_run import (
     OdooProdPromotionRunRequest,
     OdooProdPromotionRunResult,
@@ -25,8 +31,10 @@ from control_plane.workflows.odoo_prod_promotion_run import (
 
 ODOO_PROD_PROMOTION_INPUTS_ROUTE = "/v1/drivers/odoo/prod-promotion-inputs"
 ODOO_PROD_PROMOTION_RUN_ROUTE = "/v1/drivers/odoo/prod-promotion-run"
+ODOO_PROD_PROMOTION_ROUTE = "/v1/drivers/odoo/prod-promotion"
 ODOO_PROD_PROMOTION_INPUTS_ACTION = "odoo_prod_promotion_inputs.read"
 ODOO_PROD_PROMOTION_RUN_ACTION = "odoo_prod_promotion_run.execute"
+ODOO_PROD_PROMOTION_ACTION = "odoo_prod_promotion.execute"
 ODOO_DRIVER_ID = "odoo"
 
 
@@ -55,6 +63,16 @@ class OdooProdPromotionRunEnvelope(_ProductRouteEnvelope):
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooProdPromotionRunEnvelope":
         _validate_driver_envelope_product(self.product, label="Odoo prod promotion run")
+        return self
+
+
+class OdooProdPromotionEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    promotion: OdooProdPromotionRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooProdPromotionEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo prod promotion")
         return self
 
 
@@ -117,6 +135,27 @@ def execute_odoo_prod_promotion_run_result(
     )
 
 
+def execute_odoo_prod_promotion_result(
+    *,
+    control_plane_root: Path,
+    state_dir: Path,
+    database_url: str | None,
+    record_store: object,
+    request: OdooProdPromotionEnvelope,
+) -> tuple[dict[str, object], dict[str, object]]:
+    promotion_request = request.promotion.model_copy(update={"product": request.product})
+    driver_result = execute_odoo_prod_promotion(
+        control_plane_root=control_plane_root,
+        state_dir=state_dir,
+        database_url=database_url,
+        record_store=cast(OdooProdPromotionStore, record_store),
+        request=promotion_request,
+    )
+    return _prod_promotion_records(driver_result), cast(
+        dict[str, object], driver_result.model_dump(mode="json")
+    )
+
+
 def driver_result_contains_status(
     driver_result: BaseModel | dict[str, object], status: str
 ) -> bool:
@@ -166,4 +205,13 @@ def _prod_promotion_run_records(
         "deployment_record_id": driver_result.deployment_record_id,
         "release_tuple_id": driver_result.release_tuple_id,
         "request_id": driver_result.request_id,
+    }
+
+
+def _prod_promotion_records(driver_result: OdooProdPromotionResult) -> dict[str, object]:
+    return {
+        "promotion_record_id": driver_result.promotion_record_id,
+        "deployment_record_id": driver_result.deployment_record_id,
+        "backup_record_id": driver_result.backup_record_id,
+        "release_tuple_id": driver_result.release_tuple_id,
     }

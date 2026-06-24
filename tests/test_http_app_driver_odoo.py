@@ -23,6 +23,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
+from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
 from control_plane.workflows.odoo_prod_promotion_run import OdooProdPromotionRunResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
@@ -35,6 +36,7 @@ from tests.http_app_test_support import (
     _post_odoo_preview_apply,
     _post_odoo_preview_apply_inputs,
     _post_odoo_prod_backup_gate,
+    _post_odoo_prod_promotion,
     _post_odoo_prod_promotion_inputs,
     _post_odoo_prod_promotion_run,
     _post_odoo_prod_rollback,
@@ -1609,6 +1611,19 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
+    def _promotion_payload(self, *, product: str = "odoo") -> dict[str, object]:
+        return {
+            "product": product,
+            "promotion": {
+                "context": "cm",
+                "from_instance": "testing",
+                "to_instance": "prod",
+                "artifact_id": "artifact-cm-new",
+                "backup_record_id": "backup-gate-cm-prod-run-1",
+                "source_git_ref": "848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb",
+            },
+        }
+
     def _ready_inputs_result(
         self, *, artifact_id: str = "artifact-cm-new"
     ) -> OdooProdPromotionInputsResult:
@@ -1665,6 +1680,306 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             image_digest="sha256:new",
             error_message="blocked" if run_status == "blocked" else "",
         )
+
+    def _promotion_result(
+        self,
+        *,
+        promotion_status: Literal["pass", "fail"] = "pass",
+    ) -> OdooProdPromotionResult:
+        return OdooProdPromotionResult(
+            context="cm",
+            from_instance="testing",
+            to_instance="prod",
+            artifact_id="artifact-cm-new",
+            backup_record_id="backup-gate-cm-prod-run-1",
+            promotion_record_id="promotion-cm-testing-to-prod",
+            deployment_record_id="deployment-cm-prod",
+            release_tuple_id="cm-prod-artifact-cm-new",
+            promotion_status=promotion_status,
+            deployment_status="pass" if promotion_status == "pass" else "skipped",
+            post_deploy_status="pass" if promotion_status == "pass" else "skipped",
+            destination_health_status="pass" if promotion_status == "pass" else "skipped",
+            error_message="failed" if promotion_status == "fail" else "",
+        )
+
+    async def test_odoo_prod_promotion_executes_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_prod_promotion.execute"),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+            with patch(
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion",
+                return_value=self._promotion_result(),
+            ) as execute_mock:
+                response = await _post_odoo_prod_promotion(
+                    app,
+                    self._promotion_payload(),
+                    idempotency_key="odoo-prod-promotion-cm",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"],
+            {
+                "promotion_record_id": "promotion-cm-testing-to-prod",
+                "deployment_record_id": "deployment-cm-prod",
+                "backup_record_id": "backup-gate-cm-prod-run-1",
+                "release_tuple_id": "cm-prod-artifact-cm-new",
+            },
+        )
+        self.assertEqual(payload["result"]["promotion_status"], "pass")
+        self.assertEqual(payload["result"]["destination_health_status"], "pass")
+        execute_mock.assert_called_once()
+        promotion_call = execute_mock.call_args.kwargs
+        self.assertEqual(promotion_call["control_plane_root"], root)
+        self.assertEqual(promotion_call["state_dir"], root / "state")
+        self.assertIsNone(promotion_call["database_url"])
+        self.assertEqual(promotion_call["request"].context, "cm")
+        self.assertEqual(promotion_call["request"].from_instance, "testing")
+        self.assertEqual(promotion_call["request"].to_instance, "prod")
+        self.assertEqual(promotion_call["request"].product, "odoo")
+
+    async def test_odoo_prod_promotion_accepts_product_profile_driver_id(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/"
+                            "odoo-prod-promotion.yml@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=self._policy(
+                    product="odoo-tenant-cm",
+                    action="odoo_prod_promotion.execute",
+                    repository="cbusillo/odoo-tenant-cm",
+                    workflow_ref=(
+                        "cbusillo/odoo-tenant-cm/.github/workflows/"
+                        "odoo-prod-promotion.yml@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+            with patch(
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion",
+                return_value=self._promotion_result(),
+            ) as execute_mock:
+                response = await _post_odoo_prod_promotion(
+                    app,
+                    self._promotion_payload(product="odoo-tenant-cm"),
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["promotion_status"], "pass")
+        promotion_call = execute_mock.call_args.kwargs
+        self.assertEqual(promotion_call["request"].product, "odoo-tenant-cm")
+
+    async def test_odoo_prod_promotion_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_prod_promotion.execute"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+            with patch(
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion",
+                return_value=self._promotion_result(),
+            ) as execute_mock:
+                first_response = await _post_odoo_prod_promotion(
+                    app,
+                    self._promotion_payload(),
+                    idempotency_key="odoo-prod-promotion:replay",
+                )
+                replay_response = await _post_odoo_prod_promotion(
+                    app,
+                    self._promotion_payload(),
+                    idempotency_key="odoo-prod-promotion:replay",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        execute_mock.assert_called_once()
+
+    async def test_odoo_prod_promotion_rejects_idempotency_key_reuse(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_prod_promotion.execute"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+            with patch(
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion",
+                return_value=self._promotion_result(),
+            ):
+                first_response = await _post_odoo_prod_promotion(
+                    app,
+                    self._promotion_payload(),
+                    idempotency_key="odoo-prod-promotion:conflict",
+                )
+                conflict_response = await _post_odoo_prod_promotion(
+                    app,
+                    {
+                        "product": "odoo",
+                        "promotion": {
+                            "context": "cm",
+                            "from_instance": "testing",
+                            "to_instance": "prod",
+                            "artifact_id": "artifact-cm-other",
+                            "backup_record_id": "backup-gate-cm-prod-run-1",
+                        },
+                    },
+                    idempotency_key="odoo-prod-promotion:conflict",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_odoo_prod_promotion_does_not_replay_failed_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_prod_promotion.execute"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+            with patch(
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion",
+                side_effect=(
+                    self._promotion_result(promotion_status="fail"),
+                    self._promotion_result(),
+                ),
+            ) as execute_mock:
+                first_response = await _post_odoo_prod_promotion(
+                    app,
+                    self._promotion_payload(),
+                    idempotency_key="odoo-prod-promotion:failed",
+                )
+                second_response = await _post_odoo_prod_promotion(
+                    app,
+                    self._promotion_payload(),
+                    idempotency_key="odoo-prod-promotion:failed",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(first_response.json()["result"]["promotion_status"], "fail")
+        self.assertEqual(second_response.status_code, 202)
+        self.assertNotIn("replayed", second_response.json())
+        self.assertEqual(second_response.json()["result"]["promotion_status"], "pass")
+        self.assertEqual(execute_mock.call_count, 2)
+
+    async def test_odoo_prod_promotion_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_prod_backup_gate.execute"),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+            with patch(
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion"
+            ) as execute_mock:
+                response = await _post_odoo_prod_promotion(app, self._promotion_payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        execute_mock.assert_not_called()
+
+    async def test_odoo_prod_promotion_rejects_non_odoo_product_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_non_odoo_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(product="odoo-tenant-cm"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+            response = await _post_odoo_prod_promotion(
+                app,
+                self._promotion_payload(product="odoo-tenant-cm"),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+
+    async def test_odoo_prod_promotion_dependency_miss_is_dependency_503(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(
+                    product="odoo-tenant-cm", action="odoo_prod_promotion.execute"
+                ),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+            response = await _post_odoo_prod_promotion(
+                app,
+                self._promotion_payload(product="odoo-tenant-cm"),
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(payload["error"]["code"], "driver_route_dependency_not_found")
+        self.assertEqual(payload["details"]["route_path"], "/v1/drivers/odoo/prod-promotion")
+
+    async def test_odoo_prod_promotion_handler_file_miss_is_not_found(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_prod_promotion.execute"),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+            with patch(
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion",
+                side_effect=FileNotFoundError("missing manifest"),
+            ):
+                response = await _post_odoo_prod_promotion(app, self._promotion_payload())
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
 
     async def test_odoo_prod_promotion_inputs_resolves_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2088,6 +2403,10 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
                 "write_odoo_prod_promotion_run",
                 "OdooProdPromotionRunEnvelope",
             ),
+            "/v1/drivers/odoo/prod-promotion": (
+                "write_odoo_prod_promotion",
+                "OdooProdPromotionEnvelope",
+            ),
         }
         for route_path, (operation_id, schema_title) in expected.items():
             operation = paths[route_path]["post"]
@@ -2125,11 +2444,19 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
                 path="/v1/drivers/odoo/prod-promotion-run",
                 payload=self._run_payload(),
             )
+            promotion_status_code, promotion_payload = _invoke_app(
+                legacy_app,
+                method="POST",
+                path="/v1/drivers/odoo/prod-promotion",
+                payload=self._promotion_payload(),
+            )
 
         self.assertEqual(inputs_status_code, 404)
         self.assertEqual(inputs_payload["error"]["code"], "not_found")
         self.assertEqual(run_status_code, 404)
         self.assertEqual(run_payload["error"]["code"], "not_found")
+        self.assertEqual(promotion_status_code, 404)
+        self.assertEqual(promotion_payload["error"]["code"], "not_found")
 
 
 class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
