@@ -78,9 +78,12 @@ Keep a compatibility surface only when it is one of these:
   returns the same operation poll URL. The legacy WSGI read branch and descriptor
   write dispatch branch are deleted; direct fallback calls fail closed.
 - Odoo target-replacement operation status reads use native FastAPI routes for
-  bearer-token and human-session callers. Their legacy WSGI read branches are
-  deleted; the POST enqueue routes still return the same poll URLs while those
-  write paths remain on the retained fallback.
+  bearer-token and human-session callers. The target-replacement plan POST route
+  also uses native FastAPI on the bearer/OIDC write identity path and preserves
+  non-idempotent plan recomputation. The legacy WSGI read branches and plan
+  descriptor dispatch branch are deleted; the apply POST enqueue route still
+  returns the same poll URL while that write path remains on the retained
+  fallback.
 - Tracked target logs use the native FastAPI
   `GET /v1/contexts/{context}/instances/{instance}/logs` route. The legacy WSGI
   branch is deleted; direct fallback calls fail closed while the mounted fallback
@@ -144,6 +147,14 @@ Keep a compatibility surface only when it is one of these:
   dependency-miss `503` classification, and operation poll URLs. The descriptor
   route remains discoverable, but legacy WSGI descriptor dispatch is exempted and
   direct fallback calls fail closed.
+- Odoo target-replacement plan uses native FastAPI
+  `POST /v1/drivers/odoo/target-replacement-plan`, preserves product/profile
+  driver validation before authorization, instance-to-lane context resolution,
+  lane-scoped `odoo_target_replacement_plan.read` authorization,
+  dependency-miss `503` classification, and non-idempotent recomputation even
+  when callers send `Idempotency-Key`. The descriptor route remains
+  discoverable, but legacy WSGI descriptor dispatch is exempted and direct
+  fallback calls fail closed.
 - Odoo preview apply inputs and preview apply use native FastAPI routes:
   `POST /v1/drivers/odoo/preview-apply-inputs` and
   `POST /v1/drivers/odoo/preview-apply`. They preserve preview-profile

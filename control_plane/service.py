@@ -47,7 +47,6 @@ from control_plane.merge_train_policy_source import (
 )
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
-    OdooStableTargetReplacementRequest,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
@@ -255,9 +254,9 @@ from control_plane.odoo_stable_bootstrap_http import (
     ODOO_STABLE_BOOTSTRAP_ROUTE,
     OdooStableBootstrapEnvelope as OdooStableBootstrapEnvelope,
 )
-from control_plane.workflows.odoo_stable_target_replacement import (
-    OdooStableTargetReplacementStore,
-    build_odoo_stable_target_replacement_plan,
+from control_plane.odoo_target_replacement_plan_http import (
+    ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+    OdooTargetReplacementPlanEnvelope as OdooTargetReplacementPlanEnvelope,
 )
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
@@ -322,6 +321,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         ODOO_PROD_PROMOTION_RUN_ROUTE,
         ODOO_PROD_ROLLBACK_ROUTE,
         ODOO_STABLE_BOOTSTRAP_ROUTE,
+        ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
         ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
     }
 )
@@ -551,20 +551,8 @@ _ODOO_PROD_ROLLBACK_METADATA = _DriverRouteExecutionMetadata(
 )
 
 
-class OdooTargetReplacementPlanEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    replacement: OdooStableTargetReplacementRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooTargetReplacementPlanEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo target replacement plan")
-        if self.product.strip() != self.replacement.product.strip():
-            raise ValueError("Odoo target replacement plan requires matching product values.")
-        return self
-
-
 _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/target-replacement-plan",
+    route_path=ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
     envelope_model=OdooTargetReplacementPlanEnvelope,
     denial_message=(
         "Workflow cannot read the Odoo target replacement plan for the requested product/context."
@@ -1031,24 +1019,6 @@ def _handle_odoo_artifact_publish(
         },
         driver_result=driver_result,
     )
-
-
-def _handle_odoo_target_replacement_plan(
-    request: OdooTargetReplacementPlanEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    if resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Odoo target replacement plan requires a known product lane."
-        )
-    driver_result = build_odoo_stable_target_replacement_plan(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(OdooStableTargetReplacementStore, record_store),
-        request=request.replacement,
-    )
-    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
 
 
 def _dispatch_odoo_target_replacement_apply(
@@ -1567,16 +1537,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_artifact_publish,
         ),
-        _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                instance=request.replacement.instance,
-                require_profile=True,
-            ),
-            handler=_handle_odoo_target_replacement_plan,
-        ),
         _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -1730,7 +1690,6 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
                 _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,
                 _ODOO_PROD_PROMOTION_ROUTE.route_path,
                 _ODOO_PROD_ROLLBACK_METADATA.route_path,
-                _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
                 _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
                 _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
                 _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,

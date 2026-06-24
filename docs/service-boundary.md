@@ -303,7 +303,7 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/post-deploy` (native FastAPI)
   - `POST /v1/drivers/odoo/config-parameter-override` (native FastAPI)
   - `POST /v1/drivers/odoo/website-bootstrap-override` (native FastAPI)
-  - `POST /v1/drivers/odoo/target-replacement-plan`
+  - `POST /v1/drivers/odoo/target-replacement-plan` (native FastAPI)
   - `POST /v1/drivers/odoo/target-replacement-apply`
   - `POST /v1/drivers/odoo/preview-apply-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/preview-apply` (native FastAPI)
@@ -1793,6 +1793,7 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/website-bootstrap-override` (native FastAPI)
 - `POST /v1/drivers/odoo/artifact-publish`
 - `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI)
+- `POST /v1/drivers/odoo/target-replacement-plan` (native FastAPI)
 - `POST /v1/drivers/odoo/target-replacement-apply`
 - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
 - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI compatibility route)
@@ -1856,6 +1857,17 @@ operation rejection with the existing operation payload, dependency-miss `503`
 classification, and the stable-bootstrap operation `poll_url`. Its descriptor
 remains discoverable, legacy WSGI descriptor dispatch is exempted, and direct
 fallback calls fail closed.
+
+`POST /v1/drivers/odoo/target-replacement-plan` is owned by native FastAPI. It
+preserves product-profile driver validation before authorization, resolves the
+requested instance to the owning product lane context, authorizes
+`odoo_target_replacement_plan.read` against that lane context, classifies missing
+product profiles as `driver_route_dependency_not_found`, and remains
+non-idempotent so repeated plan reads can observe changed runtime/provider state.
+Its descriptor remains discoverable, legacy WSGI descriptor dispatch is exempted,
+and direct fallback calls fail closed. `POST /v1/drivers/odoo/target-replacement-apply`
+continues to use the retained fallback until the apply operation enqueue slice is
+migrated.
 Mutation-capable routes are proven by pre-mutation classification: preview apply
 uses a blocked destroy plan and rejects any non-blocked acceptance, while preview
 feedback uses the route's `dry_run` request mode so Launchplane evaluates the same

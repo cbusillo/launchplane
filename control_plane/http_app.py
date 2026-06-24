@@ -243,6 +243,18 @@ from control_plane.odoo_stable_bootstrap_http import (
     operation_payload as odoo_stable_bootstrap_operation_payload,
     resolve_odoo_stable_bootstrap_product_route,
 )
+from control_plane.odoo_target_replacement_plan_http import (
+    ODOO_TARGET_REPLACEMENT_PLAN_ACTION,
+    ODOO_TARGET_REPLACEMENT_PLAN_ROUTE as _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+    OdooTargetReplacementPlanEnvelope,
+    OdooTargetReplacementPlanProductMismatchError,
+    OdooTargetReplacementPlanRouteDependencyError,
+    resolve_odoo_target_replacement_plan_lane,
+)
+from control_plane.workflows.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementStore,
+    build_odoo_stable_target_replacement_plan,
+)
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductActivityReadModel,
@@ -6455,6 +6467,100 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             records={key: str(value) for key, value in records.items()},
             result=driver_result,
+        )
+
+    async def write_odoo_target_replacement_plan(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            plan_request = OdooTargetReplacementPlanEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+
+        try:
+            lane = resolve_odoo_target_replacement_plan_lane(
+                record_store=record_store,
+                product=plan_request.product,
+                instance=plan_request.replacement.instance,
+            )
+        except OdooTargetReplacementPlanRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+            )
+        except OdooTargetReplacementPlanProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=ODOO_TARGET_REPLACEMENT_PLAN_ACTION,
+            product=plan_request.product,
+            context=lane.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot read the Odoo target replacement plan for"
+                    " the requested product/context."
+                ),
+            )
+
+        try:
+            driver_result = build_odoo_stable_target_replacement_plan(
+                control_plane_root=resolved_control_plane_root,
+                record_store=cast(OdooStableTargetReplacementStore, record_store),
+                request=plan_request.replacement,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result=driver_result.model_dump(mode="json"),
         )
 
     async def write_odoo_prod_rollback(
@@ -14319,6 +14425,33 @@ def create_launchplane_fastapi_app(
                     }
                 }
             },
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+        write_odoo_target_replacement_plan,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": OdooTargetReplacementPlanEnvelope.model_json_schema()
+                    }
+                },
+            },
+        },
+        operation_id="write_odoo_target_replacement_plan",
+        summary="Build Odoo target replacement plan",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )
