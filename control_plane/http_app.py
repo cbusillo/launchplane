@@ -181,6 +181,19 @@ from control_plane.generic_web_verification_http import (
     resolve_generic_web_stable_verification_lane,
     should_store_generic_web_verification_idempotency,
 )
+from control_plane.generic_web_preview_http import (
+    GENERIC_WEB_PREVIEW_INVENTORY_ACTION,
+    GENERIC_WEB_PREVIEW_INVENTORY_ROUTE as _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+    GENERIC_WEB_PREVIEW_READINESS_ACTION,
+    GENERIC_WEB_PREVIEW_READINESS_ROUTE as _GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+    GenericWebPreviewInventoryEnvelope,
+    GenericWebPreviewProductMismatchError,
+    GenericWebPreviewReadinessEnvelope,
+    GenericWebPreviewRouteDependencyError,
+    apply_generic_web_preview_inventory_result,
+    apply_generic_web_preview_readiness_result,
+    resolve_generic_web_preview_profile,
+)
 from control_plane.odoo_artifact_publish_inputs_http import (
     ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
     ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE as _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
@@ -13266,6 +13279,136 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def apply_generic_web_preview_inventory(
+        inventory_request: GenericWebPreviewInventoryEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            profile = resolve_generic_web_preview_profile(
+                record_store=record_store,
+                product=inventory_request.product,
+            )
+        except GenericWebPreviewRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+            )
+        except GenericWebPreviewProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=GENERIC_WEB_PREVIEW_INVENTORY_ACTION,
+            product=profile.product,
+            context=profile.preview.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot read generic web preview inventory"
+                    " for the requested product/context."
+                ),
+            )
+        try:
+            records, result = apply_generic_web_preview_inventory_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=inventory_request,
+                profile=profile,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=result,
+        )
+
+    async def apply_generic_web_preview_readiness(
+        readiness_request: GenericWebPreviewReadinessEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            profile = resolve_generic_web_preview_profile(
+                record_store=record_store,
+                product=readiness_request.product,
+            )
+        except GenericWebPreviewRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+            )
+        except GenericWebPreviewProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=GENERIC_WEB_PREVIEW_READINESS_ACTION,
+            product=profile.product,
+            context=profile.preview.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot evaluate generic web preview readiness"
+                    " for the requested product/context."
+                ),
+            )
+        try:
+            records, result = apply_generic_web_preview_readiness_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=readiness_request,
+                profile=profile,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=result,
+        )
+
     async def apply_generic_web_stable_verification(
         request: Request,
         verification_request: GenericWebStableVerificationEnvelope,
@@ -14972,6 +15115,60 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+        apply_generic_web_preview_inventory,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": GenericWebPreviewInventoryEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_generic_web_preview_inventory",
+        summary="Read generic web preview inventory",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+        apply_generic_web_preview_readiness,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": GenericWebPreviewReadinessEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_generic_web_preview_readiness",
+        summary="Evaluate generic web preview readiness",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

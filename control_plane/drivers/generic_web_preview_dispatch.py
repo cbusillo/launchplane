@@ -49,9 +49,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewRefreshRequest,
     GenericWebPreviewRefreshResult,
     discover_generic_web_preview_desired_state,
-    evaluate_generic_web_preview_readiness,
     execute_generic_web_preview_destroy,
-    execute_generic_web_preview_inventory,
     execute_generic_web_preview_refresh,
     preview_pr_number_from_slug,
 )
@@ -348,48 +346,6 @@ def _handle_generic_web_preview_desired_state(
         result={"preview_desired_state_id": preview_desired_state_id},
         driver_result=driver_result,
     )
-
-
-def _handle_generic_web_preview_inventory(
-    request: GenericWebPreviewInventoryEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = execute_generic_web_preview_inventory(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.inventory,
-        profile=resolved_context.profile,
-    )
-    preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
-        record_store=record_store,
-        context=driver_result.context,
-        source=driver_result.source,
-        preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"preview_inventory_scan_id": preview_inventory_scan_id},
-        driver_result=driver_result,
-    )
-
-
-def _handle_generic_web_preview_readiness(
-    request: GenericWebPreviewReadinessEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = evaluate_generic_web_preview_readiness(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.readiness,
-        checked_at=utc_now_timestamp(),
-        profile=resolved_context.profile,
-    )
-    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
 
 
 def _generic_web_preview_manifest_fingerprint(

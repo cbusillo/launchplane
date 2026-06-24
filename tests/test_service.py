@@ -173,8 +173,13 @@ from control_plane.workflows.generic_web_rollback import GenericWebRollbackApply
 from control_plane.workflows.generic_web_promotion_workflow import GenericWebPromotionWorkflowResult
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyResult,
+    GenericWebPreviewInventoryItem,
+    GenericWebPreviewInventoryResult,
+    GenericWebPreviewReadinessCheck,
+    GenericWebPreviewReadinessResult,
     GenericWebPreviewRefreshRequest,
     GenericWebPreviewRefreshResult,
+    GenericWebPreviewTransportSummary,
 )
 from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
 from control_plane.workflows.npmplus_ingress import (
@@ -12633,7 +12638,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -12647,14 +12652,22 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
             )
-            driver_result = SimpleNamespace(
+            driver_result = GenericWebPreviewInventoryResult(
+                product="sellyouroutboard",
                 context="sellyouroutboard-testing",
                 source="generic-web-preview-inventory",
-                previews=(SimpleNamespace(previewSlug="pr-42"),),
+                app_name_prefix="syo-pr-",
+                previews=(
+                    GenericWebPreviewInventoryItem(
+                        applicationId="app-42",
+                        applicationName="syo-pr-42",
+                        previewSlug="pr-42",
+                    ),
+                ),
             )
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_inventory",
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_inventory",
                 return_value=driver_result,
             ):
                 status_code, payload = _invoke_app(
@@ -12681,6 +12694,217 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(records[0].source, "generic-web-preview-inventory")
         self.assertEqual(records[0].preview_slugs, ("pr-42",))
+
+    def test_generic_web_preview_inventory_does_not_replay_cached_inventory(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_inventory.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload: dict[str, object] = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "inventory": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                },
+            }
+            idempotency_key = "generic-web-preview-inventory:syo"
+            store.write_idempotency_record(
+                LaunchplaneIdempotencyRecord(
+                    record_id="idempotency-stale-generic-web-preview-inventory",
+                    scope="|".join(
+                        (
+                            "cbusillo/sellyouroutboard",
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main",
+                            "repo:every/verireel:pull_request",
+                        )
+                    ),
+                    route_path="/v1/drivers/generic-web/preview-inventory",
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=control_plane_service._idempotency_request_fingerprint(
+                        route_path="/v1/drivers/generic-web/preview-inventory",
+                        payload=request_payload,
+                    ),
+                    response_status_code=202,
+                    response_trace_id="stale-generic-web-preview-inventory",
+                    recorded_at="2026-05-09T15:08:00Z",
+                    response_payload={
+                        "status": "accepted",
+                        "trace_id": "stale-generic-web-preview-inventory",
+                        "records": {"preview_inventory_scan_id": "stale-scan"},
+                        "result": {"previews": [{"previewSlug": "stale"}]},
+                    },
+                )
+            )
+            driver_results = [
+                GenericWebPreviewInventoryResult(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    source="generic-web-preview-inventory",
+                    app_name_prefix="syo-pr-",
+                    previews=(
+                        GenericWebPreviewInventoryItem(
+                            applicationId="app-42",
+                            applicationName="syo-pr-42",
+                            previewSlug="pr-42",
+                        ),
+                    ),
+                ),
+                GenericWebPreviewInventoryResult(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    source="generic-web-preview-inventory",
+                    app_name_prefix="syo-pr-",
+                    previews=(),
+                ),
+            ]
+
+            with patch(
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_inventory",
+                side_effect=driver_results,
+            ) as execute_inventory:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-inventory",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": idempotency_key},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-inventory",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": idempotency_key},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(first_payload["result"]["previews"][0]["previewSlug"], "pr-42")
+        self.assertEqual(second_payload["result"]["previews"], [])
+        self.assertNotIn("replayed", first_payload)
+        self.assertNotIn("replayed", second_payload)
+        self.assertEqual(execute_inventory.call_count, 2)
+
+    def test_generic_web_preview_inventory_route_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["other-context"],
+                            "actions": ["preview_inventory.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_inventory",
+            ) as execute_inventory:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-inventory",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "inventory": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                        },
+                    },
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        execute_inventory.assert_not_called()
+
+    def test_generic_web_preview_inventory_legacy_wsgi_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/sellyouroutboard")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/preview-inventory",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "inventory": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_generic_web_preview_refresh_route_returns_driver_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -14188,7 +14412,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -14204,11 +14428,35 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.evaluate_generic_web_preview_readiness",
-                return_value={
-                    "readiness_status": "blocked",
-                    "missing_template_env_keys": ["SMTP_HOST"],
-                },
+                "control_plane.generic_web_preview_http.evaluate_generic_web_preview_readiness",
+                return_value=GenericWebPreviewReadinessResult(
+                    readiness_status="blocked",
+                    checked_at="2026-05-09T15:08:00Z",
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    template_context="sellyouroutboard-testing",
+                    template_instance="testing",
+                    source="generic-web-preview-readiness",
+                    missing_template_env_keys=("SMTP_HOST",),
+                    missing_provider_fields=(),
+                    transport=GenericWebPreviewTransportSummary(
+                        data_transport_mode="none",
+                        copied_env_keys=(),
+                        omitted_env_keys=(),
+                        override_env_keys=(),
+                        preview_url_env_keys=(),
+                        preview_domain_env_keys=(),
+                        migration_command_configured=False,
+                        seed_command_configured=False,
+                    ),
+                    checks=(
+                        GenericWebPreviewReadinessCheck(
+                            check_id="template-env",
+                            status="blocked",
+                            message="Missing template env keys.",
+                        ),
+                    ),
+                ),
             ) as readiness:
                 status_code, payload = _invoke_app(
                     app,
@@ -14230,6 +14478,93 @@ class LaunchplaneServiceTests(unittest.TestCase):
         readiness.assert_called_once()
         _, kwargs = readiness.call_args
         self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
+
+    def test_generic_web_preview_readiness_route_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["other-context"],
+                            "actions": ["preview_readiness.evaluate"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.generic_web_preview_http.evaluate_generic_web_preview_readiness",
+            ) as readiness:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-readiness",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "readiness": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                        },
+                    },
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        readiness.assert_not_called()
+
+    def test_generic_web_preview_readiness_legacy_wsgi_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/sellyouroutboard")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/preview-readiness",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "readiness": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_generic_web_preview_destroy_route_returns_driver_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

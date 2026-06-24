@@ -288,8 +288,8 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/stable-verification` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-desired-state` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-refresh`
-  - `POST /v1/drivers/generic-web/preview-inventory`
-  - `POST /v1/drivers/generic-web/preview-readiness`
+  - `POST /v1/drivers/generic-web/preview-inventory` (native FastAPI)
+  - `POST /v1/drivers/generic-web/preview-readiness` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-verification` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-destroy`
   - `POST /v1/drivers/odoo/artifact-publish-inputs` (native FastAPI)
@@ -1592,10 +1592,12 @@ evidence point at DNS/ingress routing instead of a generic provider timeout.
 
 Generic web preview inventory and destroy use
 `POST /v1/drivers/generic-web/preview-inventory` and
-`POST /v1/drivers/generic-web/preview-destroy`. They scan and delete stateless
-Dokploy preview applications by the preview application-name prefix in the
-DB-backed product profile. Lifecycle cleanup can dispatch to this generic path
-only after a passing plan and a matching stored preview record are present.
+`POST /v1/drivers/generic-web/preview-destroy`. Inventory runs through native
+FastAPI and scans stateless Dokploy preview applications by the preview
+application-name prefix in the DB-backed product profile. Destroy still uses the
+descriptor-backed driver route and deletes matching preview applications.
+Lifecycle cleanup can dispatch to this generic path only after a passing plan
+and a matching stored preview record are present.
 
 ### Operator read endpoints
 

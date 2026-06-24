@@ -223,6 +223,14 @@ Keep a compatibility surface only when it is one of these:
   acceptance through the generic-web base driver. Their descriptor routes remain
   discoverable, but legacy WSGI descriptor dispatch is exempted and direct
   fallback calls fail closed.
+- Generic-web preview inventory and readiness use native FastAPI routes:
+  `POST /v1/drivers/generic-web/preview-inventory` and
+  `POST /v1/drivers/generic-web/preview-readiness`. They preserve stored
+  profile validation before authorization, preview-context authorization from
+  the DB-backed product profile, non-idempotent execution, inventory scan record
+  writes when storage supports them, and readiness result projection. Their
+  descriptor routes remain discoverable, but legacy WSGI descriptor dispatch is
+  exempted and direct fallback calls fail closed.
 - Odoo prod-promotion inputs, prod-promotion run, and the older monolithic
   prod-promotion compatibility route use native FastAPI routes:
   `POST /v1/drivers/odoo/prod-promotion-inputs`,
