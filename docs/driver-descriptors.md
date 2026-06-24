@@ -173,8 +173,9 @@ Launchplane reads the product profile, destination lane, selected deployment
 record, and optional backup gate evidence, then writes a
 `GenericWebRollbackPlanRecord`. It does not mutate the provider. Odoo rollback
 planning uses this generic-web route; the former Odoo-shaped rollback-plan alias
-is retired. This route is registered through descriptor-backed dispatch, so
-descriptor/handler drift fails closed before the service starts.
+is retired. This route is executed by native FastAPI. Its descriptor remains
+discoverable for driver views and authz metadata, while legacy WSGI
+descriptor-backed dispatch is exempted so direct fallback calls fail closed.
 
 The `prod_rollback` action routes to
 `POST /v1/drivers/generic-web/prod-rollback`. It re-runs the same rollback-plan
@@ -183,8 +184,9 @@ generic-web deploy path using the previous immutable artifact identity. Generic
 rollback also forwards the generic deploy post-deploy extension hook, so a
 based driver can keep product-only post-deploy checks while reusing the common
 rollback deployment path once its other invariants are represented. This route
-is registered through descriptor-backed dispatch, so descriptor/handler drift
-fails closed before the service starts. Product drivers keep their own
+is executed by native FastAPI. Its descriptor remains discoverable for driver
+views and authz metadata, while legacy WSGI descriptor-backed dispatch is
+exempted so direct fallback calls fail closed. Product drivers keep their own
 `prod_rollback` action only when they need additional product-specific gates,
 such as Odoo backup, release tuple, manifest, migration, or post-deploy checks.
 Odoo keeps `POST /v1/drivers/odoo/prod-rollback` as its

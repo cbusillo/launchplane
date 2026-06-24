@@ -283,8 +283,8 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
   - `POST /v1/drivers/generic-web/prod-promotion-workflow`
-  - `POST /v1/drivers/generic-web/prod-rollback-plan`
-  - `POST /v1/drivers/generic-web/prod-rollback`
+  - `POST /v1/drivers/generic-web/prod-rollback-plan` (native FastAPI)
+  - `POST /v1/drivers/generic-web/prod-rollback` (native FastAPI)
   - `POST /v1/drivers/generic-web/stable-verification`
   - `POST /v1/drivers/generic-web/preview-desired-state` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-refresh`
@@ -1547,6 +1547,23 @@ The legacy response-only `target_type` alias is retired; Dokploy execution
 configuration still uses provider-specific target type fields internally where
 application-vs-compose behavior is required.
 
+Generic web prod rollback planning and apply use native FastAPI routes:
+`POST /v1/drivers/generic-web/prod-rollback-plan` and
+`POST /v1/drivers/generic-web/prod-rollback`. Both routes resolve the product
+profile and destination lane before authorization, then authorize against the
+lane context stored in Launchplane rather than request-supplied runtime
+authority. Rollback planning writes a `GenericWebRollbackPlanRecord` without
+mutating the provider. Rollback apply re-runs planning, applies ready plans via
+the common generic-web deploy path, and preserves the post-deploy extension hook
+for drivers such as Odoo that inherit generic-web behavior. Optional
+`Idempotency-Key` replay is available for non-blocked plan results and for
+successful apply results; blocked results and ordinary deploy failures are left
+uncached so a later retry can observe recovered Launchplane/provider state.
+Apply results where deploy passed but post-deploy failed are cached because the
+provider mutation already occurred. The descriptors remain discoverable, but
+legacy WSGI descriptor dispatch is exempted for both paths and direct fallback
+calls fail closed.
+
 Generic web preview desired-state discovery uses
 `POST /v1/drivers/generic-web/preview-desired-state`, now owned by native
 FastAPI. The request names the product and optional pull-request label/page
@@ -1798,6 +1815,8 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI compatibility route)
 - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-promotion`
+- `POST /v1/drivers/generic-web/prod-rollback-plan` (native FastAPI)
+- `POST /v1/drivers/generic-web/prod-rollback` (native FastAPI)
 - `POST /v1/drivers/verireel/...`
 
 The first driver route handlers now in service are admitted from descriptor

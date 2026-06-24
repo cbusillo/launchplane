@@ -9,8 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
-    GenericWebRollbackPlanStore,
-    execute_generic_web_rollback_plan,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import HealthcheckEvidence, ReleaseStatus
@@ -54,10 +52,6 @@ from control_plane.workflows.generic_web_promotion import (
 from control_plane.workflows.generic_web_promotion_workflow import (
     GenericWebPromotionWorkflowRequest,
     dispatch_generic_web_promotion_workflow,
-)
-from control_plane.workflows.generic_web_rollback import (
-    GenericWebRollbackApplyStore,
-    execute_generic_web_rollback,
 )
 from control_plane.workflows.odoo_generic_web_post_deploy import (
     generic_web_post_deploy_executor_for_driver_id,
@@ -438,27 +432,6 @@ def _handle_generic_web_stable_verification(
     )
 
 
-def _handle_generic_web_rollback_plan(
-    request: GenericWebRollbackPlanEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del control_plane_root_path
-    if resolved_context.profile is None or resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web rollback plan requires a product profile lane."
-        )
-    driver_result = execute_generic_web_rollback_plan(
-        record_store=cast(GenericWebRollbackPlanStore, record_store),
-        request=request.rollback_plan,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"generic_web_rollback_plan_id": driver_result.plan_id},
-        driver_result=driver_result,
-    )
-
-
 def _handle_generic_web_deploy(
     request: GenericWebDeployEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -567,34 +540,6 @@ def _handle_generic_web_prod_promotion(
             "release_tag": driver_result.release_tag,
             "release_url": driver_result.release_url,
             "dry_run": driver_result.dry_run,
-        },
-        driver_result=driver_result,
-    )
-
-
-def _handle_generic_web_rollback(
-    request: GenericWebRollbackEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    if resolved_context.profile is None or resolved_context.lane is None:
-        raise ProductDriverMismatchError("Generic web rollback requires a product profile lane.")
-    driver_result = execute_generic_web_rollback(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebRollbackApplyStore, record_store),
-        request=request.rollback,
-        post_deploy_executor=_generic_web_post_deploy_executor_for_profile(
-            resolved_context.profile
-        ),
-    )
-    return _DescriptorDriverDispatchResult(
-        result={
-            "generic_web_rollback_plan_id": driver_result.plan_id,
-            "deployment_record_id": driver_result.deployment_record_id,
-            "rollback_status": driver_result.rollback_status,
-            "deploy_status": driver_result.deploy_status,
-            "post_deploy_status": driver_result.post_deploy_status,
         },
         driver_result=driver_result,
     )

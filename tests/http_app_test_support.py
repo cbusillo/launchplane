@@ -3582,6 +3582,50 @@ async def _post_odoo_prod_rollback(
     )
 
 
+async def _post_generic_web_rollback_plan(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/drivers/generic-web/prod-rollback-plan",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+async def _post_generic_web_rollback(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/drivers/generic-web/prod-rollback",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _post_odoo_stable_bootstrap(
     app: FastAPI,
     payload: dict[str, object],
