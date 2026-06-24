@@ -155,6 +155,15 @@ Keep a compatibility surface only when it is one of these:
   when callers send `Idempotency-Key`. The descriptor route remains
   discoverable, but legacy WSGI descriptor dispatch is exempted and direct
   fallback calls fail closed.
+- Odoo target-replacement apply uses native FastAPI
+  `POST /v1/drivers/odoo/target-replacement-apply`, preserves product/profile
+  driver validation before authorization, instance-to-lane context resolution,
+  lane-scoped `odoo_target_replacement_apply.execute` authorization, required
+  `Idempotency-Key` operation-record replay/conflict behavior, caller-scoped
+  idempotency, active-lane operation rejection with the existing operation
+  payload, dependency-miss `503` classification, and operation poll URLs. The
+  descriptor route remains discoverable, but legacy WSGI descriptor dispatch is
+  exempted and direct fallback calls fail closed.
 - Odoo preview apply inputs and preview apply use native FastAPI routes:
   `POST /v1/drivers/odoo/preview-apply-inputs` and
   `POST /v1/drivers/odoo/preview-apply`. They preserve preview-profile
