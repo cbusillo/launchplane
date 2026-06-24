@@ -72,10 +72,15 @@ Keep a compatibility surface only when it is one of these:
   validation, and `200` reconcile result payload. Their legacy WSGI branches are
   deleted; direct fallback calls fail closed while the mounted fallback remains
   for retained non-native routes.
-- Odoo stable-bootstrap and target-replacement operation status reads use native
-  FastAPI routes for bearer-token and human-session callers. Their legacy WSGI
-  read branches are deleted; the POST enqueue routes still return the same poll
-  URLs while those write paths remain on the retained fallback.
+- Odoo stable-bootstrap operation status reads use native FastAPI routes for
+  bearer-token and human-session callers. The stable-bootstrap POST enqueue route
+  also uses native FastAPI on the bearer/OIDC write identity path and still
+  returns the same operation poll URL. The legacy WSGI read branch and descriptor
+  write dispatch branch are deleted; direct fallback calls fail closed.
+- Odoo target-replacement operation status reads use native FastAPI routes for
+  bearer-token and human-session callers. Their legacy WSGI read branches are
+  deleted; the POST enqueue routes still return the same poll URLs while those
+  write paths remain on the retained fallback.
 - Tracked target logs use the native FastAPI
   `GET /v1/contexts/{context}/instances/{instance}/logs` route. The legacy WSGI
   branch is deleted; direct fallback calls fail closed while the mounted fallback
@@ -131,6 +136,14 @@ Keep a compatibility surface only when it is one of these:
   classification, and handler-side `404` file-miss parity. The descriptor route
   remains discoverable, but the legacy WSGI descriptor dispatch path is exempted
   and direct fallback calls fail closed.
+- Odoo stable bootstrap uses native FastAPI
+  `POST /v1/drivers/odoo/stable-bootstrap`, preserves product/profile driver
+  validation before authorization, lane-scoped `odoo_stable_bootstrap.execute`
+  authorization, required `Idempotency-Key` operation-record replay/conflict
+  behavior, active-lane operation rejection with the existing operation payload,
+  dependency-miss `503` classification, and operation poll URLs. The descriptor
+  route remains discoverable, but legacy WSGI descriptor dispatch is exempted and
+  direct fallback calls fail closed.
 - Odoo preview apply inputs and preview apply use native FastAPI routes:
   `POST /v1/drivers/odoo/preview-apply-inputs` and
   `POST /v1/drivers/odoo/preview-apply`. They preserve preview-profile

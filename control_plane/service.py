@@ -45,10 +45,6 @@ from control_plane.contracts.verireel_prod_backup_gate import (
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
 )
-from control_plane.contracts.odoo_stable_bootstrap_operation import (
-    OdooStableBootstrapOperationRecord,
-    build_odoo_stable_bootstrap_operation_id,
-)
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementRequest,
@@ -255,8 +251,9 @@ from control_plane.odoo_prod_rollback_http import (
     ODOO_PROD_ROLLBACK_ROUTE,
     OdooProdRollbackEnvelope as OdooProdRollbackEnvelope,
 )
-from control_plane.contracts.odoo_stable_bootstrap import (
-    OdooStableBootstrapRequest,
+from control_plane.odoo_stable_bootstrap_http import (
+    ODOO_STABLE_BOOTSTRAP_ROUTE,
+    OdooStableBootstrapEnvelope as OdooStableBootstrapEnvelope,
 )
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
@@ -324,6 +321,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         ODOO_PROD_PROMOTION_ROUTE,
         ODOO_PROD_PROMOTION_RUN_ROUTE,
         ODOO_PROD_ROLLBACK_ROUTE,
+        ODOO_STABLE_BOOTSTRAP_ROUTE,
         ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
     }
 )
@@ -366,31 +364,6 @@ class _TestLaunchplaneServiceRecordStore(Protocol):
     def backend_name(self) -> str: ...
 
     def close(self) -> None: ...
-
-
-class _OdooStableBootstrapOperationStore(Protocol):
-    def write_odoo_stable_bootstrap_operation_record(
-        self, record: OdooStableBootstrapOperationRecord
-    ) -> object: ...
-
-    def create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
-        self, record: OdooStableBootstrapOperationRecord
-    ) -> tuple[OdooStableBootstrapOperationRecord, bool]: ...
-
-    def read_odoo_stable_bootstrap_operation_record(
-        self, operation_id: str
-    ) -> OdooStableBootstrapOperationRecord: ...
-
-    def list_odoo_stable_bootstrap_operation_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        instance_name: str = "",
-        idempotency_key: str = "",
-        statuses: tuple[str, ...] = (),
-        limit: int | None = None,
-    ) -> tuple[OdooStableBootstrapOperationRecord, ...]: ...
 
 
 class _OdooStableTargetReplacementOperationStore(Protocol):
@@ -477,18 +450,6 @@ _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
 )
 
 
-class OdooStableBootstrapEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    bootstrap: OdooStableBootstrapRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooStableBootstrapEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo stable bootstrap")
-        if self.product.strip() != self.bootstrap.product.strip():
-            raise ValueError("Odoo stable bootstrap requires matching product values.")
-        return self
-
-
 class OdooArtifactPublishEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     publish: OdooArtifactPublishEvidenceRequest
@@ -527,7 +488,7 @@ _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE = _DriverRouteExecutionMetadata(
 
 
 _ODOO_STABLE_BOOTSTRAP_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/stable-bootstrap",
+    route_path=ODOO_STABLE_BOOTSTRAP_ROUTE,
     envelope_model=OdooStableBootstrapEnvelope,
     denial_message=(
         "Workflow cannot execute Odoo stable bootstrap for the requested product/context."
@@ -1196,121 +1157,6 @@ def _dispatch_odoo_target_replacement_apply(
     return result, driver_result
 
 
-def _dispatch_odoo_stable_bootstrap(
-    request: OdooStableBootstrapEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-    state_dir: Path,
-    database_url: str | None,
-    identity: LaunchplaneIdentity,
-    request_scope: str,
-    request_idempotency_key: str,
-    request_fingerprint: str,
-    start_response: _StartResponse,
-    trace_id: str,
-) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
-    del resolved_context, state_dir, database_url, identity, request_scope
-    if not request_idempotency_key:
-        return _json_response(
-            start_response=start_response,
-            status_code=400,
-            payload={
-                "status": "rejected",
-                "trace_id": trace_id,
-                "error": {
-                    "code": "idempotency_key_required",
-                    "message": "Odoo stable bootstrap operations require an Idempotency-Key header.",
-                },
-            },
-        )
-
-    operation_store = _odoo_stable_bootstrap_operation_store(record_store)
-    existing_operation = _find_odoo_stable_bootstrap_operation_by_idempotency_key(
-        operation_store=operation_store,
-        product=request.product,
-        context=request.bootstrap.context,
-        instance=request.bootstrap.instance,
-        idempotency_key=request_idempotency_key,
-    )
-    if existing_operation is not None:
-        if existing_operation.request_fingerprint != request_fingerprint:
-            return _json_response(
-                start_response=start_response,
-                status_code=409,
-                payload={
-                    "status": "rejected",
-                    "trace_id": trace_id,
-                    "error": {
-                        "code": "idempotency_key_reused",
-                        "message": "Idempotency-Key was already used for a different Odoo stable bootstrap request.",
-                    },
-                },
-            )
-        driver_result = _operation_payload(existing_operation)
-        result: dict[str, object] = {
-            "odoo_stable_bootstrap_operation_id": existing_operation.operation_id,
-            **(
-                {"deployment_record_id": existing_operation.deployment_record_id}
-                if existing_operation.deployment_record_id
-                else {}
-            ),
-        }
-        return result, driver_result
-
-    operation = _build_odoo_stable_bootstrap_operation_record(
-        bootstrap_request=request.bootstrap,
-        idempotency_key=request_idempotency_key,
-        request_fingerprint=request_fingerprint,
-        created_at=_utc_now_timestamp(),
-    )
-    operation, created_operation = (
-        operation_store.create_odoo_stable_bootstrap_operation_record_if_no_active_lane(operation)
-    )
-    if not created_operation:
-        if operation.idempotency_key == request_idempotency_key:
-            if operation.request_fingerprint != request_fingerprint:
-                return _json_response(
-                    start_response=start_response,
-                    status_code=409,
-                    payload={
-                        "status": "rejected",
-                        "trace_id": trace_id,
-                        "error": {
-                            "code": "idempotency_key_reused",
-                            "message": "Idempotency-Key was already used for a different Odoo stable bootstrap request.",
-                        },
-                    },
-                )
-            driver_result = _operation_payload(operation)
-            result = {
-                "odoo_stable_bootstrap_operation_id": operation.operation_id,
-                **(
-                    {"deployment_record_id": operation.deployment_record_id}
-                    if operation.deployment_record_id
-                    else {}
-                ),
-            }
-            return result, driver_result
-        return _json_response(
-            start_response=start_response,
-            status_code=409,
-            payload={
-                "status": "rejected",
-                "trace_id": trace_id,
-                "error": {
-                    "code": "odoo_stable_bootstrap_operation_active",
-                    "message": "An Odoo stable bootstrap operation is already active for this product/context/instance.",
-                },
-                "operation": _operation_payload(operation),
-            },
-        )
-
-    driver_result = _operation_payload(operation)
-    result = {"odoo_stable_bootstrap_operation_id": operation.operation_id}
-    return result, driver_result
-
-
 def _handle_verireel_preview_verification(
     request: VeriReelPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -1741,17 +1587,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             custom_dispatch_handler=_dispatch_odoo_target_replacement_apply,
         ),
-        _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_STABLE_BOOTSTRAP_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.bootstrap.context,
-                instance=request.bootstrap.instance,
-                authorization_context=request.bootstrap.context,
-                use_resolved_profile_product_for_authorization=False,
-            ),
-            custom_dispatch_handler=_dispatch_odoo_stable_bootstrap,
-        ),
         _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -1897,7 +1732,6 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
                 _ODOO_PROD_ROLLBACK_METADATA.route_path,
                 _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
                 _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
-                _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
                 _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
                 _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
                 _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
@@ -3479,18 +3313,6 @@ def _driver_result_payload_for_idempotency_replay(
     return replay_payload
 
 
-def _operation_payload(
-    operation: OdooStableBootstrapOperationRecord,
-) -> dict[str, object]:
-    payload = operation.model_dump(mode="json")
-    payload["poll_url"] = _odoo_stable_bootstrap_operation_poll_url(operation.operation_id)
-    return payload
-
-
-def _odoo_stable_bootstrap_operation_poll_url(operation_id: str) -> str:
-    return f"/v1/drivers/odoo/stable-bootstrap/operations/{operation_id.strip()}"
-
-
 def _target_replacement_operation_payload(
     operation: OdooStableTargetReplacementOperationRecord,
 ) -> dict[str, object]:
@@ -3501,22 +3323,6 @@ def _target_replacement_operation_payload(
 
 def _odoo_stable_target_replacement_operation_poll_url(operation_id: str) -> str:
     return f"/v1/drivers/odoo/target-replacement/operations/{operation_id.strip()}"
-
-
-def _odoo_stable_bootstrap_operation_store(
-    record_store: object,
-) -> _OdooStableBootstrapOperationStore:
-    required_methods = (
-        "write_odoo_stable_bootstrap_operation_record",
-        "create_odoo_stable_bootstrap_operation_record_if_no_active_lane",
-        "read_odoo_stable_bootstrap_operation_record",
-        "list_odoo_stable_bootstrap_operation_records",
-    )
-    if all(hasattr(record_store, method_name) for method_name in required_methods):
-        return cast(_OdooStableBootstrapOperationStore, record_store)
-    raise click.ClickException(
-        "Odoo stable bootstrap operations require Launchplane operation-record storage."
-    )
 
 
 def _odoo_stable_target_replacement_operation_store(
@@ -3561,24 +3367,6 @@ def _query_int_value(
     return value
 
 
-def _find_odoo_stable_bootstrap_operation_by_idempotency_key(
-    *,
-    operation_store: _OdooStableBootstrapOperationStore,
-    product: str,
-    context: str,
-    instance: str,
-    idempotency_key: str,
-) -> OdooStableBootstrapOperationRecord | None:
-    records = operation_store.list_odoo_stable_bootstrap_operation_records(
-        product=product,
-        context_name=context,
-        instance_name=instance,
-        idempotency_key=idempotency_key,
-        limit=1,
-    )
-    return records[0] if records else None
-
-
 def _find_odoo_stable_target_replacement_operation_by_idempotency_key(
     *,
     operation_store: _OdooStableTargetReplacementOperationStore,
@@ -3591,34 +3379,6 @@ def _find_odoo_stable_target_replacement_operation_by_idempotency_key(
         limit=1,
     )
     return records[0] if records else None
-
-
-def _build_odoo_stable_bootstrap_operation_record(
-    *,
-    bootstrap_request: OdooStableBootstrapRequest,
-    idempotency_key: str,
-    request_fingerprint: str,
-    created_at: str,
-) -> OdooStableBootstrapOperationRecord:
-    return OdooStableBootstrapOperationRecord(
-        operation_id=build_odoo_stable_bootstrap_operation_id(
-            product=bootstrap_request.product,
-            context=bootstrap_request.context,
-            instance=bootstrap_request.instance,
-            created_at=created_at,
-            idempotency_key=idempotency_key,
-        ),
-        product=bootstrap_request.product,
-        context=bootstrap_request.context,
-        instance=bootstrap_request.instance,
-        idempotency_key=idempotency_key,
-        request_fingerprint=request_fingerprint,
-        request=bootstrap_request,
-        status="pending",
-        phase="created",
-        created_at=created_at,
-        updated_at=created_at,
-    )
 
 
 def _build_odoo_stable_target_replacement_operation_record(

@@ -231,6 +231,18 @@ from control_plane.odoo_prod_rollback_http import (
     resolve_odoo_prod_rollback_product_route,
     should_store_odoo_prod_rollback_idempotency,
 )
+from control_plane.odoo_stable_bootstrap_http import (
+    ODOO_STABLE_BOOTSTRAP_ACTION,
+    ODOO_STABLE_BOOTSTRAP_ROUTE as _ODOO_STABLE_BOOTSTRAP_ROUTE,
+    OdooStableBootstrapEnvelope,
+    OdooStableBootstrapIdempotencyKeyReusedError,
+    OdooStableBootstrapOperationActiveError,
+    OdooStableBootstrapProductMismatchError,
+    OdooStableBootstrapRouteDependencyError,
+    enqueue_odoo_stable_bootstrap_operation,
+    operation_payload as odoo_stable_bootstrap_operation_payload,
+    resolve_odoo_stable_bootstrap_product_route,
+)
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductActivityReadModel,
@@ -608,6 +620,15 @@ class LaunchplaneErrorResponse(BaseModel):
     error: LaunchplaneErrorDetail
     records: dict[str, str] | None = None
     authz: dict[str, object] | None = None
+
+
+class OdooStableBootstrapOperationActiveResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["rejected"] = "rejected"
+    trace_id: str
+    error: LaunchplaneErrorDetail
+    operation: dict[str, object]
 
 
 class HealthResponse(BaseModel):
@@ -6302,6 +6323,139 @@ def create_launchplane_fastapi_app(
                 response=response,
             )
         return response
+
+    async def write_odoo_stable_bootstrap(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", include_in_schema=False)
+        ] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            bootstrap_request = OdooStableBootstrapEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        try:
+            resolve_odoo_stable_bootstrap_product_route(
+                record_store=record_store,
+                product=bootstrap_request.product,
+                context=bootstrap_request.bootstrap.context,
+                instance=bootstrap_request.bootstrap.instance,
+            )
+        except OdooStableBootstrapRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_STABLE_BOOTSTRAP_ROUTE,
+            )
+        except OdooStableBootstrapProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=ODOO_STABLE_BOOTSTRAP_ACTION,
+            product=bootstrap_request.product,
+            context=bootstrap_request.bootstrap.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute Odoo stable bootstrap for the"
+                    " requested product/context."
+                ),
+            )
+
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Odoo stable bootstrap operations require an Idempotency-Key header.",
+            )
+        try:
+            records, driver_result = enqueue_odoo_stable_bootstrap_operation(
+                record_store=record_store,
+                request=bootstrap_request,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=request_fingerprint(raw_payload),
+                created_at=utc_now_timestamp(),
+            )
+        except OdooStableBootstrapIdempotencyKeyReusedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message=(
+                    "Idempotency-Key was already used for a different Odoo stable"
+                    " bootstrap request."
+                ),
+            ) from error
+        except OdooStableBootstrapOperationActiveError as error:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "odoo_stable_bootstrap_operation_active",
+                        "message": (
+                            "An Odoo stable bootstrap operation is already active for"
+                            " this product/context/instance."
+                        ),
+                    },
+                    "operation": odoo_stable_bootstrap_operation_payload(error.operation),
+                },
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={key: str(value) for key, value in records.items()},
+            result=driver_result,
+        )
 
     async def write_odoo_prod_rollback(
         request: Request,
@@ -14115,6 +14269,56 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_STABLE_BOOTSTRAP_ROUTE,
+        write_odoo_stable_bootstrap,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "parameters": [
+                {
+                    "name": "Idempotency-Key",
+                    "in": "header",
+                    "required": True,
+                    "schema": {"type": "string", "minLength": 1},
+                    "description": "Required operation idempotency key.",
+                }
+            ],
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": OdooStableBootstrapEnvelope.model_json_schema()}
+                },
+            },
+        },
+        operation_id="write_odoo_stable_bootstrap",
+        summary="Enqueue Odoo stable bootstrap operation",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "anyOf": [
+                                LaunchplaneErrorResponse.model_json_schema(
+                                    ref_template="#/components/schemas/{model}"
+                                ),
+                                OdooStableBootstrapOperationActiveResponse.model_json_schema(
+                                    ref_template="#/components/schemas/{model}"
+                                ),
+                            ]
+                        }
+                    }
+                }
+            },
             503: {"model": LaunchplaneErrorResponse},
         },
     )
