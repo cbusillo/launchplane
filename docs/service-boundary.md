@@ -280,7 +280,8 @@ VeriReel product paths:
   - `POST /v1/work-graph/merge-train/controller/run-once` (native FastAPI)
 - product driver routes:
   - `POST /v1/drivers/launchplane/self-deploy` (native FastAPI)
-  - `POST /v1/drivers/generic-web/deploy`
+  - `POST /v1/drivers/generic-web/deploy` (native FastAPI)
+  - `POST /v1/drivers/generic-web/source-ref-deploy` (native FastAPI)
   - `POST /v1/drivers/generic-web/prod-promotion`
   - `POST /v1/drivers/generic-web/prod-promotion-workflow`
   - `POST /v1/drivers/generic-web/prod-rollback-plan` (native FastAPI)
@@ -1520,12 +1521,19 @@ service route or a workflow that calls it so Launchplane can authorize with
 OIDC/session identity, resolve current DB-backed target records in the deployed
 runtime, and audit sanitized key/count evidence.
 
-Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
-the product, target instance, immutable artifact/image reference, and source ref;
-Launchplane resolves the context from the DB-backed product profile lane and the
-runtime target identity from DB-backed provider-target records. Dokploy target
-records remain provider execution configuration for Dokploy-backed lanes and
-must agree with the provider-target identity before deploy proceeds.
+Generic web deploys use native FastAPI
+`POST /v1/drivers/generic-web/deploy`. The request names the product, target
+instance, immutable artifact/image reference, and source ref; Launchplane
+resolves the context from the DB-backed product profile lane and the runtime
+target identity from DB-backed provider-target records. Dokploy target records
+remain provider execution configuration for Dokploy-backed lanes and must agree
+with the provider-target identity before deploy proceeds. The route keeps
+optional `Idempotency-Key` replay/conflict handling and stores deploy-pass plus
+post-deploy-fail evidence to prevent repeating the completed provider mutation.
+Generic web source-ref deploys use native FastAPI
+`POST /v1/drivers/generic-web/source-ref-deploy`; the route validates the
+request context and instance against the resolved product profile lane before
+authorization, idempotency replay, or provider mutation.
 Product environment reads expose neutral provider-target identity only from
 explicit provider-target rows. Paired DB-backed Dokploy target and target-id
 records remain visible as provider-specific execution/history metadata and as

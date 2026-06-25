@@ -618,13 +618,16 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_generic_web_deploy_registered_in_descriptor_dispatch(self) -> None:
+    def test_generic_web_deploy_is_native_fastapi_dispatch_exempt(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        route_path = control_plane_service._GENERIC_WEB_DEPLOY_ROUTE.route_path
 
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
         self.assertIn(
-            control_plane_service._GENERIC_WEB_DEPLOY_ROUTE.route_path,
-            dispatch_routes,
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
         )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_generic_web_prod_promotion_registered_in_descriptor_dispatch(self) -> None:
@@ -719,13 +722,16 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_generic_web_source_ref_deploy_registered_in_descriptor_dispatch(self) -> None:
+    def test_generic_web_source_ref_deploy_is_native_fastapi_dispatch_exempt(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        route_path = control_plane_service._GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path
 
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
         self.assertIn(
-            control_plane_service._GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
-            dispatch_routes,
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
         )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_npmplus_ingress_apply_is_native_fastapi_dispatch_exempt(self) -> None:
@@ -1594,13 +1600,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_stable_verification_descriptor_requires_dispatch_registration(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes({})
-
-    def test_generic_web_deploy_descriptor_requires_dispatch_registration(self) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._GENERIC_WEB_DEPLOY_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_rollback_plan_descriptor_allows_native_fastapi_exemption(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()

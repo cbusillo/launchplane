@@ -10,7 +10,6 @@ from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 from typing import Any, Literal, cast
 from unittest.mock import patch
 
@@ -1765,6 +1764,31 @@ def _write_dokploy_managed_secrets(*, store: PostgresRecordStore) -> None:
     )
 
 
+def _generic_web_deploy_result(
+    *,
+    deployment_record_id: str = "deployment-syo-testing",
+    deploy_status: Literal["pass", "fail"] = "pass",
+    post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped",
+    error_message: str = "",
+) -> GenericWebDeployResult:
+    return GenericWebDeployResult(
+        deployment_record_id=deployment_record_id,
+        deploy_status=deploy_status,
+        deploy_started_at="2026-05-26T02:00:00Z",
+        deploy_finished_at="2026-05-26T02:05:00Z",
+        product="sellyouroutboard",
+        context="sellyouroutboard-testing",
+        instance="testing",
+        target_name="syo-testing",
+        target_id="app-syo-testing",
+        target_category="application",
+        provider_id="dokploy",
+        provider_target_type="application",
+        post_deploy_status=post_deploy_status,
+        error_message=error_message,
+    )
+
+
 def _seed_tracked_target_records(
     *,
     database_url: str,
@@ -2587,7 +2611,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
 
     def test_auth_session_family_legacy_wsgi_routes_are_retired(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=Path(tmpdir) / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -2614,7 +2638,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
         )
         session_store = InMemoryHumanSessionStore()
         with TemporaryDirectory() as tmpdir:
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=Path(tmpdir),
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -2638,7 +2662,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
 class LaunchplaneServiceTests(unittest.TestCase):
     def test_npmplus_ingress_route_apply_legacy_wsgi_fallback_is_removed(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -2661,7 +2685,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
     def test_endpoint_apply_legacy_wsgi_fallback_is_removed(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -2709,7 +2733,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         policy = LaunchplaneAuthzPolicy.model_validate({"github_actions": []})
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -7643,7 +7667,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             root = Path(temporary_directory_name)
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -10116,7 +10140,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -10216,6 +10240,68 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 404)
         self.assertEqual(payload["error"]["code"], "not_found")
 
+    def test_generic_web_deploy_legacy_wsgi_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/deploy",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "deploy": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "instance": "testing",
+                        "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                        "source_git_ref": "abc123",
+                    },
+                },
+                headers={"Idempotency-Key": "generic-web-deploy-legacy-retired"},
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    def test_generic_web_source_ref_deploy_legacy_wsgi_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/source-ref-deploy",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "deploy": {
+                        "schema_version": 1,
+                        "context": "sellyouroutboard-testing",
+                        "instance": "testing",
+                        "source_git_ref": "abc123",
+                        "provider_source_ref": "refs/heads/launchplane-deploy/abc123",
+                    },
+                },
+                headers={"Idempotency-Key": "generic-web-source-ref-legacy-retired"},
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
     def test_generic_web_deploy_route_uses_profile_lane_for_authorization(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -10239,16 +10325,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
             )
-            driver_result = SimpleNamespace(deployment_record_id="deployment-syo-testing")
+            driver_result = _generic_web_deploy_result()
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
+                "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 status_code, payload = _invoke_app(
@@ -10301,7 +10387,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -10315,10 +10401,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
             )
-            driver_result = SimpleNamespace(deployment_record_id="deployment-odoo-testing")
+            driver_result = _generic_web_deploy_result(
+                deployment_record_id="deployment-odoo-testing"
+            )
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
+                "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 status_code, payload = _invoke_app(
@@ -10375,16 +10463,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
             )
-            driver_result = SimpleNamespace(deployment_record_id="deployment-syo-testing")
+            driver_result = _generic_web_deploy_result()
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
+                "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 status_code, payload = _invoke_app(
@@ -10436,7 +10524,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -10471,7 +10559,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
+                "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 first_status_code, first_payload = _invoke_app(
@@ -10525,7 +10613,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 }
             )
             identity = _identity()
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -10558,7 +10646,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
+                "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 first_status_code, first_payload = _invoke_app(
@@ -10586,6 +10674,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 self.assertIsInstance(legacy_result_payload, dict)
                 assert isinstance(legacy_result_payload, dict)
                 legacy_result_payload["target_type"] = "application"
+                legacy_records_payload = legacy_response_payload.get("records")
+                self.assertIsInstance(legacy_records_payload, dict)
+                assert isinstance(legacy_records_payload, dict)
+                legacy_records_payload["target_type"] = "application"
                 store.write_idempotency_record(
                     idempotency_record.model_copy(
                         update={"response_payload": legacy_response_payload}, deep=True
@@ -10605,6 +10697,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertTrue(second_payload["replayed"])
         self.assertEqual(second_payload["result"]["target_category"], "application")
         self.assertEqual(second_payload["result"]["provider_target_type"], "application")
+        self.assertNotIn("target_type", second_payload["records"])
         self.assertNotIn("target_type", second_payload["result"])
         deploy.assert_called_once()
 
@@ -10633,7 +10726,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -10649,7 +10742,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy"
+                "control_plane.generic_web_deploy_http.execute_generic_web_deploy"
             ) as deploy:
                 status_code, payload = _invoke_app(
                     app,
@@ -10698,7 +10791,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -10729,11 +10822,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.drivers.generic_web_dispatch.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.generic_web_deploy_http.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example", "token"),
                 ),
                 patch(
-                    "control_plane.drivers.generic_web_dispatch.execute_dokploy_compose_source_ref_deploy",
+                    "control_plane.generic_web_deploy_http.execute_dokploy_compose_source_ref_deploy",
                     return_value=driver_result,
                 ) as deploy,
             ):
@@ -10767,6 +10860,194 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["request"].context, "sellyouroutboard-testing")
         self.assertEqual(kwargs["request"].instance, "testing")
 
+    def test_generic_web_source_ref_deploy_route_resolves_context_when_instances_match(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload()
+            profile_payload["lanes"] = (
+                {
+                    "instance": "shared",
+                    "context": "first-context",
+                    "base_url": "https://first.example.com",
+                    "health_url": "https://first.example.com/api/health",
+                },
+                {
+                    "instance": "shared",
+                    "context": "sellyouroutboard-testing",
+                    "base_url": "https://testing.sellyouroutboard.com",
+                    "health_url": "https://testing.sellyouroutboard.com/api/health",
+                },
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_source_ref_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = DokployComposeSourceRefDeployResult(
+                context="sellyouroutboard-testing",
+                instance="shared",
+                target_id="compose-syo-testing",
+                target_name="syo-testing-compose",
+                source_git_ref="abc123",
+                provider_source_ref="refs/heads/launchplane-deploy/abc123",
+                original_source_ref="main",
+                restored_source_ref="main",
+                deploy_status="pass",
+            )
+
+            with (
+                patch(
+                    "control_plane.generic_web_deploy_http.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch(
+                    "control_plane.generic_web_deploy_http.execute_dokploy_compose_source_ref_deploy",
+                    return_value=driver_result,
+                ) as deploy,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/source-ref-deploy",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "deploy": {
+                            "schema_version": 1,
+                            "context": "sellyouroutboard-testing",
+                            "instance": "shared",
+                            "source_git_ref": "abc123",
+                            "provider_source_ref": "refs/heads/launchplane-deploy/abc123",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-source-ref-shared-instance"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["target_id"], "compose-syo-testing")
+        deploy.assert_called_once()
+        _, kwargs = deploy.call_args
+        self.assertEqual(kwargs["request"].context, "sellyouroutboard-testing")
+        self.assertEqual(kwargs["request"].instance, "shared")
+
+    def test_generic_web_source_ref_deploy_route_validates_lane_before_replay(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            identity = _identity()
+            valid_deploy_payload: dict[str, object] = {
+                "schema_version": 1,
+                "context": "sellyouroutboard-testing",
+                "instance": "testing",
+                "source_git_ref": "abc123",
+                "provider_source_ref": "refs/heads/launchplane-deploy/abc123",
+            }
+            valid_payload: dict[str, object] = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "deploy": valid_deploy_payload,
+            }
+            invalid_payload: dict[str, object] = {
+                **valid_payload,
+                "deploy": {
+                    **valid_deploy_payload,
+                    "context": "other-context",
+                },
+            }
+            store.write_idempotency_record(
+                LaunchplaneIdempotencyRecord(
+                    record_id="idempotency-generic-web-source-ref-lane-before-replay",
+                    scope="|".join(
+                        (
+                            identity.repository,
+                            identity.workflow_ref or identity.job_workflow_ref,
+                            identity.subject,
+                        )
+                    ),
+                    route_path="/v1/drivers/generic-web/source-ref-deploy",
+                    idempotency_key="generic-web-source-ref-lane-before-replay",
+                    request_fingerprint=control_plane_service._idempotency_request_fingerprint(
+                        route_path="/v1/drivers/generic-web/source-ref-deploy",
+                        payload=valid_payload,
+                    ),
+                    response_status_code=202,
+                    response_trace_id="trace-original",
+                    recorded_at="2026-05-26T02:00:00Z",
+                    response_payload={
+                        "trace_id": "trace-original",
+                        "records": {"target_id": "compose-syo-testing"},
+                        "result": {"deploy_status": "pass"},
+                    },
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_source_ref_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.generic_web_deploy_http.execute_dokploy_compose_source_ref_deploy"
+            ) as deploy:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/source-ref-deploy",
+                    payload=invalid_payload,
+                    headers={"Idempotency-Key": "generic-web-source-ref-lane-before-replay"},
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
+        deploy.assert_not_called()
+
     def test_generic_web_deploy_route_accepts_padded_lane_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -10796,16 +11077,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
             )
-            driver_result = SimpleNamespace(deployment_record_id="deployment-syo-testing")
+            driver_result = _generic_web_deploy_result()
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
+                "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 status_code, payload = _invoke_app(
@@ -11459,16 +11740,29 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
             )
-            driver_result = SimpleNamespace(deployment_record_id="deployment-generic-web-testing")
+            driver_result = GenericWebDeployResult(
+                deployment_record_id="deployment-generic-web-testing",
+                deploy_status="pass",
+                deploy_started_at="2026-05-26T02:00:00Z",
+                deploy_finished_at="2026-05-26T02:05:00Z",
+                product="generic-web",
+                context="generic-web-testing",
+                instance="testing",
+                target_name="generic-web-testing",
+                target_id="app-generic-web-testing",
+                target_category="application",
+                provider_id="dokploy",
+                provider_target_type="application",
+            )
 
             with patch(
-                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
+                "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 status_code, payload = _invoke_app(
@@ -11521,7 +11815,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,

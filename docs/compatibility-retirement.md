@@ -240,6 +240,20 @@ Keep a compatibility surface only when it is one of these:
   retry behavior, and preview-destroy reason-insensitive idempotency replay.
   Their descriptor routes remain discoverable, but legacy WSGI descriptor
   dispatch is exempted and direct fallback calls fail closed.
+- Generic-web deploy and source-ref deploy use native FastAPI routes:
+  `POST /v1/drivers/generic-web/deploy` and
+  `POST /v1/drivers/generic-web/source-ref-deploy`. They preserve stored profile
+  validation before authorization, instance-to-lane context resolution, lane
+  authorization, optional `Idempotency-Key` replay/conflict behavior,
+  descriptor discoverability, and retired `target_type` alias scrubbing on
+  deploy responses and replays. Deploy keeps the generic post-deploy extension
+  hook for Odoo-based profiles and caches deploy-pass plus post-deploy-fail
+  results because provider mutation already occurred; ordinary failed deploy
+  results are not cached. Source-ref deploy validates the request context and
+  instance against the resolved profile lane before authorization, idempotency
+  replay, or provider mutation, and failed source-ref deploy results are not
+  cached. Legacy WSGI descriptor dispatch is exempted for both paths, and direct
+  fallback calls fail closed.
 - Odoo prod-promotion inputs, prod-promotion run, and the older monolithic
   prod-promotion compatibility route use native FastAPI routes:
   `POST /v1/drivers/odoo/prod-promotion-inputs`,

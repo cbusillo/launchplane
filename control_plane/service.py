@@ -97,14 +97,10 @@ from control_plane.drivers.generic_web_dispatch import (
     _GENERIC_WEB_ROLLBACK_ROUTE as _GENERIC_WEB_ROLLBACK_ROUTE,
     _GENERIC_WEB_STABLE_VERIFICATION_ROUTE as _GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
     _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE as _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
-    _generic_web_post_deploy_executor_for_profile as _generic_web_post_deploy_executor_for_profile,
-    _handle_generic_web_deploy as _handle_generic_web_deploy,
     _handle_generic_web_prod_promotion as _handle_generic_web_prod_promotion,
     _handle_generic_web_promotion_workflow as _handle_generic_web_promotion_workflow,
-    _handle_generic_web_source_ref_deploy as _handle_generic_web_source_ref_deploy,
     _stable_verification_health_evidence as _stable_verification_health_evidence,
     _reject_human_live_generic_web_prod_promotion as _reject_human_live_generic_web_prod_promotion,
-    _validate_generic_web_source_ref_deploy_lane as _validate_generic_web_source_ref_deploy_lane,
     _validate_stable_verification_request as _validate_stable_verification_request,
     _validate_generic_web_prod_promotion_lanes as _validate_generic_web_prod_promotion_lanes,
 )
@@ -303,6 +299,8 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
+        _GENERIC_WEB_DEPLOY_ROUTE.route_path,
+        _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
         _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
@@ -1254,27 +1252,6 @@ def _handle_verireel_app_maintenance(
 
 def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchRoute[Any]]:
     return {
-        _GENERIC_WEB_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_DEPLOY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.deploy.product,
-                context="",
-                instance=request.deploy.instance,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_deploy,
-        ),
-        _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.deploy.context,
-                instance=request.deploy.instance,
-                require_profile=True,
-            ),
-            pre_idempotency_validator=_validate_generic_web_source_ref_deploy_lane,
-            handler=_handle_generic_web_source_ref_deploy,
-        ),
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -1430,8 +1407,6 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
     return (
         frozenset(
             (
-                _GENERIC_WEB_DEPLOY_ROUTE.route_path,
-                _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
                 _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
                 _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
                 _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,

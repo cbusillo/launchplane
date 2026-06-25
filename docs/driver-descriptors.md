@@ -137,20 +137,28 @@ scheduled synthetic check when the lane has a public `base_url` or `health_url`.
 Based drivers inherit the same observation record and notification path; they do
 not need tenant-local monitor workflows.
 
-The `stable_deploy` action routes to `POST /v1/drivers/generic-web/deploy`. The
-route resolves product lane context from DB-backed product profile records and
-runtime target bindings from explicit provider-target rows, while Dokploy target
-records continue to hold provider-specific execution configuration. Generic-web
-deploy validates that the provider-target row and Dokploy execution record agree
-before mutating the provider, so stale or divergent runtime identity fails
-closed. Generic-web
-deploy records post-deploy evidence as `skipped` unless a based driver explicitly
-provides a product post-deploy extension. That extension point is the boundary
-for product-only work after a provider deploy succeeds; it must return terminal
-post-deploy evidence and must keep deploy status distinct from post-deploy
-status. Odoo profiles receive this extension when they execute generic-web
-deploy, which runs the Odoo post-deploy driver after the provider deploy
-succeeds.
+The `stable_deploy` action routes to the native FastAPI
+`POST /v1/drivers/generic-web/deploy` endpoint. Descriptor metadata remains
+discoverable, but legacy WSGI descriptor dispatch is exempted. The route
+resolves product lane context from DB-backed product profile records and runtime
+target bindings from explicit provider-target rows, while Dokploy target records
+continue to hold provider-specific execution configuration. Generic-web deploy
+validates that the provider-target row and Dokploy execution record agree before
+mutating the provider, so stale or divergent runtime identity fails closed.
+Generic-web deploy records post-deploy evidence as `skipped` unless a based
+driver explicitly provides a product post-deploy extension. That extension point
+is the boundary for product-only work after a provider deploy succeeds; it must
+return terminal post-deploy evidence and must keep deploy status distinct from
+post-deploy status. Odoo profiles receive this extension when they execute
+generic-web deploy, which runs the Odoo post-deploy driver after the provider
+deploy succeeds.
+
+The `source_ref_deploy` action routes to the native FastAPI
+`POST /v1/drivers/generic-web/source-ref-deploy` endpoint. The route uses the
+same product profile lane resolution as stable deploy and validates the request
+context and instance against the resolved lane before authorization,
+idempotency replay, or provider mutation. This keeps descriptor discovery and
+driver authz metadata intact while closing the legacy WSGI execution path.
 
 The `prod_promotion` action routes to
 `POST /v1/drivers/generic-web/prod-promotion`. It promotes a generic-web
