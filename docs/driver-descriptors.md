@@ -232,14 +232,14 @@ DB-backed template lane, derives the live preview URL from the context-level
 applies explicit settings transport, deploys the submitted image, and checks the
 product health path. Inventory scans Dokploy applications by the product
 profile's preview application-name prefix; destroy deletes matching stateless
-preview applications. Readiness evaluates the DB-backed preview template lane
+preview applications. Readiness validates the DB-backed preview template lane
 and provider/runtime inputs before refresh. Verification records common
-post-refresh smoke evidence against the latest Launchplane preview generation
-and is available to any product profile that uses the generic-web base driver.
-Generic-web preview inventory, readiness, and verification are executed by
-native FastAPI. Their descriptors remain discoverable for driver views and authz
-metadata, while legacy WSGI descriptor-backed dispatch is exempted so direct
-fallback calls fail closed.
+post-refresh smoke evidence
+against the latest Launchplane preview generation and is available to any
+product profile that uses the generic-web base driver. These descriptor actions
+remain discoverable, but native FastAPI owns execution for refresh, inventory,
+readiness, destroy, and verification; the legacy WSGI descriptor dispatch paths
+are exempted and direct fallback calls fail closed.
 
 Preview resource cleanup uses a shared Launchplane destroy helper for Dokploy
 applications and compose previews. The generic helper owns domain lookup,

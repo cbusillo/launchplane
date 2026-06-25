@@ -681,21 +681,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_generic_web_preview_mutation_routes_registered_in_descriptor_dispatch(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
-            dispatch_routes,
-        )
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
     def test_generic_web_preview_desired_state_is_native_fastapi_dispatch_exempt(
         self,
     ) -> None:
@@ -710,14 +695,16 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_generic_web_preview_read_routes_are_native_fastapi_dispatch_exempt(
+    def test_generic_web_preview_routes_are_native_fastapi_dispatch_exempt(
         self,
     ) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
         for route_path in (
+            control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
             control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
             control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
+            control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
         ):
             self.assertIn(
                 route_path, control_plane_service._driver_route_metadata_from_descriptors()
@@ -1633,27 +1620,25 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_generic_web_preview_mutation_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_preview_read_descriptor_allows_native_fastapi_exemption(
+    def test_generic_web_preview_descriptor_allows_native_fastapi_exemption(
         self,
     ) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
+        self.assertNotIn(
+            control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
+            dispatch_routes,
+        )
         self.assertNotIn(
             control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
             dispatch_routes,
         )
         self.assertNotIn(
             control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
+            dispatch_routes,
+        )
+        self.assertNotIn(
+            control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
             dispatch_routes,
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)

@@ -182,17 +182,26 @@ from control_plane.generic_web_verification_http import (
     should_store_generic_web_verification_idempotency,
 )
 from control_plane.generic_web_preview_http import (
+    GENERIC_WEB_PREVIEW_DESTROY_ACTION,
+    GENERIC_WEB_PREVIEW_DESTROY_ROUTE as _GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
     GENERIC_WEB_PREVIEW_INVENTORY_ACTION,
     GENERIC_WEB_PREVIEW_INVENTORY_ROUTE as _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
     GENERIC_WEB_PREVIEW_READINESS_ACTION,
     GENERIC_WEB_PREVIEW_READINESS_ROUTE as _GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+    GENERIC_WEB_PREVIEW_REFRESH_ACTION,
+    GENERIC_WEB_PREVIEW_REFRESH_ROUTE as _GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+    GenericWebPreviewDestroyEnvelope,
     GenericWebPreviewInventoryEnvelope,
     GenericWebPreviewProductMismatchError,
     GenericWebPreviewReadinessEnvelope,
+    GenericWebPreviewRefreshEnvelope,
     GenericWebPreviewRouteDependencyError,
+    apply_generic_web_preview_destroy_result,
     apply_generic_web_preview_inventory_result,
     apply_generic_web_preview_readiness_result,
+    apply_generic_web_preview_refresh_result,
     resolve_generic_web_preview_profile,
+    should_store_generic_web_preview_idempotency,
 )
 from control_plane.odoo_artifact_publish_inputs_http import (
     ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
@@ -3152,6 +3161,27 @@ def idempotency_scope(identity: LaunchplaneIdentity) -> str:
 def request_fingerprint(payload: dict[str, object]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def canonical_request_payload_for_idempotency(
+    *, route_path: str, payload: dict[str, object]
+) -> dict[str, object]:
+    if route_path not in {
+        "/v1/drivers/generic-web/preview-destroy",
+        "/v1/drivers/verireel/preview-destroy",
+    }:
+        return payload
+    canonical_payload = json.loads(json.dumps(payload))
+    destroy_payload = canonical_payload.get("destroy")
+    if isinstance(destroy_payload, dict):
+        destroy_payload.pop("destroy_reason", None)
+    return cast(dict[str, object], canonical_payload)
+
+
+def idempotency_request_fingerprint(*, route_path: str, payload: dict[str, object]) -> str:
+    return request_fingerprint(
+        canonical_request_payload_for_idempotency(route_path=route_path, payload=payload)
+    )
 
 
 def product_config_continuity_payload(payload: dict[str, object]) -> dict[str, object]:
@@ -11034,7 +11064,10 @@ def create_launchplane_fastapi_app(
         normalized_idempotency_key = idempotency_key.strip()
         normalized_scope = idempotency_scope(identity)
         raw_payload = await request.json()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = idempotency_request_fingerprint(
+            route_path=route_path,
+            payload=cast(dict[str, object], raw_payload),
+        )
         idempotency_store = idempotency_capable_store(record_store)
         if idempotency_store is not None and normalized_idempotency_key and check_replay:
             stored_record = idempotency_store.read_idempotency_record(
@@ -13409,6 +13442,192 @@ def create_launchplane_fastapi_app(
             result=result,
         )
 
+    async def apply_generic_web_preview_refresh(
+        request: Request,
+        refresh_request: GenericWebPreviewRefreshEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            profile = resolve_generic_web_preview_profile(
+                record_store=record_store,
+                product=refresh_request.product,
+            )
+        except GenericWebPreviewRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+            )
+        except GenericWebPreviewProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=GENERIC_WEB_PREVIEW_REFRESH_ACTION,
+            product=profile.product,
+            context=profile.preview.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot refresh generic web preview state"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = apply_generic_web_preview_refresh_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=refresh_request,
+                profile=profile,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=result,
+        )
+        if should_store_generic_web_preview_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_generic_web_preview_destroy(
+        request: Request,
+        destroy_request: GenericWebPreviewDestroyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            profile = resolve_generic_web_preview_profile(
+                record_store=record_store,
+                product=destroy_request.product,
+            )
+        except GenericWebPreviewRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+            )
+        except GenericWebPreviewProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=GENERIC_WEB_PREVIEW_DESTROY_ACTION,
+            product=profile.product,
+            context=profile.preview.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot destroy generic web preview state"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = apply_generic_web_preview_destroy_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=destroy_request,
+                profile=profile,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=result,
+        )
+        if should_store_generic_web_preview_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
     async def apply_generic_web_stable_verification(
         request: Request,
         verification_request: GenericWebStableVerificationEnvelope,
@@ -15169,6 +15388,62 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+        apply_generic_web_preview_refresh,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": GenericWebPreviewRefreshEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_generic_web_preview_refresh",
+        summary="Refresh generic web preview",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+        apply_generic_web_preview_destroy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": GenericWebPreviewDestroyEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_generic_web_preview_destroy",
+        summary="Destroy generic web preview",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

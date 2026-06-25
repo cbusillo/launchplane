@@ -12930,7 +12930,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -12946,7 +12946,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
                 return_value={
                     "refresh_status": "pass",
                     "refresh_started_at": "2026-05-03T15:00:00Z",
@@ -13074,7 +13074,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -13090,7 +13090,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
                 return_value={
                     "refresh_status": "pass",
                     "refresh_started_at": "2026-05-03T15:00:00Z",
@@ -13150,7 +13150,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -13166,7 +13166,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
                 return_value={
                     "refresh_status": "fail",
                     "refresh_started_at": "2026-05-03T15:00:00Z",
@@ -13225,7 +13225,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             FilesystemRecordStore(state_dir=state_dir).write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -13965,7 +13965,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -13992,7 +13992,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
                 return_value={
                     "refresh_status": "blocked",
                     "refresh_started_at": "2026-05-03T15:00:00Z",
@@ -14056,7 +14056,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -14083,7 +14083,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
                 side_effect=[
                     {
                         "refresh_status": "blocked",
@@ -14158,7 +14158,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -14174,7 +14174,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh"
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh"
             ) as refresh:
                 status_code, payload = _invoke_app(
                     app,
@@ -14222,7 +14222,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -14249,7 +14249,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
                 side_effect=[
                     {
                         "refresh_status": "fail",
@@ -14324,7 +14324,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -14355,7 +14355,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
                 return_value={
                     "refresh_status": "pass",
                     "refresh_started_at": "2026-05-03T15:00:00Z",
@@ -14387,6 +14387,35 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(second_status_code, 409)
         self.assertEqual(second_payload["error"]["code"], "idempotency_key_reused")
         refresh.assert_called_once()
+
+    def test_generic_web_preview_refresh_legacy_wsgi_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/sellyouroutboard")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/preview-refresh",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "refresh": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "preview_slug": "pr-42",
+                        "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_generic_web_preview_readiness_route_returns_driver_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -14590,7 +14619,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -14606,7 +14635,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_destroy",
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_destroy",
                 return_value=GenericWebPreviewDestroyResult(
                     destroy_status="pass",
                     destroy_started_at="2026-05-03T16:00:00Z",
@@ -14668,7 +14697,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -14696,7 +14725,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             second_request_payload["destroy"]["destroy_reason"] = "janitor_backstop"
 
             with patch(
-                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_destroy",
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_destroy",
                 return_value=GenericWebPreviewDestroyResult(
                     destroy_status="pass",
                     destroy_started_at="2026-05-03T16:00:00Z",
@@ -14728,6 +14757,35 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(first_payload["result"], second_payload["result"])
         self.assertTrue(second_payload["replayed"])
         destroy.assert_called_once()
+
+    def test_generic_web_preview_destroy_legacy_wsgi_route_is_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/sellyouroutboard")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/preview-destroy",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "destroy": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "preview_slug": "pr-42",
+                        "destroy_reason": "external_preview_pull_request_closed",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_data_freshness_report_covers_visible_surfaces(self) -> None:
         runner = CliRunner()

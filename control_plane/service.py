@@ -109,8 +109,6 @@ from control_plane.drivers.generic_web_dispatch import (
     _validate_generic_web_prod_promotion_lanes as _validate_generic_web_prod_promotion_lanes,
 )
 from control_plane.drivers.generic_web_preview_dispatch import (
-    GenericWebPreviewDestroyEnvelope as GenericWebPreviewDestroyEnvelope,
-    GenericWebPreviewRefreshEnvelope as GenericWebPreviewRefreshEnvelope,
     GenericWebPreviewVerificationEnvelope as GenericWebPreviewVerificationEnvelope,
     GenericWebPreviewVerificationRequest as GenericWebPreviewVerificationRequest,
     GenericWebPreviewVerificationResult as GenericWebPreviewVerificationResult,
@@ -131,15 +129,14 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _generic_web_preview_refresh_mutation_requests as _generic_web_preview_refresh_mutation_requests,
     _generic_web_preview_refresh_states as _generic_web_preview_refresh_states,
     _generic_web_preview_refresh_timing as _generic_web_preview_refresh_timing,
-    _handle_generic_web_preview_destroy as _handle_generic_web_preview_destroy,
-    _handle_generic_web_preview_refresh as _handle_generic_web_preview_refresh,
-    _validate_generic_web_preview_profile as _validate_generic_web_preview_profile,
     _write_preview_desired_state_if_supported as _write_preview_desired_state_if_supported,
     _write_preview_inventory_scan_if_supported as _write_preview_inventory_scan_if_supported,
 )
 from control_plane.generic_web_preview_http import (
+    GenericWebPreviewDestroyEnvelope as GenericWebPreviewDestroyEnvelope,
     GenericWebPreviewInventoryEnvelope as GenericWebPreviewInventoryEnvelope,
     GenericWebPreviewReadinessEnvelope as GenericWebPreviewReadinessEnvelope,
+    GenericWebPreviewRefreshEnvelope as GenericWebPreviewRefreshEnvelope,
 )
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
@@ -301,8 +298,10 @@ _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHO
 _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
     {
         "/v1/drivers/generic-web/preview-desired-state",
+        _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
+        _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
@@ -1297,28 +1296,6 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             pre_authorization_validator=_reject_human_live_generic_web_prod_promotion,
             handler=_handle_generic_web_prod_promotion,
         ),
-        _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                use_preview_context_for_authorization=True,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_preview_refresh,
-            pre_idempotency_validator=_validate_generic_web_preview_profile,
-        ),
-        _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                use_preview_context_for_authorization=True,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_preview_destroy,
-            pre_idempotency_validator=_validate_generic_web_preview_profile,
-        ),
         _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_ARTIFACT_PUBLISH_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -1460,8 +1437,6 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
                 _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
                 _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
                 _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
-                _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
-                _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
                 _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
                 _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
                 _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,

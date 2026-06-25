@@ -287,11 +287,11 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/prod-rollback` (native FastAPI)
   - `POST /v1/drivers/generic-web/stable-verification` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-desired-state` (native FastAPI)
-  - `POST /v1/drivers/generic-web/preview-refresh`
+  - `POST /v1/drivers/generic-web/preview-refresh` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-inventory` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-readiness` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-verification` (native FastAPI)
-  - `POST /v1/drivers/generic-web/preview-destroy`
+  - `POST /v1/drivers/generic-web/preview-destroy` (native FastAPI)
   - `POST /v1/drivers/odoo/artifact-publish-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/artifact-publish`
   - `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI)
@@ -1574,14 +1574,15 @@ preview context, not caller-supplied runtime authority, and the legacy WSGI
 descriptor branch is exempted from the fallback dispatcher so direct fallback
 calls fail closed.
 
-Generic web preview refresh uses
+Generic web preview refresh uses native FastAPI
 `POST /v1/drivers/generic-web/preview-refresh`. The request names the product,
 preview slug, and immutable image reference. Launchplane resolves the repository
-and preview context from the DB-backed product profile, derives the canonical
-live preview URL from the context-level `LAUNCHPLANE_PREVIEW_BASE_URL` runtime
-environment record plus the preview slug, derives the anchor pull request from
-the preview slug when possible, and records preview and generation evidence for
-both successful and failed provider results. Product workflows may send
+and preview context from the DB-backed product profile before authorization,
+derives the canonical live preview URL from the context-level
+`LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record plus the preview slug,
+derives the anchor pull request from the preview slug when possible, and records
+preview and generation evidence for both successful and failed provider results.
+Product workflows may send
 `anchor_pr_number`, `anchor_pr_url`, and `anchor_head_sha` when the preview slug
 cannot be parsed from the configured slug template or when the workflow has more
 precise anchor metadata than the image reference. `preview_url` remains accepted
@@ -1589,15 +1590,21 @@ as a compatibility override but is not the product-repo authority for new
 workflows. Preview health failures that return Dokploy Dead Host are classified
 as public preview ingress failures so workflow output and persisted generation
 evidence point at DNS/ingress routing instead of a generic provider timeout.
+The route keeps optional `Idempotency-Key` replay/conflict behavior and skips
+blocked or failed-result replay storage so retries can observe recovered
+runtime/provider state.
 
 Generic web preview inventory and destroy use
 `POST /v1/drivers/generic-web/preview-inventory` and
-`POST /v1/drivers/generic-web/preview-destroy`. Inventory runs through native
-FastAPI and scans stateless Dokploy preview applications by the preview
-application-name prefix in the DB-backed product profile. Destroy still uses the
-descriptor-backed driver route and deletes matching preview applications.
-Lifecycle cleanup can dispatch to this generic path only after a passing plan
-and a matching stored preview record are present.
+`POST /v1/drivers/generic-web/preview-destroy`. Both routes run through native
+FastAPI. Inventory scans stateless Dokploy preview applications by the preview
+application-name prefix in the DB-backed product profile. Destroy deletes
+matching preview applications and keeps the legacy preview-destroy idempotency
+fingerprint that ignores `destroy_reason` so reason-only retry metadata does not
+conflict with the original teardown request. Lifecycle cleanup can dispatch to
+this generic path only after a passing plan and a matching stored preview record
+are present. The descriptor routes remain discoverable, but the legacy WSGI
+dispatch entries are exempted and direct fallback calls fail closed.
 
 ### Operator read endpoints
 

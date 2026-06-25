@@ -231,6 +231,15 @@ Keep a compatibility surface only when it is one of these:
   writes when storage supports them, and readiness result projection. Their
   descriptor routes remain discoverable, but legacy WSGI descriptor dispatch is
   exempted and direct fallback calls fail closed.
+- Generic-web preview refresh and destroy use native FastAPI routes:
+  `POST /v1/drivers/generic-web/preview-refresh` and
+  `POST /v1/drivers/generic-web/preview-destroy`. They preserve stored profile
+  validation before authorization, preview-context authorization from the
+  DB-backed product profile, optional `Idempotency-Key` replay/conflict
+  behavior, refresh generation evidence writes, blocked/failed-result no-cache
+  retry behavior, and preview-destroy reason-insensitive idempotency replay.
+  Their descriptor routes remain discoverable, but legacy WSGI descriptor
+  dispatch is exempted and direct fallback calls fail closed.
 - Odoo prod-promotion inputs, prod-promotion run, and the older monolithic
   prod-promotion compatibility route use native FastAPI routes:
   `POST /v1/drivers/odoo/prod-promotion-inputs`,
