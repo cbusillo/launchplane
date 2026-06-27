@@ -189,7 +189,12 @@ def discover_test_targets(
                 targets.append(module_name)
                 continue
             targets.extend(
-                split_module_targets(test_case_targets, module_targets, max_tests_per_target)
+                split_module_targets(
+                    test_case_targets,
+                    module_targets,
+                    max_tests_per_target,
+                    loader=loader,
+                )
             )
     return tuple(dict.fromkeys(targets))
 
@@ -198,6 +203,8 @@ def split_module_targets(
     test_case_targets: tuple[str, ...],
     method_targets: tuple[str, ...],
     max_tests_per_target: int,
+    *,
+    loader: unittest.TestLoader | None = None,
 ) -> tuple[str, ...]:
     tests_by_case: dict[str, list[str]] = {
         test_case_target: [] for test_case_target in test_case_targets
@@ -210,10 +217,23 @@ def split_module_targets(
     for test_case_target in sorted(tests_by_case):
         case_methods = tuple(sorted(tests_by_case[test_case_target]))
         if len(case_methods) > max_tests_per_target:
+            if loader is not None and not all(
+                is_loadable_unittest_target(loader, method_target) for method_target in case_methods
+            ):
+                split_targets.append(test_case_target)
+                continue
             split_targets.extend(case_methods)
             continue
         split_targets.append(test_case_target)
     return tuple(split_targets)
+
+
+def is_loadable_unittest_target(loader: unittest.TestLoader, target: str) -> bool:
+    try:
+        suite = loader.loadTestsFromName(target)
+    except (AttributeError, ImportError, TypeError, ValueError):
+        return False
+    return not contains_failed_test(suite) and suite.countTestCases() > 0
 
 
 def iter_test_case_target_ids(suite: unittest.TestSuite) -> Iterable[str]:
