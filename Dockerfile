@@ -17,7 +17,7 @@ FROM mirror.gcr.io/library/golang:1.26.4-bookworm AS github-cli-build
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local
 
-RUN go install github.com/cli/cli/v2/cmd/gh@v2.93.0
+RUN go install github.com/cli/cli/v2/cmd/gh@v2.95.0
 
 FROM mirror.gcr.io/library/python:3.13-slim
 
