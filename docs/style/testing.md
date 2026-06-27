@@ -21,8 +21,8 @@ CI may shard same-repo unittest runs through Launchplane's helper while keeping
 the canonical framework as stdlib `unittest`:
 
 ```bash
-uv run launchplane ci unittest-shard plan --shard-count 6
-uv run launchplane ci unittest-shard run --shard-count 6 --shard-index 0 --timings-output tmp/shard-0.json
+uv run launchplane ci unittest-shard plan --shard-count 12 --timings-file .ci-cache/unittest-timings/history.json --max-tests-per-target 20 --max-seconds-per-target 30
+uv run launchplane ci unittest-shard run --shard-count 12 --shard-index 0 --timings-file .ci-cache/unittest-timings/history.json --max-tests-per-target 20 --max-seconds-per-target 30 --timings-output tmp/shard-0.json
 ```
 
 Shard planning discovers `tests/test*.py` dynamically. Small files run as whole
@@ -32,3 +32,13 @@ preferably `tests.test_module.TestCase` and only down to
 large. This lets hot modules distribute across shards without physical file
 moves. Timing files are balancing hints only; discovered tests remain the source
 of truth.
+
+Same-repo CI currently uses 12 unittest shards with a 20-test/30-second split
+threshold to keep large app and service targets under the tool wall-clock
+ceiling. The shard plan includes per-target timing-source diagnostics:
+
+- `exact`: the timing file has a direct record for that unittest target.
+- `parent`: the estimate is derived from the parent module timing and spread
+  across discovered child targets.
+- `default`: no timing history exists yet, so the planner uses the conservative
+  default estimate until a shard timing artifact teaches it better.

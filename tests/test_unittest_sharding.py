@@ -13,6 +13,7 @@ from control_plane.unittest_sharding import (
     discover_test_modules,
     discover_test_targets,
     estimate_target_seconds,
+    estimate_target_timing_sources,
     plan_shards,
     read_module_timings,
     run_test_modules,
@@ -159,6 +160,41 @@ class UnittestShardingTests(unittest.TestCase):
             (("tests.test_big.BigTests", "tests.test_small"), ("tests.test_big.SmallTests",)),
         )
 
+    def test_plan_payload_reports_timing_source_diagnostics(self) -> None:
+        shard_plan = plan_shards(
+            (
+                "tests.test_big.BigTests",
+                "tests.test_big.SmallTests",
+                "tests.test_fast",
+                "tests.test_unknown",
+            ),
+            shard_count=2,
+            module_seconds={"tests.test_big": 10.0, "tests.test_fast": 2.0},
+        )
+
+        payload = shard_plan.as_payload()
+        timing_sources = {
+            target_name: timing_source
+            for shard_payload in payload["shards"]
+            for target_name, timing_source in shard_payload["timing_sources"].items()
+        }
+        timing_source_counts = {
+            shard_payload["index"]: shard_payload["timing_source_counts"]
+            for shard_payload in payload["shards"]
+        }
+
+        self.assertEqual(
+            timing_sources,
+            {
+                "tests.test_big.BigTests": "parent",
+                "tests.test_big.SmallTests": "parent",
+                "tests.test_fast": "exact",
+                "tests.test_unknown": "default",
+            },
+        )
+        self.assertEqual(timing_source_counts[0], {"exact": 1, "parent": 1})
+        self.assertEqual(timing_source_counts[1], {"default": 1, "parent": 1})
+
     def test_estimate_target_seconds_prefers_exact_target_timing(self) -> None:
         estimates = estimate_target_seconds(
             ("tests.test_big.BigTests",),
@@ -169,6 +205,30 @@ class UnittestShardingTests(unittest.TestCase):
         )
 
         self.assertEqual(estimates["tests.test_big.BigTests"], 3.0)
+
+    def test_estimate_target_timing_sources_explain_estimates(self) -> None:
+        estimate_sources = estimate_target_timing_sources(
+            (
+                "tests.test_big.BigTests",
+                "tests.test_big.SmallTests.test_behavior",
+                "tests.test_exact",
+                "tests.test_unknown",
+            ),
+            {
+                "tests.test_big": 10.0,
+                "tests.test_exact": 2.0,
+            },
+        )
+
+        self.assertEqual(
+            estimate_sources,
+            {
+                "tests.test_big.BigTests": "parent",
+                "tests.test_big.SmallTests.test_behavior": "parent",
+                "tests.test_exact": "exact",
+                "tests.test_unknown": "default",
+            },
+        )
 
     def test_plan_is_stable_when_timings_are_missing(self) -> None:
         shard_plan = plan_shards(
