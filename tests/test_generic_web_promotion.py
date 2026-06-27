@@ -315,6 +315,31 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(healthcheck.call_count, 1)
         identity_healthcheck.assert_called_once()
 
+    def test_dry_run_prod_promotion_normalizes_padded_profile_lane_contexts(self) -> None:
+        profile = _profile().model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"context": f"  {lane.context}  "})
+                    for lane in _profile().lanes
+                )
+            }
+        )
+        store = _GenericWebPromotionStore(profile)
+        store.write_environment_inventory(_testing_inventory())
+
+        result = execute_generic_web_prod_promotion(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(dry_run=True),
+        )
+
+        self.assertEqual(result.promotion_status, "pending")
+        self.assertEqual(result.context, "sellyouroutboard-testing")
+        self.assertTrue(
+            result.promotion_record_id.endswith("-sellyouroutboard-testing-testing-to-prod")
+        )
+        self.assertNotIn("  ", result.promotion_record_id)
+
     def test_execute_prod_promotion_qualifies_bare_release_tag(self) -> None:
         store = _GenericWebPromotionStore(_profile())
         expected_artifact_id = (

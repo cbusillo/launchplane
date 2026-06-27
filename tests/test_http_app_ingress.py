@@ -7,9 +7,7 @@ from typing import (
     cast,
 )
 
-from a2wsgi import WSGIMiddleware
 from click import ClickException
-from starlette.types import ASGIApp
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -58,7 +56,6 @@ from tests.test_service import (
     _private_health_endpoint_apply_payload,
     _private_health_endpoint_record,
     _StubVerifier,
-    create_launchplane_service_app,
 )
 
 
@@ -231,32 +228,6 @@ class FastApiEdgeEndpointReadTests(unittest.IsolatedAsyncioTestCase):
             openapi["components"]["schemas"]["EdgeEndpointRecordsResponse"]["additionalProperties"],
             False,
         )
-
-    async def test_fastapi_edge_endpoint_reads_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_edge_endpoint_record(_edge_endpoint_record())
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_record_read_policy(
-                    action="edge_endpoint.read",
-                    context="launchplane",
-                ),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _get_edge_endpoint_record(app, "cm-prod-dokploy")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
 
 
 class FastApiPrivateHealthEndpointReadTests(unittest.IsolatedAsyncioTestCase):
@@ -481,34 +452,6 @@ class FastApiPrivateHealthEndpointReadTests(unittest.IsolatedAsyncioTestCase):
             ],
             False,
         )
-
-    async def test_fastapi_private_health_endpoint_reads_precede_legacy_wsgi_fallback(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_private_health_endpoint_record(_private_health_endpoint_record())
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_private_health_endpoint_read_policy(),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _get_private_health_endpoint_record(
-                app,
-                "repairshopr-sync-prod-runtime",
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
 
 
 class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
@@ -920,62 +863,6 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(private_response.status_code, 403)
         self.assertEqual(edge_response.json()["error"]["code"], "authorization_denied")
         self.assertEqual(private_response.json()["error"]["code"], "authorization_denied")
-
-    async def test_endpoint_apply_routes_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate(
-                    {
-                        "github_actions": [
-                            {
-                                "repository": "every/verireel",
-                                "workflow_refs": [
-                                    "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                                ],
-                                "event_names": ["pull_request"],
-                                "products": ["launchplane", "repairshopr-sync"],
-                                "contexts": ["launchplane", "repairshopr-sync"],
-                                "actions": [
-                                    "edge_endpoint.apply",
-                                    "private_health_endpoint.apply",
-                                ],
-                            }
-                        ]
-                    }
-                ),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                local_record_store_for_tests=store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            edge_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/edge-endpoints/apply",
-                headers={"Authorization": "Bearer valid-token"},
-                payload=_edge_endpoint_apply_payload(mode="dry-run"),
-            )
-            private_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/private-health-endpoints/apply",
-                headers={"Authorization": "Bearer valid-token"},
-                payload=_private_health_endpoint_apply_payload(mode="dry-run"),
-            )
-
-        self.assertEqual(edge_response.status_code, 202)
-        self.assertEqual(private_response.status_code, 202)
-        self.assertEqual(edge_response.json()["result"]["mode"], "dry-run")
-        self.assertEqual(private_response.json()["result"]["mode"], "dry-run")
 
     async def test_openapi_includes_endpoint_apply_routes(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -1504,41 +1391,6 @@ class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         self.assertEqual(client.calls, [])
 
-    async def test_ingress_route_apply_routes_precede_legacy_wsgi_fallback(self) -> None:
-        client = _FakeNpmplusIngressClient()
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_notification_policy_apply_policy(
-                    action="ingress_route.plan",
-                    product="launchplane",
-                    context="reon-prod",
-                ),
-                record_store_factory=lambda: store,
-                npmplus_ingress_client_factory=lambda: client,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                local_record_store_for_tests=store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/drivers/ingress/route-apply",
-                headers={"Authorization": "Bearer valid-token"},
-                payload=_npmplus_ingress_route_payload(),
-            )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["result"]["status"], "planned")
-
     async def test_openapi_includes_ingress_route_apply(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -2043,71 +1895,6 @@ class FastApiIngressCanaryRouteApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
 
-    async def test_ingress_canary_apply_routes_precede_legacy_wsgi_fallback(self) -> None:
-        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(id=78),))
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_edge_endpoint_record(_edge_endpoint_record())
-            store.write_ingress_canary_route_record(_ingress_canary_route_record())
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate(
-                    {
-                        "github_actions": [
-                            {
-                                "repository": "every/verireel",
-                                "workflow_refs": [
-                                    "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                                ],
-                                "event_names": ["pull_request"],
-                                "products": ["launchplane"],
-                                "contexts": ["launchplane", "reon-prod"],
-                                "actions": [
-                                    "ingress_canary_route.apply",
-                                    "ingress_route.apply",
-                                ],
-                            }
-                        ]
-                    }
-                ),
-                record_store_factory=lambda: store,
-                npmplus_ingress_client_factory=lambda: client,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                local_record_store_for_tests=store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            record_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/ingress/canary-routes/records/apply",
-                headers={"Authorization": "Bearer valid-token"},
-                payload=_ingress_canary_route_record_apply_payload(mode="dry-run"),
-            )
-            apply_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/ingress/canary-routes/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "ingress-canary-mounted-fallback-test",
-                },
-                payload=_ingress_canary_route_apply_payload(),
-            )
-
-        self.assertEqual(record_response.status_code, 202)
-        self.assertEqual(apply_response.status_code, 202)
-        self.assertEqual(record_response.json()["result"]["mode"], "dry-run")
-        self.assertEqual(
-            apply_response.json()["records"]["ingress_canary_route_key"], "ingress-canary"
-        )
-
     async def test_openapi_includes_ingress_canary_apply_routes(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -2323,34 +2110,6 @@ class FastApiIngressCanaryRouteReadTests(unittest.IsolatedAsyncioTestCase):
             ],
             False,
         )
-
-    async def test_fastapi_ingress_canary_route_reads_precede_legacy_wsgi_fallback(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_ingress_canary_route_record(_ingress_canary_route_record())
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_record_read_policy(
-                    action="ingress_canary_route.read",
-                    context="launchplane",
-                ),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _get_ingress_canary_route_record(app, "ingress-canary")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
 
 
 class FastApiIngressRouteAuditReadTests(unittest.IsolatedAsyncioTestCase):
@@ -2583,34 +2342,3 @@ class FastApiIngressRouteAuditReadTests(unittest.IsolatedAsyncioTestCase):
             ],
             False,
         )
-
-    async def test_fastapi_ingress_route_audit_reads_precede_legacy_wsgi_fallback(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            record = _ingress_route_audit_record()
-            store.write_ingress_route_audit_record(record)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_record_read_policy(action="ingress_route.plan", context="reon-prod"),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _get_ingress_route_audit_record(
-                app,
-                record.record_id,
-                product="launchplane",
-                context="reon-prod",
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")

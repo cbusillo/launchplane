@@ -1,10 +1,12 @@
 import json
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
 from control_plane import service as control_plane_service
+from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.contracts.driver_descriptor import (
     DriverActionDescriptor,
     DriverCapabilityDescriptor,
@@ -37,6 +39,37 @@ from control_plane.drivers.registry import (
     list_driver_descriptors,
     read_driver_descriptor,
 )
+from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
+from control_plane.storage.filesystem import FilesystemRecordStore
+
+
+class _StubVerifier:
+    def __init__(self, identity: GitHubActionsIdentity):
+        self.identity = identity
+
+    def verify(self, token: str) -> GitHubActionsIdentity:
+        if token != "valid-token":
+            raise ValueError("OIDC bearer token is required.")
+        return self.identity
+
+
+def _identity() -> GitHubActionsIdentity:
+    return GitHubActionsIdentity(
+        repository="every/verireel",
+        repository_owner="every",
+        workflow_ref="every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
+        job_workflow_ref="",
+        ref="refs/heads/main",
+        ref_type="branch",
+        event_name="pull_request",
+        environment="",
+        subject="repo:every/verireel:pull_request",
+        sha="6b3c9d7e8f901234567890abcdef1234567890ab",
+        raw_claims={
+            "repository": "every/verireel",
+            "workflow_ref": "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
+        },
+    )
 
 
 class _PreviewStore:
@@ -387,15 +420,10 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
 
         self.assertTrue(descriptor_post_route_metadata)
         self.assertLessEqual(
-            set(descriptor_post_route_metadata)
-            - control_plane_service._descriptor_driver_dispatch_exempt_route_paths(),
-            control_plane_service._build_write_routes(),
+            set(descriptor_post_route_metadata),
+            control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
         )
-        self.assertEqual(
-            set(descriptor_post_route_metadata)
-            - control_plane_service._descriptor_driver_dispatch_exempt_route_paths(),
-            set(control_plane_service._descriptor_driver_dispatch_routes()),
-        )
+        control_plane_service._validate_native_descriptor_driver_routes()
         for route_path, (
             driver_id,
             action_id,
@@ -408,1389 +436,93 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             )
         self.assertNotIn(
             "/v1/drivers/launchplane/self-deploy",
-            control_plane_service._build_write_routes(),
+            control_plane_service._driver_route_metadata_from_descriptors(),
         )
 
-    def test_post_descriptor_route_requires_dispatch_registration(self) -> None:
+    def test_post_descriptor_route_requires_native_fastapi_route(self) -> None:
         descriptor = DriverDescriptor(
-            driver_id="fake-dispatch",
-            label="Fake dispatch",
-            product="fake-dispatch",
-            description="Test-only descriptor dispatch driver.",
+            driver_id="fake-native",
+            label="Fake native",
+            product="fake-native",
+            description="Test-only native descriptor driver.",
             provider_boundary="Test-only provider boundary.",
             actions=(
                 DriverActionDescriptor(
                     action_id="ping",
                     label="Ping",
-                    description="Test descriptor-backed dispatch route.",
+                    description="Test descriptor-backed native route.",
                     safety="safe_write",
                     scope="context",
                     method="POST",
-                    route_path="/v1/drivers/fake-dispatch/ping",
-                    authz_action="fake_dispatch.ping",
+                    route_path="/v1/drivers/fake-native/ping",
+                    authz_action="fake_native.ping",
                 ),
             ),
         )
 
-        with (
-            patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)),
-            patch(
-                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
-                return_value=frozenset(),
-            ),
-        ):
+        with patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)):
             with self.assertRaisesRegex(
                 ValueError,
-                "POST driver descriptor routes must be registered for descriptor-backed dispatch",
+                "POST driver descriptor routes must be implemented as native FastAPI routes",
             ):
-                control_plane_service._validate_descriptor_driver_dispatch_routes({})
+                control_plane_service._validate_native_descriptor_driver_routes()
 
         with (
             patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)),
             patch(
-                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
-                return_value=frozenset(),
-            ),
-            patch(
-                "control_plane.service._descriptor_driver_dispatch_exempt_route_paths",
-                return_value=frozenset({"/v1/drivers/fake-dispatch/ping"}),
+                "control_plane.service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS",
+                frozenset({"/v1/drivers/fake-native/ping"}),
             ),
         ):
-            control_plane_service._validate_descriptor_driver_dispatch_routes({})
+            control_plane_service._validate_native_descriptor_driver_routes()
 
-    def test_descriptor_dispatch_registration_requires_descriptor_route(self) -> None:
-        descriptor = DriverDescriptor(
-            driver_id="fake-dispatch",
-            label="Fake dispatch",
-            product="fake-dispatch",
-            description="Test-only descriptor dispatch driver.",
-            provider_boundary="Test-only provider boundary.",
-            actions=(
-                DriverActionDescriptor(
-                    action_id="ping",
-                    label="Ping",
-                    description="Test descriptor-backed dispatch route.",
-                    safety="safe_write",
-                    scope="context",
-                    method="POST",
-                    route_path="/v1/drivers/fake-dispatch/ping",
-                    authz_action="fake_dispatch.ping",
-                ),
-            ),
-        )
-        route = control_plane_service._DescriptorDriverDispatchRoute(
-            execution_metadata=control_plane_service._DriverRouteExecutionMetadata(
-                route_path="/v1/drivers/fake-dispatch/ping",
-                envelope_model=control_plane_service.GenericWebStableVerificationEnvelope,
-                denial_message="Workflow cannot execute fake dispatch.",
-            ),
-            context_resolver=lambda request: control_plane_service._DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.verification.context,
-            ),
-            handler=lambda _request, _resolved_context, _record_store, _root_path: (
-                control_plane_service._DescriptorDriverDispatchResult(result={})
-            ),
-        )
-
-        with (
-            patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)),
-            patch(
-                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
-                return_value=frozenset(),
-            ),
-        ):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(
-                {"/v1/drivers/fake-dispatch/ping": route}
+    def test_native_fastapi_driver_routes_are_registered(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: FilesystemRecordStore(root / "state"),
+                control_plane_root_path=root,
+                state_dir=root / "state",
             )
 
-        with (
-            patch("control_plane.service.list_driver_descriptors", return_value=()),
-            patch(
-                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
-                return_value=frozenset(),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(
-                    {"/v1/drivers/fake-dispatch/ping": route}
-                )
-
-    def test_descriptor_dispatch_registration_requires_exactly_one_handler(self) -> None:
-        descriptor = DriverDescriptor(
-            driver_id="fake-dispatch",
-            label="Fake dispatch",
-            product="fake-dispatch",
-            description="Test-only descriptor dispatch driver.",
-            provider_boundary="Test-only provider boundary.",
-            actions=(
-                DriverActionDescriptor(
-                    action_id="ping",
-                    label="Ping",
-                    description="Test descriptor-backed dispatch route.",
-                    safety="safe_write",
-                    scope="context",
-                    method="POST",
-                    route_path="/v1/drivers/fake-dispatch/ping",
-                    authz_action="fake_dispatch.ping",
-                ),
-            ),
+        native_post_routes = control_plane_service._fastapi_route_paths_by_method(app, "POST")
+        self.assertLessEqual(
+            control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
+            native_post_routes,
         )
-        route_metadata = control_plane_service._DriverRouteExecutionMetadata(
-            route_path="/v1/drivers/fake-dispatch/ping",
-            envelope_model=control_plane_service.GenericWebStableVerificationEnvelope,
-            denial_message="Workflow cannot execute fake dispatch.",
-        )
+        control_plane_service._validate_native_fastapi_driver_route_paths(app)
 
-        def context_resolver(
-            request: control_plane_service.GenericWebStableVerificationEnvelope,
-        ) -> control_plane_service._DescriptorDriverDispatchContext:
-            return control_plane_service._DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.verification.context,
+    def test_native_fastapi_driver_route_validation_fails_closed(self) -> None:
+        class _Route:
+            path: str
+            methods: frozenset[str]
+
+            def __init__(self, path: str) -> None:
+                self.path = path
+                self.methods = frozenset({"POST"})
+
+        class _App:
+            routes: tuple[_Route, ...]
+
+            def __init__(self, routes: tuple[_Route, ...]) -> None:
+                self.routes = routes
+
+        missing_route_path = sorted(control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS)[0]
+        app = _App(
+            tuple(
+                _Route(route_path)
+                for route_path in control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS
+                if route_path != missing_route_path
             )
+        )
 
-        def standard_handler(
-            _request: Any,
-            _resolved_context: control_plane_service._ResolvedProductDriverContext,
-            _record_store: object,
-            _root_path: Path,
-        ) -> control_plane_service._DescriptorDriverDispatchResult:
-            return control_plane_service._DescriptorDriverDispatchResult(result={})
-
-        def custom_handler(
-            _request: Any,
-            _resolved_context: control_plane_service._ResolvedProductDriverContext,
-            _record_store: object,
-            _root_path: Path,
-            _state_dir: Path,
-            _database_url: str | None,
-            _identity: Any,
-            _request_scope: str,
-            _request_idempotency_key: str,
-            _request_fingerprint: str,
-            _start_response: control_plane_service._StartResponse,
-            _trace_id: str,
-        ) -> tuple[dict[str, object], Any] | list[bytes]:
-            return {}, None
-
-        with (
-            patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)),
-            patch(
-                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
-                return_value=frozenset(),
-            ),
+        with self.assertRaisesRegex(
+            ValueError,
+            "Native FastAPI driver routes must be registered by the FastAPI app",
         ):
-            with self.assertRaisesRegex(ValueError, "must register exactly one handler"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(
-                    {
-                        "/v1/drivers/fake-dispatch/ping": (
-                            control_plane_service._DescriptorDriverDispatchRoute(
-                                execution_metadata=route_metadata,
-                                context_resolver=context_resolver,
-                            )
-                        )
-                    }
-                )
-            with self.assertRaisesRegex(ValueError, "must register exactly one handler"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(
-                    {
-                        "/v1/drivers/fake-dispatch/ping": (
-                            control_plane_service._DescriptorDriverDispatchRoute(
-                                execution_metadata=route_metadata,
-                                context_resolver=context_resolver,
-                                handler=standard_handler,
-                                custom_dispatch_handler=custom_handler,
-                            )
-                        )
-                    }
-                )
-
-    def test_stable_verification_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_deploy_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_DEPLOY_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_prod_promotion_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_promotion_workflow_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_rollback_plan_is_native_fastapi_dispatch_exempt(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_rollback_is_native_fastapi_dispatch_exempt(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._GENERIC_WEB_ROLLBACK_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_preview_verification_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_preview_routes_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
-            dispatch_routes,
-        )
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
-            dispatch_routes,
-        )
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
-            dispatch_routes,
-        )
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_preview_desired_state_is_native_fastapi_dispatch_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_source_ref_deploy_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_npmplus_ingress_apply_is_native_fastapi_dispatch_exempt(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        route_path = "/v1/drivers/ingress/route-apply"
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_artifact_publish_inputs_is_native_fastapi_dispatch_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        route_path = ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_prod_backup_gate_is_native_fastapi_dispatch_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        route_path = control_plane_service._ODOO_PROD_BACKUP_GATE_METADATA.route_path
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_prod_rollback_is_native_fastapi_dispatch_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        route_path = control_plane_service._ODOO_PROD_ROLLBACK_METADATA.route_path
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_prod_promotion_is_native_fastapi_dispatch_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        route_path = control_plane_service._ODOO_PROD_PROMOTION_ROUTE.route_path
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_stable_bootstrap_is_native_fastapi_dispatch_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        route_path = control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_artifact_publish_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_preview_apply_inputs_is_native_fastapi_dispatch_exempt(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_preview_apply_is_native_fastapi_dispatch_exempt(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._ODOO_PREVIEW_APPLY_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_prod_promotion_inputs_is_native_fastapi_dispatch_exempt(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_prod_promotion_run_is_native_fastapi_dispatch_exempt(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._ODOO_PROD_PROMOTION_RUN_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_post_deploy_is_native_fastapi_dispatch_exempt(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_config_parameter_override_is_native_fastapi_dispatch_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_website_bootstrap_override_is_native_fastapi_dispatch_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_verification_registered_in_descriptor_dispatch(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_inventory_registered_in_descriptor_dispatch(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_destroy_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_refresh_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_PREVIEW_REFRESH_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_testing_verification_registered_in_descriptor_dispatch(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_testing_deploy_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_deploy_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_PROD_DEPLOY_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_backup_gate_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_promotion_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_PROD_PROMOTION_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_rollback_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_PROD_ROLLBACK_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_app_maintenance_registered_in_descriptor_dispatch(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_APP_MAINTENANCE_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_stable_read_routes_registered_in_descriptor_dispatch(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertIn(
-            control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
-            dispatch_routes,
-        )
-        self.assertIn(
-            control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_stable_verification_dispatch_registration_requires_descriptor_route(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_stable_verification = registry.GENERIC_WEB_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.GENERIC_WEB_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_stable_verification,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "generic-web"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_rollback_plan_dispatch_registration_requires_descriptor_route(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_rollback_plan = registry.GENERIC_WEB_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.GENERIC_WEB_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_rollback_plan,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "generic-web"
-                ),
-            ),
-        ):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_rollback_descriptor_allows_native_fastapi_exemption(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertNotIn(
-            control_plane_service._GENERIC_WEB_ROLLBACK_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_promotion_workflow_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(
-            control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path
-        )
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_prod_promotion_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_prod_promotion_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_prod_promotion = registry.GENERIC_WEB_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.GENERIC_WEB_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_prod_promotion,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "generic-web"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_promotion_workflow_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_promotion_workflow = registry.GENERIC_WEB_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.GENERIC_WEB_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_promotion_workflow,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "generic-web"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_rollback_dispatch_registration_requires_descriptor_route(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_rollback = registry.GENERIC_WEB_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.GENERIC_WEB_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._GENERIC_WEB_ROLLBACK_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_rollback,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "generic-web"
-                ),
-            ),
-        ):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_preview_verification_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_preview_verification = registry.GENERIC_WEB_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.GENERIC_WEB_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_preview_verification,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "generic-web"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_verification_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_preview_verification = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_preview_verification,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_inventory_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_preview_inventory = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_preview_inventory,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_destroy_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_preview_destroy = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_PREVIEW_DESTROY_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_preview_destroy,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_refresh_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_preview_refresh = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_PREVIEW_REFRESH_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_preview_refresh,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_testing_verification_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_testing_verification = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_TESTING_VERIFICATION_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_testing_verification,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_testing_deploy_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_testing_deploy = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_TESTING_DEPLOY_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_testing_deploy,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_deploy_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_prod_deploy = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_PROD_DEPLOY_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_prod_deploy,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_backup_gate_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_prod_backup_gate = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_prod_backup_gate,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_promotion_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_prod_promotion = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_PROD_PROMOTION_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_prod_promotion,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_rollback_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_prod_rollback = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_PROD_ROLLBACK_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_prod_rollback,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_app_maintenance_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        descriptor_without_app_maintenance = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path
-                    != control_plane_service._VERIREEL_APP_MAINTENANCE_ROUTE.route_path
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_app_maintenance,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_stable_read_dispatch_registration_requires_descriptor_route(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        stable_read_route_paths = {
-            control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
-            control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
-        }
-        descriptor_without_stable_read = registry.VERIREEL_DRIVER.model_copy(
-            update={
-                "actions": tuple(
-                    action
-                    for action in registry.VERIREEL_DRIVER.actions
-                    if action.route_path not in stable_read_route_paths
-                )
-            }
-        )
-
-        with patch.object(
-            registry,
-            "_DESCRIPTORS",
-            (
-                descriptor_without_stable_read,
-                *(
-                    descriptor
-                    for descriptor in registry._DESCRIPTORS
-                    if descriptor.driver_id != "verireel"
-                ),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
-                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_stable_verification_descriptor_requires_dispatch_registration(self) -> None:
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes({})
-
-    def test_generic_web_deploy_descriptor_requires_dispatch_registration(self) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._GENERIC_WEB_DEPLOY_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_rollback_plan_descriptor_allows_native_fastapi_exemption(self) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        self.assertNotIn(
-            control_plane_service._GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
-            dispatch_routes,
-        )
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_preview_verification_descriptor_requires_dispatch_registration(self) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(
-            control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path
-        )
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_generic_web_preview_descriptor_requires_dispatch_registration(self) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_npmplus_ingress_apply_descriptor_allows_native_fastapi_exemption(self) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-
-        self.assertNotIn("/v1/drivers/ingress/route-apply", dispatch_routes)
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_descriptor_requires_dispatch_registration(self) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_target_replacement_apply_is_native_fastapi_dispatch_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_target_replacement_plan_is_native_fastapi_dispatch_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-        route_path = control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path
-
-        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
-        self.assertIn(
-            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-        )
-        self.assertNotIn(route_path, dispatch_routes)
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_odoo_preview_lifecycle_descriptor_routes_are_native_fastapi_exempt(
-        self,
-    ) -> None:
-        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
-
-        for route_path in (
-            control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
-            control_plane_service._ODOO_PREVIEW_APPLY_ROUTE.route_path,
-            control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
-            control_plane_service._ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,
-            control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path,
-            control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
-            control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path,
-        ):
-            self.assertIn(
-                route_path, control_plane_service._driver_route_metadata_from_descriptors()
-            )
-            self.assertIn(
-                route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
-            )
-            self.assertNotIn(route_path, dispatch_routes)
-        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_verification_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_inventory_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_destroy_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_PREVIEW_DESTROY_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_preview_refresh_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_PREVIEW_REFRESH_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_testing_verification_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_TESTING_VERIFICATION_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_testing_deploy_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_TESTING_DEPLOY_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_deploy_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_PROD_DEPLOY_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_backup_gate_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_promotion_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_PROD_PROMOTION_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_prod_rollback_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_PROD_ROLLBACK_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_app_maintenance_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_APP_MAINTENANCE_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
-
-    def test_verireel_stable_read_descriptor_requires_dispatch_registration(
-        self,
-    ) -> None:
-        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path)
-        dispatch_routes.pop(control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path)
-
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+            control_plane_service._validate_native_fastapi_driver_route_paths(app)
 
     def test_generic_web_execution_metadata_matches_descriptors(self) -> None:
         self.assert_route_metadata_matches_descriptor(
@@ -1958,7 +690,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertNotIn(
             "/v1/drivers/odoo/prod-rollback-plan",
-            control_plane_service._build_write_routes(),
+            control_plane_service._driver_route_metadata_from_descriptors(),
         )
         self.assert_route_metadata_matches_descriptor(
             driver_id="odoo",
@@ -2063,18 +795,21 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
 
     def test_route_policy_sets_use_execution_metadata(self) -> None:
-        self.assertEqual(
-            control_plane_service._HUMAN_IDENTITY_MUTATION_ROUTES,
-            frozenset(
-                {
-                    control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
-                    control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
-                }
-            ),
-        )
         self.assertIn(
             "/v1/drivers/generic-web/prod-promotion",
-            control_plane_service._HUMAN_IDENTITY_MUTATION_ROUTES,
+            control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
+        )
+        self.assertIn(
+            "/v1/drivers/generic-web/prod-promotion-workflow",
+            control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
+        )
+        self.assertIn(
+            control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
+            control_plane_service._GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS,
+        )
+        self.assertNotIn(
+            control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
+            control_plane_service._GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS,
         )
         self.assertEqual(
             control_plane_service._NON_IDEMPOTENT_DRIVER_RESULT_ROUTES,

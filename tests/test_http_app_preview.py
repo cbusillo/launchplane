@@ -3,15 +3,10 @@ import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import (
-    Any,
-    cast,
-)
+from typing import cast
 from unittest.mock import patch
 
-from a2wsgi import WSGIMiddleware
 from fastapi import FastAPI
-from starlette.types import ASGIApp
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -61,11 +56,9 @@ from tests.http_app_test_support import (
 from tests.test_service import (
     _generic_site_profile_payload,
     _identity,
-    _invoke_app,
     _product_profile_payload,
     _sqlite_database_url,
     _StubVerifier,
-    create_launchplane_service_app,
 )
 
 
@@ -535,50 +528,6 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
         self.assertIn("preview lifecycle sweep applies", response.json()["error"]["message"])
         inventory_mock.assert_not_called()
-
-    def test_preview_lifecycle_cleanup_legacy_wsgi_route_is_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity(repository="every/launchplane")),
-                authz_policy=LaunchplaneAuthzPolicy(),
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/previews/lifecycle-cleanup",
-                payload={
-                    "product": "verireel",
-                    "context": "verireel-testing",
-                    "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
-                },
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
-
-    def test_preview_lifecycle_sweep_legacy_wsgi_route_is_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity(repository="every/launchplane")),
-                authz_policy=LaunchplaneAuthzPolicy(),
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/previews/lifecycle-sweep",
-                payload={"source": "launchplane-preview-lifecycle"},
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
 
 
 class FastApiPreviewDesiredStateTests(unittest.IsolatedAsyncioTestCase):
@@ -1186,35 +1135,3 @@ class FastApiPreviewReadTests(unittest.IsolatedAsyncioTestCase):
             openapi["components"]["schemas"]["PreviewHistoryResponse"]["additionalProperties"],
             False,
         )
-
-    async def test_fastapi_preview_reads_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            preview = _preview_read_record()
-            store.write_preview_record(preview)
-            store.write_preview_generation_record(_preview_generation_read_record())
-            policy = _record_read_policy(
-                action="preview.read",
-                context="example-site",
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            preview_response = await _get_preview_record(app, preview.preview_id)
-            history_response = await _get_preview_history(app, preview.preview_id)
-
-        self.assertEqual(preview_response.status_code, 200)
-        self.assertEqual(history_response.status_code, 200)
-        self.assertEqual(preview_response.json()["status"], "ok")
-        self.assertEqual(history_response.json()["status"], "ok")

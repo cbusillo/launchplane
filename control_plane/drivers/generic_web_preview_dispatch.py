@@ -24,7 +24,6 @@ from control_plane.contracts.preview_record import PreviewState
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.drivers.dispatch import (
-    _DescriptorDriverDispatchResult,
     _DriverRouteExecutionMetadata,
     _ProductRouteEnvelope,
     _ResolvedProductDriverContext,
@@ -44,15 +43,9 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
     GenericWebPreviewDestroyRequest,
     GenericWebPreviewInventoryRequest,
-    GenericWebPreviewProfileStore,
     GenericWebPreviewReadinessRequest,
     GenericWebPreviewRefreshRequest,
     GenericWebPreviewRefreshResult,
-    discover_generic_web_preview_desired_state,
-    evaluate_generic_web_preview_readiness,
-    execute_generic_web_preview_destroy,
-    execute_generic_web_preview_inventory,
-    execute_generic_web_preview_refresh,
     preview_pr_number_from_slug,
 )
 from control_plane.workflows.launchplane import find_preview_record
@@ -264,22 +257,6 @@ def _preview_generation_mutation_store(
     raise TypeError("record store does not support Launchplane preview generation mutations")
 
 
-def _handle_generic_web_preview_verification(
-    request: GenericWebPreviewVerificationEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    return _DescriptorDriverDispatchResult(
-        result=_apply_generic_web_preview_verification_records(
-            control_plane_root_path=control_plane_root_path,
-            record_store=record_store,
-            request=request.verification,
-        )
-    )
-
-
 def _validate_generic_web_preview_profile(
     request: _ProductRouteEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -340,72 +317,6 @@ def _write_preview_desired_state_if_supported(
         return ""
     getattr(record_store, "write_preview_desired_state_record")(record)
     return record.desired_state_id
-
-
-def _handle_generic_web_preview_desired_state(
-    request: GenericWebPreviewDesiredStateEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = discover_generic_web_preview_desired_state(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.desired_state,
-        discovered_at=utc_now_timestamp(),
-        profile=resolved_context.profile,
-    )
-    preview_desired_state_id = _write_preview_desired_state_if_supported(
-        record_store=record_store,
-        record=driver_result,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"preview_desired_state_id": preview_desired_state_id},
-        driver_result=driver_result,
-    )
-
-
-def _handle_generic_web_preview_inventory(
-    request: GenericWebPreviewInventoryEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = execute_generic_web_preview_inventory(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.inventory,
-        profile=resolved_context.profile,
-    )
-    preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
-        record_store=record_store,
-        context=driver_result.context,
-        source=driver_result.source,
-        preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"preview_inventory_scan_id": preview_inventory_scan_id},
-        driver_result=driver_result,
-    )
-
-
-def _handle_generic_web_preview_readiness(
-    request: GenericWebPreviewReadinessEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = evaluate_generic_web_preview_readiness(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.readiness,
-        checked_at=utc_now_timestamp(),
-        profile=resolved_context.profile,
-    )
-    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
 
 
 def _generic_web_preview_manifest_fingerprint(
@@ -595,50 +506,6 @@ def _apply_generic_web_preview_refresh_records(
         preview_request=preview_request,
         generation_request=generation_request,
     )
-
-
-def _handle_generic_web_preview_refresh(
-    request: GenericWebPreviewRefreshEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    _generic_web_preview_anchor_pr_number(
-        request=request.refresh,
-        profile=resolved_context.profile,
-    )
-    driver_result = execute_generic_web_preview_refresh(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.refresh,
-        profile=resolved_context.profile,
-    )
-    driver_result = GenericWebPreviewRefreshResult.model_validate(driver_result)
-    result = _apply_generic_web_preview_refresh_records(
-        control_plane_root_path=control_plane_root_path,
-        record_store=record_store,
-        request=request.refresh,
-        driver_result=driver_result,
-        profile=resolved_context.profile,
-    )
-    return _DescriptorDriverDispatchResult(result=result, driver_result=driver_result)
-
-
-def _handle_generic_web_preview_destroy(
-    request: GenericWebPreviewDestroyEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = execute_generic_web_preview_destroy(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.destroy,
-        profile=resolved_context.profile,
-    )
-    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
 
 
 def _apply_generic_web_preview_verification_records(

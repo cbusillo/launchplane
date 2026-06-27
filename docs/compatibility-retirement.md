@@ -24,12 +24,18 @@ Delete or demote a compatibility surface when all of these are true:
   product workflow wrapper
 - live evidence proves the route for at least one real context or product lane
 
-For the legacy WSGI HTTP fallback, apply the same rule route-family by
-route-family. A native FastAPI replacement must own the path before the mounted
-fallback, carry Pydantic/OpenAPI contract coverage, preserve the relevant legacy
-behavior in native route tests, and have caller evidence before the old WSGI
-handler is deleted or demoted. If a PR keeps the old handler reachable, it must
-name the removal condition or owning follow-up issue.
+The legacy WSGI HTTP fallback has passed this checkpoint. Native FastAPI owns the
+production HTTP boundary, the production fallback mount is removed, and test-only
+WSGI fallback stubs should not be retained as compatibility scaffolding. Future
+HTTP slices must preserve relevant behavior in native route tests, delete
+obsolete compatibility code with the path they replace, and keep any remaining
+compatibility exception issue-backed.
+
+Driver descriptor POST execution is past that checkpoint. Descriptors remain the
+metadata and authz source for route discovery, but the legacy WSGI
+descriptor-backed driver dispatch bridge is removed; new writable driver
+descriptor routes must be implemented as native FastAPI routes or startup fails
+closed.
 
 Keep a compatibility surface only when it is one of these:
 
@@ -54,9 +60,8 @@ Keep a compatibility surface only when it is one of these:
 - File-backed JSON state is local-dev/test scaffolding. Production truth is
   Launchplane service-owned persistence.
 - The Launchplane health read uses the native FastAPI `GET /v1/health` route.
-  Its legacy WSGI branch is deleted; direct fallback calls fail closed while
-  the mounted fallback remains for retained non-native routes.
-- The human auth/session family uses native FastAPI routes in the mounted
+  Its legacy WSGI branch is deleted; direct fallback calls fail closed.
+- The human auth/session family uses native FastAPI routes in the production
   service: `GET /auth/github/login`, `GET /auth/github/callback`,
   `GET /v1/auth/session`, and `POST /auth/logout`. GitHub OAuth login preserves
   PKCE state, same-origin `return_to` sanitization, GitHub authorization
@@ -64,14 +69,18 @@ Keep a compatibility surface only when it is one of these:
   read preserves the existing signed-session cookie read/renewal behavior,
   `authentication_required` rejection envelope, and `configured` flag. Logout
   preserves cookie-backed session deletion and the clearing `Set-Cookie` header.
-- Launchplane service runtime and Odoo worker status reads use native FastAPI
-  routes for bearer-token and human-session callers. Odoo worker reconcile uses
-  native FastAPI `POST /v1/service/odoo-workers/reconcile` on the bearer/OIDC
-  write identity path with the existing operation-record storage protocol,
+- Launchplane service runtime, Odoo worker status, and VeriReel worker status
+  reads use native FastAPI routes for bearer-token and human-session callers.
+  Odoo worker reconcile uses native FastAPI
+  `POST /v1/service/odoo-workers/reconcile` on the bearer/OIDC write identity
+  path with the existing operation-record storage protocol,
   `launchplane_service.reconcile_odoo_workers` authorization, `max_attempts`
-  validation, and `200` reconcile result payload. Their legacy WSGI branches are
-  deleted; direct fallback calls fail closed while the mounted fallback remains
-  for retained non-native routes.
+  validation, and `200` reconcile result payload. VeriReel worker reconcile uses
+  native FastAPI `POST /v1/service/verireel-workers/reconcile` with the same
+  storage protocol, `launchplane_service.reconcile_verireel_workers`
+  authorization, `max_attempts` validation, and redacted reconcile result
+  payload. Their legacy WSGI branches are deleted; direct fallback calls fail
+  closed.
 - Odoo stable-bootstrap operation status reads use native FastAPI routes for
   bearer-token and human-session callers. The stable-bootstrap POST enqueue route
   also uses native FastAPI on the bearer/OIDC write identity path and still
@@ -79,15 +88,15 @@ Keep a compatibility surface only when it is one of these:
   write dispatch branch are deleted; direct fallback calls fail closed.
 - Odoo target-replacement operation status reads use native FastAPI routes for
   bearer-token and human-session callers. The target-replacement plan POST route
-  also uses native FastAPI on the bearer/OIDC write identity path and preserves
-  non-idempotent plan recomputation. The legacy WSGI read branches and plan
-  descriptor dispatch branch are deleted; the apply POST enqueue route still
-  returns the same poll URL while that write path remains on the retained
-  fallback.
+  uses native FastAPI on the bearer/OIDC write identity path and preserves
+  non-idempotent plan recomputation. The target-replacement apply POST enqueue
+  route also uses native FastAPI, preserves the same operation poll URL, and
+  keeps caller-scoped idempotency replay/conflict behavior. The legacy WSGI read
+  branches and descriptor dispatch branches are deleted; direct fallback calls
+  fail closed.
 - Tracked target logs use the native FastAPI
   `GET /v1/contexts/{context}/instances/{instance}/logs` route. The legacy WSGI
-  branch is deleted; direct fallback calls fail closed while the mounted fallback
-  remains for retained non-native routes.
+  branch is deleted; direct fallback calls fail closed.
 - Edge endpoint record reads use native FastAPI `GET /v1/edge-endpoints/records`
   and `GET /v1/edge-endpoints/records/{endpoint_key}` routes. Their legacy WSGI
   read branch is deleted. Edge endpoint apply uses native FastAPI
@@ -132,29 +141,32 @@ Keep a compatibility surface only when it is one of these:
   `Idempotency-Key` replay/conflict behavior, and executes the Launchplane-owned
   Dokploy self-deploy workflow only. Its legacy WSGI branch is deleted, and
   direct fallback calls fail closed.
-- Odoo artifact publish inputs use native FastAPI
+- Odoo artifact publish and artifact publish inputs use native FastAPI
+  `POST /v1/drivers/odoo/artifact-publish` and
   `POST /v1/drivers/odoo/artifact-publish-inputs`, preserve
+  `odoo_artifact_publish.write` and
   `odoo_artifact_publish_inputs.read` authorization, optional
   `Idempotency-Key` replay/conflict behavior, dependency-miss `503`
-  classification, and handler-side `404` file-miss parity. The descriptor route
-  remains discoverable, but the legacy WSGI descriptor dispatch path is exempted
-  and direct fallback calls fail closed.
+  classification for product-profile dependencies and inputs dependencies,
+  handler-side `404` file-miss parity, and no-cache retry behavior for failed
+  publish evidence. Product-specific artifact publish calls validate the
+  requested context and instance against the DB-backed product profile lane
+  before authorization. The descriptor routes remain discoverable, and direct
+  legacy WSGI fallback calls fail closed.
 - Odoo stable bootstrap uses native FastAPI
   `POST /v1/drivers/odoo/stable-bootstrap`, preserves product/profile driver
   validation before authorization, lane-scoped `odoo_stable_bootstrap.execute`
   authorization, required `Idempotency-Key` operation-record replay/conflict
   behavior, active-lane operation rejection with the existing operation payload,
   dependency-miss `503` classification, and operation poll URLs. The descriptor
-  route remains discoverable, but legacy WSGI descriptor dispatch is exempted and
-  direct fallback calls fail closed.
+  route remains discoverable, and direct legacy WSGI fallback calls fail closed.
 - Odoo target-replacement plan uses native FastAPI
   `POST /v1/drivers/odoo/target-replacement-plan`, preserves product/profile
   driver validation before authorization, instance-to-lane context resolution,
   lane-scoped `odoo_target_replacement_plan.read` authorization,
   dependency-miss `503` classification, and non-idempotent recomputation even
   when callers send `Idempotency-Key`. The descriptor route remains
-  discoverable, but legacy WSGI descriptor dispatch is exempted and direct
-  fallback calls fail closed.
+  discoverable, and direct legacy WSGI fallback calls fail closed.
 - Odoo target-replacement apply uses native FastAPI
   `POST /v1/drivers/odoo/target-replacement-apply`, preserves product/profile
   driver validation before authorization, instance-to-lane context resolution,
@@ -162,8 +174,8 @@ Keep a compatibility surface only when it is one of these:
   `Idempotency-Key` operation-record replay/conflict behavior, caller-scoped
   idempotency, active-lane operation rejection with the existing operation
   payload, dependency-miss `503` classification, and operation poll URLs. The
-  descriptor route remains discoverable, but legacy WSGI descriptor dispatch is
-  exempted and direct fallback calls fail closed.
+  descriptor route remains discoverable, and direct legacy WSGI fallback calls
+  fail closed.
 - Odoo preview apply inputs and preview apply use native FastAPI routes:
   `POST /v1/drivers/odoo/preview-apply-inputs` and
   `POST /v1/drivers/odoo/preview-apply`. They preserve preview-profile
@@ -173,8 +185,8 @@ Keep a compatibility surface only when it is one of these:
   uncached/non-idempotent like the legacy descriptor route. Preview apply keeps
   optional `Idempotency-Key` replay/conflict behavior for non-blocked results and
   skips blocked-result storage so retries can observe changed runtime/provider
-  state. Their descriptor routes remain discoverable, but legacy WSGI descriptor
-  dispatch is exempted and direct fallback calls fail closed.
+  state. Their descriptor routes remain discoverable, and direct legacy WSGI
+  fallback calls fail closed.
 - Odoo post-deploy and override writes use native FastAPI routes:
   `POST /v1/drivers/odoo/post-deploy`,
   `POST /v1/drivers/odoo/config-parameter-override`, and
@@ -182,16 +194,15 @@ Keep a compatibility surface only when it is one of these:
   product-profile driver validation, lane-scoped authorization, optional
   `Idempotency-Key` replay/conflict behavior, post-deploy result records, and
   Odoo instance override record merge behavior. Their descriptor routes remain
-  discoverable, but legacy WSGI descriptor dispatch is exempted and direct
-  fallback calls fail closed.
+  discoverable, and direct legacy WSGI fallback calls fail closed.
 - Odoo prod backup gate uses native FastAPI
   `POST /v1/drivers/odoo/prod-backup-gate`, preserves product/profile driver
   validation, lane-scoped authorization, dependency-miss `503` classification,
   handler-side `404` file-miss parity, and optional `Idempotency-Key`
   replay/conflict behavior. Passed results are cached for replay; failed
   results are not cached so retries can observe changed backup/provider state.
-  The descriptor route remains discoverable, but legacy WSGI descriptor dispatch
-  is exempted and direct fallback calls fail closed.
+  The descriptor route remains discoverable, and direct legacy WSGI fallback
+  calls fail closed.
 - Odoo prod rollback uses native FastAPI
   `POST /v1/drivers/odoo/prod-rollback`, preserves product/profile driver
   validation, request-context authorization, dependency-miss `503`
@@ -199,8 +210,7 @@ Keep a compatibility surface only when it is one of these:
   payloads, and optional `Idempotency-Key` replay/conflict behavior. Passed
   results are cached for replay; failed rollback results are not cached so
   retries can observe recovered deployment/provider state. The descriptor route
-  remains discoverable, but legacy WSGI descriptor dispatch is exempted and
-  direct fallback calls fail closed.
+  remains discoverable, and direct legacy WSGI fallback calls fail closed.
 - Generic-web prod rollback planning and apply use native FastAPI routes:
   `POST /v1/drivers/generic-web/prod-rollback-plan` and
   `POST /v1/drivers/generic-web/prod-rollback`. Both routes preserve
@@ -211,9 +221,69 @@ Keep a compatibility surface only when it is one of these:
   extension hook for Odoo-based profiles. Blocked plan/apply results and
   ordinary failed apply results are not cached so retries can observe recovered
   Launchplane/provider state; apply results where deploy passed but post-deploy
-  failed are cached because provider mutation already occurred. Legacy WSGI
-  descriptor dispatch is exempted for both paths, and direct fallback calls fail
-  closed.
+  failed are cached because provider mutation already occurred. Native FastAPI
+  owns both paths, and direct legacy WSGI fallback calls fail closed.
+- Generic-web stable and preview verification use native FastAPI routes:
+  `POST /v1/drivers/generic-web/stable-verification` and
+  `POST /v1/drivers/generic-web/preview-verification`. They preserve
+  product/profile validation before authorization, stable lane ownership checks,
+  preview-profile validation, optional `Idempotency-Key` replay/conflict
+  behavior, evidence-only record writes, and Odoo-based product profile
+  acceptance through the generic-web base driver. Their descriptor routes remain
+  discoverable, and direct legacy WSGI fallback calls fail closed.
+- Generic-web preview inventory and readiness use native FastAPI routes:
+  `POST /v1/drivers/generic-web/preview-inventory` and
+  `POST /v1/drivers/generic-web/preview-readiness`. They preserve stored
+  profile validation before authorization, preview-context authorization from
+  the DB-backed product profile, non-idempotent execution, inventory scan record
+  writes when storage supports them, and readiness result projection. Their
+  descriptor routes remain discoverable, and direct legacy WSGI fallback calls
+  fail closed.
+- Generic-web preview refresh and destroy use native FastAPI routes:
+  `POST /v1/drivers/generic-web/preview-refresh` and
+  `POST /v1/drivers/generic-web/preview-destroy`. They preserve stored profile
+  validation before authorization, preview-context authorization from the
+  DB-backed product profile, optional `Idempotency-Key` replay/conflict
+  behavior, refresh generation evidence writes, blocked/failed-result no-cache
+  retry behavior, and preview-destroy reason-insensitive idempotency replay.
+  Their descriptor routes remain discoverable, and direct legacy WSGI fallback
+  calls fail closed.
+- Generic-web deploy and source-ref deploy use native FastAPI routes:
+  `POST /v1/drivers/generic-web/deploy` and
+  `POST /v1/drivers/generic-web/source-ref-deploy`. They preserve stored profile
+  validation before authorization, instance-to-lane context resolution, lane
+  authorization, optional `Idempotency-Key` replay/conflict behavior,
+  descriptor discoverability, and retired `target_type` alias scrubbing on
+  deploy responses and replays. Deploy keeps the generic post-deploy extension
+  hook for Odoo-based profiles and caches deploy-pass plus post-deploy-fail
+  results because provider mutation already occurred; ordinary failed deploy
+  results are not cached. Source-ref deploy validates the request context and
+  instance against the resolved profile lane before authorization, idempotency
+  replay, or provider mutation, and failed source-ref deploy results are not
+  cached. Native FastAPI owns both paths, and direct legacy WSGI fallback calls
+  fail closed.
+- Generic-web prod promotion and prod promotion workflow use native FastAPI
+  routes: `POST /v1/drivers/generic-web/prod-promotion` and
+  `POST /v1/drivers/generic-web/prod-promotion-workflow`. They preserve
+  DB-backed product profile and lane validation, destination-lane authorization,
+  browser-session dry-run-only enforcement for direct promotion, optional
+  `Idempotency-Key` replay/conflict behavior, dry-run/pending replay caching,
+  failed/blocked-result no-cache retry behavior, workflow dispatch result shape,
+  descriptor discoverability, and retired `target_type` alias scrubbing on
+  promotion responses and replays. Their descriptor routes remain discoverable,
+  and direct legacy WSGI fallback calls fail closed.
+- VeriReel read/evidence routes use native FastAPI for
+  `POST /v1/drivers/verireel/testing-verification`,
+  `POST /v1/drivers/verireel/stable-environment`,
+  `POST /v1/drivers/verireel/runtime-verification`,
+  `POST /v1/drivers/verireel/preview-inventory`, and
+  `POST /v1/drivers/verireel/preview-verification`. They preserve descriptor
+  metadata discovery, context-scoped authz, testing verification deployment
+  evidence writes, stable environment and runtime verification non-idempotent
+  reads, preview inventory scan records, preview generation verification
+  transitions, successful verification idempotency replay, and failed-result
+  no-cache retry behavior. Native FastAPI owns these paths, and direct legacy
+  WSGI fallback calls fail closed.
 - Odoo prod-promotion inputs, prod-promotion run, and the older monolithic
   prod-promotion compatibility route use native FastAPI routes:
   `POST /v1/drivers/odoo/prod-promotion-inputs`,
@@ -223,8 +293,8 @@ Keep a compatibility surface only when it is one of these:
   identity matching where applicable, dependency-miss `503` classification,
   handler-side `404` file-miss parity, optional `Idempotency-Key`
   replay/conflict behavior, and blocked/failed-result no-cache retry behavior.
-  Their descriptor routes remain discoverable, but legacy WSGI descriptor
-  dispatch is exempted and direct fallback calls fail closed. Product workflows
+  Their descriptor routes remain discoverable, and direct legacy WSGI fallback
+  calls fail closed. Product workflows
   should continue to prefer the thin `prod-promotion-run` route; the monolithic
   route is retained for explicit operator workflows and diagnostics.
 - Merge-train admission, controller-status, and policy-target reads use native
@@ -232,7 +302,7 @@ Keep a compatibility surface only when it is one of these:
   run-once, batch-candidate run-once, batch-landing run-once, stack-collapse
   run-once, controller run-once, and PR feedback also use native FastAPI write
   routes. Their legacy WSGI branches are deleted, and direct fallback calls fail
-  closed while the mounted fallback remains for retained non-native routes.
+  closed.
 - Work graph snapshot, work-graph rank, GitHub issue-inbox reads, and GitHub
   issue-inbox reconcile use native FastAPI routes. Their legacy WSGI
   read/rank/reconcile branches and WSGI-only helpers are deleted.
@@ -246,7 +316,7 @@ Keep a compatibility surface only when it is one of these:
   use native FastAPI routes for bearer-token and human-session callers. The
   product-profile collection also preserves the dedicated Every Code worker
   token. Their legacy WSGI branches are deleted; direct fallback calls fail
-  closed while the mounted fallback remains for retained non-native routes.
+  closed.
 - Product profile writes use native FastAPI `POST /v1/product-profiles` for
   bearer-token callers and preserve product-profile write-contract validation,
   record storage, and optional `Idempotency-Key` replay/conflict behavior. The
@@ -302,9 +372,8 @@ Keep a compatibility surface only when it is one of these:
   runner-host hygiene audit, and runner-lane registration audit evidence
   ingestion use native FastAPI routes for bearer-token callers and preserve the
   existing `Idempotency-Key` replay/conflict contract. Their legacy WSGI
-  branches are deleted; the mounted fallback remains only for retained
-  non-native routes, and direct WSGI calls to these evidence-ingress paths fail
-  closed.
+  branches are deleted, and direct WSGI calls to these evidence-ingress paths
+  fail closed. The production service no longer mounts the legacy fallback.
 - Public ingress monitor run-once uses native FastAPI
   `POST /v1/products/public-ingress-monitor/run-once` for bearer-token callers
   and preserves the existing optional `Idempotency-Key` replay/conflict
@@ -537,3 +606,8 @@ following:
 Review this page after adding any new product driver route or tenant workflow.
 If a product workflow still shells into a Launchplane CLI to mutate production
 truth after a service route exists, that workflow is not done.
+
+The v2 closeout review must include an explicit search for dead code and stale
+transition docs: obsolete imports, helpers, dependencies, tests, direct fallback
+fixtures, compatibility branches, and migration-only wording should be removed
+or tied to an open issue-backed exception.

@@ -36,17 +36,19 @@ The service boundary is implemented and deployed for the current Odoo and
 VeriReel product paths:
 
 - CLI: `uv run launchplane service serve`
-- server runtime: FastAPI served by Uvicorn, with legacy WSGI routes mounted as
-  the fallback while route ownership is migrated incrementally
+- server runtime: FastAPI served directly by Uvicorn
 - native FastAPI health route: `GET /v1/health`, backed by a Pydantic response
-  model, included in OpenAPI as the first v2 contract proof, and retired from
-  the legacy WSGI fallback
+  model and included in OpenAPI as the first v2 contract proof
 - native FastAPI Launchplane service runtime reads:
   - `GET /v1/service/runtime`, requiring `launchplane_service.read` for the
     Launchplane service context and returning runtime metadata only
   - `GET /v1/service/odoo-workers/status`, requiring
     `launchplane_service.read` for the Launchplane service context and returning
     Odoo operation worker queue counters without request payloads
+  - `GET /v1/service/verireel-workers/status`, requiring
+    `launchplane_service.read` for the Launchplane service context and returning
+    VeriReel backup-gate operation worker queue counters without request
+    payloads
 - native FastAPI Odoo operation status reads:
   - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`,
     requiring `odoo_stable_bootstrap.execute` for the stored operation product
@@ -280,20 +282,21 @@ VeriReel product paths:
   - `POST /v1/work-graph/merge-train/controller/run-once` (native FastAPI)
 - product driver routes:
   - `POST /v1/drivers/launchplane/self-deploy` (native FastAPI)
-  - `POST /v1/drivers/generic-web/deploy`
-  - `POST /v1/drivers/generic-web/prod-promotion`
-  - `POST /v1/drivers/generic-web/prod-promotion-workflow`
+  - `POST /v1/drivers/generic-web/deploy` (native FastAPI)
+  - `POST /v1/drivers/generic-web/source-ref-deploy` (native FastAPI)
+  - `POST /v1/drivers/generic-web/prod-promotion` (native FastAPI)
+  - `POST /v1/drivers/generic-web/prod-promotion-workflow` (native FastAPI)
   - `POST /v1/drivers/generic-web/prod-rollback-plan` (native FastAPI)
   - `POST /v1/drivers/generic-web/prod-rollback` (native FastAPI)
-  - `POST /v1/drivers/generic-web/stable-verification`
+  - `POST /v1/drivers/generic-web/stable-verification` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-desired-state` (native FastAPI)
-  - `POST /v1/drivers/generic-web/preview-refresh`
-  - `POST /v1/drivers/generic-web/preview-inventory`
-  - `POST /v1/drivers/generic-web/preview-readiness`
-  - `POST /v1/drivers/generic-web/preview-verification`
-  - `POST /v1/drivers/generic-web/preview-destroy`
+  - `POST /v1/drivers/generic-web/preview-refresh` (native FastAPI)
+  - `POST /v1/drivers/generic-web/preview-inventory` (native FastAPI)
+  - `POST /v1/drivers/generic-web/preview-readiness` (native FastAPI)
+  - `POST /v1/drivers/generic-web/preview-verification` (native FastAPI)
+  - `POST /v1/drivers/generic-web/preview-destroy` (native FastAPI)
   - `POST /v1/drivers/odoo/artifact-publish-inputs` (native FastAPI)
-  - `POST /v1/drivers/odoo/artifact-publish`
+  - `POST /v1/drivers/odoo/artifact-publish` (native FastAPI)
   - `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI)
   - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`
     (native FastAPI)
@@ -309,29 +312,25 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion-run` (native FastAPI)
-  - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI compatibility route)
+  - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI retained operator route)
   - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
-  - `POST /v1/drivers/verireel/testing-deploy`
-  - `POST /v1/drivers/verireel/testing-verification`
-  - `POST /v1/drivers/verireel/stable-environment`
-  - `POST /v1/drivers/verireel/app-maintenance`
-  - `POST /v1/drivers/verireel/prod-deploy`
-  - `POST /v1/drivers/verireel/prod-backup-gate`
-  - `POST /v1/drivers/verireel/prod-promotion`
-  - `POST /v1/drivers/verireel/prod-rollback`
-  - `POST /v1/drivers/verireel/preview-refresh`
-  - `POST /v1/drivers/verireel/preview-inventory`
-  - `POST /v1/drivers/verireel/preview-destroy`
+  - `POST /v1/drivers/verireel/testing-deploy` (native FastAPI)
+  - `POST /v1/drivers/verireel/testing-verification` (native FastAPI)
+  - `POST /v1/drivers/verireel/stable-environment` (native FastAPI)
+  - `POST /v1/drivers/verireel/app-maintenance` (native FastAPI)
+  - `POST /v1/drivers/verireel/prod-deploy` (native FastAPI)
+  - `POST /v1/drivers/verireel/prod-backup-gate` (native FastAPI)
+  - `POST /v1/drivers/verireel/prod-promotion` (native FastAPI)
+  - `POST /v1/drivers/verireel/prod-rollback` (native FastAPI)
+  - `POST /v1/drivers/verireel/preview-refresh` (native FastAPI)
+  - `POST /v1/drivers/verireel/preview-inventory` (native FastAPI)
+  - `POST /v1/drivers/verireel/preview-destroy` (native FastAPI)
 
-## Native Route Migration Checklist
+## Native Route Checklist
 
-Move service routes from the legacy WSGI fallback to native FastAPI one route
-family at a time. Each migration PR should be small enough to review without a
-second plan hidden inside it.
+New service route families must preserve the completed v2 HTTP boundary:
 
-Before a migrated route is done, verify all of the following:
-
-- The native FastAPI route owns the path before the mounted WSGI fallback.
+- The native FastAPI route owns the production path.
 - Pydantic request and response models define the HTTP contract; use
   `extra="forbid"` for boundary models unless the route documents a narrower
   reason not to.
@@ -345,18 +344,13 @@ Before a migrated route is done, verify all of the following:
   maximum body-size behavior, validation failures, authentication failures,
   authorization failures, and expected `400`, `413`, `401`, and `403` envelope
   shape where those statuses can apply.
-- Existing legacy behavior tests stay in place until equivalent native FastAPI
-  route tests cover the same behavior. A migration PR may add native tests first
-  and retire legacy tests only when the fallback path is no longer production
-  reachable for that route family.
-- The PR classifies the legacy impact as deleted, demoted to local-only or
-  diagnostic use, unchanged with a named removal condition, or intentionally
-  retained with an owning follow-up issue.
+- Route tests preserve relevant behavior directly through FastAPI helpers.
+- The PR deletes obsolete compatibility code when it replaces a legacy surface,
+  or names the issue-backed removal condition when deletion is not in scope.
 
 `GET /v1/health` is the first proven pattern: native FastAPI route ownership,
-typed Pydantic response, focused OpenAPI assertions, and direct WSGI fallback
-retirement. Do not turn that route into a migration framework; use it as the
-small contract shape for the next route-family slice.
+typed Pydantic response, and focused OpenAPI assertions. Use it as the small
+contract shape for future route-family slices.
 
 The human auth/session family uses native FastAPI routes in the mounted service:
 `GET /auth/github/login`, `GET /auth/github/callback`, `GET /v1/auth/session`,
@@ -388,9 +382,9 @@ metadata rather than echoing workflow refs, human logins, owner-agent subjects,
 or the full policy body.
 
 The service also serves the built operator UI shell at `/`, with `/ui` retained
-as a compatibility alias. Built assets live under `/ui/assets/...`, while
-`/ui/*` falls back to the app shell so the frontend can own client-side routes.
-Versioned API ingress remains under `/v1`.
+as a compatibility alias. This route family is native FastAPI. Built assets live
+under `/ui/assets/...`, while `/ui/*` falls back to the app shell so the frontend
+can own client-side routes. Versioned API ingress remains under `/v1`.
 
 Validate the operator UI shell with browser navigation or `GET /ui`. Do not use
 `HEAD /ui` as the only availability check, because static app-shell fallback
@@ -406,8 +400,7 @@ requests. Other signed events, actions, or labels return `202` with
 Every Code work request and include `deduped` plus the delivery id in the
 response. Matching pull-request close deliveries can close every linked request
 referenced by the PR, including still-queued requests that never stored a result
-PR URL. The route is native FastAPI; the legacy WSGI branch is deleted, and
-direct WSGI fallback calls fail closed.
+PR URL. The route is native FastAPI.
 
 The Every Code worker read, native claim, and status routes also accept a
 dedicated local-worker bearer token. Configure
@@ -496,18 +489,17 @@ reads use `every_code_work_request.read`; PR-feedback reads use
 `every_code_notification_attempt.read`; preview PR-feedback notification-attempt
 reads use `preview_pr_feedback_notification_attempt.read`. The dedicated Every
 Code worker token is accepted only for the worker-facing Every Code read routes,
-not for the preview PR-feedback notification-attempt route. The legacy WSGI
-fallback no longer owns these read paths. Every Code work-request status is also
-a native FastAPI route for the dedicated Every Code worker token and workflows
-authorized for `every_code_work_request.update`. It checks idempotency replay
-before requiring status-write store capabilities, writes successful idempotency
-records, preserves missing-request `404 not_found`, and delivers configured
-blocked notifications when a request transitions to `blocked`. Every Code
-PR-feedback write, PR-feedback status, and preview-gate write routes are also
-native FastAPI routes for the dedicated Every Code worker token. They require
-only the matching PR-feedback or preview-gate record-store capabilities, preserve
-the direct worker signal payloads, do not create idempotency records, and fail
-closed when called through the direct WSGI fallback. PR-feedback status preserves
+not for the preview PR-feedback notification-attempt route. Every Code
+work-request status is also a native FastAPI route for the dedicated Every Code
+worker token and workflows authorized for `every_code_work_request.update`. It
+checks idempotency replay before requiring status-write store capabilities,
+writes successful idempotency records, preserves missing-request `404 not_found`,
+and delivers configured blocked notifications when a request transitions to
+`blocked`. Every Code PR-feedback write, PR-feedback status, and preview-gate
+write routes are also native FastAPI routes for the dedicated Every Code worker
+token. They require only the matching PR-feedback or preview-gate record-store
+capabilities, preserve the direct worker signal payloads, and do not create
+idempotency records. PR-feedback status preserves
 the worker transition semantics: missing feedback returns `404 not_found`, and
 already applied or ignored feedback returns `409 feedback_already_final`.
 
@@ -534,8 +526,7 @@ repository policy, resolves its GitHub token from that policy's
 policy or token is available. The route is dry-run by default; `mutate: true`
 applies at most one worker transition from one fresh snapshot. This route is the
 deployed sequential baseline, not the full batch train target. It is native
-FastAPI; the legacy WSGI fallback branch is deleted, direct fallback calls fail
-closed, and accepted calls persist `launchplane_merge_train_runs` evidence with
+FastAPI, and accepted calls persist `launchplane_merge_train_runs` evidence with
 optional `Idempotency-Key` replay/conflict handling.
 
 `POST /v1/work-graph/merge-train/pr-feedback` is a native FastAPI route that
@@ -578,7 +569,7 @@ one-action controller for the full batch train. Request payloads name
 `repository`, `base_branch`, and optional `mutate`; the route uses the same
 policy, authorization, and GitHub token boundary as the lower-level merge-train
 routes. The native FastAPI route supports optional `Idempotency-Key`
-replay/conflict handling and direct legacy WSGI fallback calls fail closed.
+replay/conflict handling.
 Each call advances at most one safe phase from DB-backed records and
 fresh GitHub evidence: plan stack collapse, execute stack collapse, admit the
 collapsed root PR, plan/build/observe a batch candidate, plan landing, or land
@@ -602,8 +593,7 @@ no record write. Build mode requires a prior candidate record id, creates or
 resets the Launchplane train ref, merges queued PR heads into that ref in order,
 and records the resulting candidate SHA. Observe mode requires a prior candidate
 record id, reads required checks for that exact candidate SHA, and records
-whether the candidate is still pending, passed, or failed. The legacy WSGI
-fallback branch is deleted, and direct fallback calls fail closed. The route
+whether the candidate is still pending, passed, or failed. The route
 never lands original PRs; PR-native landing remains a later phase with separate
 records and pre-merge invariants.
 
@@ -614,8 +604,7 @@ record id, merges supported stack children into the root PR, and persists a
 waiting-for-root-checks stack-collapse plan record. `mode: admit` requires that
 executed record, verifies the active policy digest and the root PR head against
 fresh GitHub evidence, then writes a root-only batch-candidate record for the
-normal candidate build/observe/landing phases. The legacy WSGI fallback branch
-is deleted, direct fallback calls fail closed, and accepted calls support
+normal candidate build/observe/landing phases and accepted calls support
 optional `Idempotency-Key` replay/conflict handling.
 
 `POST /v1/work-graph/merge-train/batch-landing/run-once` executes one
@@ -629,9 +618,7 @@ base-branch movement before merging, relies on GitHub's SHA guard for each PR
 head, and records stale landing evidence before returning the normal stale-state
 response. When landing a collapsed stack root, the route validates the linked
 stack-collapse record before the root merge and then writes stack-child
-disposition evidence after the landing record is persisted. The legacy WSGI
-fallback branch is deleted, direct fallback calls fail closed, and accepted calls
-support optional `Idempotency-Key` replay/conflict handling.
+disposition evidence after the landing record is persisted and accepted calls support optional `Idempotency-Key` replay/conflict handling.
 
 `.github/workflows/merge-train-runner.yml` is the first external scheduler for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
@@ -726,8 +713,7 @@ bearer callers may use the route when policy grants the action; terminal-agent
 credentials remain read-only. Apply requests preserve `Idempotency-Key`
 replay/conflict handling when callers provide a key; dry-runs remain stateless
 and repeatable. Shared and production policy changes should use this route rather
-than direct DB CLI writes from an arbitrary checkout, and the retired legacy WSGI
-fallback branch fails closed for direct calls.
+than direct DB CLI writes from an arbitrary checkout.
 
 ## Host Assumption
 
@@ -993,10 +979,10 @@ policy grant, persists the evaluation record, and returns status, safe next
 action, source URL, record id, and `agent_audit` metadata. Denied intents are
 successful preflight results with `202 accepted`; route errors are reserved for
 authentication, validation, and fail-closed storage-capability failures. The
-legacy WSGI branch is deleted, and terminal-agent bearer callers keep the
-route-specific preflight exception only through this native path. When callers
-send `Idempotency-Key`, Launchplane replays matching evaluations or rejects
-conflicting payloads before requiring the write-intent record store.
+terminal-agent bearer callers keep the route-specific preflight exception only
+through this native path. When callers send `Idempotency-Key`, Launchplane
+replays matching evaluations or rejects conflicting payloads before requiring the
+write-intent record store.
 Agents can use it to preflight safe rerun, preview, config, cleanup, and
 promotion-dispatch candidates without receiving a generic write token or reusable
 credentials. Some intents, such as product config apply and promotion dry-run,
@@ -1074,9 +1060,7 @@ writes, not on every possible operator action.
 
 ### Evidence ingress endpoints
 
-These evidence-ingress paths are native FastAPI routes. The legacy WSGI fallback
-does not serve them; direct calls to the fallback fail closed while retained
-non-native routes continue to use the mounted fallback during migration.
+These evidence-ingress paths are native FastAPI routes.
 
 - `POST /v1/evidence/deployments`
 - `POST /v1/evidence/backup-gates`
@@ -1163,14 +1147,12 @@ Desired-state discovery requires
 `preview_desired_state.discover` authorization for the requested product/context,
 requires storage that can persist `PreviewDesiredStateRecord`, preserves optional
 `Idempotency-Key` replay/conflict behavior for successful scans, and returns the
-stored scan as accepted evidence. Its legacy WSGI fallback branch is deleted;
-direct fallback calls fail closed.
+stored scan as accepted evidence.
 
 `POST /v1/previews/lifecycle-plan` requires
 `preview_lifecycle.plan` authorization for the requested product/context,
 preserves optional `Idempotency-Key` replay/conflict behavior, writes the typed
-preview lifecycle plan record, and has its legacy WSGI fallback branch deleted;
-direct fallback calls fail closed.
+preview lifecycle plan record.
 
 `POST /v1/previews/lifecycle-cleanup` requires
 `preview_lifecycle.cleanup` authorization for the requested product/context,
@@ -1179,7 +1161,6 @@ that can read lifecycle plan records and write cleanup records, and additionally
 requires preview read/write capability before any `apply=true` provider destroy
 mutation starts. It rejects missing or product-mismatched `plan_id` values before
 writing cleanup state and returns the stored cleanup record as accepted evidence.
-Its legacy WSGI fallback branch is deleted; direct fallback calls fail closed.
 
 `POST /v1/previews/lifecycle-sweep` derives enabled preview profiles from
 Launchplane product-profile records, requires both `preview_lifecycle.plan` and
@@ -1188,8 +1169,7 @@ inventory, desired-state, plan, or cleanup mutation starts, requires storage
 that can read product profiles and preview/inventory history and write preview,
 inventory, desired-state, lifecycle plan, and cleanup records, preserves optional
 `Idempotency-Key` replay/conflict behavior, and returns the sweep summary as
-accepted evidence. Its legacy WSGI fallback branch is deleted; direct fallback
-calls fail closed.
+accepted evidence.
 
 PR feedback delivery is part of the same preview lifecycle boundary. Product
 repos submit thin preview outcome facts to `POST /v1/previews/pr-feedback`;
@@ -1198,8 +1178,8 @@ when its runtime token is available, and stores an append-only feedback record
 with the comment body, delivery action, comment URL, and any skip/failure reason.
 The route is native FastAPI; it requires a store capable of writing preview PR
 feedback records, preserves optional `Idempotency-Key` replay/conflict behavior,
-and the legacy direct WSGI fallback branch is retired so fallback calls fail
-closed. Dry-runs evaluate authorization without writing records or comments.
+and supports dry-runs that evaluate authorization without writing records or
+comments.
 Workflows can be granted explicit `preview_pr_feedback.write`, or generic-web
 preview workflows can reuse their matching lifecycle grants: refresh-capable
 workflows may report pending/ready/failed feedback, and destroy-capable workflows
@@ -1218,15 +1198,12 @@ through native FastAPI authenticated service ingress and stored in Launchplane
 records; product repos do not carry repo-local Launchplane lifecycle manifests.
 Writes require `product_profile.write` for the profile product in the
 Launchplane service context, validate the profile write contract before storage,
-and preserve optional `Idempotency-Key` replay/conflict behavior. The legacy WSGI
-write branch is deleted; direct fallback calls fail closed while the mounted
-fallback remains for retained non-native routes.
+and preserve optional `Idempotency-Key` replay/conflict behavior.
 
 Public ingress notification policy writes use
 `POST /v1/public-ingress/notification-policies/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"` and a complete
-`PublicIngressNotificationPolicyRecord`. The route is native FastAPI and its
-legacy WSGI fallback branch is deleted. Apply requires
+`PublicIngressNotificationPolicyRecord`. Apply requires
 `public_ingress_notification_policy.apply`, DB-backed Launchplane storage, and
 an idempotency key when a caller wants retry-safe service semantics. Local
 operator calls must include a non-empty reason. Policies store routing intent and
@@ -1236,8 +1213,7 @@ operator destination values must not be encoded in text-file defaults or source.
 Every Code notification policy writes use
 `POST /v1/every-code/notification-policies/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"` and a complete
-`EveryCodeNotificationPolicyRecord`. The route is native FastAPI and its legacy
-WSGI fallback branch is deleted. Apply requires
+`EveryCodeNotificationPolicyRecord`. Apply requires
 `every_code_notification_policy.apply`, DB-backed Launchplane storage, and an
 idempotency key when a caller wants retry-safe service semantics. Local operator
 calls must include a non-empty reason. Policies store repository-scoped routing
@@ -1251,8 +1227,7 @@ Code notifications and records delivered or failed attempts under
 Preview PR feedback notification policy writes use
 `POST /v1/previews/pr-feedback/notification-policies/apply`. The request
 carries `mode: "dry-run"` or `mode: "apply"` and a complete
-`PreviewPrFeedbackNotificationPolicyRecord`. The route is native FastAPI and its
-legacy WSGI fallback branch is deleted. Apply requires
+`PreviewPrFeedbackNotificationPolicyRecord`. Apply requires
 `preview_pr_feedback_notification_policy.apply`, DB-backed Launchplane storage,
 explicit product and context scope, and an idempotency key when a caller wants
 retry-safe service semantics. Local operator calls must include a non-empty
@@ -1267,8 +1242,7 @@ those attempts with `GET /v1/previews/pr-feedback/notification-attempts`.
 
 Edge endpoint writes use `POST /v1/edge-endpoints/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, a complete `EdgeEndpointRecord`, a reason,
-and exact confirmation text for apply mode. The route is native FastAPI and its
-legacy WSGI fallback branch is deleted. Apply authorizes with
+and exact confirmation text for apply mode. Apply authorizes with
 `edge_endpoint.apply` against product/context `launchplane`/`launchplane`,
 requires an `Idempotency-Key` header before mutation, and continues to support
 Launchplane record stores that implement the edge endpoint read/write methods.
@@ -1277,8 +1251,7 @@ Dry-runs plan the accepted response without writing the record.
 Private health endpoint writes use `POST /v1/private-health-endpoints/apply`.
 The request carries `mode: "dry-run"` or `mode: "apply"`, a complete
 `PrivateHealthEndpointRecord`, a reason, and exact confirmation text for apply
-mode. The route is native FastAPI and its legacy WSGI fallback branch is
-deleted. Apply authorizes with `private_health_endpoint.apply` against the
+mode. Apply authorizes with `private_health_endpoint.apply` against the
 request endpoint's product/context, requires an `Idempotency-Key` header before
 mutation, rejects public URLs through the private endpoint contract validator,
 and rejects cross-product/context/instance overwrites for an existing endpoint
@@ -1286,8 +1259,7 @@ key. The accepted response preserves the legacy private-health apply envelope:
 the endpoint key/status remain in `result`, while `records` stays empty for
 compatibility with existing replays.
 
-Product config writes use `POST /v1/product-config/apply`. The route is native
-FastAPI and its legacy WSGI fallback branch is deleted. The request carries
+Product config writes use `POST /v1/product-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
 runtime values, and write-only managed secret values. Dry-run requires the
 `product_config.plan` action; apply requires `product_config.apply`. The route
@@ -1396,8 +1368,7 @@ should surface that action and stop. Applying product-config records does not by
 itself guarantee the live target process has been synchronized.
 
 Runtime key-safety policy reconciliation uses
-`POST /v1/runtime-key-safety/policies/apply`. The route is native FastAPI and
-its legacy WSGI fallback branch is deleted. It is restricted to workflows with
+`POST /v1/runtime-key-safety/policies/apply`. It is restricted to workflows with
 `runtime_key_safety.write` for product/context `launchplane`, requires DB-backed
 storage, and writes metadata-only policy records for managed runtime secret
 binding keys. Optional `Idempotency-Key` headers preserve replay/conflict
@@ -1421,8 +1392,7 @@ catalogs. Manifests must use neutral `provider_targets`; obsolete
 `dokploy_targets` input is rejected with a clear validation error. The route is
 restricted to `product_onboarding.apply` authority for product/context
 `launchplane`, requires DB-backed storage, and returns only sanitized
-`provider_target*` summaries. Its legacy WSGI fallback branch is deleted; direct
-fallback calls fail closed. Product records are not loaded from checked-in
+`provider_target*` summaries. Product records are not loaded from checked-in
 catalogs or product repos.
 
 Product context audit, cutover, and legacy cleanup routes expose copied or
@@ -1440,7 +1410,6 @@ Launchplane-owned route at a time with mode `audit`, `backfill-dry-run`, or
 apply, always scoped to product/context `launchplane`. Apply requests are
 idempotency-keyed and write only complete non-conflicting Dokploy target/id
 projections; existing rows and conflicts are reported rather than overwritten.
-Its legacy WSGI fallback branch is deleted; direct fallback calls fail closed.
 The manual `Provider Target Operations` workflow is the supported shared and
 production caller for Phase Two backfill evidence.
 
@@ -1449,8 +1418,7 @@ Launchplane self-deploy uses the native FastAPI
 Launchplane-owned self-deploy workflow, requires
 `launchplane_service_deploy.execute` authority for product/context
 `launchplane`, and preserves optional `Idempotency-Key` replay/conflict
-behavior for retry-safe deploy requests. Its legacy WSGI fallback branch is
-deleted; direct fallback calls fail closed. Runtime target identity, image
+behavior for retry-safe deploy requests. Runtime target identity, image
 references, OAuth environment changes, and provider credentials remain
 operator-supplied runtime inputs or managed secrets rather than checked-in
 authority.
@@ -1459,8 +1427,7 @@ Dokploy target setup uses the native FastAPI
 `POST /v1/dokploy-targets/setup` route. The route is the service-owned path for
 adopting an existing Dokploy target or creating a new application/compose target
 while immediately writing the matching Dokploy target, target-id, and
-provider-target records. Its legacy WSGI fallback branch is deleted; direct
-fallback calls fail closed. It supports dry-run and apply modes, requires
+provider-target records. It supports dry-run and apply modes, requires
 `dokploy_target.setup` authz for product/context `launchplane`, and requires
 exact confirmation, an operator reason, and an idempotency key for apply. Apply
 requests keep the `Idempotency-Key` replay/conflict contract; dry-runs remain
@@ -1509,8 +1476,7 @@ live env by key, and returns sanitized key/count evidence without runtime values
 or secret plaintext. Apply updates only the product profile's expected runtime
 environment keys and runtime managed-secret binding keys for the selected lane,
 preserves unrelated live env, verifies persistence by key metadata, and can
-explicitly trigger a deploy when requested. Its legacy WSGI fallback branch is
-deleted; direct WSGI fallback calls fail closed.
+explicitly trigger a deploy when requested.
 
 Live target runtime applies are service-boundary work. Operators and agents must
 not run local CLI live-target mutation commands from arbitrary checkouts to make
@@ -1520,26 +1486,34 @@ service route or a workflow that calls it so Launchplane can authorize with
 OIDC/session identity, resolve current DB-backed target records in the deployed
 runtime, and audit sanitized key/count evidence.
 
-Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
-the product, target instance, immutable artifact/image reference, and source ref;
-Launchplane resolves the context from the DB-backed product profile lane and the
-runtime target identity from DB-backed provider-target records. Dokploy target
-records remain provider execution configuration for Dokploy-backed lanes and
-must agree with the provider-target identity before deploy proceeds.
+Generic web deploys use native FastAPI
+`POST /v1/drivers/generic-web/deploy`. The request names the product, target
+instance, immutable artifact/image reference, and source ref; Launchplane
+resolves the context from the DB-backed product profile lane and the runtime
+target identity from DB-backed provider-target records. Dokploy target records
+remain provider execution configuration for Dokploy-backed lanes and must agree
+with the provider-target identity before deploy proceeds. The route keeps
+optional `Idempotency-Key` replay/conflict handling and stores deploy-pass plus
+post-deploy-fail evidence to prevent repeating the completed provider mutation.
+Generic web source-ref deploys use native FastAPI
+`POST /v1/drivers/generic-web/source-ref-deploy`; the route validates the
+request context and instance against the resolved product profile lane before
+authorization, idempotency replay, or provider mutation.
 Product environment reads expose neutral provider-target identity only from
 explicit provider-target rows. Paired DB-backed Dokploy target and target-id
 records remain visible as provider-specific execution/history metadata and as
 audit/backfill comparison material; they no longer synthesize current
 provider-target authority when an explicit row is missing.
 
-Generic web prod promotion can be exercised directly with
-`POST /v1/drivers/generic-web/prod-promotion`; browser sessions may only use this
-route with `dry_run=true`. The operator UI then uses
-`POST /v1/drivers/generic-web/prod-promotion-workflow` to dispatch the
+Generic web prod promotion uses native FastAPI. It can be exercised directly
+with `POST /v1/drivers/generic-web/prod-promotion`; browser sessions may only
+use this route with `dry_run=true`. The operator UI then uses the native
+`POST /v1/drivers/generic-web/prod-promotion-workflow` route to dispatch the
 product-owned GitHub workflow configured by the DB-backed product profile. That
 workflow remains responsible for product release/tag behavior while Launchplane
 supplies authz, managed `GITHUB_TOKEN` lookup, dispatch inputs, and workflow-run
-observation.
+observation. Native FastAPI owns both paths while descriptor discovery remains
+available.
 
 Generic web deploy and prod-promotion responses expose provider-neutral target
 metadata with `target_category`, `provider_id`, and `provider_target_type`.
@@ -1560,9 +1534,8 @@ for drivers such as Odoo that inherit generic-web behavior. Optional
 successful apply results; blocked results and ordinary deploy failures are left
 uncached so a later retry can observe recovered Launchplane/provider state.
 Apply results where deploy passed but post-deploy failed are cached because the
-provider mutation already occurred. The descriptors remain discoverable, but
-legacy WSGI descriptor dispatch is exempted for both paths and direct fallback
-calls fail closed.
+provider mutation already occurred. The descriptors remain discoverable, and
+native FastAPI owns both paths.
 
 Generic web preview desired-state discovery uses
 `POST /v1/drivers/generic-web/preview-desired-state`, now owned by native
@@ -1570,18 +1543,17 @@ FastAPI. The request names the product and optional pull-request label/page
 limit; Launchplane resolves the repository, preview context, anchor repo, and
 preview slug template from the DB-backed product profile before recording
 desired preview state. Authorization uses the resolved profile product and
-preview context, not caller-supplied runtime authority, and the legacy WSGI
-descriptor branch is exempted from the fallback dispatcher so direct fallback
-calls fail closed.
+preview context, not caller-supplied runtime authority.
 
-Generic web preview refresh uses
+Generic web preview refresh uses native FastAPI
 `POST /v1/drivers/generic-web/preview-refresh`. The request names the product,
 preview slug, and immutable image reference. Launchplane resolves the repository
-and preview context from the DB-backed product profile, derives the canonical
-live preview URL from the context-level `LAUNCHPLANE_PREVIEW_BASE_URL` runtime
-environment record plus the preview slug, derives the anchor pull request from
-the preview slug when possible, and records preview and generation evidence for
-both successful and failed provider results. Product workflows may send
+and preview context from the DB-backed product profile before authorization,
+derives the canonical live preview URL from the context-level
+`LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record plus the preview slug,
+derives the anchor pull request from the preview slug when possible, and records
+preview and generation evidence for both successful and failed provider results.
+Product workflows may send
 `anchor_pr_number`, `anchor_pr_url`, and `anchor_head_sha` when the preview slug
 cannot be parsed from the configured slug template or when the workflow has more
 precise anchor metadata than the image reference. `preview_url` remains accepted
@@ -1589,13 +1561,20 @@ as a compatibility override but is not the product-repo authority for new
 workflows. Preview health failures that return Dokploy Dead Host are classified
 as public preview ingress failures so workflow output and persisted generation
 evidence point at DNS/ingress routing instead of a generic provider timeout.
+The route keeps optional `Idempotency-Key` replay/conflict behavior and skips
+blocked or failed-result replay storage so retries can observe recovered
+runtime/provider state.
 
 Generic web preview inventory and destroy use
 `POST /v1/drivers/generic-web/preview-inventory` and
-`POST /v1/drivers/generic-web/preview-destroy`. They scan and delete stateless
-Dokploy preview applications by the preview application-name prefix in the
-DB-backed product profile. Lifecycle cleanup can dispatch to this generic path
-only after a passing plan and a matching stored preview record are present.
+`POST /v1/drivers/generic-web/preview-destroy`. Both routes run through native
+FastAPI. Inventory scans stateless Dokploy preview applications by the preview
+application-name prefix in the DB-backed product profile. Destroy deletes
+matching preview applications and keeps the legacy preview-destroy idempotency
+fingerprint that ignores `destroy_reason` so reason-only retry metadata does not
+conflict with the original teardown request. Lifecycle cleanup can dispatch to
+this generic path only after a passing plan and a matching stored preview record
+are present. The descriptor routes remain discoverable.
 
 ### Operator read endpoints
 
@@ -1641,6 +1620,11 @@ only after a passing plan and a matching stored preview record are present.
   human-session callers)
 - `POST /v1/service/odoo-workers/reconcile` (native FastAPI on the bearer/OIDC
   write identity path with `launchplane_service.reconcile_odoo_workers`)
+- `GET /v1/service/verireel-workers/status` (native FastAPI for bearer-token and
+  human-session callers)
+- `POST /v1/service/verireel-workers/reconcile` (native FastAPI on the
+  bearer/OIDC write identity path with
+  `launchplane_service.reconcile_verireel_workers`)
 - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` (native
   FastAPI for bearer-token and human-session callers)
 - `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI on the bearer/OIDC
@@ -1720,9 +1704,7 @@ scope query parameters for list and single-record reads, preserve optional
 `status`, `mode`, `provider_host_id`, `trace_id`, `idempotency_key`, and `limit`
 list filters, and return `404 not_found` when a record exists outside the
 requested scope. Endpoint apply and ingress route apply routes use native
-FastAPI write handlers with the apply contracts above. Their legacy WSGI
-branches are deleted; direct fallback calls fail closed while the mounted
-fallback remains for retained non-native routes.
+FastAPI write handlers with the apply contracts above.
 
 Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.
@@ -1734,9 +1716,7 @@ context. Single environment detail reads authorize against the selected lane
 context. Raw context names and provider target identifiers remain evidence
 metadata; runtime values, secret plaintext, secret ciphertext, and
 product-specific driver payloads are not exposed as shared top-level fields.
-Their legacy WSGI product-read branches are deleted; direct fallback calls fail
-closed. `/v1/repo-product-mapping` and `/v1/agent/context` are also native
-FastAPI routes, and their legacy WSGI branches are deleted.
+`/v1/repo-product-mapping` and `/v1/agent/context` are also native FastAPI routes.
 
 `GET /v1/products/{product}/environments` returns the product's stable
 environment summaries from DB-backed Launchplane records. It is the collection
@@ -1781,8 +1761,7 @@ for the requested product in the Launchplane service context. It supports
 `dry-run` and `apply` modes, copies only current-authority records into the
 target context, updates lane/preview product profile context fields, returns key
 names/counts only, and preserves optional `Idempotency-Key` replay/conflict
-behavior. Its legacy WSGI fallback branch is deleted; direct fallback calls fail
-closed. It does not copy append-only deployments, promotions, backup gates, or
+behavior. It does not copy append-only deployments, promotions, backup gates, or
 preview history.
 
 Product legacy context cleanup uses native FastAPI
@@ -1790,8 +1769,7 @@ Product legacy context cleanup uses native FastAPI
 `product_profile.write` for the requested product in the Launchplane service
 context. It supports `dry-run` and `apply` modes after a context cutover has
 moved the product profile to the target context, preserves optional
-`Idempotency-Key` replay/conflict behavior, and has its legacy WSGI fallback
-branch deleted. Direct fallback calls fail closed. Cleanup refuses to run while
+`Idempotency-Key` replay/conflict behavior. Cleanup refuses to run while
 the source context is still owned by this or another product profile. It deletes
 legacy runtime environment records and Dokploy target lookup records only when
 matching target-context records already exist, disables legacy managed secret
@@ -1807,35 +1785,22 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/post-deploy` (native FastAPI)
 - `POST /v1/drivers/odoo/config-parameter-override` (native FastAPI)
 - `POST /v1/drivers/odoo/website-bootstrap-override` (native FastAPI)
-- `POST /v1/drivers/odoo/artifact-publish`
+- `POST /v1/drivers/odoo/artifact-publish` (native FastAPI)
 - `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI)
 - `POST /v1/drivers/odoo/target-replacement-plan` (native FastAPI)
 - `POST /v1/drivers/odoo/target-replacement-apply` (native FastAPI)
 - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
-- `POST /v1/drivers/odoo/prod-promotion` (native FastAPI compatibility route)
+- `POST /v1/drivers/odoo/prod-promotion` (native FastAPI retained operator route)
 - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
-- `POST /v1/drivers/generic-web/prod-promotion`
+- `POST /v1/drivers/generic-web/prod-promotion` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-rollback-plan` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-rollback` (native FastAPI)
-- `POST /v1/drivers/verireel/...`
+- `POST /v1/drivers/verireel/...` (native FastAPI)
 
-The first driver route handlers now in service are admitted from descriptor
-action route paths rather than a separate product-driver router allowlist. The
-current legacy WSGI descriptor handlers include:
-
-- `POST /v1/drivers/odoo/artifact-publish`
-- `POST /v1/drivers/generic-web/prod-promotion`
-- `POST /v1/drivers/verireel/testing-deploy`
-- `POST /v1/drivers/verireel/testing-verification`
-- `POST /v1/drivers/verireel/stable-environment`
-- `POST /v1/drivers/verireel/app-maintenance`
-- `POST /v1/drivers/verireel/prod-deploy`
-- `POST /v1/drivers/verireel/prod-backup-gate`
-- `POST /v1/drivers/verireel/prod-promotion`
-- `POST /v1/drivers/verireel/prod-rollback`
-- `POST /v1/drivers/verireel/preview-refresh`
-- `POST /v1/drivers/verireel/preview-inventory`
-- `POST /v1/drivers/verireel/preview-destroy`
+Driver route metadata remains descriptor-backed for UI/action discovery. VeriReel testing
+verification, stable environment, runtime verification, preview inventory, and
+preview verification are native FastAPI routes; their
+descriptors remain discoverable.
 
 `Odoo Driver Route Smoke` is the Launchplane-owned route exposure gate for Odoo
 preview and artifact-publish handoff routes. It first sends unauthenticated
@@ -1848,14 +1813,15 @@ identities resolved from Launchplane runtime records; product repos should not
 keep those dependency repo defaults in workflow files. Missing runtime records
 for those artifact-publish inputs are classified as
 `driver_route_dependency_not_found`, not as route-missing or generic invalid
-requests. The artifact-publish inputs route is owned by native FastAPI; the
-legacy WSGI descriptor dispatcher is exempted from the path, and direct fallback
-calls fail closed. Odoo post-deploy, config-parameter override, and
+requests. The artifact-publish and artifact-publish inputs routes are owned by
+native FastAPI; product-specific artifact publish calls validate the requested
+context and instance against the DB-backed product profile lane before
+authorization. Native FastAPI owns the paths. Failed publish evidence is not cached as
+an idempotent success. Odoo post-deploy, config-parameter override, and
 website-bootstrap override are native FastAPI routes too. They preserve
 product-profile driver validation, lane-scoped authorization, optional
 `Idempotency-Key` replay/conflict behavior, post-deploy transition records, and
-Odoo instance override record merge behavior while direct WSGI fallback calls
-fail closed. Odoo preview apply inputs and preview apply are also owned by
+Odoo instance override record merge behavior. Odoo preview apply inputs and preview apply are also owned by
 native FastAPI. They preserve preview-context authorization,
 runtime-environment dependency classification, and the
 `odoo_preview_runtime_config_incomplete` details envelope for apply requests
@@ -1872,8 +1838,7 @@ lane-scoped `odoo_stable_bootstrap.execute` authorization, required
 `Idempotency-Key` operation-record replay/conflict behavior, active-lane
 operation rejection with the existing operation payload, dependency-miss `503`
 classification, and the stable-bootstrap operation `poll_url`. Its descriptor
-remains discoverable, legacy WSGI descriptor dispatch is exempted, and direct
-fallback calls fail closed.
+remains discoverable.
 
 `POST /v1/drivers/odoo/target-replacement-plan` is owned by native FastAPI. It
 preserves product-profile driver validation before authorization, resolves the
@@ -1881,8 +1846,7 @@ requested instance to the owning product lane context, authorizes
 `odoo_target_replacement_plan.read` against that lane context, classifies missing
 product profiles as `driver_route_dependency_not_found`, and remains
 non-idempotent so repeated plan reads can observe changed runtime/provider state.
-Its descriptor remains discoverable, legacy WSGI descriptor dispatch is exempted,
-and direct fallback calls fail closed.
+Its descriptor remains discoverable.
 
 `POST /v1/drivers/odoo/target-replacement-apply` is owned by native FastAPI. It
 preserves product-profile driver validation before authorization, resolves the
@@ -1892,8 +1856,7 @@ requested instance to the owning product lane context, authorizes
 rejects changed payload reuse with `409 idempotency_key_reused`, rejects a second
 active operation for the same lane with the active operation payload, and returns
 the pending operation record plus poll URL in the accepted response. Its
-descriptor remains discoverable, legacy WSGI descriptor dispatch is exempted,
-and direct fallback calls fail closed.
+descriptor remains discoverable.
 Mutation-capable routes are proven by pre-mutation classification: preview apply
 uses a blocked destroy plan and rejects any non-blocked acceptance, while preview
 feedback uses the route's `dry_run` request mode so Launchplane evaluates the same
@@ -2073,8 +2036,7 @@ the backup-gate and promotion routes. Blocked responses are not cached as
 idempotent successes and explain which Launchplane record is missing, so a
 tenant workflow does not have to accept hand-entered artifact or source facts.
 The route is owned by native FastAPI; its descriptor remains discoverable, the
-legacy WSGI descriptor dispatcher is exempted from the path, and direct fallback
-calls fail closed.
+native route owns execution.
 
 `POST /v1/drivers/odoo/prod-promotion-run` is the preferred thin-workflow
 mutation route for Odoo prod promotion. The tenant workflow supplies product,
@@ -2086,8 +2048,7 @@ operator workflows, but product repos should not own the chain.
 The route is owned by native FastAPI and preserves request-context authorization,
 reusable Launchplane workflow identity matching, optional `Idempotency-Key`
 replay/conflict behavior, and no-cache retry behavior for blocked or failed
-driver results. Its descriptor remains discoverable, legacy WSGI descriptor
-dispatch is exempted, and direct fallback calls fail closed. The older
+driver results. Its descriptor remains discoverable. The older
 `POST /v1/drivers/odoo/prod-promotion` compatibility route is also native
 FastAPI for explicit operator workflows and diagnostics, but product repos
 should prefer the thin `prod-promotion-run` path.

@@ -1,15 +1,9 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import (
-    Any,
-    cast,
-)
 from unittest.mock import patch
 
-from a2wsgi import WSGIMiddleware
 from click import ClickException
-from starlette.types import ASGIApp
 
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
@@ -60,7 +54,6 @@ from tests.test_service import (
     _FakeMovedRootStackedMergeTrainSnapshotReader,
     _FakeStackedMergeTrainSnapshotReader,
     _identity,
-    _invoke_app,
     _local_operator_policy,
     _mark_merge_train_batch_candidate_record_passed,
     _merge_train_policy_table,
@@ -75,7 +68,6 @@ from tests.test_service import (
     _StackCollapseWriteFailingFilesystemRecordStore,
     _StaleLandingMergeTrainGitHubClient,
     _StubVerifier,
-    create_launchplane_service_app,
 )
 
 
@@ -271,35 +263,6 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
                 openapi["components"]["schemas"][response_model_name]["additionalProperties"],
                 False,
             )
-
-    async def test_fastapi_merge_train_reads_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            _seed_merge_train_policy(state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                local_record_store_for_tests=store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _asgi_get(
-                app,
-                "/v1/work-graph/merge-train/admission?repository=cbusillo/sellyouroutboard&base_branch=main",
-                headers={"Authorization": "Bearer valid-token"},
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["admission"]["status"], "admitted")
 
 
 class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase):
@@ -873,74 +836,6 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
 
-    async def test_fastapi_route_precedes_legacy_wsgi_fallback(self) -> None:
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
-        ):
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            _seed_merge_train_policy(state_dir)
-            passed_candidate_record = _seed_merge_train_batch_candidate_record(
-                state_dir,
-                status="passed",
-                required_checks_status="pass",
-                candidate_sha="candidate-built",
-            )
-            store = FilesystemRecordStore(state_dir=state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                local_record_store_for_tests=store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-            response = await _post_merge_train_batch_landing_run_once(
-                app,
-                {
-                    "schema_version": 1,
-                    "repository": "cbusillo/sellyouroutboard",
-                    "base_branch": "main",
-                    "mode": "plan",
-                    "candidate_record_id": passed_candidate_record.record_id,
-                },
-            )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["result"]["mode"], "plan")
-
-    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            _seed_merge_train_policy(state_dir)
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/work-graph/merge-train/batch-landing/run-once",
-                payload={
-                    "schema_version": 1,
-                    "repository": "cbusillo/sellyouroutboard",
-                    "base_branch": "main",
-                    "mode": "plan",
-                    "candidate_record_id": "missing-candidate",
-                },
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
-
     async def test_openapi_includes_batch_landing_contract(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_merge_train_service_identity()),
@@ -1300,73 +1195,6 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
             response.json()["error"]["message"],
             "Merge train stack collapse admission requires database-backed candidate records.",
         )
-
-    async def test_fastapi_route_precedes_legacy_wsgi_fallback(self) -> None:
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
-        ):
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            _seed_merge_train_policy(state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                local_record_store_for_tests=store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-            plan_record_id = _seed_merge_train_stack_collapse_plan_record(state_dir)
-            with patch(
-                "control_plane.merge_train_stack_collapse.GitHubMergeTrainClient",
-                _FakeMergeTrainGitHubClient,
-            ):
-                response = await _post_merge_train_stack_collapse_run_once(
-                    app,
-                    {
-                        "schema_version": 1,
-                        "repository": "cbusillo/sellyouroutboard",
-                        "base_branch": "main",
-                        "mode": "execute",
-                        "stack_collapse_plan_record_id": plan_record_id,
-                    },
-                )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["result"]["mode"], "execute")
-
-    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            _seed_merge_train_policy(state_dir)
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/work-graph/merge-train/stack-collapse/run-once",
-                payload={
-                    "schema_version": 1,
-                    "repository": "cbusillo/sellyouroutboard",
-                    "base_branch": "main",
-                    "mode": "execute",
-                    "stack_collapse_plan_record_id": "missing-stack-collapse-plan",
-                },
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
 
     async def test_openapi_includes_stack_collapse_contract(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -1844,68 +1672,6 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["details"]["github_status_code"], 503)
         self.assertEqual(records, ())
 
-    async def test_fastapi_route_precedes_legacy_wsgi_fallback(self) -> None:
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
-        ):
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            _seed_merge_train_policy(state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                local_record_store_for_tests=store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-            with patch(
-                "control_plane.merge_train_run_once.GitHubMergeTrainSnapshotReader",
-                _FakeMergeTrainSnapshotReader,
-            ):
-                response = await _post_merge_train_run_once(
-                    app,
-                    {
-                        "schema_version": 1,
-                        "repository": "cbusillo/sellyouroutboard",
-                        "base_branch": "main",
-                    },
-                )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["result"]["mode"], "dry-run")
-
-    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            _seed_merge_train_policy(state_dir)
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/work-graph/merge-train/run-once",
-                payload={
-                    "schema_version": 1,
-                    "repository": "cbusillo/sellyouroutboard",
-                    "base_branch": "main",
-                },
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
-
     async def test_openapi_includes_run_once_contract(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_merge_train_service_identity()),
@@ -2272,31 +2038,6 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(payload["error"]["code"], "merge_train_controller_invalid_state")
         self.assertIn("merge train repository must be owner/name", payload["error"]["message"])
-
-    async def test_legacy_wsgi_controller_route_fails_closed(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            _seed_merge_train_policy(state_dir)
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/work-graph/merge-train/controller/run-once",
-                payload={
-                    "schema_version": 1,
-                    "repository": "cbusillo/sellyouroutboard",
-                    "base_branch": "main",
-                    "mutate": False,
-                },
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
 
     async def test_openapi_includes_controller_contract(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -2925,70 +2666,6 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
             "Merge train batch candidate storage requires database-backed records.",
         )
 
-    async def test_fastapi_route_precedes_legacy_wsgi_fallback(self) -> None:
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
-        ):
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            _seed_merge_train_policy(state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                local_record_store_for_tests=store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-            with patch(
-                "control_plane.merge_train_batch_candidate.GitHubMergeTrainSnapshotReader",
-                _FakeMergeTrainSnapshotReader,
-            ):
-                response = await _post_merge_train_batch_candidate_run_once(
-                    app,
-                    {
-                        "schema_version": 1,
-                        "repository": "cbusillo/sellyouroutboard",
-                        "base_branch": "main",
-                        "mode": "plan",
-                    },
-                )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["result"]["mode"], "plan")
-
-    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            _seed_merge_train_policy(state_dir)
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/work-graph/merge-train/batch-candidate/run-once",
-                payload={
-                    "schema_version": 1,
-                    "repository": "cbusillo/sellyouroutboard",
-                    "base_branch": "main",
-                    "mode": "plan",
-                },
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
-
     async def test_openapi_includes_batch_candidate_contract(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_merge_train_service_identity()),
@@ -3447,32 +3124,6 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
-
-    async def test_wsgi_fallback_no_longer_serves_route(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            _seed_merge_train_policy(state_dir)
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/work-graph/merge-train/pr-feedback",
-                payload={
-                    "schema_version": 1,
-                    "repository": "cbusillo/sellyouroutboard",
-                    "base_branch": "main",
-                    "pull_request_number": 7,
-                    "event": "blocked",
-                },
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
 
     async def test_openapi_includes_pr_feedback_contract(self) -> None:
         app = create_launchplane_fastapi_app(

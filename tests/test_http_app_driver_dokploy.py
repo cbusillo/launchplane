@@ -7,15 +7,9 @@ from datetime import (
 )
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import (
-    Any,
-    cast,
-)
 from unittest.mock import patch
 
-from a2wsgi import WSGIMiddleware
 from click import ClickException
-from starlette.types import ASGIApp
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
@@ -49,11 +43,9 @@ from tests.http_app_test_support import (
 )
 from tests.test_service import (
     _identity,
-    _invoke_app,
     _seed_tracked_target_records,
     _sqlite_database_url,
     _StubVerifier,
-    create_launchplane_service_app,
 )
 
 
@@ -169,40 +161,25 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
-    async def test_driver_descriptors_accept_human_session_when_mounted_over_wsgi(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            oauth_config = _github_oauth_config()
-            session_store = InMemoryHumanSessionStore()
-            session_manager = HumanSessionManager(
-                config=oauth_config,
-                session_store=session_store,
-            )
-            human_session = session_manager.issue(_github_human_identity())
-            policy = _github_human_driver_read_policy()
-            app = create_launchplane_fastapi_app(
-                verifier=_RejectingVerifier(),
-                authz_policy=policy,
-                record_store_factory=lambda: _MissingProductReadStore(),
-                human_session_manager=session_manager,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_RejectingVerifier(),
-                authz_policy=policy,
-                github_oauth_config=oauth_config,
-                human_session_store=session_store,
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+    async def test_driver_descriptors_accept_human_session_identity(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+        )
+        human_session = session_manager.issue(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_github_human_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
 
-            response = await _get_driver_descriptors(
-                app,
-                authorization="",
-                headers={"Cookie": session_manager.session_cookie_header(human_session)},
-            )
+        response = await _get_driver_descriptors(
+            app,
+            authorization="",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -380,31 +357,6 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
             False,
         )
 
-    async def test_fastapi_driver_descriptors_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            policy = _driver_read_policy()
-            app = create_launchplane_fastapi_app(
-                verifier=_RejectingVerifier(),
-                authz_policy=policy,
-                record_store_factory=lambda: _MissingProductReadStore(),
-                bearer_identity_config=_local_operator_bearer_config(),
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _get_driver_descriptors(app)
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertIn("trace_id", payload)
-        self.assertNotIn("authz", payload)
-
 
 class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
     async def test_driver_instance_view_returns_lane_summary(self) -> None:
@@ -493,35 +445,22 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
-    async def test_driver_context_view_accepts_human_session_when_mounted_over_wsgi(
-        self,
-    ) -> None:
+    async def test_driver_context_view_accepts_human_session_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            oauth_config = _github_oauth_config()
             session_store = InMemoryHumanSessionStore()
             session_manager = HumanSessionManager(
-                config=oauth_config,
+                config=_github_oauth_config(),
                 session_store=session_store,
             )
             human_session = session_manager.issue(_github_human_identity())
-            policy = _github_human_driver_read_policy(context="example-site")
             record_store = _driver_context_store(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_RejectingVerifier(),
-                authz_policy=policy,
+                authz_policy=_github_human_driver_read_policy(context="example-site"),
                 record_store_factory=lambda: record_store,
                 human_session_manager=session_manager,
             )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_RejectingVerifier(),
-                authz_policy=policy,
-                github_oauth_config=oauth_config,
-                human_session_store=session_store,
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
 
             response = await _get_driver_context_view(
                 app,
@@ -775,52 +714,6 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
             ],
             False,
         )
-
-    async def test_fastapi_dokploy_target_inspect_precedes_legacy_wsgi_fallback(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_dokploy_target_inspect_records(database_url)
-            app_store = PostgresRecordStore(database_url=database_url)
-            with (
-                patch(
-                    "control_plane.http_app.control_plane_dokploy.read_dokploy_config",
-                    return_value=("https://dokploy.example.invalid", "token"),
-                ),
-                patch(
-                    "control_plane.dokploy_target_inspect.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"id": "compose-cm-prod", "name": "cm-prod"},
-                ),
-            ):
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=_record_read_policy(
-                        action="dokploy_target.inspect",
-                        context="launchplane",
-                    ),
-                    database_url=database_url,
-                    record_store_factory=lambda: app_store,
-                    control_plane_root_path=root,
-                )
-                legacy_app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                    control_plane_root_path=root,
-                )
-                app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-                response = await _get_dokploy_target_inspect(
-                    app,
-                    context="cm_website",
-                    instance="prod",
-                )
-                app_store.close()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
 
 
 class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
@@ -1132,62 +1025,6 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("403", route["responses"])
         self.assertIn("409", route["responses"])
 
-    async def test_fastapi_self_deploy_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
-                control_plane_root_path=root,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-            with (
-                patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
-                    return_value=("https://dokploy.example.com", "token-123"),
-                ),
-                patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
-                ),
-                patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
-                ),
-                patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
-                ),
-            ):
-                response = await _post_launchplane_self_deploy(app, self._payload())
-
-        self.assertEqual(response.status_code, 202)
-
-    async def test_legacy_wsgi_self_deploy_route_is_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/launchplane/self-deploy",
-                payload=self._payload(),
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
-
 
 class FastApiDokployTargetSetupTests(unittest.IsolatedAsyncioTestCase):
     async def test_openapi_includes_dokploy_target_setup_contract(self) -> None:
@@ -1255,64 +1092,6 @@ class FastApiDokployTargetSetupTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "database_required")
-
-    async def test_fastapi_dokploy_target_setup_precedes_legacy_wsgi_fallback(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app_store = PostgresRecordStore(database_url=database_url)
-            app_store.ensure_schema()
-            with patch(
-                "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
-                return_value=("https://dokploy.example.invalid", "token"),
-            ):
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=_record_read_policy(
-                        action="dokploy_target.setup",
-                        context="launchplane",
-                    ),
-                    database_url=database_url,
-                    record_store_factory=lambda: app_store,
-                    control_plane_root_path=root,
-                )
-                legacy_app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                    control_plane_root_path=root,
-                )
-                app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/dokploy-targets/setup",
-                    headers={"Authorization": "Bearer valid-token"},
-                    payload={
-                        "schema_version": 1,
-                        "mode": "dry-run",
-                        "operation": "create-compose",
-                        "product": "launchplane",
-                        "context": "cm_website",
-                        "instance": "testing",
-                        "target_name": "cm-website-testing",
-                        "project_name": "Odoo",
-                        "environment_name": "production",
-                        "server_id": "server-123",
-                        "domains": ["cm-website-testing.example.invalid"],
-                        "runtime_port": 8069,
-                        "deploy_timeout_seconds": 900,
-                    },
-                )
-                app_store.close()
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(payload["status"], "accepted")
-        self.assertEqual(payload["result"]["mode"], "dry-run")
 
 
 class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
@@ -1807,58 +1586,3 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             openapi["components"]["schemas"]["TrackedTargetLogsResponse"]["additionalProperties"],
             False,
         )
-
-    async def test_fastapi_tracked_target_logs_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_tracked_target_records(
-                database_url=database_url,
-                context="sellyouroutboard-testing",
-                instance="testing",
-                target_id="app-123",
-                target_type="application",
-                target_name="syo-testing-app",
-            )
-            app_store = PostgresRecordStore(database_url=database_url)
-            with (
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
-                    return_value=("https://dokploy.example.com", "secret-token"),
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
-                    return_value=("contact form submitted",),
-                ),
-            ):
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=_record_read_policy(
-                        action="target_logs.read",
-                        context="sellyouroutboard-testing",
-                    ),
-                    record_store_factory=lambda: app_store,
-                    control_plane_root_path=root,
-                )
-                legacy_app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                    control_plane_root_path=root,
-                )
-                app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-                response = await _get_tracked_target_logs(
-                    app,
-                    "sellyouroutboard-testing",
-                    "testing",
-                    lines="2",
-                )
-                app_store.close()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")

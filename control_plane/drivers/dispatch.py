@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-from pathlib import Path
 import re
-from typing import Callable, Generic, TypeVar, cast
+from typing import Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -13,7 +11,6 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.promotion_record import ReleaseStatus
-from control_plane.service_auth import LaunchplaneIdentity
 
 
 class _ProductRouteEnvelope(BaseModel):
@@ -23,40 +20,6 @@ class _ProductRouteEnvelope(BaseModel):
 
 
 _DriverRouteEnvelopeT = TypeVar("_DriverRouteEnvelopeT", bound=_ProductRouteEnvelope)
-_StartResponse = Callable[[str, list[tuple[str, str]]], None]
-
-
-def _http_status_text(status_code: int) -> str:
-    return {
-        200: "OK",
-        202: "Accepted",
-        400: "Bad Request",
-        401: "Unauthorized",
-        403: "Forbidden",
-        404: "Not Found",
-        405: "Method Not Allowed",
-        409: "Conflict",
-        503: "Service Unavailable",
-        500: "Internal Server Error",
-    }.get(status_code, "OK")
-
-
-def _json_response(
-    *,
-    start_response: _StartResponse,
-    status_code: int,
-    payload: dict[str, object],
-    headers: list[tuple[str, str]] | None = None,
-) -> list[bytes]:
-    encoded = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
-    status_line = f"{status_code} {_http_status_text(status_code)}"
-    response_headers = [
-        ("Content-Type", "application/json"),
-        ("Content-Length", str(len(encoded))),
-    ]
-    response_headers.extend(headers or [])
-    start_response(status_line, response_headers)
-    return [encoded]
 
 
 @dataclass(frozen=True)
@@ -64,23 +27,6 @@ class _DriverRouteExecutionMetadata(Generic[_DriverRouteEnvelopeT]):
     route_path: str
     envelope_model: type[_DriverRouteEnvelopeT]
     denial_message: str
-
-
-@dataclass(frozen=True)
-class _DescriptorDriverDispatchContext:
-    product: str
-    context: str
-    authorization_context: str = ""
-    use_preview_context_for_authorization: bool = False
-    use_resolved_profile_product_for_authorization: bool = True
-    instance: str = ""
-    require_profile: bool = False
-
-
-@dataclass(frozen=True)
-class _DescriptorDriverDispatchResult:
-    result: dict[str, object]
-    driver_result: BaseModel | dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -146,75 +92,3 @@ def _normalize_preview_verification_checked_urls(value: object, *, label: str) -
     if any(not item for item in checked_urls):
         raise ValueError(f"{label} checked_urls cannot contain blanks.")
     return checked_urls
-
-
-_DescriptorDriverDispatchContextResolver = Callable[
-    [_DriverRouteEnvelopeT], _DescriptorDriverDispatchContext
-]
-_DescriptorDriverAuthorizationActionResolver = Callable[[_DriverRouteEnvelopeT], str]
-_DescriptorDriverDispatchHandler = Callable[
-    [
-        _DriverRouteEnvelopeT,
-        _ResolvedProductDriverContext,
-        object,
-        Path,
-    ],
-    _DescriptorDriverDispatchResult,
-]
-_DescriptorDriverCustomDispatchHandler = Callable[
-    [
-        _DriverRouteEnvelopeT,
-        _ResolvedProductDriverContext,
-        object,
-        Path,
-        Path,
-        str | None,
-        LaunchplaneIdentity,
-        str,
-        str,
-        str,
-        _StartResponse,
-        str,
-    ],
-    tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes],
-]
-_DescriptorDriverDispatchValidator = Callable[
-    [
-        _DriverRouteEnvelopeT,
-        _ResolvedProductDriverContext,
-        object,
-        Path,
-    ],
-    None,
-]
-_DescriptorDriverPreAuthorizationValidator = Callable[
-    [
-        _DriverRouteEnvelopeT,
-        _ResolvedProductDriverContext,
-        LaunchplaneIdentity,
-        _StartResponse,
-        str,
-    ],
-    list[bytes] | None,
-]
-
-
-@dataclass(frozen=True)
-class _DescriptorDriverDispatchRoute(Generic[_DriverRouteEnvelopeT]):
-    execution_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT]
-    context_resolver: _DescriptorDriverDispatchContextResolver[_DriverRouteEnvelopeT]
-    handler: _DescriptorDriverDispatchHandler[_DriverRouteEnvelopeT] | None = None
-    pre_idempotency_validator: _DescriptorDriverDispatchValidator[_DriverRouteEnvelopeT] | None = (
-        None
-    )
-    pre_authorization_validator: (
-        _DescriptorDriverPreAuthorizationValidator[_DriverRouteEnvelopeT] | None
-    ) = None
-    authorization_action_resolver: (
-        _DescriptorDriverAuthorizationActionResolver[_DriverRouteEnvelopeT] | None
-    ) = None
-    custom_dispatch_handler: (
-        _DescriptorDriverCustomDispatchHandler[_DriverRouteEnvelopeT] | None
-    ) = None
-    skip_pre_idempotency_check: bool = False
-    skip_driver_context_resolution: bool = False

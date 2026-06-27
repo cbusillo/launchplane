@@ -14,7 +14,7 @@ owns its removal.
 ## Decision Summary
 
 - HTTP service boundary: accepted. FastAPI and Uvicorn are the v2 service
-  boundary. Legacy WSGI routes remain only as a migration bridge.
+  boundary. The production legacy WSGI bridge is removed.
 - API contracts: accepted. Pydantic models and FastAPI OpenAPI output are the
   contract source for HTTP payloads and future client generation.
 - Storage: accepted. SQLAlchemy ORM models plus Alembic migrations are the
@@ -59,22 +59,22 @@ Launchplane v2 uses these foundation boundaries:
   the latest compatible Python version documented by the repo gates.
 
 FastAPI is no longer speculative. The serving-boundary slice has landed and the
-legacy WSGI service is mounted only as a migration bridge. New service routes
-should use FastAPI route modules unless a PR documents a bounded compatibility
-exception.
+production service is served directly by Uvicorn/FastAPI without mounting the
+legacy WSGI service. New service routes should use FastAPI route modules unless
+a PR documents a bounded compatibility exception.
 
-The remaining HTTP work is route migration, request hardening, OpenAPI contract
-coverage, and deletion of fallback routes once their replacements are proven.
-The legacy WSGI app is retired when all production route families have native
-FastAPI ownership, route tests cover the native paths, and no production request
-needs the mounted fallback.
+The remaining HTTP work is request hardening, OpenAPI contract coverage, final
+dead-code removal, and transition-doc cleanup. The production legacy WSGI mount,
+test-only WSGI fallback stubs, and tests that recreate removed WSGI production
+behavior are removed once native FastAPI coverage preserves the relevant
+contract.
 
 Each HTTP migration slice moves one route family at a time. The route family is
-not considered migrated until the native FastAPI path wins ahead of the mounted
-WSGI fallback, Pydantic models define the request and response contracts,
-focused OpenAPI assertions cover the path and schema references, route tests
-preserve the legacy behavior, and the PR names the fallback impact: deleted,
-demoted, unchanged with a removal condition, or retained with an owning issue.
+not considered migrated until the native FastAPI path owns the production route,
+Pydantic models define the request and response contracts, focused OpenAPI
+assertions cover the path and schema references, route tests preserve the
+relevant behavior, and the PR names the fallback impact: deleted, demoted,
+unchanged with a removal condition, or retained with an owning issue.
 Request hardening expectations belong in the same route-family slice: JSON
 content-type behavior, maximum body-size behavior, validation errors,
 authentication errors, authorization errors, and the consistent `400`, `413`,
@@ -98,7 +98,7 @@ Candidate route-family order:
 
 This order is a starting point, not a second plan. A slice may move a lower-risk
 route family earlier when the owning issue explains why and preserves the same
-retirement discipline.
+removal discipline.
 
 ## Authority Model
 
@@ -143,15 +143,11 @@ Use the candidate route-family order above as the default extraction order.
 Within a route family, prefer extracting shared request/auth/error handling
 before moving mutation-heavy driver or workflow execution code.
 
-Implementation slices should avoid adding new v2 behavior directly to legacy
-WSGI routing. If a slice must touch the legacy surface, it must explain why and
-name the retirement checkpoint that removes or demotes that path.
-
-Do not delete a WSGI route family merely because the native route exists. Delete
-or demote it when native tests cover the path, OpenAPI covers the contract,
-callers no longer need the fallback, and live or rehearsed evidence proves the
-native path for the owning product/context class. Old WSGI code should not stay
-as a second production implementation after those checkpoints pass.
+Implementation slices should add new service behavior through FastAPI route
+modules and delete obsolete compatibility code as the owning route family proves
+its native path. Native tests, OpenAPI coverage, caller evidence, and live or
+rehearsed evidence are the proof points for removing the old path; obsolete code
+should not stay as a second implementation after those checkpoints pass.
 
 ## Prove Or Defer Gates
 
@@ -483,10 +479,7 @@ hand-maintaining frontend mirrors. Generated examples and schemas must stay
 public-safe and must not include real product, domain, provider, authz, or
 operator values.
 
-The legacy WSGI health route is retained only as part of the mounted fallback
-bridge while route ownership is migrated. Its removal belongs to the route
-migration checkpoint that retires or demotes the legacy WSGI surface after the
-native FastAPI route family is proven.
+Production health traffic uses the native FastAPI route directly.
 
 ### Python 3.14
 
@@ -526,15 +519,24 @@ Every v2 slice must classify its legacy impact:
 - `retained`: path remains production-capable and has an owning removal issue,
   condition, and dated reason
 
-The main legacy categories are:
+Completed legacy categories:
 
-- WSGI fallback routes mounted behind the FastAPI app
+- WSGI fallback routes mounted behind the FastAPI app are removed and must not be
+  reintroduced.
+
+The remaining legacy categories are:
+
 - file-backed production mutation paths
 - local CLI live-target mutations that bypass service routes
 - request-process daemon threads for durable operations
 - manual frontend/backend contract mirrors
 - service-host env or workflow defaults used as live runtime authority
 - secrets with fixed or ambiguous key ids and no rotation metadata
+
+The v2 closeout pass must run an explicit audit and search for dead code,
+including obsolete imports, helpers, tests, docs, dependencies, compatibility
+stubs, and transition-only wording. Cleanup must be represented in issue-backed
+plans rather than standalone repo-local plan files.
 
 See [compatibility-retirement.md](compatibility-retirement.md) for the detailed
 checkpoint rules.
@@ -550,8 +552,7 @@ possible. In practice this means:
   live or rehearsal evidence
 - heavy provider dependencies are introduced behind explicit service boundaries,
   not scattered through drivers or storage code
-- the legacy fallback remains available only until route-family migration proves
-  removal is safe
+- removed compatibility code is not kept as an inactive rollback path
 
 After later slices depend on a foundation change, prefer forward fixes or a
 replacement slice over large retroactive reverts. Direct revert is best while a
@@ -572,7 +573,7 @@ slice is still isolated.
 
 - #1322 tracks the v2 foundation epic and issue rerouting.
 - #1323 tracks this ADR and accepted decision updates.
-- #1325 tracks HTTP/FastAPI route migration and legacy fallback retirement.
+- #1325 tracks HTTP/FastAPI route migration and legacy fallback removal.
 - #1326 tracks Keycloak identity boundary proof.
 - #1327 tracks OpenFGA authorization model proof.
 - #1328 tracks the DB-backed worker queue decision and Temporal deferral gates.

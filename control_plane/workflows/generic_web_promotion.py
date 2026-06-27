@@ -187,6 +187,15 @@ def resolve_generic_web_promotion_lanes(
     )
     if source_profile.product != destination_profile.product:
         raise click.ClickException("Generic web promotion resolved inconsistent product profiles.")
+    source_lane = source_lane.model_copy(
+        update={"context": source_lane.context.strip(), "instance": source_lane.instance.strip()}
+    )
+    destination_lane = destination_lane.model_copy(
+        update={
+            "context": destination_lane.context.strip(),
+            "instance": destination_lane.instance.strip(),
+        }
+    )
     if source_lane.context != destination_lane.context:
         raise click.ClickException(
             "Generic web promotion currently requires source and destination lanes to share a context. "

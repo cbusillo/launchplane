@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
 )
@@ -15,18 +13,12 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence, Releas
 from control_plane.contracts.runtime_identity import health_payload_runtime_identity_status
 from control_plane.contracts.structured_health import structured_health_evidence_from_payload
 from control_plane.drivers.dispatch import (
-    _DescriptorDriverDispatchResult,
     _DriverRouteExecutionMetadata,
     _ProductRouteEnvelope,
-    _ResolvedProductDriverContext,
-    ProductDriverMismatchError,
-    _StartResponse,
-    _json_response,
     _normalize_preview_verification_checked_urls,
     _normalize_release_status,
     _validate_driver_envelope_product,
 )
-from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     apply_deployment_evidence,
@@ -34,24 +26,16 @@ from control_plane.workflows.evidence_ingestion import (
 )
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
-    GenericWebDeployStore,
     GenericWebPostDeployExecutor,
-    execute_generic_web_deploy,
 )
 from control_plane.workflows.dokploy_deploy import (
     DokployComposeSourceRefDeployRequest,
-    DokployComposeSourceRefDeployStore,
-    execute_dokploy_compose_source_ref_deploy,
 )
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
-    GenericWebPromotionStore,
-    execute_generic_web_prod_promotion,
-    resolve_generic_web_promotion_lanes,
 )
 from control_plane.workflows.generic_web_promotion_workflow import (
     GenericWebPromotionWorkflowRequest,
-    dispatch_generic_web_promotion_workflow,
 )
 from control_plane.workflows.odoo_generic_web_post_deploy import (
     generic_web_post_deploy_executor_for_driver_id,
@@ -411,198 +395,3 @@ def _apply_generic_web_stable_verification_records(
         result["promotion_health_status"] = health_evidence.status
 
     return result
-
-
-def _handle_generic_web_stable_verification(
-    request: GenericWebStableVerificationEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del control_plane_root_path
-    if resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web stable verification requires a product profile lane."
-        )
-    return _DescriptorDriverDispatchResult(
-        result=_apply_generic_web_stable_verification_records(
-            record_store=record_store,
-            request=request.verification,
-        )
-    )
-
-
-def _handle_generic_web_deploy(
-    request: GenericWebDeployEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    if resolved_context.profile is None or resolved_context.lane is None:
-        raise ProductDriverMismatchError("Generic web deploy requires a product profile lane.")
-    driver_result = execute_generic_web_deploy(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebDeployStore, record_store),
-        request=request.deploy,
-        profile=resolved_context.profile,
-        lane=resolved_context.lane,
-        post_deploy_executor=_generic_web_post_deploy_executor_for_profile(
-            resolved_context.profile
-        ),
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"deployment_record_id": driver_result.deployment_record_id},
-        driver_result=driver_result,
-    )
-
-
-def _validate_generic_web_source_ref_deploy_lane(
-    request: GenericWebSourceRefDeployEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> None:
-    del record_store, control_plane_root_path
-    if resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web source-ref deploy requires a product profile lane."
-        )
-    if request.deploy.context != resolved_context.lane.context:
-        raise ProductDriverMismatchError(
-            "Generic web source-ref deploy context does not match the product profile lane."
-        )
-    if request.deploy.instance != resolved_context.lane.instance:
-        raise ProductDriverMismatchError(
-            "Generic web source-ref deploy instance does not match the product profile lane."
-        )
-
-
-def _handle_generic_web_source_ref_deploy(
-    request: GenericWebSourceRefDeployEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    if resolved_context.profile is None or resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web source-ref deploy requires a product profile lane."
-        )
-    host, token = control_plane_dokploy.read_dokploy_config(
-        control_plane_root=control_plane_root_path
-    )
-    driver_result = execute_dokploy_compose_source_ref_deploy(
-        host=host,
-        token=token,
-        record_store=cast(DokployComposeSourceRefDeployStore, record_store),
-        request=request.deploy,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={
-            "context": driver_result.context,
-            "instance": driver_result.instance,
-            "target_id": driver_result.target_id,
-            "source_git_ref": driver_result.source_git_ref,
-            "provider_source_ref": driver_result.provider_source_ref,
-            "restored_source_ref": driver_result.restored_source_ref,
-            "deploy_status": driver_result.deploy_status,
-        },
-        driver_result=driver_result,
-    )
-
-
-def _handle_generic_web_prod_promotion(
-    request: GenericWebProdPromotionEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    if resolved_context.profile is None or resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web prod promotion requires a product profile lane."
-        )
-    driver_result = execute_generic_web_prod_promotion(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPromotionStore, record_store),
-        request=request.promotion,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={
-            "promotion_record_id": driver_result.promotion_record_id,
-            "deployment_record_id": driver_result.deployment_record_id,
-            "backup_record_id": driver_result.backup_record_id,
-            "inventory_record_id": driver_result.inventory_record_id,
-            "promotion_status": driver_result.promotion_status,
-            "deployment_status": driver_result.deployment_status,
-            "source_health_status": driver_result.source_health_status,
-            "destination_health_status": driver_result.destination_health_status,
-            "backup_status": driver_result.backup_status,
-            "release_status": driver_result.release_status,
-            "release_tag": driver_result.release_tag,
-            "release_url": driver_result.release_url,
-            "dry_run": driver_result.dry_run,
-        },
-        driver_result=driver_result,
-    )
-
-
-def _handle_generic_web_promotion_workflow(
-    request: GenericWebPromotionWorkflowEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del record_store
-    if resolved_context.profile is None or resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web promotion workflow requires a product profile lane."
-        )
-    driver_result = dispatch_generic_web_promotion_workflow(
-        control_plane_root=control_plane_root_path,
-        profile=resolved_context.profile,
-        request=request.workflow,
-    )
-    return _DescriptorDriverDispatchResult(
-        result=driver_result.model_dump(mode="json"),
-        driver_result=driver_result,
-    )
-
-
-def _validate_generic_web_prod_promotion_lanes(
-    request: GenericWebProdPromotionEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> None:
-    del control_plane_root_path
-    if resolved_context.profile is None or resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web prod promotion requires a product profile lane."
-        )
-    resolve_generic_web_promotion_lanes(
-        record_store=cast(GenericWebPromotionStore, record_store),
-        request=request.promotion,
-    )
-
-
-def _reject_human_live_generic_web_prod_promotion(
-    request: GenericWebProdPromotionEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    identity: LaunchplaneIdentity,
-    start_response: _StartResponse,
-    trace_id: str,
-) -> list[bytes] | None:
-    del resolved_context
-    if not isinstance(identity, GitHubHumanIdentity) or request.promotion.dry_run:
-        return None
-    return _json_response(
-        start_response=start_response,
-        status_code=403,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "authorization_denied",
-                "message": "Launchplane UI can only dry-run generic-web prod promotions.",
-            },
-        },
-    )

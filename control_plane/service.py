@@ -2,28 +2,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 import logging
 import os
 import re
 import uuid
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Iterable, Protocol, cast
+from typing import Iterable, Protocol, cast
 
 import click
-from a2wsgi import WSGIMiddleware
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
-from jwt import InvalidTokenError
-from starlette.types import ASGIApp
+from pydantic import BaseModel
 
 from control_plane.http_app import (
     LaunchplaneAuthzPolicyRuntime,
     create_launchplane_fastapi_app,
     resolve_launchplane_authz_policy,
 )
-from control_plane import secrets as control_plane_secrets
-from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     close_every_code_work_request_for_issue,
@@ -37,27 +31,9 @@ from control_plane.contracts.every_code_pr_feedback_record import (
     EveryCodePrFeedbackRecord,
     build_every_code_pr_feedback_id,
 )
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
-from control_plane.contracts.verireel_prod_backup_gate import (
-    VeriReelProdBackupGateRequest,
-)
-from control_plane.merge_train_policy_source import (
-    MergeTrainPolicyStoreMissingError,
-)
-from control_plane.contracts.preview_mutation_request import (
-    PreviewDestroyMutationRequest,
-    PreviewGenerationMutationRequest,
-    PreviewMutationRequest,
-)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
-)
-from control_plane.contracts.promotion_record import (
-    HealthcheckEvidence,
-    PostDeployUpdateEvidence,
-    ReleaseStatus,
 )
 from control_plane.drivers.registry import list_driver_descriptors, read_driver_descriptor
 from control_plane.every_code_work_request_write import (
@@ -65,15 +41,11 @@ from control_plane.every_code_work_request_write import (
     build_every_code_work_request_record,
 )
 from control_plane.drivers.dispatch import (
-    _DescriptorDriverDispatchContext as _DescriptorDriverDispatchContext,
-    _DescriptorDriverDispatchRoute as _DescriptorDriverDispatchRoute,
-    _DescriptorDriverDispatchResult as _DescriptorDriverDispatchResult,
     _DriverRouteEnvelopeT as _DriverRouteEnvelopeT,
     _DriverRouteExecutionMetadata as _DriverRouteExecutionMetadata,
     _ProductRouteEnvelope as _ProductRouteEnvelope,
     _ResolvedProductDriverContext as _ResolvedProductDriverContext,
     _image_reference_tail as _image_reference_tail,
-    _json_response as _json_response,
     _normalize_preview_verification_checked_urls as _normalize_preview_verification_checked_urls,
     _normalize_release_status as _normalize_release_status,
     _repo_token as _repo_token,
@@ -97,24 +69,10 @@ from control_plane.drivers.generic_web_dispatch import (
     _GENERIC_WEB_ROLLBACK_ROUTE as _GENERIC_WEB_ROLLBACK_ROUTE,
     _GENERIC_WEB_STABLE_VERIFICATION_ROUTE as _GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
     _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE as _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
-    _apply_generic_web_stable_verification_records as _apply_generic_web_stable_verification_records,
-    _generic_web_post_deploy_executor_for_profile as _generic_web_post_deploy_executor_for_profile,
-    _handle_generic_web_deploy as _handle_generic_web_deploy,
-    _handle_generic_web_prod_promotion as _handle_generic_web_prod_promotion,
-    _handle_generic_web_promotion_workflow as _handle_generic_web_promotion_workflow,
-    _handle_generic_web_stable_verification as _handle_generic_web_stable_verification,
-    _handle_generic_web_source_ref_deploy as _handle_generic_web_source_ref_deploy,
     _stable_verification_health_evidence as _stable_verification_health_evidence,
-    _reject_human_live_generic_web_prod_promotion as _reject_human_live_generic_web_prod_promotion,
-    _validate_generic_web_source_ref_deploy_lane as _validate_generic_web_source_ref_deploy_lane,
     _validate_stable_verification_request as _validate_stable_verification_request,
-    _validate_generic_web_prod_promotion_lanes as _validate_generic_web_prod_promotion_lanes,
 )
 from control_plane.drivers.generic_web_preview_dispatch import (
-    GenericWebPreviewDestroyEnvelope as GenericWebPreviewDestroyEnvelope,
-    GenericWebPreviewInventoryEnvelope as GenericWebPreviewInventoryEnvelope,
-    GenericWebPreviewReadinessEnvelope as GenericWebPreviewReadinessEnvelope,
-    GenericWebPreviewRefreshEnvelope as GenericWebPreviewRefreshEnvelope,
     GenericWebPreviewVerificationEnvelope as GenericWebPreviewVerificationEnvelope,
     GenericWebPreviewVerificationRequest as GenericWebPreviewVerificationRequest,
     GenericWebPreviewVerificationResult as GenericWebPreviewVerificationResult,
@@ -135,57 +93,43 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _generic_web_preview_refresh_mutation_requests as _generic_web_preview_refresh_mutation_requests,
     _generic_web_preview_refresh_states as _generic_web_preview_refresh_states,
     _generic_web_preview_refresh_timing as _generic_web_preview_refresh_timing,
-    _handle_generic_web_preview_destroy as _handle_generic_web_preview_destroy,
-    _handle_generic_web_preview_inventory as _handle_generic_web_preview_inventory,
-    _handle_generic_web_preview_readiness as _handle_generic_web_preview_readiness,
-    _handle_generic_web_preview_refresh as _handle_generic_web_preview_refresh,
-    _handle_generic_web_preview_verification as _handle_generic_web_preview_verification,
-    _validate_generic_web_preview_profile as _validate_generic_web_preview_profile,
     _write_preview_desired_state_if_supported as _write_preview_desired_state_if_supported,
     _write_preview_inventory_scan_if_supported as _write_preview_inventory_scan_if_supported,
+)
+from control_plane.generic_web_preview_http import (
+    GenericWebPreviewDestroyEnvelope as GenericWebPreviewDestroyEnvelope,
+    GenericWebPreviewInventoryEnvelope as GenericWebPreviewInventoryEnvelope,
+    GenericWebPreviewReadinessEnvelope as GenericWebPreviewReadinessEnvelope,
+    GenericWebPreviewRefreshEnvelope as GenericWebPreviewRefreshEnvelope,
 )
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
     ODOO_PREVIEW_APPLY_ROUTE,
-    OdooPreviewApplyConfigError,
     OdooPreviewApplyEnvelope,
     OdooPreviewApplyInputsEnvelope,
 )
 from control_plane.launchplane_mutations import (
-    LaunchplaneMutationStore,
-    apply_launchplane_destroy_preview,
-    apply_launchplane_generation_evidence,
     control_plane_root,
 )
 from control_plane.service_auth import (
     AgentAuthzDecision,
     BearerIdentityConfig,
-    GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
-    TokenVerifier,
     agent_authz_audit,
-    bearer_identity_from_token,
     load_authz_policy,
-    read_bearer_token,
 )
 from control_plane.service_human_auth import (
     GitHubOAuthClient,
-    GitHubOAuthConfig,
     HumanSessionManager,
-    HumanSessionStore,
-    InMemoryHumanSessionStore,
-    LaunchplaneHumanSession,
     OAuthLoginStateStore,
     load_github_oauth_config_from_env,
 )
 from control_plane.storage.factory import build_shared_record_store
-from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.ui_static_http import serve_ui_route
 from control_plane.work_graph_github_projects import (
     build_github_project_planning_facts,
     load_github_project_planning_facts_config_from_env,
@@ -194,14 +138,6 @@ from control_plane.work_graph_issue_inbox import (
     build_github_issue_inbox_read_model,
     load_github_issue_inbox_config_from_env,
     reconcile_github_issue_inbox,
-)
-from control_plane.merge_train_github import (
-    MergeTrainGitHubError,
-    MergeTrainGitHubStaleHeadError,
-)
-from control_plane.workflows.evidence_ingestion import (
-    EvidenceIngestionStore,
-    apply_deployment_evidence,
 )
 from control_plane.workflows.preview_pr_feedback import (
     handle_every_code_preview_validation_comment,
@@ -212,10 +148,9 @@ from control_plane.workflows.launchplane import (
     resolve_launchplane_github_token,
     verify_github_webhook_signature,
 )
-from control_plane.workflows.odoo_artifact_publish import (
-    OdooArtifactPublishEvidenceStore,
-    OdooArtifactPublishEvidenceRequest,
-    ingest_odoo_artifact_publish_evidence,
+from control_plane.odoo_artifact_publish_http import (
+    ODOO_ARTIFACT_PUBLISH_ROUTE,
+    OdooArtifactPublishEnvelope as OdooArtifactPublishEnvelope,
 )
 from control_plane.odoo_post_deploy_http import (
     ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
@@ -253,50 +188,40 @@ from control_plane.odoo_target_replacement_apply_http import (
     ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
     OdooTargetReplacementApplyEnvelope as OdooTargetReplacementApplyEnvelope,
 )
-from control_plane.workflows.verireel_stable_deploy import (
-    VeriReelStableDeployRequest,
-    VeriReelStableDeployStore,
-    execute_verireel_stable_deploy,
+from control_plane.verireel_read_http import (
+    VeriReelPreviewDestroyEnvelope as VeriReelPreviewDestroyEnvelope,
+    VeriReelPreviewInventoryEnvelope as VeriReelPreviewInventoryEnvelope,
+    VeriReelPreviewRefreshEnvelope as VeriReelPreviewRefreshEnvelope,
+    VeriReelPreviewVerificationEnvelope as VeriReelPreviewVerificationEnvelope,
+    VeriReelPreviewVerificationRequest as VeriReelPreviewVerificationRequest,
+    VeriReelRuntimeVerificationEnvelope as VeriReelRuntimeVerificationEnvelope,
+    VeriReelStableEnvironmentEnvelope as VeriReelStableEnvironmentEnvelope,
+    VeriReelTestingVerificationEnvelope as VeriReelTestingVerificationEnvelope,
+    VeriReelTestingVerificationRequest as VeriReelTestingVerificationRequest,
+    _VERIREEL_PREVIEW_DESTROY_ROUTE as _VERIREEL_PREVIEW_DESTROY_ROUTE,
+    _VERIREEL_PREVIEW_INVENTORY_ROUTE as _VERIREEL_PREVIEW_INVENTORY_ROUTE,
+    _VERIREEL_PREVIEW_REFRESH_ROUTE as _VERIREEL_PREVIEW_REFRESH_ROUTE,
+    _VERIREEL_PREVIEW_VERIFICATION_ROUTE as _VERIREEL_PREVIEW_VERIFICATION_ROUTE,
+    _VERIREEL_RUNTIME_VERIFICATION_ROUTE as _VERIREEL_RUNTIME_VERIFICATION_ROUTE,
+    _VERIREEL_STABLE_ENVIRONMENT_ROUTE as _VERIREEL_STABLE_ENVIRONMENT_ROUTE,
+    _VERIREEL_TESTING_VERIFICATION_ROUTE as _VERIREEL_TESTING_VERIFICATION_ROUTE,
 )
-from control_plane.workflows.verireel_environment import (
-    VeriReelStableEnvironmentRequest,
-    resolve_verireel_stable_environment,
+from control_plane.verireel_nonprod_http import (
+    VeriReelAppMaintenanceEnvelope as VeriReelAppMaintenanceEnvelope,
+    VeriReelTestingDeployEnvelope as VeriReelTestingDeployEnvelope,
+    _VERIREEL_APP_MAINTENANCE_ROUTE as _VERIREEL_APP_MAINTENANCE_ROUTE,
+    _VERIREEL_TESTING_DEPLOY_ROUTE as _VERIREEL_TESTING_DEPLOY_ROUTE,
 )
-from control_plane.workflows.verireel_rollout import (
-    VeriReelRolloutVerificationRequest,
-    execute_verireel_rollout_verification,
+from control_plane.verireel_prod_http import (
+    VeriReelProdBackupGateEnvelope as VeriReelProdBackupGateEnvelope,
+    VeriReelProdDeployEnvelope as VeriReelProdDeployEnvelope,
+    VeriReelProdPromotionEnvelope as VeriReelProdPromotionEnvelope,
+    VeriReelProdRollbackEnvelope as VeriReelProdRollbackEnvelope,
+    _VERIREEL_PROD_BACKUP_GATE_ROUTE as _VERIREEL_PROD_BACKUP_GATE_ROUTE,
+    _VERIREEL_PROD_DEPLOY_ROUTE as _VERIREEL_PROD_DEPLOY_ROUTE,
+    _VERIREEL_PROD_PROMOTION_ROUTE as _VERIREEL_PROD_PROMOTION_ROUTE,
+    _VERIREEL_PROD_ROLLBACK_ROUTE as _VERIREEL_PROD_ROLLBACK_ROUTE,
 )
-from control_plane.workflows.verireel_app_maintenance import (
-    VeriReelAppMaintenanceRequest,
-    execute_verireel_app_maintenance,
-)
-from control_plane.workflows.verireel_prod_backup_gate import (
-    VeriReelProdBackupGateOperationStore,
-    enqueue_verireel_prod_backup_gate,
-)
-from control_plane.workflows.verireel_prod_promotion import (
-    VeriReelProdPromotionRequest,
-    VeriReelProdPromotionStore,
-    execute_verireel_prod_promotion,
-)
-from control_plane.workflows.verireel_prod_rollback import (
-    VeriReelProdRollbackRequest,
-    VeriReelProdRollbackStore,
-    execute_verireel_prod_rollback,
-)
-from control_plane.workflows.verireel_preview_driver import (
-    VeriReelPreviewDestroyRequest,
-    VeriReelPreviewDestroyResult,
-    VeriReelPreviewRefreshConfigError,
-    VeriReelPreviewInventoryRequest,
-    VeriReelPreviewRefreshRequest,
-    VeriReelPreviewRefreshResult,
-    VeriReelPreviewRefreshTransportError,
-    execute_verireel_preview_destroy,
-    execute_verireel_preview_inventory,
-    execute_verireel_preview_refresh,
-)
-
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _WHOLE_PRODUCT_CONTEXT = "*"
@@ -304,9 +229,33 @@ _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHO
 _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
     {
         "/v1/drivers/generic-web/preview-desired-state",
+        _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
+        _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
+        _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
+        _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
+        _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
+        _GENERIC_WEB_DEPLOY_ROUTE.route_path,
+        _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
+        _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
+        _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
+        _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
+        _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
+        _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
+        _VERIREEL_PREVIEW_REFRESH_ROUTE.route_path,
+        _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
+        _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
+        _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
+        _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
+        _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
+        _VERIREEL_APP_MAINTENANCE_ROUTE.route_path,
+        _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path,
+        _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
+        _VERIREEL_PROD_PROMOTION_ROUTE.route_path,
+        _VERIREEL_PROD_ROLLBACK_ROUTE.route_path,
         "/v1/drivers/ingress/route-apply",
+        ODOO_ARTIFACT_PUBLISH_ROUTE,
         "/v1/drivers/odoo/artifact-publish-inputs",
         ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
         ODOO_POST_DEPLOY_ROUTE,
@@ -345,27 +294,6 @@ class _DriverRouteMetadata:
     operator_visible: bool
 
 
-class _IdempotencyCapableStore(Protocol):
-    def read_idempotency_record(
-        self,
-        *,
-        scope: str,
-        route_path: str,
-        idempotency_key: str,
-    ) -> LaunchplaneIdempotencyRecord: ...
-
-    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object: ...
-
-
-class _TestLaunchplaneServiceRecordStore(Protocol):
-    @property
-    def backend_name(self) -> str: ...
-
-    def close(self) -> None: ...
-
-
-_StartResponse = Callable[[str, list[tuple[str, str]]], None]
-_WsgiApp = Callable[[dict[str, object], _StartResponse], list[bytes]]
 _EveryCodeWebhookResponse = tuple[int, dict[str, object]]
 
 
@@ -393,6 +321,7 @@ _PREVIEW_INVENTORY_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE
 _PREVIEW_REFRESH_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path})
 _PREVIEW_READINESS_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path})
 _PREVIEW_DESTROY_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path})
+_PREVIEW_VERIFICATION_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path})
 _PREVIEW_DESTROY_IDEMPOTENCY_ROUTE_PATHS = frozenset(
     {
         _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
@@ -416,20 +345,11 @@ _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
     | _PREVIEW_REFRESH_ROUTE_PATHS
     | _PREVIEW_READINESS_ROUTE_PATHS
     | _PREVIEW_DESTROY_ROUTE_PATHS
+    | _PREVIEW_VERIFICATION_ROUTE_PATHS
 )
 _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
     _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
 )
-
-
-class OdooArtifactPublishEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    publish: OdooArtifactPublishEvidenceRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooArtifactPublishEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo artifact publish")
-        return self
 
 
 _ODOO_POST_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
@@ -469,7 +389,7 @@ _ODOO_STABLE_BOOTSTRAP_ROUTE = _DriverRouteExecutionMetadata(
 
 
 _ODOO_ARTIFACT_PUBLISH_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/artifact-publish",
+    route_path=ODOO_ARTIFACT_PUBLISH_ROUTE,
     envelope_model=OdooArtifactPublishEnvelope,
     denial_message=(
         "Workflow cannot write Odoo artifact publish evidence for the requested product/context."
@@ -541,335 +461,6 @@ _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-_PREVIEW_VERIFICATION_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path})
-_GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
-    _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
-    | _PREVIEW_VERIFICATION_ROUTE_PATHS
-    | {_ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path}
-)
-_GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
-    _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
-)
-
-
-class VeriReelTestingDeployEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    deploy: VeriReelStableDeployRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelTestingDeployEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel testing deploy")
-        if self.deploy.instance != "testing":
-            raise ValueError("VeriReel testing deploy requires instance 'testing'.")
-        return self
-
-
-class VeriReelTestingVerificationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    context: str = "verireel"
-    instance: str = "testing"
-    deployment_record_id: str
-    migration_status: ReleaseStatus
-    verification_status: ReleaseStatus
-    owner_routes_status: ReleaseStatus
-
-    @field_validator(
-        "migration_status", "verification_status", "owner_routes_status", mode="before"
-    )
-    @classmethod
-    def _normalize_status(cls, value: object) -> ReleaseStatus:
-        return _normalize_release_status(value, label="Testing verification status")
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "VeriReelTestingVerificationRequest":
-        if not self.context.strip():
-            raise ValueError("VeriReel testing verification requires context.")
-        if self.instance != "testing":
-            raise ValueError("VeriReel testing verification requires instance 'testing'.")
-        if not self.deployment_record_id.strip():
-            raise ValueError("VeriReel testing verification requires deployment_record_id.")
-        return self
-
-
-class VeriReelTestingVerificationEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    verification: VeriReelTestingVerificationRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelTestingVerificationEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel testing verification")
-        return self
-
-
-class VeriReelProdDeployEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    deploy: VeriReelStableDeployRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelProdDeployEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel prod deploy")
-        if self.deploy.instance != "prod":
-            raise ValueError("VeriReel prod deploy requires instance 'prod'.")
-        return self
-
-
-class VeriReelAppMaintenanceEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    maintenance: VeriReelAppMaintenanceRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelAppMaintenanceEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel app maintenance")
-        return self
-
-
-class VeriReelStableEnvironmentEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    environment: VeriReelStableEnvironmentRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelStableEnvironmentEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel stable environment")
-        return self
-
-
-class VeriReelRuntimeVerificationEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    verification: VeriReelRolloutVerificationRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelRuntimeVerificationEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel runtime verification")
-        return self
-
-
-_VERIREEL_TESTING_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/testing-deploy",
-    envelope_model=VeriReelTestingDeployEnvelope,
-    denial_message=(
-        "Workflow cannot execute the VeriReel testing deploy driver"
-        " for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_TESTING_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/testing-verification",
-    envelope_model=VeriReelTestingVerificationEnvelope,
-    denial_message=(
-        "Workflow cannot write VeriReel testing verification for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_STABLE_ENVIRONMENT_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/stable-environment",
-    envelope_model=VeriReelStableEnvironmentEnvelope,
-    denial_message=(
-        "Workflow cannot read the VeriReel stable environment for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_RUNTIME_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/runtime-verification",
-    envelope_model=VeriReelRuntimeVerificationEnvelope,
-    denial_message=(
-        "Workflow cannot execute the VeriReel runtime verification driver"
-        " for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_APP_MAINTENANCE_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/app-maintenance",
-    envelope_model=VeriReelAppMaintenanceEnvelope,
-    denial_message=(
-        "Workflow cannot execute the VeriReel app maintenance driver"
-        " for the requested product/context."
-    ),
-)
-
-
-class VeriReelProdPromotionEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    promotion: VeriReelProdPromotionRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelProdPromotionEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel prod promotion")
-        return self
-
-
-class VeriReelProdBackupGateEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    backup_gate: VeriReelProdBackupGateRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelProdBackupGateEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel prod backup gate")
-        return self
-
-
-class VeriReelProdRollbackEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    rollback: VeriReelProdRollbackRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelProdRollbackEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel prod rollback")
-        return self
-
-
-_VERIREEL_PROD_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/prod-deploy",
-    envelope_model=VeriReelProdDeployEnvelope,
-    denial_message=(
-        "Workflow cannot execute the VeriReel prod deploy driver for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_PROD_BACKUP_GATE_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/prod-backup-gate",
-    envelope_model=VeriReelProdBackupGateEnvelope,
-    denial_message=(
-        "Workflow cannot execute the VeriReel prod backup gate driver"
-        " for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_PROD_PROMOTION_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/prod-promotion",
-    envelope_model=VeriReelProdPromotionEnvelope,
-    denial_message=(
-        "Workflow cannot execute the VeriReel prod promotion driver"
-        " for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_PROD_ROLLBACK_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/prod-rollback",
-    envelope_model=VeriReelProdRollbackEnvelope,
-    denial_message=(
-        "Workflow cannot execute the VeriReel prod rollback driver"
-        " for the requested product/context."
-    ),
-)
-
-
-class VeriReelPreviewRefreshEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    refresh: VeriReelPreviewRefreshRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelPreviewRefreshEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel preview refresh")
-        return self
-
-
-class VeriReelPreviewDestroyEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    destroy: VeriReelPreviewDestroyRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelPreviewDestroyEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel preview destroy")
-        return self
-
-
-class VeriReelPreviewVerificationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    context: str = "verireel-testing"
-    anchor_repo: str = "verireel"
-    anchor_pr_number: int = Field(ge=1)
-    verification_status: str
-    verified_at: str
-    failure_summary: str = ""
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "VeriReelPreviewVerificationRequest":
-        if not self.context.strip():
-            raise ValueError("VeriReel preview verification requires context.")
-        if not self.anchor_repo.strip():
-            raise ValueError("VeriReel preview verification requires anchor_repo.")
-        if self.verification_status.strip() not in {"pass", "fail"}:
-            raise ValueError("VeriReel preview verification status must be 'pass' or 'fail'.")
-        if not self.verified_at.strip():
-            raise ValueError("VeriReel preview verification requires verified_at.")
-        return self
-
-
-class VeriReelPreviewVerificationEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    verification: VeriReelPreviewVerificationRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelPreviewVerificationEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel preview verification")
-        return self
-
-
-class VeriReelPreviewInventoryEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    inventory: VeriReelPreviewInventoryRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelPreviewInventoryEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel preview inventory")
-        return self
-
-
-_VERIREEL_PREVIEW_REFRESH_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/preview-refresh",
-    envelope_model=VeriReelPreviewRefreshEnvelope,
-    denial_message=(
-        "Workflow cannot execute the VeriReel preview refresh driver"
-        " for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_PREVIEW_INVENTORY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/preview-inventory",
-    envelope_model=VeriReelPreviewInventoryEnvelope,
-    denial_message=(
-        "Workflow cannot read the VeriReel preview inventory for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_PREVIEW_DESTROY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/preview-destroy",
-    envelope_model=VeriReelPreviewDestroyEnvelope,
-    denial_message=(
-        "Workflow cannot execute the VeriReel preview destroy driver"
-        " for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/verireel/preview-verification",
-    envelope_model=VeriReelPreviewVerificationEnvelope,
-    denial_message=(
-        "Workflow cannot write VeriReel preview verification for the requested product/context."
-    ),
-)
-
-
-_HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
-    {
-        _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
-        _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
-    }
-)
 _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
     {
         _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
@@ -886,804 +477,31 @@ _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
 _PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES = frozenset({_VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path})
 
 
-def _driver_route_authorization_response(
-    *,
-    authz_policy: LaunchplaneAuthzPolicy,
-    identity: LaunchplaneIdentity,
-    route_path: str,
-    product: str,
-    context: str,
-    denial_message: str,
-    start_response: _StartResponse,
-    trace_id: str,
-    action: str | None = None,
-) -> list[bytes] | None:
-    """Authorize descriptor routes against normalized product/context values."""
+def _fastapi_route_paths_by_method(app: object, method: str) -> frozenset[str]:
+    normalized_method = method.upper()
+    route_paths: set[str] = set()
+    for route in cast(Iterable[object], getattr(app, "routes", ())):
+        route_path = getattr(route, "path", None)
+        route_methods = getattr(route, "methods", None)
+        if not isinstance(route_path, str) or route_methods is None:
+            continue
+        methods = {
+            str(route_method).upper() for route_method in cast(Iterable[object], route_methods)
+        }
+        if normalized_method in methods:
+            route_paths.add(route_path)
+    return frozenset(route_paths)
 
-    normalized_product = product.strip()
-    normalized_context = context.strip()
-    if authz_policy.allows(
-        identity=identity,
-        action=action or _descriptor_driver_authz_action(route_path),
-        product=normalized_product,
-        context=normalized_context,
-    ):
-        return None
-    return _json_response(
-        start_response=start_response,
-        status_code=403,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "authorization_denied",
-                "message": denial_message,
-            },
-        },
+
+def _validate_native_fastapi_driver_route_paths(app: object) -> None:
+    missing_native_routes = sorted(
+        _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS - _fastapi_route_paths_by_method(app, "POST")
     )
-
-
-def _resolve_and_authorize_descriptor_route(
-    *,
-    route_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT],
-    record_store: object,
-    authz_policy: LaunchplaneAuthzPolicy,
-    identity: LaunchplaneIdentity,
-    product: str,
-    authorization_context: str,
-    start_response: _StartResponse,
-    trace_id: str,
-    descriptor_context: str = "",
-    descriptor_instance: str = "",
-    require_profile: bool = False,
-) -> tuple[_ResolvedProductDriverContext, list[bytes] | None]:
-    resolved_driver_context = _resolve_descriptor_product_driver_context(
-        record_store=record_store,
-        route_path=route_metadata.route_path,
-        product=product,
-        context=descriptor_context,
-        instance=descriptor_instance,
-        require_profile=require_profile,
-    )
-    authorization_response = _driver_route_authorization_response(
-        authz_policy=authz_policy,
-        identity=identity,
-        route_path=route_metadata.route_path,
-        product=product,
-        context=authorization_context,
-        denial_message=route_metadata.denial_message,
-        start_response=start_response,
-        trace_id=trace_id,
-    )
-    return resolved_driver_context, authorization_response
-
-
-def _handle_odoo_artifact_publish(
-    request: OdooArtifactPublishEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context, control_plane_root_path
-    driver_result = ingest_odoo_artifact_publish_evidence(
-        record_store=cast(OdooArtifactPublishEvidenceStore, record_store),
-        request=request.publish,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={
-            "artifact_id": driver_result.artifact_id,
-            "publish_status": driver_result.status,
-            "image_repository": driver_result.image_repository,
-            "image_digest": driver_result.image_digest,
-            "source_commit": driver_result.source_commit,
-        },
-        driver_result=driver_result,
-    )
-
-
-def _handle_verireel_preview_verification(
-    request: VeriReelPreviewVerificationEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    return _DescriptorDriverDispatchResult(
-        result=_apply_verireel_preview_verification_records(
-            control_plane_root_path=control_plane_root_path,
-            record_store=record_store,
-            request=request.verification,
-        )
-    )
-
-
-def _handle_verireel_preview_inventory(
-    request: VeriReelPreviewInventoryEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    driver_result = execute_verireel_preview_inventory(
-        control_plane_root=control_plane_root_path,
-        request=request.inventory,
-    )
-    preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
-        record_store=record_store,
-        context=driver_result.context,
-        source="verireel-preview-inventory",
-        preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"preview_inventory_scan_id": preview_inventory_scan_id},
-        driver_result=driver_result,
-    )
-
-
-def _handle_verireel_preview_destroy(
-    request: VeriReelPreviewDestroyEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    driver_result = execute_verireel_preview_destroy(
-        control_plane_root=control_plane_root_path,
-        request=request.destroy,
-    )
-    return _DescriptorDriverDispatchResult(
-        result=_apply_verireel_preview_destroy_records(
-            record_store=record_store,
-            request=request.destroy,
-            driver_result=driver_result,
-        ),
-        driver_result=driver_result,
-    )
-
-
-def _handle_verireel_preview_refresh(
-    request: VeriReelPreviewRefreshEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    try:
-        driver_result = execute_verireel_preview_refresh(
-            control_plane_root=control_plane_root_path,
-            record_store=record_store if isinstance(record_store, PostgresRecordStore) else None,
-            request=request.refresh,
-        )
-    except VeriReelPreviewRefreshConfigError as error:
-        now = _utc_now_timestamp()
-        error_message = (
-            str(error).strip() or "VeriReel preview refresh configuration is incomplete."
-        )
-        driver_result = VeriReelPreviewRefreshResult(
-            refresh_status="fail",
-            refresh_started_at=now,
-            refresh_finished_at=now,
-            application_name="",
-            application_id="",
-            preview_url=_verireel_preview_url_for_failed_records(request=request.refresh),
-            error_message=error_message,
-        )
-    return _DescriptorDriverDispatchResult(
-        result=_apply_verireel_preview_refresh_records(
-            control_plane_root_path=control_plane_root_path,
-            record_store=record_store,
-            request=request.refresh,
-            driver_result=driver_result,
-        ),
-        driver_result=driver_result,
-    )
-
-
-def _handle_verireel_testing_verification(
-    request: VeriReelTestingVerificationEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context, control_plane_root_path
-    return _DescriptorDriverDispatchResult(
-        result=dict[str, object](
-            _apply_verireel_testing_verification_records(
-                record_store=record_store,
-                request=request.verification,
-            )
-        )
-    )
-
-
-def _handle_verireel_testing_deploy(
-    request: VeriReelTestingDeployEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    driver_result = execute_verireel_stable_deploy(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(VeriReelStableDeployStore, record_store),
-        request=request.deploy,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"deployment_record_id": driver_result.deployment_record_id},
-        driver_result=driver_result,
-    )
-
-
-def _handle_verireel_prod_deploy(
-    request: VeriReelProdDeployEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    driver_result = execute_verireel_stable_deploy(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(VeriReelStableDeployStore, record_store),
-        request=request.deploy,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"deployment_record_id": driver_result.deployment_record_id},
-        driver_result=driver_result,
-    )
-
-
-def _handle_verireel_prod_backup_gate(
-    request: VeriReelProdBackupGateEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context, control_plane_root_path
-    driver_result = enqueue_verireel_prod_backup_gate(
-        record_store=cast(VeriReelProdBackupGateOperationStore, record_store),
-        request=request.backup_gate,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"backup_gate_record_id": driver_result.backup_record_id},
-        driver_result=driver_result,
-    )
-
-
-def _handle_verireel_prod_rollback(
-    request: VeriReelProdRollbackEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    driver_result = execute_verireel_prod_rollback(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(VeriReelProdRollbackStore, record_store),
-        request=request.rollback,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={
-            "promotion_record_id": driver_result.promotion_record_id,
-            "backup_record_id": driver_result.backup_record_id,
-        },
-        driver_result=driver_result,
-    )
-
-
-def _validate_verireel_prod_promotion_target_lane(
-    request: VeriReelProdPromotionEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> None:
-    del resolved_context, control_plane_root_path
-    _resolve_descriptor_product_driver_context(
-        record_store=record_store,
-        route_path=_VERIREEL_PROD_PROMOTION_ROUTE.route_path,
-        product=request.product,
-        context=request.promotion.context,
-        instance=request.promotion.to_instance,
-    )
-
-
-def _handle_verireel_prod_promotion(
-    request: VeriReelProdPromotionEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    driver_result = execute_verireel_prod_promotion(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(VeriReelProdPromotionStore, record_store),
-        request=request.promotion,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={
-            "promotion_record_id": driver_result.promotion_record_id,
-            "deployment_record_id": driver_result.deployment_record_id,
-        },
-        driver_result=driver_result,
-    )
-
-
-def _handle_verireel_stable_environment(
-    request: VeriReelStableEnvironmentEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context, record_store
-    driver_result = resolve_verireel_stable_environment(
-        control_plane_root=control_plane_root_path,
-        request=request.environment,
-    )
-    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
-
-
-def _handle_verireel_runtime_verification(
-    request: VeriReelRuntimeVerificationEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context, record_store
-    driver_result = execute_verireel_rollout_verification(
-        control_plane_root=control_plane_root_path,
-        request=request.verification,
-    )
-    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
-
-
-def _handle_verireel_app_maintenance(
-    request: VeriReelAppMaintenanceEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del resolved_context, record_store
-    driver_result = execute_verireel_app_maintenance(
-        control_plane_root=control_plane_root_path,
-        request=request.maintenance,
-    )
-    return _DescriptorDriverDispatchResult(
-        result=driver_result.model_dump(mode="json"),
-        driver_result=driver_result,
-    )
-
-
-def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchRoute[Any]]:
-    return {
-        _GENERIC_WEB_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_DEPLOY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.deploy.product,
-                context="",
-                instance=request.deploy.instance,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_deploy,
-        ),
-        _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.deploy.context,
-                instance=request.deploy.instance,
-                require_profile=True,
-            ),
-            pre_idempotency_validator=_validate_generic_web_source_ref_deploy_lane,
-            handler=_handle_generic_web_source_ref_deploy,
-        ),
-        _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.workflow.context,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_promotion_workflow,
-        ),
-        _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PROD_PROMOTION_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                instance=request.promotion.to_instance,
-                require_profile=True,
-            ),
-            pre_idempotency_validator=_validate_generic_web_prod_promotion_lanes,
-            pre_authorization_validator=_reject_human_live_generic_web_prod_promotion,
-            handler=_handle_generic_web_prod_promotion,
-        ),
-        _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.verification.context,
-                instance=request.verification.instance,
-            ),
-            handler=_handle_generic_web_stable_verification,
-        ),
-        _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                use_preview_context_for_authorization=True,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_preview_inventory,
-            pre_idempotency_validator=_validate_generic_web_preview_profile,
-            skip_pre_idempotency_check=True,
-        ),
-        _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                use_preview_context_for_authorization=True,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_preview_refresh,
-            pre_idempotency_validator=_validate_generic_web_preview_profile,
-        ),
-        _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PREVIEW_READINESS_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                use_preview_context_for_authorization=True,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_preview_readiness,
-            pre_idempotency_validator=_validate_generic_web_preview_profile,
-            skip_pre_idempotency_check=True,
-        ),
-        _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                use_preview_context_for_authorization=True,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_preview_destroy,
-            pre_idempotency_validator=_validate_generic_web_preview_profile,
-        ),
-        _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.verification.context,
-                require_profile=True,
-            ),
-            handler=_handle_generic_web_preview_verification,
-            pre_idempotency_validator=_validate_generic_web_preview_profile,
-        ),
-        _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_ODOO_ARTIFACT_PUBLISH_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.publish.context,
-            ),
-            handler=_handle_odoo_artifact_publish,
-        ),
-        _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.verification.context,
-            ),
-            handler=_handle_verireel_preview_verification,
-        ),
-        _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_PREVIEW_INVENTORY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.inventory.context,
-            ),
-            handler=_handle_verireel_preview_inventory,
-        ),
-        _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_PREVIEW_DESTROY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.destroy.context,
-            ),
-            handler=_handle_verireel_preview_destroy,
-        ),
-        _VERIREEL_PREVIEW_REFRESH_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_PREVIEW_REFRESH_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.refresh.context,
-            ),
-            handler=_handle_verireel_preview_refresh,
-        ),
-        _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_TESTING_VERIFICATION_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.verification.context,
-                instance=request.verification.instance,
-            ),
-            handler=_handle_verireel_testing_verification,
-        ),
-        _VERIREEL_TESTING_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_TESTING_DEPLOY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.deploy.context,
-                instance=request.deploy.instance,
-            ),
-            handler=_handle_verireel_testing_deploy,
-        ),
-        _VERIREEL_PROD_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_PROD_DEPLOY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.deploy.context,
-                instance=request.deploy.instance,
-            ),
-            handler=_handle_verireel_prod_deploy,
-        ),
-        _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_PROD_BACKUP_GATE_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.backup_gate.context,
-                instance=request.backup_gate.instance,
-            ),
-            handler=_handle_verireel_prod_backup_gate,
-        ),
-        _VERIREEL_PROD_PROMOTION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_PROD_PROMOTION_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.promotion.context,
-                instance=request.promotion.from_instance,
-            ),
-            handler=_handle_verireel_prod_promotion,
-            pre_idempotency_validator=_validate_verireel_prod_promotion_target_lane,
-        ),
-        _VERIREEL_PROD_ROLLBACK_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_PROD_ROLLBACK_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.rollback.context,
-                instance=request.rollback.instance,
-            ),
-            handler=_handle_verireel_prod_rollback,
-        ),
-        _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_STABLE_ENVIRONMENT_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.environment.context,
-                instance=request.environment.instance,
-            ),
-            handler=_handle_verireel_stable_environment,
-        ),
-        _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_RUNTIME_VERIFICATION_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.verification.context,
-                instance=request.verification.instance,
-            ),
-            handler=_handle_verireel_runtime_verification,
-        ),
-        _VERIREEL_APP_MAINTENANCE_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_VERIREEL_APP_MAINTENANCE_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context="",
-                authorization_context=request.maintenance.context,
-            ),
-            handler=_handle_verireel_app_maintenance,
-        ),
-    }
-
-
-def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
-    return (
-        frozenset(
-            (
-                _GENERIC_WEB_DEPLOY_ROUTE.route_path,
-                _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
-                _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
-                _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
-                _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
-                _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
-                _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
-                _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
-                _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
-                _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
-                _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
-                _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
-                _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
-                _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
-                _ODOO_PROD_BACKUP_GATE_METADATA.route_path,
-                _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,
-                _ODOO_PROD_PROMOTION_ROUTE.route_path,
-                _ODOO_PROD_ROLLBACK_METADATA.route_path,
-                _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
-                _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
-                _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
-                _VERIREEL_PREVIEW_REFRESH_ROUTE.route_path,
-                _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
-                _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
-                _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
-                _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path,
-                _VERIREEL_PROD_PROMOTION_ROUTE.route_path,
-                _VERIREEL_PROD_ROLLBACK_ROUTE.route_path,
-                _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
-                _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
-                _VERIREEL_APP_MAINTENANCE_ROUTE.route_path,
-            )
-        )
-        - _descriptor_driver_dispatch_exempt_route_paths()
-    )
-
-
-def _descriptor_driver_dispatch_exempt_route_paths() -> frozenset[str]:
-    return _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS
-
-
-def _dispatch_descriptor_driver_route(
-    *,
-    dispatch_route: _DescriptorDriverDispatchRoute[Any],
-    payload: dict[str, object],
-    record_store: object,
-    authz_policy: LaunchplaneAuthzPolicy,
-    identity: LaunchplaneIdentity,
-    request_scope: str,
-    request_idempotency_key: str,
-    request_fingerprint: str,
-    start_response: _StartResponse,
-    trace_id: str,
-    control_plane_root_path: Path,
-    state_dir: Path,
-    database_url: str | None,
-) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
-    route_metadata = dispatch_route.execution_metadata
-    descriptor_route_metadata = _driver_route_metadata_from_descriptors().get(
-        route_metadata.route_path
-    )
-    if descriptor_route_metadata is None:
+    if missing_native_routes:
         raise ValueError(
-            f"Descriptor-backed dispatch route {route_metadata.route_path} "
-            "must be declared by a driver descriptor."
+            "Native FastAPI driver routes must be registered by the FastAPI app: "
+            f"{', '.join(missing_native_routes)}"
         )
-    if descriptor_route_metadata.method != "POST":
-        raise ValueError(
-            f"Descriptor-backed dispatch route {route_metadata.route_path} must use POST."
-        )
-    request = route_metadata.envelope_model.model_validate(payload)
-    dispatch_context = dispatch_route.context_resolver(request)
-    resolved_driver_context = (
-        _ResolvedProductDriverContext(profile=None)
-        if dispatch_route.skip_driver_context_resolution
-        else _resolve_descriptor_product_driver_context(
-            record_store=record_store,
-            route_path=route_metadata.route_path,
-            product=dispatch_context.product,
-            context=dispatch_context.context,
-            instance=dispatch_context.instance,
-            require_profile=dispatch_context.require_profile,
-        )
-    )
-    if dispatch_route.pre_idempotency_validator is not None:
-        dispatch_route.pre_idempotency_validator(
-            request,
-            resolved_driver_context,
-            record_store,
-            control_plane_root_path,
-        )
-    if dispatch_route.pre_authorization_validator is not None:
-        pre_authorization_response = dispatch_route.pre_authorization_validator(
-            request,
-            resolved_driver_context,
-            identity,
-            start_response,
-            trace_id,
-        )
-        if pre_authorization_response is not None:
-            return pre_authorization_response
-    authorization_product = dispatch_context.product
-    if (
-        dispatch_context.use_resolved_profile_product_for_authorization
-        and resolved_driver_context.profile is not None
-    ):
-        authorization_product = resolved_driver_context.profile.product
-    authorization_context = dispatch_context.authorization_context or dispatch_context.context
-    if not authorization_context and resolved_driver_context.lane is not None:
-        authorization_context = resolved_driver_context.lane.context
-    if (
-        not authorization_context
-        and dispatch_context.use_preview_context_for_authorization
-        and resolved_driver_context.profile is not None
-        and resolved_driver_context.profile.preview.context
-    ):
-        authorization_context = resolved_driver_context.profile.preview.context
-    authorization_response = _driver_route_authorization_response(
-        authz_policy=authz_policy,
-        identity=identity,
-        route_path=route_metadata.route_path,
-        action=dispatch_route.authorization_action_resolver(request)
-        if dispatch_route.authorization_action_resolver is not None
-        else None,
-        product=authorization_product,
-        context=authorization_context,
-        denial_message=route_metadata.denial_message,
-        start_response=start_response,
-        trace_id=trace_id,
-    )
-    if authorization_response is not None:
-        return authorization_response
-    if (
-        route_metadata.route_path not in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES
-        and not dispatch_route.skip_pre_idempotency_check
-    ):
-        idempotent_response = _check_idempotent_request(
-            record_store=record_store,
-            scope=request_scope,
-            route_path=route_metadata.route_path,
-            idempotency_key=request_idempotency_key,
-            request_fingerprint=request_fingerprint,
-            start_response=start_response,
-            trace_id=trace_id,
-        )
-        if idempotent_response is not None:
-            return idempotent_response
-    if dispatch_route.custom_dispatch_handler is not None:
-        return dispatch_route.custom_dispatch_handler(
-            request,
-            resolved_driver_context,
-            record_store,
-            control_plane_root_path,
-            state_dir,
-            database_url,
-            identity,
-            request_scope,
-            request_idempotency_key,
-            request_fingerprint,
-            start_response,
-            trace_id,
-        )
-    if dispatch_route.handler is None:
-        raise ValueError(
-            f"Descriptor-backed dispatch route {route_metadata.route_path} must register a handler."
-        )
-    dispatch_result = dispatch_route.handler(
-        request,
-        resolved_driver_context,
-        record_store,
-        control_plane_root_path,
-    )
-    return dispatch_result.result, dispatch_result.driver_result
-
-
-def _http_status_text(status_code: int) -> str:
-    return {
-        200: "OK",
-        202: "Accepted",
-        400: "Bad Request",
-        401: "Unauthorized",
-        403: "Forbidden",
-        404: "Not Found",
-        405: "Method Not Allowed",
-        409: "Conflict",
-        503: "Service Unavailable",
-        500: "Internal Server Error",
-    }.get(status_code, "OK")
 
 
 def _trace_id() -> str:
@@ -1702,23 +520,6 @@ def _parse_utc_timestamp(value: str) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
-
-
-def _not_found_response(
-    *,
-    start_response: _StartResponse,
-    trace_id: str,
-    path: str,
-) -> list[bytes]:
-    return _json_response(
-        start_response=start_response,
-        status_code=404,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {"code": "not_found", "message": f"No Launchplane route for {path}."},
-        },
-    )
 
 
 def _driver_route_metadata_from_descriptors() -> dict[str, _DriverRouteMetadata]:
@@ -1768,71 +569,21 @@ def _descriptor_driver_authz_action(route_path: str) -> str:
         raise ValueError(f"Unknown descriptor-backed driver route: {route_path}") from exc
 
 
-def _validate_descriptor_driver_dispatch_routes(
-    dispatch_routes: dict[str, _DescriptorDriverDispatchRoute[Any]],
-) -> None:
+def _validate_native_descriptor_driver_routes() -> None:
     descriptor_routes = _driver_route_metadata_from_descriptors()
-    missing_required_routes = sorted(
-        _required_descriptor_driver_dispatch_route_paths() - dispatch_routes.keys()
-    )
-    if missing_required_routes:
-        raise ValueError(
-            "Descriptor-backed dispatch routes must be registered by the service: "
-            f"{', '.join(missing_required_routes)}"
-        )
     post_descriptor_routes = frozenset(
         route_path
         for route_path, route_metadata in descriptor_routes.items()
         if route_metadata.method == "POST"
     )
     missing_post_descriptor_routes = sorted(
-        post_descriptor_routes
-        - _descriptor_driver_dispatch_exempt_route_paths()
-        - dispatch_routes.keys()
+        post_descriptor_routes - _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS
     )
     if missing_post_descriptor_routes:
         raise ValueError(
-            "POST driver descriptor routes must be registered for descriptor-backed "
-            f"dispatch: {', '.join(missing_post_descriptor_routes)}"
+            "POST driver descriptor routes must be implemented as native FastAPI "
+            f"routes: {', '.join(missing_post_descriptor_routes)}"
         )
-    for route_path, dispatch_route in dispatch_routes.items():
-        if route_path != dispatch_route.execution_metadata.route_path:
-            raise ValueError(
-                f"Descriptor-backed dispatch route {route_path} must match execution metadata."
-            )
-        has_standard_handler = dispatch_route.handler is not None
-        has_custom_handler = dispatch_route.custom_dispatch_handler is not None
-        if has_standard_handler == has_custom_handler:
-            raise ValueError(
-                f"Descriptor-backed dispatch route {route_path} must register exactly one handler."
-            )
-        descriptor_route = descriptor_routes.get(route_path)
-        if descriptor_route is None:
-            raise ValueError(
-                f"Descriptor-backed dispatch route {route_path} must be declared by a driver descriptor."
-            )
-        if descriptor_route.method != "POST":
-            raise ValueError(
-                f"Descriptor-backed dispatch route {route_path} must be declared as POST."
-            )
-
-
-def _driver_write_routes_from_descriptors() -> frozenset[str]:
-    return frozenset(
-        route_path
-        for route_path, route_metadata in _driver_route_metadata_from_descriptors().items()
-        if route_metadata.method == "POST" and route_path not in _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS
-    )
-
-
-def _build_write_routes() -> frozenset[str]:
-    return _driver_write_routes_from_descriptors()
-
-
-def _secret_capable_store(record_store: object) -> control_plane_secrets.SecretReadStore | None:
-    if hasattr(record_store, "read_secret_record") and hasattr(record_store, "list_secret_records"):
-        return cast(control_plane_secrets.SecretReadStore, record_store)
-    return None
 
 
 class _EveryCodeWorkRequestStore(Protocol):
@@ -2912,83 +1663,6 @@ def _every_code_feedback_pr_reference(
     return pr_number_value, f"https://github.com/{repository}/pull/{pr_number_value}"
 
 
-def _idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
-    if hasattr(record_store, "read_idempotency_record") and hasattr(
-        record_store, "write_idempotency_record"
-    ):
-        return cast(_IdempotencyCapableStore, record_store)
-    return None
-
-
-def _human_session_capable_store(record_store: object) -> HumanSessionStore | None:
-    if all(
-        hasattr(record_store, method_name)
-        for method_name in ("write_session", "read_session", "delete_session")
-    ):
-        return record_store  # type: ignore[return-value]
-    return None
-
-
-def _idempotency_key(environ: dict[str, object]) -> str:
-    return str(environ.get("HTTP_IDEMPOTENCY_KEY", "")).strip()
-
-
-def _identity_actor(identity: LaunchplaneIdentity) -> str:
-    if isinstance(identity, GitHubHumanIdentity):
-        return f"github:{identity.login}"
-    if isinstance(identity, LocalOperatorIdentity):
-        return f"local-operator:{identity.subject}"
-    if isinstance(identity, LocalAdminIdentity):
-        return f"local-admin:{identity.subject}"
-    if isinstance(identity, TerminalAgentIdentity):
-        return f"terminal-agent:{identity.subject}"
-    return (
-        f"github-actions:{identity.repository}:{identity.workflow_ref or identity.job_workflow_ref}"
-    )
-
-
-def _idempotency_scope(identity: LaunchplaneIdentity) -> str:
-    if isinstance(identity, GitHubHumanIdentity):
-        return "|".join(("github-human", identity.login, str(identity.github_id)))
-    if isinstance(identity, LocalOperatorIdentity):
-        return "|".join(("local-operator", identity.subject, identity.token_label))
-    if isinstance(identity, LocalAdminIdentity):
-        return "|".join(("local-admin", identity.subject, identity.token_label))
-    if isinstance(identity, TerminalAgentIdentity):
-        return "|".join(("terminal-agent", identity.subject, identity.token_label))
-    workflow_ref = identity.workflow_ref or identity.job_workflow_ref or ""
-    return "|".join(
-        (
-            str(identity.repository).strip(),
-            str(workflow_ref).strip(),
-            str(identity.subject).strip(),
-        )
-    )
-
-
-def _request_fingerprint(payload: dict[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _canonical_request_payload_for_idempotency(
-    *, route_path: str, payload: dict[str, object]
-) -> dict[str, object]:
-    if route_path not in _PREVIEW_DESTROY_IDEMPOTENCY_ROUTE_PATHS:
-        return payload
-    canonical_payload = json.loads(json.dumps(payload))
-    destroy_payload = canonical_payload.get("destroy")
-    if isinstance(destroy_payload, dict):
-        destroy_payload.pop("destroy_reason", None)
-    return cast(dict[str, object], canonical_payload)
-
-
-def _idempotency_request_fingerprint(*, route_path: str, payload: dict[str, object]) -> str:
-    return _request_fingerprint(
-        _canonical_request_payload_for_idempotency(route_path=route_path, payload=payload)
-    )
-
-
 def _accepted_payload(
     *,
     trace_id: str,
@@ -3071,252 +1745,6 @@ def _accepted_payload(
     return payload
 
 
-def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
-    if route_path == _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path:
-        return frozenset({"deployment_record_id", "release_tuple_id"})
-    return frozenset()
-
-
-def _driver_result_payload_for_idempotency_replay(
-    *, route_path: str, driver_result: dict[str, object]
-) -> dict[str, object]:
-    replay_payload = dict(driver_result)
-    if route_path in {
-        _GENERIC_WEB_DEPLOY_ROUTE.route_path,
-        _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
-        _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
-        _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
-        _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
-        _VERIREEL_PROD_PROMOTION_ROUTE.route_path,
-    }:
-        replay_payload.pop("target_type", None)
-    return replay_payload
-
-
-def _query_string_value(query: dict[str, list[str]], key: str) -> str:
-    return str((query.get(key) or [""])[0] or "").strip()
-
-
-def _query_int_value(
-    query: dict[str, list[str]],
-    key: str,
-    *,
-    default: int | None = None,
-    minimum: int | None = None,
-    maximum: int | None = None,
-) -> int | None:
-    raw_value = _query_string_value(query, key)
-    if not raw_value:
-        value = default
-    else:
-        value = int(raw_value)
-    if value is None:
-        return None
-    if minimum is not None and value < minimum:
-        raise ValueError(f"Query parameter {key} must be at least {minimum}")
-    if maximum is not None and value > maximum:
-        raise ValueError(f"Query parameter {key} must be at most {maximum}")
-    return value
-
-
-def _replay_idempotent_response(
-    *,
-    start_response: _StartResponse,
-    trace_id: str,
-    stored_record: LaunchplaneIdempotencyRecord,
-) -> list[bytes]:
-    stored_payload = dict(stored_record.response_payload)
-    stored_driver_result = stored_payload.get("result")
-    result_payload = _accepted_payload(
-        trace_id=trace_id,
-        result=dict(stored_payload.get("records") or {}),
-        driver_result=(
-            _driver_result_payload_for_idempotency_replay(
-                route_path=stored_record.route_path,
-                driver_result=stored_driver_result,
-            )
-            if isinstance(stored_driver_result, dict)
-            else None
-        ),
-        extra_record_keys=_accepted_payload_extra_record_keys(route_path=stored_record.route_path),
-        replayed=True,
-        original_trace_id=stored_record.response_trace_id,
-    )
-    return _json_response(
-        start_response=start_response,
-        status_code=stored_record.response_status_code,
-        payload=result_payload,
-    )
-
-
-def _read_idempotency_record(
-    *,
-    record_store: object,
-    scope: str,
-    route_path: str,
-    idempotency_key: str,
-) -> LaunchplaneIdempotencyRecord | None:
-    idempotency_store = _idempotency_capable_store(record_store)
-    if idempotency_store is None or not idempotency_key:
-        return None
-    return idempotency_store.read_idempotency_record(
-        scope=scope,
-        route_path=route_path,
-        idempotency_key=idempotency_key,
-    )
-
-
-def _write_idempotency_record(
-    *,
-    record_store: object,
-    scope: str,
-    route_path: str,
-    idempotency_key: str,
-    request_fingerprint: str,
-    response_status_code: int,
-    response_trace_id: str,
-    response_payload: dict[str, object],
-) -> None:
-    idempotency_store = _idempotency_capable_store(record_store)
-    if idempotency_store is None or not idempotency_key:
-        return
-    idempotency_store.write_idempotency_record(
-        LaunchplaneIdempotencyRecord(
-            record_id=build_launchplane_idempotency_record_id(
-                response_trace_id=response_trace_id,
-            ),
-            scope=scope,
-            route_path=route_path,
-            idempotency_key=idempotency_key,
-            request_fingerprint=request_fingerprint,
-            response_status_code=response_status_code,
-            response_trace_id=response_trace_id,
-            recorded_at=_utc_now_timestamp(),
-            response_payload=response_payload,
-        )
-    )
-
-
-def _check_idempotent_request(
-    *,
-    record_store: object,
-    scope: str,
-    route_path: str,
-    idempotency_key: str,
-    request_fingerprint: str,
-    start_response: _StartResponse,
-    trace_id: str,
-) -> list[bytes] | None:
-    stored_record = _read_idempotency_record(
-        record_store=record_store,
-        scope=scope,
-        route_path=route_path,
-        idempotency_key=idempotency_key,
-    )
-    if stored_record is None:
-        return None
-    if stored_record.request_fingerprint != request_fingerprint:
-        return _json_response(
-            start_response=start_response,
-            status_code=409,
-            payload={
-                "status": "rejected",
-                "trace_id": trace_id,
-                "error": {
-                    "code": "idempotency_key_reused",
-                    "message": (
-                        "Idempotency-Key was already used for a different Launchplane request payload on this route."
-                    ),
-                },
-            },
-        )
-    return _replay_idempotent_response(
-        start_response=start_response,
-        trace_id=trace_id,
-        stored_record=stored_record,
-    )
-
-
-def _driver_result_status_values(
-    driver_result: BaseModel | dict[str, object] | object,
-) -> tuple[str, ...]:
-    if isinstance(driver_result, BaseModel):
-        items = driver_result.model_dump(mode="json").items()
-    elif isinstance(driver_result, dict):
-        items = driver_result.items()
-    elif hasattr(driver_result, "__dict__"):
-        items = vars(driver_result).items()
-    else:
-        return ()
-    return tuple(
-        str(value).strip() for key, value in items if key.endswith("_status") or key == "status"
-    )
-
-
-def _driver_result_contains_status(
-    driver_result: BaseModel | dict[str, object] | object, status: str
-) -> bool:
-    return status in _driver_result_status_values(driver_result)
-
-
-def _should_store_idempotency_record(
-    *, path: str, driver_result: BaseModel | dict[str, object] | None
-) -> bool:
-    if path in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
-        return False
-    if driver_result is None:
-        return True
-    if _driver_result_contains_status(driver_result, "blocked"):
-        return False
-    if _driver_result_has_completed_deploy_with_post_deploy_failure(driver_result):
-        return True
-    if _driver_result_contains_status(driver_result, "fail"):
-        return False
-    if path in _PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES:
-        return not _driver_result_contains_status(driver_result, "pending")
-    return True
-
-
-def _driver_result_has_completed_deploy_with_post_deploy_failure(
-    driver_result: BaseModel | dict[str, object] | object,
-) -> bool:
-    if isinstance(driver_result, BaseModel):
-        result_payload = driver_result.model_dump(mode="json")
-    elif isinstance(driver_result, dict):
-        result_payload = driver_result
-    elif hasattr(driver_result, "__dict__"):
-        result_payload = vars(driver_result)
-    else:
-        return False
-    return (
-        result_payload.get("deploy_status") == "pass"
-        and result_payload.get("post_deploy_status") == "fail"
-    )
-
-
-def _read_json_request(environ: dict[str, object]) -> dict[str, object]:
-    body_bytes = _read_request_body(environ)
-    if not body_bytes:
-        raise ValueError("Request body is required.")
-    return _decode_json_request_body(body_bytes)
-
-
-def _read_request_body(environ: dict[str, object]) -> bytes:
-    content_length = int(str(environ.get("CONTENT_LENGTH", "0") or "0"))
-    body_stream = cast(BinaryIO | None, environ.get("wsgi.input"))
-    return body_stream.read(content_length) if body_stream is not None else b""
-
-
-def _decode_json_request_body(body_bytes: bytes) -> dict[str, object]:
-    try:
-        payload = json.loads(body_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Request body must be valid UTF-8 JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("Request body must decode to a JSON object.")
-    return payload
-
-
 def _decode_json_request_body_or_none(body_bytes: bytes) -> dict[str, object] | None:
     try:
         payload = json.loads(body_bytes.decode("utf-8"))
@@ -3325,10 +1753,6 @@ def _decode_json_request_body_or_none(body_bytes: bytes) -> dict[str, object] | 
     if not isinstance(payload, dict):
         return None
     return cast(dict[str, object], payload)
-
-
-def _bearer_token(environ: dict[str, object]) -> str:
-    return read_bearer_token(str(environ.get("HTTP_AUTHORIZATION", "")))
 
 
 def _every_code_worker_token_from_env() -> str:
@@ -3384,76 +1808,6 @@ def _bearer_identity_config_from_env() -> BearerIdentityConfig:
         terminal_agent_subject=_terminal_agent_subject_from_env(),
         terminal_agent_token_label=_terminal_agent_token_label_from_env(),
     )
-
-
-def _owner_agent_identity_from_bearer(environ: dict[str, object]) -> LaunchplaneIdentity | None:
-    try:
-        provided_token = _bearer_token(environ)
-    except PermissionError:
-        return None
-    return bearer_identity_from_token(
-        token=provided_token,
-        config=_bearer_identity_config_from_env(),
-    )
-
-
-def _session(
-    *,
-    environ: dict[str, object],
-    session_manager: HumanSessionManager | None,
-    on_renewed_session: Callable[[LaunchplaneHumanSession], None] | None = None,
-) -> LaunchplaneHumanSession | None:
-    if session_manager is None:
-        return None
-    session = session_manager.read_cookie(str(environ.get("HTTP_COOKIE", "")))
-    if session is None:
-        return None
-    renewed_session = session_manager.renew_if_needed(session)
-    if (
-        renewed_session is not None
-        and renewed_session.expires_at != session.expires_at
-        and on_renewed_session is not None
-    ):
-        on_renewed_session(renewed_session)
-    return renewed_session
-
-
-def _session_identity(
-    *,
-    environ: dict[str, object],
-    session_manager: HumanSessionManager | None,
-    on_renewed_session: Callable[[LaunchplaneHumanSession], None] | None = None,
-) -> GitHubHumanIdentity | None:
-    session = _session(
-        environ=environ,
-        session_manager=session_manager,
-        on_renewed_session=on_renewed_session,
-    )
-    return session.identity if session is not None else None
-
-
-def _read_identity(
-    *,
-    environ: dict[str, object],
-    verifier: TokenVerifier,
-    session_manager: HumanSessionManager | None,
-    on_renewed_session: Callable[[LaunchplaneHumanSession], None] | None = None,
-) -> LaunchplaneIdentity:
-    human_identity = _session_identity(
-        environ=environ,
-        session_manager=session_manager,
-        on_renewed_session=on_renewed_session,
-    )
-    if human_identity is not None:
-        return human_identity
-    owner_agent_identity = _owner_agent_identity_from_bearer(environ)
-    if owner_agent_identity is not None:
-        return owner_agent_identity
-    token = _bearer_token(environ)
-    try:
-        return verifier.verify(token)
-    except ValueError as error:
-        raise PermissionError(str(error)) from error
 
 
 def _authz_diagnostic_payload(
@@ -3669,627 +2023,6 @@ def _resolve_authz_policy(
     )
 
 
-def _verireel_preview_manifest_fingerprint(request: VeriReelPreviewRefreshRequest) -> str:
-    normalized_sha = request.anchor_head_sha.strip().lower()
-    short_sha = normalized_sha[:7]
-    return (
-        f"{_repo_token(request.anchor_repo)}-preview-manifest-"
-        f"{request.preview_slug.strip()}-{short_sha}"
-    )
-
-
-def _apply_verireel_preview_refresh_records(
-    *,
-    control_plane_root_path: Path,
-    record_store: object,
-    request: VeriReelPreviewRefreshRequest,
-    driver_result: VeriReelPreviewRefreshResult,
-) -> dict[str, object]:
-    requested_at = (
-        driver_result.refresh_started_at.strip() or driver_result.refresh_finished_at.strip()
-    )
-    finished_at = driver_result.refresh_finished_at.strip() or requested_at
-    refresh_passed = driver_result.refresh_status == "pass"
-    failure_summary = driver_result.error_message.strip() or "Preview provisioning failed."
-    preview_url = driver_result.preview_url.strip() or request.preview_url.strip()
-    if not preview_url and not refresh_passed:
-        preview_url = _verireel_preview_url_for_failed_records(request=request)
-    preview_request = PreviewMutationRequest(
-        context=request.context,
-        anchor_repo=request.anchor_repo,
-        anchor_pr_number=request.anchor_pr_number,
-        anchor_pr_url=request.anchor_pr_url,
-        canonical_url=preview_url,
-        state="pending" if refresh_passed else "failed",
-        created_at=requested_at,
-        updated_at=finished_at,
-        eligible_at=requested_at,
-    )
-    generation_request = PreviewGenerationMutationRequest(
-        context=request.context,
-        anchor_repo=request.anchor_repo,
-        anchor_pr_number=request.anchor_pr_number,
-        anchor_pr_url=request.anchor_pr_url,
-        anchor_head_sha=request.anchor_head_sha,
-        state="verifying" if refresh_passed else "failed",
-        requested_reason="external_preview_refresh",
-        requested_at=requested_at,
-        started_at=requested_at,
-        finished_at="" if refresh_passed else finished_at,
-        failed_at="" if refresh_passed else finished_at,
-        resolved_manifest_fingerprint=_verireel_preview_manifest_fingerprint(request),
-        artifact_id=request.image_reference,
-        deploy_status="pass" if refresh_passed else "fail",
-        verify_status="pending" if refresh_passed else "skipped",
-        overall_health_status="pending" if refresh_passed else "fail",
-        failure_stage="" if refresh_passed else "provision",
-        failure_summary="" if refresh_passed else failure_summary,
-    )
-    return apply_launchplane_generation_evidence(
-        control_plane_root_path=control_plane_root_path,
-        record_store=cast(LaunchplaneMutationStore, record_store),
-        preview_request=preview_request,
-        generation_request=generation_request,
-    )
-
-
-def _verireel_preview_url_for_failed_records(*, request: VeriReelPreviewRefreshRequest) -> str:
-    return f"https://{request.preview_slug}.preview-config-missing.launchplane.invalid"
-
-
-def _apply_verireel_preview_destroy_records(
-    *,
-    record_store: object,
-    request: VeriReelPreviewDestroyRequest,
-    driver_result: VeriReelPreviewDestroyResult,
-) -> dict[str, object]:
-    if driver_result.destroy_status != "pass":
-        return {"transition": "destroy_failed"}
-    try:
-        return apply_launchplane_destroy_preview(
-            record_store=cast(LaunchplaneMutationStore, record_store),
-            request=PreviewDestroyMutationRequest(
-                context=request.context,
-                anchor_repo=request.anchor_repo,
-                anchor_pr_number=request.anchor_pr_number,
-                destroyed_at=(
-                    driver_result.destroy_finished_at.strip()
-                    or driver_result.destroy_started_at.strip()
-                    or _utc_now_timestamp()
-                ),
-                destroy_reason=request.destroy_reason,
-            ),
-        )
-    except click.ClickException as error:
-        if str(error).startswith("No Launchplane preview found"):
-            return {"transition": "destroyed_missing_preview"}
-        raise
-
-
-def _apply_verireel_preview_verification_records(
-    *,
-    control_plane_root_path: Path,
-    record_store: object,
-    request: VeriReelPreviewVerificationRequest,
-) -> dict[str, object]:
-    generic_request = GenericWebPreviewVerificationRequest(
-        context=request.context,
-        anchor_repo=request.anchor_repo,
-        anchor_pr_number=request.anchor_pr_number,
-        verification_status=cast(ReleaseStatus, request.verification_status),
-        verified_at=request.verified_at,
-        failure_summary=request.failure_summary,
-    )
-    return _apply_generic_web_preview_verification_records(
-        control_plane_root_path=control_plane_root_path,
-        record_store=record_store,
-        request=generic_request,
-        result_key="verireel_preview_verification",
-        default_failure_summary="Preview E2E verification failed.",
-    )
-
-
-def _testing_post_deploy_detail(status: ReleaseStatus) -> str:
-    if status == "pass":
-        return "Prisma migrations completed on testing."
-    if status == "fail":
-        return "Prisma migrations failed on testing."
-    return ""
-
-
-def _testing_destination_health_status(
-    *,
-    deployment_record: DeploymentRecord,
-    request: VeriReelTestingVerificationRequest,
-) -> ReleaseStatus:
-    statuses = (
-        deployment_record.destination_health.status,
-        request.verification_status,
-        request.owner_routes_status,
-    )
-    if any(status == "fail" for status in statuses):
-        return "fail"
-    if all(status == "pass" for status in statuses):
-        return "pass"
-    if any(status == "pending" for status in statuses):
-        return "pending"
-    return "skipped"
-
-
-def _updated_testing_destination_health(
-    *,
-    deployment_record: DeploymentRecord,
-    status: ReleaseStatus,
-) -> HealthcheckEvidence:
-    if status in {"pass", "fail"} and deployment_record.destination_health.urls:
-        return deployment_record.destination_health.model_copy(update={"status": status})
-    return HealthcheckEvidence(status=status)
-
-
-def _apply_verireel_testing_verification_records(
-    *,
-    record_store: object,
-    request: VeriReelTestingVerificationRequest,
-) -> dict[str, str]:
-    evidence_store = cast(EvidenceIngestionStore, record_store)
-    try:
-        deployment_record = evidence_store.read_deployment_record(request.deployment_record_id)
-    except FileNotFoundError as exc:
-        raise click.ClickException(
-            f"No Launchplane deployment record found for {request.deployment_record_id}."
-        ) from exc
-    if deployment_record.context != request.context:
-        raise click.ClickException(
-            "Testing verification context does not match deployment record context."
-        )
-    if deployment_record.instance != request.instance:
-        raise click.ClickException(
-            "Testing verification instance does not match deployment record instance."
-        )
-
-    destination_health_status = _testing_destination_health_status(
-        deployment_record=deployment_record,
-        request=request,
-    )
-    updated_record = deployment_record.model_copy(
-        update={
-            "post_deploy_update": PostDeployUpdateEvidence(
-                attempted=request.migration_status != "skipped",
-                status=request.migration_status,
-                detail=_testing_post_deploy_detail(request.migration_status),
-            ),
-            "destination_health": _updated_testing_destination_health(
-                deployment_record=deployment_record,
-                status=destination_health_status,
-            ),
-        }
-    )
-    result = apply_deployment_evidence(
-        record_store=evidence_store,
-        deployment_record=updated_record,
-    )
-    result["deployment_health_status"] = destination_health_status
-    result["post_deploy_status"] = request.migration_status
-    return result
-
-
-def create_launchplane_service_app(
-    *,
-    state_dir: Path,
-    verifier: TokenVerifier,
-    authz_policy: LaunchplaneAuthzPolicy,
-    control_plane_root_path: Path | None = None,
-    database_url: str | None = None,
-    local_record_store_for_tests: _TestLaunchplaneServiceRecordStore | None = None,
-    github_oauth_config: GitHubOAuthConfig | None = None,
-    human_session_store: HumanSessionStore | None = None,
-    authz_policy_runtime: LaunchplaneAuthzPolicyRuntime | None = None,
-    record_store_for_service: _TestLaunchplaneServiceRecordStore | None = None,
-) -> _WsgiApp:
-    resolved_root = control_plane_root_path or control_plane_root()
-    ui_static_root = resolved_root / "control_plane" / "ui_static"
-    record_store = cast(
-        PostgresRecordStore,
-        record_store_for_service
-        or local_record_store_for_tests
-        or build_shared_record_store(database_url=database_url),
-    )
-    authz_policy, resolved_authz_policy_sha256, resolved_authz_policy_source = (
-        _resolve_authz_policy(record_store=record_store, bootstrap_policy=authz_policy)
-    )
-    resolved_authz_policy_runtime = authz_policy_runtime or LaunchplaneAuthzPolicyRuntime(
-        authz_policy,
-        policy_sha256=resolved_authz_policy_sha256,
-        source=resolved_authz_policy_source,
-    )
-    resolved_authz_policy_runtime.update(
-        authz_policy,
-        policy_sha256=resolved_authz_policy_sha256,
-        source=resolved_authz_policy_source,
-    )
-    resolved_github_oauth_config = github_oauth_config or load_github_oauth_config_from_env()
-    session_store = (
-        human_session_store
-        or _human_session_capable_store(record_store)
-        or InMemoryHumanSessionStore()
-    )
-    session_manager = (
-        HumanSessionManager(
-            config=resolved_github_oauth_config,
-            session_store=session_store,
-        )
-        if resolved_github_oauth_config is not None
-        else None
-    )
-    descriptor_driver_dispatch_routes = _descriptor_driver_dispatch_routes()
-    _validate_descriptor_driver_dispatch_routes(descriptor_driver_dispatch_routes)
-    write_routes = _build_write_routes()
-
-    def app(
-        environ: dict[str, object],
-        start_response: _StartResponse,
-    ) -> list[bytes]:
-        nonlocal authz_policy, resolved_authz_policy_sha256, resolved_authz_policy_source
-
-        renewed_session: LaunchplaneHumanSession | None = None
-
-        def record_renewed_session(session: LaunchplaneHumanSession) -> None:
-            nonlocal renewed_session
-            renewed_session = session
-
-        original_start_response = start_response
-
-        def start_response_with_session_cookie(status: str, headers: list[tuple[str, str]]) -> None:
-            response_headers = list(headers)
-            if session_manager is not None and renewed_session is not None:
-                response_headers.append(
-                    (
-                        "Set-Cookie",
-                        session_manager.session_cookie_header(renewed_session),
-                    )
-                )
-            original_start_response(status, response_headers)
-
-        start_response = start_response_with_session_cookie
-        request_trace_id = _trace_id()
-        method = str(environ.get("REQUEST_METHOD", "GET")).upper()
-        path = str(environ.get("PATH_INFO", ""))
-        if method == "GET" and (path == "/" or path == "/ui" or path.startswith("/ui/")):
-            return serve_ui_route(
-                start_response=start_response,
-                trace_id=request_trace_id,
-                path=path,
-                ui_static_root=ui_static_root,
-                json_response=_json_response,
-                http_status_text=_http_status_text,
-            )
-        if path not in write_routes:
-            return _not_found_response(
-                start_response=start_response,
-                trace_id=request_trace_id,
-                path=path,
-            )
-        if method not in {"GET", "POST"}:
-            return _json_response(
-                start_response=start_response,
-                status_code=405,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "method_not_allowed",
-                        "message": "Only GET and POST are allowed for Launchplane routes.",
-                    },
-                },
-            )
-        if method == "GET":
-            return _json_response(
-                start_response=start_response,
-                status_code=405,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "method_not_allowed",
-                        "message": "Only POST is allowed for this Launchplane route.",
-                    },
-                },
-            )
-        try:
-            if method == "GET":
-                identity = _read_identity(
-                    environ=environ,
-                    verifier=verifier,
-                    session_manager=session_manager,
-                    on_renewed_session=record_renewed_session,
-                )
-            else:
-                if path in _HUMAN_IDENTITY_MUTATION_ROUTES:
-                    identity = _read_identity(
-                        environ=environ,
-                        verifier=verifier,
-                        session_manager=session_manager,
-                        on_renewed_session=record_renewed_session,
-                    )
-                else:
-                    owner_agent_identity = _owner_agent_identity_from_bearer(environ)
-                    if isinstance(
-                        owner_agent_identity,
-                        LocalAdminIdentity | LocalOperatorIdentity,
-                    ):
-                        identity = owner_agent_identity
-                    else:
-                        token = _bearer_token(environ)
-                        identity = verifier.verify(token)
-                        if not isinstance(identity, GitHubActionsIdentity):
-                            raise PermissionError("Mutation routes require GitHub Actions OIDC.")
-            if isinstance(identity, TerminalAgentIdentity) and method != "GET":
-                return _json_response(
-                    start_response=start_response,
-                    status_code=403,
-                    payload={
-                        "status": "rejected",
-                        "trace_id": request_trace_id,
-                        "error": {
-                            "code": "authorization_denied",
-                            "message": (
-                                "Terminal agent credentials can only read redacted "
-                                "Launchplane context."
-                            ),
-                        },
-                    },
-                )
-            payload = _read_json_request(environ)
-            request_idempotency_key = _idempotency_key(environ)
-            request_scope = _idempotency_scope(identity)
-            request_fingerprint = _idempotency_request_fingerprint(route_path=path, payload=payload)
-            effective_idempotency_route_path = path
-            driver_result: BaseModel | dict[str, object] | None = None
-            result: dict[str, object] = {}
-            if path in descriptor_driver_dispatch_routes:
-                try:
-                    dispatch_response = _dispatch_descriptor_driver_route(
-                        dispatch_route=descriptor_driver_dispatch_routes[path],
-                        payload=payload,
-                        record_store=record_store,
-                        control_plane_root_path=resolved_root,
-                        state_dir=state_dir,
-                        database_url=database_url,
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        request_scope=request_scope,
-                        request_idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                except DriverRouteDependencyNotFoundError:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "driver_route_dependency_not_found",
-                                "message": (
-                                    "Driver route is registered, but required"
-                                    " product or runtime records were not found."
-                                ),
-                            },
-                            "details": {
-                                "route_path": path,
-                            },
-                        },
-                    )
-                if isinstance(dispatch_response, list):
-                    return dispatch_response
-                result, driver_result = dispatch_response
-            elif path.startswith("/v1/drivers/"):
-                return _json_response(
-                    start_response=start_response,
-                    status_code=500,
-                    payload={
-                        "status": "rejected",
-                        "trace_id": request_trace_id,
-                        "error": {
-                            "code": "driver_route_not_registered",
-                            "message": (
-                                "Driver route is declared but has no registered service handler."
-                            ),
-                        },
-                    },
-                )
-            else:
-                return _not_found_response(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    path=path,
-                )
-        except (PermissionError, InvalidTokenError):
-            return _json_response(
-                start_response=start_response,
-                status_code=401,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "authentication_required",
-                        "message": "A valid GitHub OIDC token or browser session is required.",
-                    },
-                },
-            )
-        except FileNotFoundError:
-            return _not_found_response(
-                start_response=start_response,
-                trace_id=request_trace_id,
-                path=path,
-            )
-        except ValidationError:
-            return _json_response(
-                start_response=start_response,
-                status_code=400,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "invalid_request",
-                        "message": "Request payload failed validation.",
-                    },
-                },
-            )
-        except ProductDriverMismatchError:
-            return _json_response(
-                start_response=start_response,
-                status_code=403,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "product_driver_mismatch",
-                        "message": "Product is not configured for the requested driver route.",
-                    },
-                },
-            )
-        except VeriReelPreviewRefreshTransportError as error:
-            error_message = str(error).strip() or "VeriReel preview refresh backend request failed."
-            return _json_response(
-                start_response=start_response,
-                status_code=502,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "preview_refresh_backend_unavailable",
-                        "message": error_message,
-                    },
-                },
-            )
-        except OdooPreviewApplyConfigError as error:
-            return _json_response(
-                start_response=start_response,
-                status_code=400,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "odoo_preview_runtime_config_incomplete",
-                        "message": "Odoo preview apply runtime environment is incomplete.",
-                    },
-                    "details": {
-                        "context": error.context,
-                        "instance": error.instance,
-                        "missing_keys": list(error.missing_keys),
-                    },
-                },
-            )
-        except MergeTrainGitHubStaleHeadError as error:
-            message = str(error).strip() or "Merge train landing evidence no longer matches GitHub."
-            return _json_response(
-                start_response=start_response,
-                status_code=409,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "merge_train_github_stale_state",
-                        "message": message,
-                    },
-                    "details": {
-                        "github_status_code": error.status_code,
-                    },
-                },
-            )
-        except MergeTrainGitHubError as error:
-            message = str(error).strip() or "GitHub merge train request failed."
-            return _json_response(
-                start_response=start_response,
-                status_code=502,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "github_request_failed",
-                        "message": "GitHub merge train request failed; retry after upstream recovers.",
-                    },
-                    "details": {
-                        "github_status_code": error.status_code,
-                        "message": message,
-                    },
-                },
-            )
-        except MergeTrainPolicyStoreMissingError:
-            return _json_response(
-                start_response=start_response,
-                status_code=503,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "merge_train_policy_not_configured",
-                        "message": "No active DB-backed merge train policy record is configured.",
-                    },
-                },
-            )
-        except (ValueError, click.ClickException):
-            return _json_response(
-                start_response=start_response,
-                status_code=400,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "invalid_request",
-                        "message": "Request could not be completed.",
-                    },
-                },
-            )
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception(
-                "Unexpected Launchplane service error", extra={"trace_id": request_trace_id}
-            )
-            return _json_response(
-                start_response=start_response,
-                status_code=500,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "internal_error",
-                        "message": "Unexpected Launchplane service error. Use trace_id to inspect service logs.",
-                    },
-                },
-            )
-        accepted_payload = _accepted_payload(
-            trace_id=request_trace_id,
-            result=result,
-            driver_result=driver_result,
-            extra_record_keys=_accepted_payload_extra_record_keys(route_path=path),
-        )
-        should_store_idempotency = _should_store_idempotency_record(
-            path=effective_idempotency_route_path,
-            driver_result=driver_result,
-        )
-        if method == "POST" and request_idempotency_key and should_store_idempotency:
-            _write_idempotency_record(
-                record_store=record_store,
-                scope=request_scope,
-                route_path=effective_idempotency_route_path,
-                idempotency_key=request_idempotency_key,
-                request_fingerprint=request_fingerprint,
-                response_status_code=202,
-                response_trace_id=request_trace_id,
-                response_payload=accepted_payload,
-            )
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=accepted_payload,
-        )
-
-    return app
-
-
 def serve_launchplane_service(
     *,
     state_dir: Path,
@@ -4348,14 +2081,6 @@ def serve_launchplane_service(
         if work_graph_issue_inbox_config is not None
         else None
     )
-    application = create_launchplane_service_app(
-        state_dir=state_dir,
-        verifier=verifier,
-        authz_policy=bootstrap_authz_policy,
-        database_url=database_url,
-        authz_policy_runtime=authz_policy_runtime,
-        record_store_for_service=service_record_store,
-    )
     github_oauth_config = load_github_oauth_config_from_env()
     human_session_manager = (
         HumanSessionManager(
@@ -4385,10 +2110,8 @@ def serve_launchplane_service(
         work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
         every_code_github_webhook_handler=handle_every_code_github_webhook_request,
     )
-    fastapi_application.mount(
-        "/",
-        cast(ASGIApp, WSGIMiddleware(cast(Any, application))),
-    )
+    _validate_native_descriptor_driver_routes()
+    _validate_native_fastapi_driver_route_paths(fastapi_application)
     click.echo(f"Launchplane service listening on http://{host}:{port}")
     try:
         uvicorn.run(

@@ -14,6 +14,10 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerStore,
     build_odoo_stable_operation_worker_status,
 )
+from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
+    VeriReelProdBackupGateOperationWorkerStore,
+    build_verireel_prod_backup_gate_operation_worker_status,
+)
 
 
 def launchplane_policy_sha256_from_env() -> str:
@@ -80,6 +84,38 @@ def odoo_stable_operation_worker_status_payload(
 ) -> dict[str, object]:
     worker_status = build_odoo_stable_operation_worker_status(
         record_store=require_odoo_stable_operation_worker_store(record_store),
+        recent_terminal_limit=recent_terminal_limit,
+    )
+    return asdict(worker_status)
+
+
+def require_verireel_prod_backup_gate_operation_worker_store(
+    record_store: object,
+) -> VeriReelProdBackupGateOperationWorkerStore:
+    required_methods = (
+        "list_verireel_prod_backup_gate_operation_records",
+        "claim_next_verireel_prod_backup_gate_operation_record",
+        "heartbeat_verireel_prod_backup_gate_operation_record",
+        "mark_verireel_prod_backup_gate_operation_phase",
+        "complete_verireel_prod_backup_gate_operation_record",
+        "complete_verireel_prod_backup_gate_operation_with_backup_gate_record",
+        "recover_expired_verireel_prod_backup_gate_operation_records",
+        "write_backup_gate_record",
+    )
+    if all(callable(getattr(record_store, method_name, None)) for method_name in required_methods):
+        return cast(VeriReelProdBackupGateOperationWorkerStore, record_store)
+    raise click.ClickException(
+        "VeriReel prod backup gate worker status requires Launchplane operation-record storage."
+    )
+
+
+def verireel_prod_backup_gate_operation_worker_status_payload(
+    *,
+    record_store: object,
+    recent_terminal_limit: int,
+) -> dict[str, object]:
+    worker_status = build_verireel_prod_backup_gate_operation_worker_status(
+        record_store=require_verireel_prod_backup_gate_operation_worker_store(record_store),
         recent_terminal_limit=recent_terminal_limit,
     )
     return asdict(worker_status)

@@ -44,7 +44,7 @@ from tests.http_app_test_support import (
     _post_generic_web_rollback,
     _post_generic_web_rollback_plan,
 )
-from tests.test_service import _StubVerifier, _identity, _invoke_app, create_launchplane_service_app
+from tests.test_service import _StubVerifier, _identity
 
 
 class _GenericWebRollbackStore:
@@ -1122,64 +1122,6 @@ class FastApiGenericWebRollbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("/v1/drivers/generic-web/prod-rollback-plan", payload["paths"])
         self.assertIn("/v1/drivers/generic-web/prod-rollback", payload["paths"])
-
-    def test_legacy_wsgi_routes_are_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_fastapi_rollback_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-            )
-
-            plan_status_code, plan_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/generic-web/prod-rollback-plan",
-                payload=_rollback_plan_payload(),
-            )
-            rollback_status_code, rollback_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/generic-web/prod-rollback",
-                payload=_rollback_payload(),
-            )
-
-        self.assertEqual(plan_status_code, 404)
-        self.assertEqual(plan_payload["error"]["code"], "not_found")
-        self.assertEqual(rollback_status_code, 404)
-        self.assertEqual(rollback_payload["error"]["code"], "not_found")
-
-    def test_odoo_rollback_plan_alias_is_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_fastapi_rollback_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/prod-rollback-plan",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "rollback_plan": {
-                        "schema_version": 1,
-                        "product": "odoo-tenant-cm",
-                        "instance": "prod",
-                        "rollback_deployment_record_id": "deployment-cm-prod-previous",
-                    },
-                },
-                headers={"Idempotency-Key": "odoo-rollback-plan-cm-prod"},
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
 
 
 if __name__ == "__main__":
