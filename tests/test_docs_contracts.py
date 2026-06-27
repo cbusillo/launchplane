@@ -8,15 +8,19 @@ class DocsContractsTests(TestCase):
         foundation_adr = Path("docs/v2-foundation-adr.md").read_text(encoding="utf-8")
         retirement_doc = Path("docs/compatibility-retirement.md").read_text(encoding="utf-8")
 
-        self.assertIn("Native Route Migration Checklist", service_boundary)
-        self.assertIn("native FastAPI route owns the path", service_boundary)
+        self.assertIn("Native Route Checklist", service_boundary)
+        self.assertIn("native FastAPI route owns the production path", service_boundary)
         self.assertIn("stable `operation_id`", service_boundary)
         self.assertIn("maximum body-size behavior", service_boundary)
         self.assertIn("`400`, `413`, `401`, and `403`", service_boundary)
+        self.assertIn("deletes obsolete compatibility code", service_boundary)
         self.assertIn("one route family at a time", foundation_adr)
         self.assertIn("OpenAPI examples are contract examples", foundation_adr)
-        self.assertIn("route-family by", retirement_doc)
-        self.assertIn("name the removal condition", retirement_doc)
+        self.assertIn("production legacy WSGI bridge is removed", foundation_adr)
+        self.assertIn("dead-code removal, and transition-doc cleanup", foundation_adr)
+        self.assertIn("legacy WSGI HTTP fallback has passed this checkpoint", retirement_doc)
+        self.assertIn("explicit search for dead code and stale", retirement_doc)
+        self.assertIn("issue-backed exception", retirement_doc)
 
     def test_product_environment_evidence_includes_config_status(self) -> None:
         workflow_text = Path(".github/workflows/product-environment-evidence.yml").read_text(

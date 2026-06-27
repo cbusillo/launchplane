@@ -4,13 +4,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import (
-    Any,
     cast,
 )
 from unittest.mock import patch
-
-from a2wsgi import WSGIMiddleware
-from starlette.types import ASGIApp
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -78,7 +74,6 @@ from tests.test_service import (
     _sqlite_database_url,
     _StubVerifier,
     _write_runtime_key_safety_policy,
-    create_launchplane_service_app,
 )
 
 
@@ -1002,50 +997,6 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
-    async def test_notification_policy_apply_routes_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                policy = _notification_policy_apply_policy(
-                    action="public_ingress_notification_policy.apply",
-                    product="launchplane",
-                    context="launchplane",
-                )
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    record_store_factory=lambda: store,
-                )
-                legacy_app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_RejectingVerifier(),
-                    authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                    local_record_store_for_tests=store,
-                )
-                app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/public-ingress/notification-policies/apply",
-                    headers={"Authorization": "Bearer valid-token"},
-                    payload={
-                        "schema_version": 1,
-                        "mode": "dry-run",
-                        "policy": _public_ingress_notification_policy_record().model_dump(
-                            mode="json"
-                        ),
-                    },
-                )
-            finally:
-                store.close()
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["result"]["mode"], "dry-run")
-
     async def test_openapi_includes_notification_policy_apply_routes(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -1269,39 +1220,6 @@ class FastApiRuntimeKeySafetyPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "database_required")
-
-    async def test_runtime_key_safety_policy_apply_native_route_precedes_wsgi_fallback(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                policy = _runtime_key_safety_policy_apply_policy(action="runtime_key_safety.write")
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    record_store_factory=lambda: store,
-                )
-                legacy_app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_RejectingVerifier(),
-                    authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                    local_record_store_for_tests=store,
-                )
-                app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-                response = await _post_runtime_key_safety_policy_apply(
-                    app,
-                    _runtime_key_safety_policy_apply_payload(),
-                )
-            finally:
-                store.close()
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["status"], "accepted")
 
     async def test_openapi_includes_runtime_key_safety_policy_apply_route(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -1765,40 +1683,6 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         )
         for status_code in ("400", "401", "409", "503"):
             self.assertIn("LaunchplaneErrorResponse", json.dumps(route["responses"][status_code]))
-
-    async def test_fastapi_evaluate_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_agent_write_intent_policy(
-                    actions=("every_code_work_request.rerun",),
-                    product="launchplane",
-                    context="launchplane",
-                ),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "legacy-state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy(),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _post_agent_write_intent_evaluate(
-                app,
-                _agent_write_intent_payload(
-                    intent="every_code_rerun",
-                    mode="dry_run",
-                    product="launchplane",
-                    context="launchplane",
-                ),
-            )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["result"]["intent"]["status"], "allowed")
 
 
 class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
@@ -2929,48 +2813,6 @@ class FastApiProductContextCutoverTests(unittest.IsolatedAsyncioTestCase):
             for status_code in ("400", "401", "403", "404", "409", "503"):
                 self.assertIn(status_code, route["responses"])
 
-    async def test_fastapi_context_apply_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                store.write_product_profile_record(
-                    LaunchplaneProductProfileRecord.model_validate(
-                        _product_profile_payload_with_prod()
-                    )
-                )
-            finally:
-                store.close()
-            app_store = PostgresRecordStore(database_url=database_url)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
-                record_store_factory=lambda: app_store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _post_context_cutover_apply(
-                app,
-                {
-                    "product": "sellyouroutboard",
-                    "source_context": "sellyouroutboard-testing",
-                    "target_context": "sellyouroutboard",
-                    "mode": "dry-run",
-                },
-            )
-            app_store.close()
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["records"], {"product_profile": "sellyouroutboard"})
-
     async def test_context_cutover_audit_returns_redacted_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -3137,29 +2979,3 @@ class FastApiProductContextCutoverTests(unittest.IsolatedAsyncioTestCase):
             ],
             False,
         )
-
-    async def test_fastapi_context_cutover_audit_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _write_context_cutover_audit_records(database_url)
-            app_store = PostgresRecordStore(database_url=database_url)
-            policy = _product_profile_read_policy(product="sellyouroutboard")
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: app_store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _get_context_cutover_audit(app)
-            app_store.close()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")

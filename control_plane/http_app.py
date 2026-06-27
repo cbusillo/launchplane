@@ -1,8 +1,10 @@
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import secrets
+from urllib.parse import unquote
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -15,8 +17,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy_target_inspect import (
@@ -183,6 +185,22 @@ from control_plane.generic_web_deploy_http import (
     should_store_generic_web_source_ref_deploy_idempotency,
     validate_generic_web_source_ref_deploy_lane,
 )
+from control_plane.generic_web_promotion_http import (
+    GENERIC_WEB_PROD_PROMOTION_ACTION,
+    GENERIC_WEB_PROD_PROMOTION_ROUTE as _GENERIC_WEB_PROD_PROMOTION_ROUTE,
+    GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ACTION,
+    GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE as _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
+    GenericWebProdPromotionEnvelope,
+    GenericWebPromotionProductMismatchError,
+    GenericWebPromotionRouteDependencyError,
+    GenericWebPromotionWorkflowEnvelope,
+    dispatch_generic_web_promotion_workflow_result,
+    execute_generic_web_prod_promotion_result,
+    resolve_generic_web_promotion_destination_lane,
+    resolve_generic_web_promotion_workflow_lane,
+    should_store_generic_web_promotion_idempotency,
+    validate_generic_web_prod_promotion_lanes,
+)
 from control_plane.generic_web_verification_http import (
     GENERIC_WEB_PREVIEW_VERIFICATION_ACTION,
     GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE as _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
@@ -198,6 +216,72 @@ from control_plane.generic_web_verification_http import (
     resolve_generic_web_preview_verification_profile,
     resolve_generic_web_stable_verification_lane,
     should_store_generic_web_verification_idempotency,
+)
+from control_plane.verireel_read_http import (
+    VERIREEL_PREVIEW_DESTROY_ACTION,
+    VERIREEL_PREVIEW_DESTROY_ROUTE as _VERIREEL_PREVIEW_DESTROY_ROUTE,
+    VERIREEL_PREVIEW_INVENTORY_ACTION,
+    VERIREEL_PREVIEW_INVENTORY_ROUTE as _VERIREEL_PREVIEW_INVENTORY_ROUTE,
+    VERIREEL_PREVIEW_REFRESH_ACTION,
+    VERIREEL_PREVIEW_REFRESH_ROUTE as _VERIREEL_PREVIEW_REFRESH_ROUTE,
+    VERIREEL_PREVIEW_VERIFICATION_ACTION,
+    VERIREEL_PREVIEW_VERIFICATION_ROUTE as _VERIREEL_PREVIEW_VERIFICATION_ROUTE,
+    VERIREEL_RUNTIME_VERIFICATION_ACTION,
+    VERIREEL_RUNTIME_VERIFICATION_ROUTE as _VERIREEL_RUNTIME_VERIFICATION_ROUTE,
+    VERIREEL_STABLE_ENVIRONMENT_ACTION,
+    VERIREEL_STABLE_ENVIRONMENT_ROUTE as _VERIREEL_STABLE_ENVIRONMENT_ROUTE,
+    VERIREEL_TESTING_VERIFICATION_ACTION,
+    VERIREEL_TESTING_VERIFICATION_ROUTE as _VERIREEL_TESTING_VERIFICATION_ROUTE,
+    VeriReelPreviewDestroyEnvelope,
+    VeriReelPreviewInventoryEnvelope,
+    VeriReelPreviewRefreshEnvelope,
+    VeriReelPreviewVerificationEnvelope,
+    VeriReelProductMismatchError,
+    VeriReelRouteDependencyError,
+    VeriReelPreviewRefreshTransportError,
+    VeriReelRuntimeVerificationEnvelope,
+    VeriReelStableEnvironmentEnvelope,
+    VeriReelTestingVerificationEnvelope,
+    apply_verireel_preview_destroy_result,
+    apply_verireel_preview_inventory_result,
+    apply_verireel_preview_refresh_result,
+    apply_verireel_preview_verification_result,
+    apply_verireel_testing_verification_result,
+    read_verireel_stable_environment_result,
+    resolve_verireel_driver_context,
+    run_verireel_runtime_verification_result,
+    should_store_verireel_result_idempotency,
+    verireel_preview_verification_response_records,
+    verireel_testing_verification_response_records,
+)
+from control_plane.verireel_nonprod_http import (
+    VERIREEL_APP_MAINTENANCE_ACTION,
+    VERIREEL_APP_MAINTENANCE_ROUTE as _VERIREEL_APP_MAINTENANCE_ROUTE,
+    VERIREEL_TESTING_DEPLOY_ACTION,
+    VERIREEL_TESTING_DEPLOY_ROUTE as _VERIREEL_TESTING_DEPLOY_ROUTE,
+    VeriReelAppMaintenanceEnvelope,
+    VeriReelTestingDeployEnvelope,
+    apply_verireel_app_maintenance_result,
+    apply_verireel_testing_deploy_result,
+)
+from control_plane.verireel_prod_http import (
+    VERIREEL_PROD_BACKUP_GATE_ACTION,
+    VERIREEL_PROD_BACKUP_GATE_ROUTE as _VERIREEL_PROD_BACKUP_GATE_ROUTE,
+    VERIREEL_PROD_DEPLOY_ACTION,
+    VERIREEL_PROD_DEPLOY_ROUTE as _VERIREEL_PROD_DEPLOY_ROUTE,
+    VERIREEL_PROD_PROMOTION_ACTION,
+    VERIREEL_PROD_PROMOTION_ROUTE as _VERIREEL_PROD_PROMOTION_ROUTE,
+    VERIREEL_PROD_ROLLBACK_ACTION,
+    VERIREEL_PROD_ROLLBACK_ROUTE as _VERIREEL_PROD_ROLLBACK_ROUTE,
+    VeriReelProdBackupGateEnvelope,
+    VeriReelProdDeployEnvelope,
+    VeriReelProdPromotionEnvelope,
+    VeriReelProdRollbackEnvelope,
+    apply_verireel_prod_backup_gate_result,
+    apply_verireel_prod_deploy_result,
+    apply_verireel_prod_promotion_result,
+    apply_verireel_prod_rollback_result,
+    should_store_verireel_prod_result_idempotency,
 )
 from control_plane.generic_web_preview_http import (
     GENERIC_WEB_PREVIEW_DESTROY_ACTION,
@@ -229,6 +313,16 @@ from control_plane.odoo_artifact_publish_inputs_http import (
     OdooArtifactPublishInputsRouteDependencyError,
     build_odoo_artifact_publish_inputs_result,
     resolve_odoo_artifact_publish_inputs_profile,
+)
+from control_plane.odoo_artifact_publish_http import (
+    ODOO_ARTIFACT_PUBLISH_ACTION,
+    ODOO_ARTIFACT_PUBLISH_ROUTE as _ODOO_ARTIFACT_PUBLISH_ROUTE,
+    OdooArtifactPublishEnvelope,
+    OdooArtifactPublishProductMismatchError,
+    OdooArtifactPublishRouteDependencyError,
+    ingest_odoo_artifact_publish_evidence_result,
+    resolve_odoo_artifact_publish_product_route,
+    should_store_odoo_artifact_publish_idempotency,
 )
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ACTION,
@@ -495,6 +589,10 @@ from control_plane.workflows.npmplus_ingress import (
 from control_plane.workflows.odoo_stable_operation_worker import (
     DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
     reconcile_stale_odoo_stable_operation_records,
+)
+from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
+    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    reconcile_stale_verireel_prod_backup_gate_operation_records,
 )
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
@@ -915,6 +1013,21 @@ def _asgi_header_values(*, scope: Scope, name: str) -> list[str]:
     return header_values
 
 
+def _http_status_text(status_code: int) -> str:
+    return {
+        200: "OK",
+        202: "Accepted",
+        400: "Bad Request",
+        401: "Unauthorized",
+        403: "Forbidden",
+        404: "Not Found",
+        405: "Method Not Allowed",
+        409: "Conflict",
+        503: "Service Unavailable",
+        500: "Internal Server Error",
+    }.get(status_code, "OK")
+
+
 async def _send_launchplane_error_response(
     *,
     scope: Scope,
@@ -1007,6 +1120,60 @@ class OdooStableOperationWorkerReconcileResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     reconcile_result: OdooStableOperationWorkerReconcileResultResponse
+
+
+class VeriReelProdBackupGateOperationLeaseSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: str
+    product: str
+    context: str
+    instance: str
+    backup_record_id: str
+    status: str
+    phase: str
+    attempt: int
+    lease_owner: str
+    lease_expires_at: str
+    heartbeat_at: str
+    heartbeat_age_seconds: int | None
+    lease_expired: bool
+
+
+class VeriReelProdBackupGateOperationWorkerStatusResponseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    recorded_at: str
+    pending_count: int
+    running_count: int
+    stalled_count: int
+    terminal_count: int
+    counts_by_status: dict[str, int]
+    operations: tuple[VeriReelProdBackupGateOperationLeaseSummaryResponse, ...]
+
+
+class VeriReelProdBackupGateOperationWorkerStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    worker_status: VeriReelProdBackupGateOperationWorkerStatusResponseModel
+
+
+class VeriReelProdBackupGateOperationWorkerReconcileResultResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reconciled_operation_ids: tuple[str, ...]
+    reconciled_count: int
+
+
+class VeriReelProdBackupGateOperationWorkerReconcileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    reconcile_result: VeriReelProdBackupGateOperationWorkerReconcileResultResponse
 
 
 class OdooStableBootstrapOperationStatusResponse(BaseModel):
@@ -3942,6 +4109,22 @@ def create_launchplane_fastapi_app(
                 message="Workflow cannot reconcile Launchplane Odoo workers.",
             )
 
+    def require_launchplane_service_verireel_reconcile_authorization(
+        *, identity: LaunchplaneIdentity, trace_id: str
+    ) -> None:
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="launchplane_service.reconcile_verireel_workers",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot reconcile Launchplane VeriReel workers.",
+            )
+
     def read_launchplane_runtime(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
@@ -4042,6 +4225,97 @@ def create_launchplane_fastapi_app(
                 reconciled_bootstrap_ids=reconciled_bootstrap_ids,
                 reconciled_replacement_ids=reconciled_replacement_ids,
                 reconciled_count=len(reconciled_bootstrap_ids) + len(reconciled_replacement_ids),
+            ),
+        )
+
+    def read_verireel_prod_backup_gate_operation_worker_status(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        recent_terminal_limit: Annotated[str, Query()] = "10",
+    ) -> VeriReelProdBackupGateOperationWorkerStatusResponse:
+        trace_id = next_trace_id()
+        require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
+        try:
+            parsed_recent_terminal_limit = control_plane_service_status.query_int_value(
+                recent_terminal_limit,
+                "recent_terminal_limit",
+                default=10,
+                minimum=0,
+                maximum=100,
+            )
+            assert parsed_recent_terminal_limit is not None
+            worker_status = VeriReelProdBackupGateOperationWorkerStatusResponseModel.model_validate(
+                control_plane_service_status.verireel_prod_backup_gate_operation_worker_status_payload(
+                    record_store=record_store,
+                    recent_terminal_limit=parsed_recent_terminal_limit,
+                )
+            )
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="operation_record_storage_required",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        return VeriReelProdBackupGateOperationWorkerStatusResponse(
+            trace_id=trace_id,
+            worker_status=worker_status,
+        )
+
+    def reconcile_verireel_prod_backup_gate_operation_workers(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        max_attempts: Annotated[str, Query()] = str(
+            DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS
+        ),
+    ) -> VeriReelProdBackupGateOperationWorkerReconcileResponse:
+        trace_id = next_trace_id()
+        require_launchplane_service_verireel_reconcile_authorization(
+            identity=identity,
+            trace_id=trace_id,
+        )
+        try:
+            parsed_max_attempts = control_plane_service_status.query_int_value(
+                max_attempts,
+                "max_attempts",
+                default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+                minimum=1,
+                maximum=100,
+            )
+            assert parsed_max_attempts is not None
+            reconcile_result = reconcile_stale_verireel_prod_backup_gate_operation_records(
+                record_store=control_plane_service_status.require_verireel_prod_backup_gate_operation_worker_store(
+                    record_store
+                ),
+                max_attempts=parsed_max_attempts,
+            )
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="operation_record_storage_required",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        reconciled_operation_ids = tuple(reconcile_result.reconciled_operation_ids)
+        return VeriReelProdBackupGateOperationWorkerReconcileResponse(
+            trace_id=trace_id,
+            reconcile_result=VeriReelProdBackupGateOperationWorkerReconcileResultResponse(
+                reconciled_operation_ids=reconciled_operation_ids,
+                reconciled_count=len(reconciled_operation_ids),
             ),
         )
 
@@ -5537,6 +5811,137 @@ def create_launchplane_fastapi_app(
                 "details": {"route_path": route_path},
             },
         )
+
+    async def write_odoo_artifact_publish(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            publish_request = OdooArtifactPublishEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        try:
+            product_profile = resolve_odoo_artifact_publish_product_route(
+                record_store=record_store,
+                product=publish_request.product,
+                context=publish_request.publish.context,
+                instance=publish_request.publish.instance,
+            )
+        except OdooArtifactPublishRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_ARTIFACT_PUBLISH_ROUTE,
+            )
+        except OdooArtifactPublishProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        authorization_product = (
+            product_profile.product if product_profile is not None else publish_request.product
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=ODOO_ARTIFACT_PUBLISH_ACTION,
+            product=authorization_product,
+            context=publish_request.publish.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write Odoo artifact publish evidence for the requested"
+                    " product/context."
+                ),
+            )
+
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_ARTIFACT_PUBLISH_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+
+        try:
+            records, driver_result = ingest_odoo_artifact_publish_evidence_result(
+                record_store=record_store,
+                request=publish_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_ODOO_ARTIFACT_PUBLISH_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={key: str(value) for key, value in records.items()},
+            result=driver_result,
+        )
+        if should_store_odoo_artifact_publish_idempotency(driver_result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_ODOO_ARTIFACT_PUBLISH_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
 
     async def write_odoo_artifact_publish_inputs(
         request: Request,
@@ -10865,7 +11270,14 @@ def create_launchplane_fastapi_app(
             for key, value in dict(stored_record.response_payload.get("records") or {}).items()
         }
         stored_result = stored_record.response_payload.get("result")
-        if route_path == _GENERIC_WEB_DEPLOY_ROUTE and isinstance(stored_result, dict):
+        if route_path in {
+            _GENERIC_WEB_DEPLOY_ROUTE,
+            _GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
+            _VERIREEL_PROD_DEPLOY_ROUTE,
+            _VERIREEL_PROD_PROMOTION_ROUTE,
+            _VERIREEL_TESTING_DEPLOY_ROUTE,
+        } and isinstance(stored_result, dict):
             stored_records.pop("target_type", None)
             stored_result = {str(key): value for key, value in stored_result.items()}
             stored_result.pop("target_type", None)
@@ -13865,6 +14277,1378 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def apply_generic_web_prod_promotion(
+        request: Request,
+        promotion_request: GenericWebProdPromotionEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        if isinstance(identity, TerminalAgentIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials can only read redacted Launchplane context.",
+            )
+        try:
+            profile, lane = resolve_generic_web_promotion_destination_lane(
+                record_store=record_store,
+                product=promotion_request.product,
+                instance=promotion_request.promotion.to_instance,
+            )
+            validate_generic_web_prod_promotion_lanes(
+                record_store=record_store,
+                request=promotion_request,
+            )
+        except GenericWebPromotionRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            )
+        except GenericWebPromotionProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if isinstance(identity, GitHubHumanIdentity) and not promotion_request.promotion.dry_run:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Launchplane UI can only dry-run generic-web prod promotions.",
+            )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=GENERIC_WEB_PROD_PROMOTION_ACTION,
+            product=profile.product,
+            context=lane.context.strip(),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the generic web prod promotion driver"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = execute_generic_web_prod_promotion_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=promotion_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=result,
+        )
+        if should_store_generic_web_promotion_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def dispatch_generic_web_prod_promotion_workflow(
+        request: Request,
+        workflow_request: GenericWebPromotionWorkflowEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        if isinstance(identity, TerminalAgentIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials can only read redacted Launchplane context.",
+            )
+        try:
+            profile, lane = resolve_generic_web_promotion_workflow_lane(
+                record_store=record_store,
+                product=workflow_request.product,
+                context=workflow_request.workflow.context,
+            )
+        except GenericWebPromotionRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
+            )
+        except GenericWebPromotionProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ACTION,
+            product=profile.product,
+            context=lane.context.strip(),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot dispatch the generic web prod promotion workflow"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = dispatch_generic_web_promotion_workflow_result(
+                control_plane_root=resolved_control_plane_root,
+                request=workflow_request,
+                profile=profile,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=(f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE}."),
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=result,
+        )
+        if should_store_generic_web_promotion_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    def resolve_verireel_route_authorization(
+        *,
+        record_store: object,
+        product: str,
+        context: str,
+        instance: str = "",
+    ) -> tuple[str, str]:
+        resolved_context = resolve_verireel_driver_context(
+            record_store=record_store,
+            product=product,
+            context=context,
+            instance=instance,
+        )
+        authorization_product = (
+            resolved_context.profile.product if resolved_context.profile is not None else product
+        )
+        authorization_context = context.strip()
+        if not authorization_context and resolved_context.lane is not None:
+            authorization_context = resolved_context.lane.context.strip()
+        return authorization_product, authorization_context
+
+    def handle_verireel_route_dependency_error(*, trace_id: str, route_path: str) -> JSONResponse:
+        return driver_route_dependency_not_found_response(
+            trace_id=trace_id,
+            route_path=route_path,
+        )
+
+    def raise_verireel_product_mismatch_error(
+        *, trace_id: str, error: VeriReelProductMismatchError
+    ) -> None:
+        raise _launchplane_http_error(
+            status_code=403,
+            trace_id=trace_id,
+            code="product_driver_mismatch",
+            message="Product is not configured for the requested driver route.",
+        ) from error
+
+    def raise_verireel_invalid_request_error(
+        *, trace_id: str, error: ValueError | click.ClickException
+    ) -> None:
+        raise _launchplane_http_error(
+            status_code=400,
+            trace_id=trace_id,
+            code="invalid_request",
+            message="Request could not be completed.",
+        ) from error
+
+    def raise_verireel_unexpected_driver_error(*, trace_id: str, error: Exception) -> None:
+        _LOGGER.exception("Unexpected Launchplane service error", extra={"trace_id": trace_id})
+        raise _launchplane_http_error(
+            status_code=500,
+            trace_id=trace_id,
+            code="internal_error",
+            message="Unexpected Launchplane service error. Use trace_id to inspect service logs.",
+        ) from error
+
+    async def apply_verireel_prod_deploy(
+        request: Request,
+        deploy_request: VeriReelProdDeployEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=deploy_request.product,
+                context=deploy_request.deploy.context,
+                instance=deploy_request.deploy.instance,
+            )
+        except VeriReelRouteDependencyError:
+            return handle_verireel_route_dependency_error(
+                trace_id=trace_id,
+                route_path=_VERIREEL_PROD_DEPLOY_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
+        except (ValueError, click.ClickException) as error:
+            raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_PROD_DEPLOY_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the VeriReel prod deploy driver"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_VERIREEL_PROD_DEPLOY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = apply_verireel_prod_deploy_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=deploy_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_PROD_DEPLOY_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
+        except Exception as error:
+            raise_verireel_unexpected_driver_error(trace_id=trace_id, error=error)
+        response = accepted_evidence_response(trace_id=trace_id, records=records, result=result)
+        if should_store_verireel_prod_result_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_VERIREEL_PROD_DEPLOY_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_verireel_prod_backup_gate(
+        request: Request,
+        backup_gate_request: VeriReelProdBackupGateEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=backup_gate_request.product,
+                context=backup_gate_request.backup_gate.context,
+                instance=backup_gate_request.backup_gate.instance,
+            )
+        except VeriReelRouteDependencyError:
+            return handle_verireel_route_dependency_error(
+                trace_id=trace_id,
+                route_path=_VERIREEL_PROD_BACKUP_GATE_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
+        except (ValueError, click.ClickException) as error:
+            raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_PROD_BACKUP_GATE_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the VeriReel prod backup gate driver"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_VERIREEL_PROD_BACKUP_GATE_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = apply_verireel_prod_backup_gate_result(
+                record_store=record_store,
+                request=backup_gate_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_PROD_BACKUP_GATE_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
+        except Exception as error:
+            raise_verireel_unexpected_driver_error(trace_id=trace_id, error=error)
+        response = accepted_evidence_response(trace_id=trace_id, records=records, result=result)
+        if should_store_verireel_prod_result_idempotency(result, skip_pending=True):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_VERIREEL_PROD_BACKUP_GATE_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_verireel_prod_promotion(
+        request: Request,
+        promotion_request: VeriReelProdPromotionEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=promotion_request.product,
+                context=promotion_request.promotion.context,
+                instance=promotion_request.promotion.from_instance,
+            )
+            resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=promotion_request.product,
+                context=promotion_request.promotion.context,
+                instance=promotion_request.promotion.to_instance,
+            )
+        except VeriReelRouteDependencyError:
+            return handle_verireel_route_dependency_error(
+                trace_id=trace_id,
+                route_path=_VERIREEL_PROD_PROMOTION_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
+        except (ValueError, click.ClickException) as error:
+            raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_PROD_PROMOTION_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the VeriReel prod promotion driver"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_VERIREEL_PROD_PROMOTION_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = apply_verireel_prod_promotion_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=promotion_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_PROD_PROMOTION_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
+        except Exception as error:
+            raise_verireel_unexpected_driver_error(trace_id=trace_id, error=error)
+        response = accepted_evidence_response(trace_id=trace_id, records=records, result=result)
+        if should_store_verireel_prod_result_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_VERIREEL_PROD_PROMOTION_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_verireel_prod_rollback(
+        request: Request,
+        rollback_request: VeriReelProdRollbackEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=rollback_request.product,
+                context=rollback_request.rollback.context,
+                instance=rollback_request.rollback.instance,
+            )
+        except VeriReelRouteDependencyError:
+            return handle_verireel_route_dependency_error(
+                trace_id=trace_id,
+                route_path=_VERIREEL_PROD_ROLLBACK_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
+        except (ValueError, click.ClickException) as error:
+            raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_PROD_ROLLBACK_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the VeriReel prod rollback driver"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_VERIREEL_PROD_ROLLBACK_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = apply_verireel_prod_rollback_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=rollback_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_PROD_ROLLBACK_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
+        except Exception as error:
+            raise_verireel_unexpected_driver_error(trace_id=trace_id, error=error)
+        response = accepted_evidence_response(trace_id=trace_id, records=records, result=result)
+        if should_store_verireel_prod_result_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_VERIREEL_PROD_ROLLBACK_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_verireel_testing_deploy(
+        request: Request,
+        deploy_request: VeriReelTestingDeployEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=deploy_request.product,
+                context=deploy_request.deploy.context,
+                instance=deploy_request.deploy.instance,
+            )
+        except VeriReelRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_VERIREEL_TESTING_DEPLOY_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_TESTING_DEPLOY_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the VeriReel testing deploy driver"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_VERIREEL_TESTING_DEPLOY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = apply_verireel_testing_deploy_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=deploy_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_TESTING_DEPLOY_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(trace_id=trace_id, records=records, result=result)
+        if should_store_verireel_result_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_VERIREEL_TESTING_DEPLOY_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_verireel_app_maintenance(
+        request: Request,
+        maintenance_request: VeriReelAppMaintenanceEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=maintenance_request.product,
+                context=maintenance_request.maintenance.context,
+                instance=maintenance_request.maintenance.instance,
+            )
+        except VeriReelRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_VERIREEL_APP_MAINTENANCE_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_APP_MAINTENANCE_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the VeriReel app maintenance driver"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_VERIREEL_APP_MAINTENANCE_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = apply_verireel_app_maintenance_result(
+                control_plane_root=resolved_control_plane_root,
+                request=maintenance_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_APP_MAINTENANCE_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(trace_id=trace_id, records=records, result=result)
+        if should_store_verireel_result_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_VERIREEL_APP_MAINTENANCE_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_verireel_testing_verification(
+        request: Request,
+        verification_request: VeriReelTestingVerificationEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=verification_request.product,
+                context=verification_request.verification.context,
+                instance=verification_request.verification.instance,
+            )
+        except VeriReelRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_VERIREEL_TESTING_VERIFICATION_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_TESTING_VERIFICATION_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot write VeriReel testing verification for the requested product/context.",
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_VERIREEL_TESTING_VERIFICATION_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            result = apply_verireel_testing_verification_result(
+                record_store=record_store,
+                request=verification_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_TESTING_VERIFICATION_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=verireel_testing_verification_response_records(result),
+            result=result,
+        )
+        if should_store_verireel_result_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_VERIREEL_TESTING_VERIFICATION_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def read_verireel_stable_environment(
+        environment_request: VeriReelStableEnvironmentEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=environment_request.product,
+                context=environment_request.environment.context,
+                instance=environment_request.environment.instance,
+            )
+        except VeriReelRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_VERIREEL_STABLE_ENVIRONMENT_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_STABLE_ENVIRONMENT_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read the VeriReel stable environment for the requested product/context.",
+            )
+        try:
+            result = read_verireel_stable_environment_result(
+                control_plane_root=resolved_control_plane_root,
+                request=environment_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_STABLE_ENVIRONMENT_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        return accepted_evidence_response(trace_id=trace_id, records={}, result=result)
+
+    async def run_verireel_runtime_verification(
+        verification_request: VeriReelRuntimeVerificationEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=verification_request.product,
+                context=verification_request.verification.context,
+                instance=verification_request.verification.instance,
+            )
+        except VeriReelRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_VERIREEL_RUNTIME_VERIFICATION_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_RUNTIME_VERIFICATION_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the VeriReel runtime verification driver"
+                    " for the requested product/context."
+                ),
+            )
+        try:
+            result = run_verireel_runtime_verification_result(
+                control_plane_root=resolved_control_plane_root,
+                request=verification_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_RUNTIME_VERIFICATION_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        return accepted_evidence_response(trace_id=trace_id, records={}, result=result)
+
+    async def read_verireel_preview_inventory(
+        inventory_request: VeriReelPreviewInventoryEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=inventory_request.product,
+                context="",
+            )
+        except VeriReelRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_VERIREEL_PREVIEW_INVENTORY_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        authorization_context = inventory_request.inventory.context.strip() or authorization_context
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_PREVIEW_INVENTORY_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read the VeriReel preview inventory for the requested product/context.",
+            )
+        try:
+            records, result = apply_verireel_preview_inventory_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=inventory_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_PREVIEW_INVENTORY_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        return accepted_evidence_response(trace_id=trace_id, records=records, result=result)
+
+    async def apply_verireel_preview_refresh(
+        request: Request,
+        refresh_request: VeriReelPreviewRefreshEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=refresh_request.product,
+                context="",
+            )
+        except VeriReelRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_VERIREEL_PREVIEW_REFRESH_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        authorization_context = refresh_request.refresh.context.strip() or authorization_context
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_PREVIEW_REFRESH_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the VeriReel preview refresh driver"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_VERIREEL_PREVIEW_REFRESH_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = apply_verireel_preview_refresh_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=refresh_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_PREVIEW_REFRESH_ROUTE}.",
+            ) from error
+        except VeriReelPreviewRefreshTransportError as error:
+            error_message = str(error).strip() or "VeriReel preview refresh backend request failed."
+            raise _launchplane_http_error(
+                status_code=502,
+                trace_id=trace_id,
+                code="preview_refresh_backend_unavailable",
+                message=error_message,
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=result,
+        )
+        if should_store_verireel_result_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_VERIREEL_PREVIEW_REFRESH_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_verireel_preview_destroy(
+        request: Request,
+        destroy_request: VeriReelPreviewDestroyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=destroy_request.product,
+                context="",
+            )
+        except VeriReelRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_VERIREEL_PREVIEW_DESTROY_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        authorization_context = destroy_request.destroy.context.strip() or authorization_context
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_PREVIEW_DESTROY_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot execute the VeriReel preview destroy driver"
+                    " for the requested product/context."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_VERIREEL_PREVIEW_DESTROY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            records, result = apply_verireel_preview_destroy_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=destroy_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_PREVIEW_DESTROY_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=result,
+        )
+        if should_store_verireel_result_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_VERIREEL_PREVIEW_DESTROY_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_verireel_preview_verification(
+        request: Request,
+        verification_request: VeriReelPreviewVerificationEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            authorization_product, authorization_context = resolve_verireel_route_authorization(
+                record_store=record_store,
+                product=verification_request.product,
+                context="",
+            )
+        except VeriReelRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
+            )
+        except VeriReelProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        authorization_context = (
+            verification_request.verification.context.strip() or authorization_context
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=VERIREEL_PREVIEW_VERIFICATION_ACTION,
+            product=authorization_product,
+            context=authorization_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot write VeriReel preview verification for the requested product/context.",
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            result = apply_verireel_preview_verification_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=verification_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_VERIREEL_PREVIEW_VERIFICATION_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=verireel_preview_verification_response_records(result),
+            result=result,
+        )
+        if should_store_verireel_result_idempotency(result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
     async def apply_generic_web_stable_verification(
         request: Request,
         verification_request: GenericWebStableVerificationEnvelope,
@@ -15412,6 +17196,36 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        "/v1/service/verireel-workers/status",
+        read_verireel_prod_backup_gate_operation_worker_status,
+        methods=["GET"],
+        response_model=VeriReelProdBackupGateOperationWorkerStatusResponse,
+        operation_id="read_verireel_prod_backup_gate_operation_worker_status",
+        summary="Read VeriReel prod backup gate operation worker status",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/service/verireel-workers/reconcile",
+        reconcile_verireel_prod_backup_gate_operation_workers,
+        methods=["POST"],
+        response_model=VeriReelProdBackupGateOperationWorkerReconcileResponse,
+        operation_id="reconcile_verireel_prod_backup_gate_operation_workers",
+        summary="Reconcile stale VeriReel prod backup gate operation workers",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE,
         apply_public_ingress_notification_policy,
         methods=["POST"],
@@ -15742,6 +17556,64 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _GENERIC_WEB_PROD_PROMOTION_ROUTE,
+        apply_generic_web_prod_promotion,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": GenericWebProdPromotionEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_generic_web_prod_promotion",
+        summary="Execute generic web prod promotion",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
+        dispatch_generic_web_prod_promotion_workflow,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": GenericWebPromotionWorkflowEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="dispatch_generic_web_prod_promotion_workflow",
+        summary="Dispatch generic web prod promotion workflow",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
         apply_generic_web_stable_verification,
         methods=["POST"],
@@ -15792,6 +17664,377 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_TESTING_DEPLOY_ROUTE,
+        apply_verireel_testing_deploy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelTestingDeployEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_verireel_testing_deploy",
+        summary="Execute VeriReel testing deploy",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_PROD_DEPLOY_ROUTE,
+        apply_verireel_prod_deploy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": VeriReelProdDeployEnvelope.model_json_schema()}
+                },
+            }
+        },
+        operation_id="apply_verireel_prod_deploy",
+        summary="Execute VeriReel prod deploy",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_PROD_BACKUP_GATE_ROUTE,
+        apply_verireel_prod_backup_gate,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelProdBackupGateEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_verireel_prod_backup_gate",
+        summary="Execute VeriReel prod backup gate",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_PROD_PROMOTION_ROUTE,
+        apply_verireel_prod_promotion,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelProdPromotionEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_verireel_prod_promotion",
+        summary="Execute VeriReel prod promotion",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_PROD_ROLLBACK_ROUTE,
+        apply_verireel_prod_rollback,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": VeriReelProdRollbackEnvelope.model_json_schema()}
+                },
+            }
+        },
+        operation_id="apply_verireel_prod_rollback",
+        summary="Execute VeriReel prod rollback",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_TESTING_VERIFICATION_ROUTE,
+        apply_verireel_testing_verification,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelTestingVerificationEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_verireel_testing_verification",
+        summary="Write VeriReel testing verification",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_STABLE_ENVIRONMENT_ROUTE,
+        read_verireel_stable_environment,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelStableEnvironmentEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="read_verireel_stable_environment",
+        summary="Read VeriReel stable environment",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_RUNTIME_VERIFICATION_ROUTE,
+        run_verireel_runtime_verification,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelRuntimeVerificationEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="run_verireel_runtime_verification",
+        summary="Run VeriReel runtime verification",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_PREVIEW_INVENTORY_ROUTE,
+        read_verireel_preview_inventory,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelPreviewInventoryEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="read_verireel_preview_inventory",
+        summary="Read VeriReel preview inventory",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_PREVIEW_REFRESH_ROUTE,
+        apply_verireel_preview_refresh,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelPreviewRefreshEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_verireel_preview_refresh",
+        summary="Refresh VeriReel preview",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            502: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_PREVIEW_DESTROY_ROUTE,
+        apply_verireel_preview_destroy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelPreviewDestroyEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_verireel_preview_destroy",
+        summary="Destroy VeriReel preview",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_APP_MAINTENANCE_ROUTE,
+        apply_verireel_app_maintenance,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelAppMaintenanceEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_verireel_app_maintenance",
+        summary="Execute VeriReel app maintenance",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _VERIREEL_PREVIEW_VERIFICATION_ROUTE,
+        apply_verireel_preview_verification,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": VeriReelPreviewVerificationEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_verireel_preview_verification",
+        summary="Write VeriReel preview verification",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
@@ -16061,6 +18304,33 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _ODOO_ARTIFACT_PUBLISH_ROUTE,
+        write_odoo_artifact_publish,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": OdooArtifactPublishEnvelope.model_json_schema()}
+                },
+            }
+        },
+        operation_id="write_odoo_artifact_publish",
+        summary="Write Odoo artifact publish evidence",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
         write_odoo_artifact_publish_inputs,
         methods=["POST"],
@@ -16271,7 +18541,7 @@ def create_launchplane_fastapi_app(
             }
         },
         operation_id="write_odoo_prod_promotion",
-        summary="Execute Odoo prod promotion compatibility route",
+        summary="Execute Odoo prod promotion route",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
@@ -17932,6 +20202,79 @@ def create_launchplane_fastapi_app(
         responses=evidence_ingress_error_responses,
     )
 
+    def read_operator_ui(path: str = "") -> Response:
+        trace_id = next_trace_id()
+        route_path = "/" if path == "" else f"/ui/{path}"
+        ui_static_root = resolved_control_plane_root / "control_plane" / "ui_static"
+        index_path = ui_static_root / "index.html"
+
+        def not_found_response() -> JSONResponse:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "not_found",
+                        "message": f"No Launchplane route for {route_path}.",
+                    },
+                },
+            )
+
+        def ui_file_response(*, file_path: FilePath, cache_control: str) -> Response:
+            content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+            body = file_path.read_bytes()
+            return Response(
+                content=body,
+                headers={
+                    "Content-Type": content_type,
+                    "Content-Length": str(len(body)),
+                    "Cache-Control": cache_control,
+                },
+            )
+
+        if not index_path.is_file():
+            return not_found_response()
+        if route_path in {"/", "/ui", "/ui/"}:
+            return ui_file_response(file_path=index_path, cache_control="no-store")
+        if route_path.startswith("/ui/assets/"):
+            relative_asset_path = unquote(route_path.removeprefix("/ui/"))
+            if ".." in FilePath(relative_asset_path).parts:
+                return not_found_response()
+            asset_path = (ui_static_root / relative_asset_path).resolve()
+            try:
+                asset_path.relative_to(ui_static_root.resolve())
+            except ValueError:
+                return not_found_response()
+            if not asset_path.is_file():
+                return not_found_response()
+            return ui_file_response(
+                file_path=asset_path,
+                cache_control="public, max-age=31536000, immutable",
+            )
+        if route_path.startswith("/ui/"):
+            return ui_file_response(file_path=index_path, cache_control="no-store")
+        return not_found_response()
+
+    app.add_api_route(
+        "/",
+        read_operator_ui,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        "/ui",
+        read_operator_ui,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        "/ui/{path:path}",
+        read_operator_ui,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+
     def launchplane_http_exception_handler(request: Request, error: Exception) -> JSONResponse:
         if not isinstance(error, HTTPException):
             raise error
@@ -17959,6 +20302,36 @@ def create_launchplane_fastapi_app(
             status_code=http_error.status_code,
             content=payload.model_dump(mode="json", exclude_none=True),
             headers=http_error.headers,
+        )
+        preserve_renewed_session_cookie(request, response)
+        return response
+
+    def launchplane_starlette_http_exception_handler(
+        request: Request, error: Exception
+    ) -> JSONResponse:
+        if not isinstance(error, StarletteHTTPException):
+            raise error
+        trace_id = next_trace_id()
+        if error.status_code == 404:
+            status_code = 404
+            code = "not_found"
+            message = f"No Launchplane route for {request.url.path}."
+        elif error.status_code == 405:
+            status_code = 405
+            code = "method_not_allowed"
+            message = "Only GET and POST are allowed for Launchplane routes."
+        else:
+            status_code = error.status_code
+            code = "http_error"
+            message = str(error.detail)
+        payload = LaunchplaneErrorResponse(
+            trace_id=trace_id,
+            error=LaunchplaneErrorDetail(code=code, message=message),
+        )
+        response = JSONResponse(
+            status_code=status_code,
+            content=payload.model_dump(mode="json", exclude_none=True),
+            headers=error.headers,
         )
         preserve_renewed_session_cookie(request, response)
         return response
@@ -17996,6 +20369,10 @@ def create_launchplane_fastapi_app(
         },
     )
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
+    app.add_exception_handler(
+        StarletteHTTPException,
+        launchplane_starlette_http_exception_handler,
+    )
     app.add_exception_handler(
         RequestValidationError,
         launchplane_request_validation_exception_handler,

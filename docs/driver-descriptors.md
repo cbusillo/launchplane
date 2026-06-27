@@ -139,7 +139,7 @@ not need tenant-local monitor workflows.
 
 The `stable_deploy` action routes to the native FastAPI
 `POST /v1/drivers/generic-web/deploy` endpoint. Descriptor metadata remains
-discoverable, but legacy WSGI descriptor dispatch is exempted. The route
+discoverable. The route
 resolves product lane context from DB-backed product profile records and runtime
 target bindings from explicit provider-target rows, while Dokploy target records
 continue to hold provider-specific execution configuration. Generic-web deploy
@@ -157,23 +157,25 @@ The `source_ref_deploy` action routes to the native FastAPI
 `POST /v1/drivers/generic-web/source-ref-deploy` endpoint. The route uses the
 same product profile lane resolution as stable deploy and validates the request
 context and instance against the resolved lane before authorization,
-idempotency replay, or provider mutation. This keeps descriptor discovery and
-driver authz metadata intact while closing the legacy WSGI execution path.
+idempotency replay, or provider mutation. Descriptor discovery and driver authz
+metadata stay intact while native FastAPI owns execution.
 
-The `prod_promotion` action routes to
-`POST /v1/drivers/generic-web/prod-promotion`. It promotes a generic-web
-testing image to prod using DB-backed product profile lanes, records source and
-destination health evidence, writes promotion/deployment linkage, and refreshes
-prod inventory after successful verified deploys. Product-specific drivers such
-as VeriReel or Odoo can wrap this common action when they need additional gates
-such as backups, migrations, rollout checks, or tenant-specific validation.
+The `prod_promotion` action routes to the native FastAPI
+`POST /v1/drivers/generic-web/prod-promotion` endpoint. It promotes a
+generic-web testing image to prod using DB-backed product profile lanes, records
+source and destination health evidence, writes promotion/deployment linkage, and
+refreshes prod inventory after successful verified deploys. Direct browser
+sessions may only dry-run this route; live direct promotion remains a workflow
+or automation responsibility. Product-specific drivers such as VeriReel or Odoo
+can wrap this common action when they need additional gates such as backups,
+migrations, rollout checks, or tenant-specific validation.
 
-The `prod_promotion_workflow` action routes to
-`POST /v1/drivers/generic-web/prod-promotion-workflow`. It dispatches the
-product repository promotion workflow after resolving the requested stable lane
-from DB-backed product profile records. This route is registered through
-descriptor-backed dispatch, so descriptor/handler drift fails closed before the
-service starts.
+The `prod_promotion_workflow` action routes to the native FastAPI
+`POST /v1/drivers/generic-web/prod-promotion-workflow` endpoint. It dispatches
+the product repository promotion workflow after resolving the requested stable
+lane from DB-backed product profile records. Both promotion routes keep
+descriptor discovery and authz metadata intact while native FastAPI owns
+execution.
 
 The `prod_rollback_plan` action routes to
 `POST /v1/drivers/generic-web/prod-rollback-plan`. It is a safe-write planner:
@@ -181,9 +183,8 @@ Launchplane reads the product profile, destination lane, selected deployment
 record, and optional backup gate evidence, then writes a
 `GenericWebRollbackPlanRecord`. It does not mutate the provider. Odoo rollback
 planning uses this generic-web route; the former Odoo-shaped rollback-plan alias
-is retired. This route is executed by native FastAPI. Its descriptor remains
-discoverable for driver views and authz metadata, while legacy WSGI
-descriptor-backed dispatch is exempted so direct fallback calls fail closed.
+is retired. Native FastAPI executes the route, and its descriptor remains
+discoverable for driver views and authz metadata.
 
 The `prod_rollback` action routes to
 `POST /v1/drivers/generic-web/prod-rollback`. It re-runs the same rollback-plan
@@ -193,8 +194,8 @@ rollback also forwards the generic deploy post-deploy extension hook, so a
 based driver can keep product-only post-deploy checks while reusing the common
 rollback deployment path once its other invariants are represented. This route
 is executed by native FastAPI. Its descriptor remains discoverable for driver
-views and authz metadata, while legacy WSGI descriptor-backed dispatch is
-exempted so direct fallback calls fail closed. Product drivers keep their own
+views and authz metadata.
+Product drivers keep their own
 `prod_rollback` action only when they need additional product-specific gates,
 such as Odoo backup, release tuple, manifest, migration, or post-deploy checks.
 Odoo keeps `POST /v1/drivers/odoo/prod-rollback` as its
@@ -211,8 +212,7 @@ Launchplane updates deployment, promotion, and inventory evidence without
 mutating provider state. Odoo stable smoke follow-ups use this generic-web route;
 the former Odoo-shaped stable verification alias is retired. This route is
 executed by native FastAPI. Its descriptor remains discoverable for driver views
-and authz metadata, while legacy WSGI descriptor-backed dispatch is exempted so
-direct fallback calls fail closed.
+and authz metadata.
 Stable verification may also include the checked endpoint's bounded
 `health_payload`. Launchplane records recognized non-secret fields such as
 `status`, `version`, `source_git_ref`, and `image_reference`, and compares any
@@ -246,8 +246,7 @@ post-refresh smoke evidence
 against the latest Launchplane preview generation and is available to any
 product profile that uses the generic-web base driver. These descriptor actions
 remain discoverable, but native FastAPI owns execution for refresh, inventory,
-readiness, destroy, and verification; the legacy WSGI descriptor dispatch paths
-are exempted and direct fallback calls fail closed.
+readiness, destroy, and verification.
 
 Preview resource cleanup uses a shared Launchplane destroy helper for Dokploy
 applications and compose previews. The generic helper owns domain lookup,
@@ -411,9 +410,13 @@ instance match a lane on the product profile before invoking stable deploy,
 environment, rollout verification, backup gate, promotion, or rollback
 workflows.
 
+VeriReel testing verification, stable environment reads, runtime verification,
+preview inventory, and preview verification are native FastAPI routes. Their
+descriptor metadata remains the GUI-facing action and authz source.
+
 Odoo exposes:
 
-- artifact publish handoff
+- artifact publish handoff (native FastAPI)
 - post-deploy settings
 - PR preview desired state, refresh, readiness, inventory, and destroy through
   the generic-web preview lifecycle
@@ -443,10 +446,9 @@ they remain in the driver route authorization map but are not surfaced as
 operator actions. Compatibility routes that should remain callable but not
 advertised as current driver actions belong in `route_aliases` with
 `operator_visible=false`.
-The HTTP service admits product-driver POST routes from descriptor action and
-route-alias paths and reads product-driver handler authorization actions from
-descriptor route metadata, so new drivers do not need a second hardcoded router
-allowlist or authz-action entry.
+Native FastAPI product-driver POST routes read authorization actions from
+descriptor route metadata, so new drivers do not need a second hardcoded
+authz-action entry.
 Future OpenFGA mapping should consume this same descriptor metadata. The
 `authz_action` and `alternate_authz_actions` fields can map driver dispatch to
 generic relation checks, but descriptors must never contain live tuple
@@ -455,14 +457,14 @@ topology. OpenFGA does not make an advertised action executable by itself;
 backend handler registration, route dispatch, and fail-closed service
 authorization still have to agree.
 
-POST driver descriptor actions and route aliases use descriptor-backed service
-dispatch unless the service declares a narrow exemption for a deliberate
-non-dispatch route. The service validates this at startup, so adding a writable
-descriptor route without registering a backend handler fails closed instead of
-silently advertising an unimplemented action. This keeps
-descriptor metadata as the route/authz source of truth while preventing an
-advertised descriptor action from becoming executable without implementation.
-Descriptor route metadata and service compatibility policy also drive
+POST driver descriptor actions and route aliases execute through native FastAPI
+routes. The legacy WSGI descriptor-backed dispatch bridge is removed. The
+service validates this at startup, so adding a writable descriptor route without
+registering a matching native FastAPI route fails closed instead of silently
+advertising an unimplemented action. This keeps descriptor metadata as the
+route/authz source of truth while preventing an advertised descriptor action
+from becoming executable without implementation. Descriptor route metadata and service
+compatibility policy also drive
 product-driver compatibility checks. A
 product whose descriptor names a `base_driver_id` can use the base driver's
 shared lifecycle routes when its profile owns the requested stable lane or

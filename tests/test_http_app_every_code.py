@@ -2,14 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import (
-    Any,
-    cast,
-)
 from unittest.mock import patch
-
-from a2wsgi import WSGIMiddleware
-from starlette.types import ASGIApp
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.every_code_notifications import (
@@ -67,7 +60,6 @@ from tests.test_service import (
     _identity,
     _sqlite_database_url,
     _StubVerifier,
-    create_launchplane_service_app,
 )
 
 
@@ -1818,33 +1810,3 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(
                 "LaunchplaneErrorResponse", json.dumps(status_route["responses"][status_code])
             )
-
-    async def test_fastapi_every_code_reads_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            seeded = _seed_every_code_read_records(store)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_every_code_read_policy(),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "legacy-state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy(),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            work_request_response = await _get_every_code_work_request(
-                app,
-                seeded["request_id"],
-            )
-            notification_response = await _get_preview_pr_feedback_notification_attempts(
-                app,
-                feedback_id=seeded["preview_feedback_id"],
-            )
-
-        self.assertEqual(work_request_response.status_code, 200)
-        self.assertEqual(notification_response.status_code, 200)

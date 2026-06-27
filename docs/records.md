@@ -723,9 +723,10 @@ run` is the foreground loop intended for an external process supervisor, and
   `/app/scripts/start-launchplane-verireel-workers.sh`.
   Production operation remains observable through the `launchplane service
   verireel-workers status` and `launchplane service verireel-workers reconcile`
-  operator commands, and live operation selection remains in Launchplane
-  records. A service route should be added before non-operator callers need to
-  reconcile or read VeriReel worker status through the deployed HTTP API.
+  operator commands, and through
+  `GET /v1/service/verireel-workers/status` and
+  `POST /v1/service/verireel-workers/reconcile` on the deployed Launchplane
+  service. Live operation selection remains in Launchplane records.
   Other long-running work should use typed worker operation or
   lease records that reference business evidence records, rather than making
   business evidence records themselves the queue lease, unless a future ADR

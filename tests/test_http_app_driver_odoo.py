@@ -20,6 +20,7 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.odoo_artifact_publish import OdooArtifactPublishResult
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
@@ -33,6 +34,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 from tests.http_app_test_support import (
     _asgi_get,
     _MissingProductReadStore,
+    _post_odoo_artifact_publish,
     _post_odoo_artifact_publish_inputs,
     _post_odoo_config_parameter_override,
     _post_odoo_post_deploy,
@@ -50,12 +52,10 @@ from tests.http_app_test_support import (
 )
 from tests.test_service import (
     _identity,
-    _invoke_app,
     _odoo_preview_profile_payload,
     _sqlite_database_url,
     _StubVerifier,
     _write_odoo_preview_template_runtime_environment,
-    create_launchplane_service_app,
 )
 
 
@@ -467,28 +467,282 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("409", route["responses"])
         self.assertIn("503", route["responses"])
 
-    def test_legacy_wsgi_odoo_artifact_publish_inputs_route_is_retired(self) -> None:
+
+class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
+    def _policy(
+        self,
+        *,
+        product: str = "odoo",
+        context: str = "opw",
+        repository: str = "every/tenant-opw",
+        workflow_ref: str = (
+            "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+        ),
+    ) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": repository,
+                        "workflow_refs": [workflow_ref],
+                        "event_names": ["workflow_dispatch"],
+                        "products": [product],
+                        "contexts": [context],
+                        "actions": ["odoo_artifact_publish.write"],
+                    }
+                ]
+            }
+        )
+
+    def _payload(self, *, product: str = "odoo", context: str = "opw") -> dict[str, object]:
+        return {
+            "product": product,
+            "publish": {
+                "context": context,
+                "instance": "testing",
+                "manifest": {
+                    "artifact_id": f"artifact-{context}-new",
+                    "source_commit": "2719b363e1a434d890b2d75f0cb4ef629bc3a012",
+                    "enterprise_base_digest": "sha256:enterprise",
+                    "image": {
+                        "repository": f"ghcr.io/cbusillo/{product}",
+                        "digest": "sha256:new",
+                    },
+                },
+            },
+        }
+
+    def _identity(
+        self,
+        *,
+        repository: str = "every/tenant-opw",
+        workflow_ref: str = (
+            "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+        ),
+    ) -> GitHubActionsIdentity:
+        return _identity(
+            repository=repository,
+            workflow_ref=workflow_ref,
+            event_name="workflow_dispatch",
+        )
+
+    def _tenant_identity(self) -> GitHubActionsIdentity:
+        return self._identity(
+            repository="cbusillo/odoo-tenant-cm-website",
+            workflow_ref=(
+                "cbusillo/odoo-tenant-cm-website/.github/workflows/odoo-preview.yml@refs/heads/main"
+            ),
+        )
+
+    def _tenant_store(self, state_dir: Path) -> FilesystemRecordStore:
+        store = FilesystemRecordStore(state_dir=state_dir)
+        profile_payload = _odoo_preview_profile_payload("odoo-tenant-cm-website")
+        profile_payload["display_name"] = "Cell Mechanic Website Odoo"
+        profile_payload["repository"] = "cbusillo/odoo-tenant-cm-website"
+        profile_payload["image"] = {"repository": "ghcr.io/cbusillo/odoo-tenant-cm-website"}
+        lanes = list(cast(tuple[dict[str, object], ...], profile_payload["lanes"]))
+        lanes[0]["context"] = "cm_website"
+        profile_payload["lanes"] = tuple(lanes)
+        preview = cast(dict[str, object], profile_payload["preview"])
+        preview["context"] = "cm_website"
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        )
+        return store
+
+    async def test_odoo_artifact_publish_writes_manifest_for_authorized_workflow(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
+            app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
                 control_plane_root_path=root,
             )
 
-            status_code, payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/artifact-publish-inputs",
-                payload={
-                    "product": "odoo",
-                    "inputs": {"context": "opw", "instance": "testing"},
-                },
+            with patch(
+                "control_plane.odoo_artifact_publish_http.ingest_odoo_artifact_publish_evidence",
+                return_value=OdooArtifactPublishResult(
+                    status="pass",
+                    context="opw",
+                    instance="testing",
+                    artifact_id="artifact-opw-new",
+                    image_repository="ghcr.io/cbusillo/odoo",
+                    image_digest="sha256:new",
+                    source_commit="2719b363e1a434d890b2d75f0cb4ef629bc3a012",
+                ),
+            ) as ingest_evidence:
+                response = await _post_odoo_artifact_publish(app, self._payload())
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"], {"artifact_id": "artifact-opw-new"})
+        self.assertEqual(payload["result"]["status"], "pass")
+        self.assertEqual(payload["result"]["artifact_id"], "artifact-opw-new")
+        ingest_evidence.assert_called_once()
+
+    async def test_odoo_artifact_publish_accepts_product_profile_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._tenant_store(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity()),
+                authz_policy=self._policy(
+                    product="odoo-tenant-cm-website",
+                    context="cm_website",
+                    repository="cbusillo/odoo-tenant-cm-website",
+                    workflow_ref=(
+                        "cbusillo/odoo-tenant-cm-website/.github/workflows/odoo-preview.yml@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
             )
 
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
+            with patch(
+                "control_plane.odoo_artifact_publish_http.ingest_odoo_artifact_publish_evidence",
+                return_value=OdooArtifactPublishResult(
+                    status="pass",
+                    context="cm_website",
+                    instance="testing",
+                    artifact_id="artifact-cm_website-new",
+                    image_repository="ghcr.io/cbusillo/odoo-tenant-cm-website",
+                    image_digest="sha256:new",
+                    source_commit="2719b363e1a434d890b2d75f0cb4ef629bc3a012",
+                ),
+            ) as ingest_evidence:
+                response = await _post_odoo_artifact_publish(
+                    app,
+                    self._payload(
+                        product="odoo-tenant-cm-website",
+                        context="cm_website",
+                    ),
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["records"]["artifact_id"], "artifact-cm_website-new")
+        ingest_evidence.assert_called_once()
+
+    async def test_odoo_artifact_publish_rejects_product_profile_lane_mismatch(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._tenant_store(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity()),
+                authz_policy=self._policy(
+                    product="odoo-tenant-cm-website",
+                    context="different_context",
+                    repository="cbusillo/odoo-tenant-cm-website",
+                    workflow_ref=(
+                        "cbusillo/odoo-tenant-cm-website/.github/workflows/odoo-preview.yml@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_artifact_publish(
+                app,
+                self._payload(
+                    product="odoo-tenant-cm-website",
+                    context="different_context",
+                ),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+
+    async def test_odoo_artifact_publish_missing_product_profile_is_dependency_503(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity()),
+                authz_policy=self._policy(
+                    product="odoo-tenant-cm-website",
+                    context="cm_website",
+                    repository="cbusillo/odoo-tenant-cm-website",
+                    workflow_ref=(
+                        "cbusillo/odoo-tenant-cm-website/.github/workflows/odoo-preview.yml@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_artifact_publish(
+                app,
+                self._payload(product="odoo-tenant-cm-website", context="cm_website"),
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(payload["error"]["code"], "driver_route_dependency_not_found")
+        self.assertEqual(payload["details"]["route_path"], "/v1/drivers/odoo/artifact-publish")
+
+    async def test_odoo_artifact_publish_handler_file_miss_is_not_dependency_503(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=self._policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        with patch(
+            "control_plane.odoo_artifact_publish_http.ingest_odoo_artifact_publish_evidence",
+            side_effect=FileNotFoundError("handler-side file miss"),
+        ):
+            response = await _post_odoo_artifact_publish(app, self._payload())
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+        self.assertNotEqual(
+            response.json()["error"]["code"],
+            "driver_route_dependency_not_found",
+        )
+
+    async def test_odoo_artifact_publish_rejects_malformed_payload(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=self._policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_odoo_artifact_publish(app, {"product": "odoo"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_openapi_includes_odoo_artifact_publish_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=self._policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/drivers/odoo/artifact-publish"]["post"]
+        self.assertEqual(route["operationId"], "write_odoo_artifact_publish")
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["title"], "OdooArtifactPublishEnvelope")
+        self.assertIn("400", route["responses"])
+        self.assertIn("401", route["responses"])
+        self.assertIn("403", route["responses"])
+        self.assertIn("404", route["responses"])
+        self.assertIn("409", route["responses"])
+        self.assertIn("503", route["responses"])
 
 
 class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
@@ -1490,55 +1744,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("409", route["responses"])
             self.assertIn("503", route["responses"])
 
-    def test_legacy_wsgi_odoo_preview_apply_routes_are_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(actions=("odoo_preview_apply.execute",)),
-                control_plane_root_path=root,
-            )
-
-            inputs_status_code, inputs_payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/preview-apply-inputs",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "inputs": {"product": "odoo-tenant-cm", "pr_number": 42},
-                },
-            )
-            apply_status_code, apply_payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/preview-apply",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "apply": {
-                        "dry_run_plan": {
-                            "status": "ready",
-                            "operation": "destroy",
-                            "product": "odoo-tenant-cm",
-                            "repository": "cbusillo/odoo-tenant-cm",
-                            "preview_slug": "pr-42",
-                            "preview_url": "https://pr-42.cm-preview.example.test",
-                            "domain_host": "pr-42.cm-preview.example.test",
-                            "compose_ref": "compose-cm-pr-42",
-                            "compose_name": "cm-odoo-preview-pr-42",
-                            "summary": "ready isolated Odoo preview destroy",
-                        },
-                    },
-                },
-            )
-
-        self.assertEqual(inputs_status_code, 404)
-        self.assertEqual(inputs_payload["error"]["code"], "not_found")
-        self.assertEqual(apply_status_code, 404)
-        self.assertEqual(apply_payload["error"]["code"], "not_found")
-
 
 class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     def _identity(
@@ -2428,42 +2633,6 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             for status_code in ("400", "401", "403", "404", "409", "503"):
                 self.assertIn(status_code, operation["responses"])
 
-    async def test_legacy_wsgi_odoo_prod_promotion_routes_are_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                control_plane_root_path=root,
-            )
-
-            inputs_status_code, inputs_payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/prod-promotion-inputs",
-                payload=self._inputs_payload(),
-            )
-            run_status_code, run_payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/prod-promotion-run",
-                payload=self._run_payload(),
-            )
-            promotion_status_code, promotion_payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/prod-promotion",
-                payload=self._promotion_payload(),
-            )
-
-        self.assertEqual(inputs_status_code, 404)
-        self.assertEqual(inputs_payload["error"]["code"], "not_found")
-        self.assertEqual(run_status_code, 404)
-        self.assertEqual(run_payload["error"]["code"], "not_found")
-        self.assertEqual(promotion_status_code, 404)
-        self.assertEqual(promotion_payload["error"]["code"], "not_found")
-
 
 class FastApiOdooStableBootstrapTests(unittest.IsolatedAsyncioTestCase):
     def _identity(
@@ -2904,26 +3073,6 @@ class FastApiOdooStableBootstrapTests(unittest.IsolatedAsyncioTestCase):
             str(operation["responses"]["409"]),
         )
 
-    async def test_legacy_wsgi_odoo_stable_bootstrap_route_is_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/stable-bootstrap",
-                payload=self._payload(),
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
-
 
 class FastApiOdooTargetReplacementPlanTests(unittest.IsolatedAsyncioTestCase):
     def _identity(
@@ -3310,26 +3459,6 @@ class FastApiOdooTargetReplacementPlanTests(unittest.IsolatedAsyncioTestCase):
         for status_code in ("400", "401", "403", "503"):
             self.assertIn(status_code, operation["responses"])
         self.assertNotIn("409", operation["responses"])
-
-    async def test_legacy_wsgi_odoo_target_replacement_plan_route_is_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/target-replacement-plan",
-                payload=self._payload(),
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
 
 
 class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
@@ -3866,26 +3995,6 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
         for status_code in ("400", "401", "403", "409", "503"):
             self.assertIn(status_code, operation["responses"])
 
-    async def test_legacy_wsgi_odoo_target_replacement_apply_route_is_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/target-replacement-apply",
-                payload=self._payload(),
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
-
 
 class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
     def _identity(
@@ -4291,26 +4400,6 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
         for status_code in ("400", "401", "403", "404", "409", "503"):
             self.assertIn(status_code, operation["responses"])
 
-    async def test_legacy_wsgi_odoo_prod_backup_gate_route_is_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/prod-backup-gate",
-                payload=self._payload(),
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
-
 
 class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
     def _identity(
@@ -4668,26 +4757,6 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
         )
         for status_code in ("400", "401", "403", "404", "409", "503"):
             self.assertIn(status_code, operation["responses"])
-
-    async def test_legacy_wsgi_odoo_prod_rollback_route_is_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                legacy_app,
-                method="POST",
-                path="/v1/drivers/odoo/prod-rollback",
-                payload=self._payload(),
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["error"]["code"], "not_found")
 
 
 class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
@@ -5305,47 +5374,6 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             )
             for status_code in ("400", "401", "403", "404", "409", "503"):
                 self.assertIn(status_code, route["responses"])
-
-    def test_legacy_wsgi_odoo_post_deploy_override_routes_are_retired(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                control_plane_root_path=root,
-            )
-            requests = (
-                (
-                    "/v1/drivers/odoo/post-deploy",
-                    {
-                        "product": "odoo",
-                        "post_deploy": {"context": "opw", "instance": "testing"},
-                    },
-                ),
-                (
-                    "/v1/drivers/odoo/config-parameter-override",
-                    self._config_override_payload(),
-                ),
-                (
-                    "/v1/drivers/odoo/website-bootstrap-override",
-                    self._website_override_payload(),
-                ),
-            )
-
-            responses = [
-                _invoke_app(
-                    legacy_app,
-                    method="POST",
-                    path=route_path,
-                    payload=payload,
-                )
-                for route_path, payload in requests
-            ]
-
-        for status_code, payload in responses:
-            self.assertEqual(status_code, 404)
-            self.assertEqual(payload["error"]["code"], "not_found")
 
 
 if __name__ == "__main__":

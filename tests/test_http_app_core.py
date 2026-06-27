@@ -2,7 +2,6 @@ import base64
 import hashlib
 import json
 import unittest
-from collections.abc import Callable
 from datetime import (
     datetime,
     timedelta,
@@ -10,22 +9,19 @@ from datetime import (
 )
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import (
-    Any,
-    cast,
-)
 from unittest.mock import patch
 from urllib.parse import (
     parse_qs,
     urlparse,
 )
 
-from a2wsgi import WSGIMiddleware
-from starlette.types import ASGIApp
-
 from control_plane.http_app import (
     LaunchplaneAuthzPolicyRuntime,
     create_launchplane_fastapi_app,
+)
+from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateRequest
+from control_plane.contracts.verireel_prod_backup_gate_operation import (
+    VeriReelProdBackupGateOperationRecord,
 )
 from control_plane.service_auth import (
     BearerIdentityConfig,
@@ -67,7 +63,6 @@ from tests.test_service import (
     _identity,
     _sqlite_database_url,
     _StubVerifier,
-    create_launchplane_service_app,
 )
 
 
@@ -138,7 +133,6 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
         query = parse_qs(urlparse(location).query)
         self.assertEqual(query["state"], [oauth_client.authorization_state])
         self.assertTrue(query["challenge"][0])
-        self.assertEqual(response.headers["Cache-Control"], "no-store")
 
     async def test_github_oauth_login_rejects_when_auth_is_not_configured(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -368,40 +362,6 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
             any("GitHub OAuth callback failed" in entry for entry in captured_logs.output)
         )
 
-    async def test_github_oauth_routes_precede_wsgi_fallback(self) -> None:
-        session_manager = HumanSessionManager(
-            config=_github_oauth_config(),
-            session_store=InMemoryHumanSessionStore(),
-        )
-        oauth_client = _StubFastApiGitHubOAuthClient(_github_human_identity())
-        app = create_launchplane_fastapi_app(
-            verifier=_RejectingVerifier(),
-            authz_policy=_local_operator_launchplane_service_read_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-            human_session_manager=session_manager,
-            github_oauth_client=oauth_client,
-        )
-        fallback_calls: list[str] = []
-
-        def fallback_app(
-            environ: dict[str, object], start_response: Callable[..., object]
-        ) -> list[bytes]:
-            fallback_calls.append(str(environ.get("PATH_INFO", "")))
-            start_response("599 Legacy Fallback", [("Content-Type", "application/json")])
-            return [b'{"status":"legacy"}']
-
-        app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, fallback_app))))
-        login_response = await _asgi_get(app, "/auth/github/login")
-        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
-        callback_response = await _asgi_get(
-            app,
-            f"/auth/github/callback?code=github-code&state={state}",
-        )
-
-        self.assertEqual(login_response.status_code, 302)
-        self.assertEqual(callback_response.status_code, 302)
-        self.assertEqual(fallback_calls, [])
-
     async def test_session_read_rejects_missing_human_session(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -525,40 +485,6 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
         assert renewed_session is not None
         self.assertGreater(renewed_session.expires_at, expiring_session.expires_at)
 
-    async def test_session_read_native_route_precedes_wsgi_fallback(self) -> None:
-        session_store = InMemoryHumanSessionStore()
-        session_manager = HumanSessionManager(
-            config=_github_oauth_config(),
-            session_store=session_store,
-        )
-        human_session = session_manager.issue(_github_human_identity())
-        app = create_launchplane_fastapi_app(
-            verifier=_RejectingVerifier(),
-            authz_policy=_local_operator_launchplane_service_read_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-            human_session_manager=session_manager,
-        )
-        fallback_calls: list[str] = []
-
-        def fallback_app(
-            environ: dict[str, object], start_response: Callable[..., object]
-        ) -> list[bytes]:
-            fallback_calls.append(str(environ.get("PATH_INFO", "")))
-            start_response("599 Legacy Fallback", [("Content-Type", "application/json")])
-            return [b'{"status":"legacy"}']
-
-        app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, fallback_app))))
-
-        response = await _asgi_get(
-            app,
-            "/v1/auth/session",
-            headers={"Cookie": session_manager.session_cookie_header(human_session)},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["identity"]["login"], "example-operator")
-        self.assertEqual(fallback_calls, [])
-
     async def test_logout_deletes_session_and_clears_cookie(self) -> None:
         session_store = InMemoryHumanSessionStore()
         session_manager = HumanSessionManager(
@@ -627,41 +553,6 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("HttpOnly", response.headers["Set-Cookie"])
         self.assertIn("SameSite=Lax", response.headers["Set-Cookie"])
 
-    async def test_logout_native_route_precedes_wsgi_fallback(self) -> None:
-        session_store = InMemoryHumanSessionStore()
-        session_manager = HumanSessionManager(
-            config=_github_oauth_config(),
-            session_store=session_store,
-        )
-        human_session = session_manager.issue(_github_human_identity())
-        app = create_launchplane_fastapi_app(
-            verifier=_RejectingVerifier(),
-            authz_policy=_local_operator_launchplane_service_read_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-            human_session_manager=session_manager,
-        )
-        fallback_calls: list[str] = []
-
-        def fallback_app(
-            environ: dict[str, object], start_response: Callable[..., object]
-        ) -> list[bytes]:
-            fallback_calls.append(str(environ.get("PATH_INFO", "")))
-            start_response("599 Legacy Fallback", [("Content-Type", "application/json")])
-            return [b'{"status":"legacy"}']
-
-        app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, fallback_app))))
-
-        response = await _asgi_request(
-            app,
-            "POST",
-            "/auth/logout",
-            headers={"Cookie": session_manager.session_cookie_header(human_session)},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
-        self.assertEqual(fallback_calls, [])
-
     async def test_openapi_includes_auth_session_contract(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -718,7 +609,187 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
             )
 
 
+class FastApiOperatorUiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ui_route_serves_static_shell_without_authentication(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            ui_root = root / "control_plane" / "ui_static"
+            asset_root = ui_root / "assets"
+            asset_root.mkdir(parents=True)
+            (ui_root / "index.html").write_text(
+                '<html><head><script type="module" src="/ui/assets/app.js"></script></head></html>',
+                encoding="utf-8",
+            )
+            (asset_root / "app.js").write_text("console.log('launchplane ui');\n", encoding="utf-8")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: _MissingProductReadStore(),
+                control_plane_root_path=root,
+            )
+
+            shell_response = await _asgi_get(app, "/ui")
+            asset_response = await _asgi_get(app, "/ui/assets/app.js")
+
+        self.assertEqual(shell_response.status_code, 200)
+        self.assertEqual(shell_response.headers["Content-Type"], "text/html")
+        self.assertIn(b"/ui/assets/app.js", shell_response.body)
+        self.assertEqual(shell_response.headers["Cache-Control"], "no-store")
+        self.assertEqual(asset_response.status_code, 200)
+        self.assertIn(
+            asset_response.headers["Content-Type"],
+            {"text/javascript", "application/javascript"},
+        )
+        self.assertIn(b"launchplane ui", asset_response.body)
+        self.assertEqual(
+            asset_response.headers["Cache-Control"],
+            "public, max-age=31536000, immutable",
+        )
+
+    async def test_root_route_serves_ui_shell_without_authentication(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            ui_root = root / "control_plane" / "ui_static"
+            ui_root.mkdir(parents=True)
+            (ui_root / "index.html").write_text(
+                '<html><head><script type="module" src="/ui/assets/app.js"></script></head></html>',
+                encoding="utf-8",
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: _MissingProductReadStore(),
+                control_plane_root_path=root,
+            )
+
+            response = await _asgi_get(app, "/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Content-Type"], "text/html")
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertIn(b"/ui/assets/app.js", response.body)
+
+    async def test_ui_route_falls_back_to_shell_for_nested_paths(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            ui_root = root / "control_plane" / "ui_static"
+            ui_root.mkdir(parents=True)
+            (ui_root / "index.html").write_text("<html>Launchplane UI</html>", encoding="utf-8")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: _MissingProductReadStore(),
+                control_plane_root_path=root,
+            )
+
+            response = await _asgi_get(app, "/ui/contexts/verireel")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Content-Type"], "text/html")
+        self.assertIn(b"Launchplane UI", response.body)
+
+    async def test_ui_asset_route_rejects_parent_directory_segments(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            ui_root = root / "control_plane" / "ui_static"
+            ui_root.mkdir(parents=True)
+            (ui_root / "index.html").write_text("<html>Launchplane UI</html>", encoding="utf-8")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: _MissingProductReadStore(),
+                control_plane_root_path=root,
+            )
+
+            response = await _asgi_get(app, "/ui/assets/%2e%2e/index.html")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.headers["Content-Type"], "application/json")
+        self.assertNotIn(b"Launchplane UI", response.body)
+
+    async def test_unknown_route_uses_launchplane_error_envelope(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/missing-route")
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertTrue(str(payload["trace_id"]).startswith("launchplane_req_"))
+        self.assertEqual(payload["error"]["code"], "not_found")
+        self.assertEqual(payload["error"]["message"], "No Launchplane route for /missing-route.")
+
+    async def test_unsupported_method_uses_launchplane_error_envelope(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(app, "PUT", "/v1/health")
+
+        self.assertEqual(response.status_code, 405)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "method_not_allowed")
+
+
 class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
+    def _verireel_operation_record(
+        self,
+        *,
+        status: str = "pending",
+        phase: str = "created",
+        lease_owner: str = "",
+        lease_expires_at: str = "",
+        heartbeat_at: str = "",
+        attempt: int = 0,
+    ) -> VeriReelProdBackupGateOperationRecord:
+        request = VeriReelProdBackupGateRequest(
+            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
+        )
+        return VeriReelProdBackupGateOperationRecord.model_validate(
+            {
+                "operation_id": "verireel-operation-1",
+                "product": "verireel",
+                "context": "verireel",
+                "instance": "prod",
+                "backup_record_id": request.backup_record_id,
+                "request_fingerprint": request.model_dump_json(),
+                "request": request.model_dump(mode="json"),
+                "status": status,
+                "phase": phase,
+                "created_at": "2026-04-25T00:00:00Z",
+                "updated_at": "2026-04-25T00:01:00Z",
+                "started_at": "2026-04-25T00:01:00Z" if lease_owner else "",
+                "lease_owner": lease_owner,
+                "lease_expires_at": lease_expires_at,
+                "heartbeat_at": heartbeat_at,
+                "attempt": attempt,
+            }
+        )
+
+    def _local_operator_launchplane_service_verireel_reconcile_policy(
+        self,
+    ) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "local_operators": [
+                    {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-write"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["launchplane_service.reconcile_verireel_workers"],
+                    }
+                ]
+            }
+        )
+
     async def test_runtime_reports_current_image_and_policy_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             policy = _local_operator_launchplane_service_read_policy()
@@ -801,6 +872,73 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker_status["operations"][0]["operation_id"], "bootstrap-cm-testing")
         self.assertNotIn("request", worker_status["operations"][0])
 
+    async def test_verireel_worker_status_reports_queue_status(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._verireel_operation_record()
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_launchplane_service_read_policy(),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/service/verireel-workers/status",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        worker_status = payload["worker_status"]
+        self.assertEqual(worker_status["status"], "ok")
+        self.assertEqual(worker_status["pending_count"], 1)
+        self.assertEqual(worker_status["running_count"], 0)
+        self.assertEqual(worker_status["operations"][0]["operation_id"], "verireel-operation-1")
+        self.assertEqual(
+            worker_status["operations"][0]["backup_record_id"],
+            "backup-gate-verireel-prod-run-12345-attempt-1",
+        )
+        self.assertNotIn("request", worker_status["operations"][0])
+
+    async def test_verireel_worker_status_reports_stalled_queue_status(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._verireel_operation_record(
+                    status="running",
+                    phase="backup_gate",
+                    lease_owner="old-worker",
+                    lease_expires_at="2000-01-01T00:00:00Z",
+                    heartbeat_at="2000-01-01T00:00:00Z",
+                    attempt=1,
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_launchplane_service_read_policy(),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/service/verireel-workers/status",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        worker_status = response.json()["worker_status"]
+        self.assertEqual(worker_status["status"], "stalled")
+        self.assertEqual(worker_status["running_count"], 1)
+        self.assertEqual(worker_status["stalled_count"], 1)
+        self.assertTrue(worker_status["operations"][0]["lease_expired"])
+
     async def test_worker_reconcile_recovers_stale_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -836,6 +974,53 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             {
                 "reconciled_bootstrap_ids": ["bootstrap-cm-testing"],
                 "reconciled_replacement_ids": [],
+                "reconciled_count": 1,
+            },
+        )
+        self.assertEqual(operation.status, "pending")
+        self.assertEqual(operation.lease_owner, "")
+
+    async def test_verireel_worker_reconcile_recovers_stale_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._verireel_operation_record(
+                    status="running",
+                    phase="created",
+                    lease_owner="old-worker",
+                    lease_expires_at="2000-01-01T00:00:00Z",
+                    heartbeat_at="2000-01-01T00:00:00Z",
+                    attempt=1,
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=self._local_operator_launchplane_service_verireel_reconcile_policy(),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(
+                    token_label="local-owner-write"
+                ),
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/service/verireel-workers/reconcile",
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload={},
+            )
+            operation = record_store.read_verireel_prod_backup_gate_operation_record(
+                "verireel-operation-1"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        self.assertEqual(
+            payload["reconcile_result"],
+            {
+                "reconciled_operation_ids": ["verireel-operation-1"],
                 "reconciled_count": 1,
             },
         )
@@ -887,6 +1072,25 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    async def test_verireel_worker_reconcile_requires_verireel_reconcile_authz(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_local_operator_launchplane_service_reconcile_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/service/verireel-workers/reconcile",
+            headers={"Authorization": "Bearer local-operator-token"},
+            payload={},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_worker_reconcile_rejects_terminal_agent_mutation(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -903,6 +1107,29 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             app,
             "POST",
             "/v1/service/odoo-workers/reconcile",
+            headers={"Authorization": "Bearer terminal-agent-token"},
+            payload={},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_verireel_worker_reconcile_rejects_terminal_agent_mutation(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self._local_operator_launchplane_service_verireel_reconcile_policy(),
+            record_store_factory=lambda: _EmptyStore(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="terminal-agent-token",
+                terminal_agent_subject="local-owner-agent",
+                terminal_agent_token_label="local-owner-read",
+            ),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/service/verireel-workers/reconcile",
             headers={"Authorization": "Bearer terminal-agent-token"},
             payload={},
         )
@@ -929,6 +1156,25 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_query")
 
+    async def test_verireel_worker_reconcile_validates_max_attempts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=self._local_operator_launchplane_service_verireel_reconcile_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/service/verireel-workers/reconcile?max_attempts=0",
+            headers={"Authorization": "Bearer local-operator-token"},
+            payload={},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_query")
+
     async def test_worker_reconcile_requires_operation_record_storage(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -941,6 +1187,25 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             app,
             "POST",
             "/v1/service/odoo-workers/reconcile",
+            headers={"Authorization": "Bearer local-operator-token"},
+            payload={},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "operation_record_storage_required")
+
+    async def test_verireel_worker_reconcile_requires_operation_record_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=self._local_operator_launchplane_service_verireel_reconcile_policy(),
+            record_store_factory=lambda: _EmptyStore(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/service/verireel-workers/reconcile",
             headers={"Authorization": "Bearer local-operator-token"},
             payload={},
         )
@@ -965,6 +1230,23 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    async def test_verireel_worker_status_requires_service_read_authz(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/service/verireel-workers/status",
+            headers={"Authorization": "Bearer local-operator-token"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_service_runtime_routes_require_authentication(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -975,19 +1257,34 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
 
         runtime_response = await _asgi_get(app, "/v1/service/runtime")
         worker_response = await _asgi_get(app, "/v1/service/odoo-workers/status")
+        verireel_worker_response = await _asgi_get(app, "/v1/service/verireel-workers/status")
         reconcile_response = await _asgi_request(
             app,
             "POST",
             "/v1/service/odoo-workers/reconcile",
             payload={},
         )
+        verireel_reconcile_response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/service/verireel-workers/reconcile",
+            payload={},
+        )
 
         self.assertEqual(runtime_response.status_code, 401)
         self.assertEqual(worker_response.status_code, 401)
+        self.assertEqual(verireel_worker_response.status_code, 401)
         self.assertEqual(reconcile_response.status_code, 401)
+        self.assertEqual(verireel_reconcile_response.status_code, 401)
         self.assertEqual(runtime_response.json()["error"]["code"], "authentication_required")
         self.assertEqual(worker_response.json()["error"]["code"], "authentication_required")
+        self.assertEqual(
+            verireel_worker_response.json()["error"]["code"], "authentication_required"
+        )
         self.assertEqual(reconcile_response.json()["error"]["code"], "authentication_required")
+        self.assertEqual(
+            verireel_reconcile_response.json()["error"]["code"], "authentication_required"
+        )
 
     async def test_runtime_rejects_human_session_without_service_read_authz(self) -> None:
         oauth_config = _github_oauth_config()
@@ -1041,6 +1338,25 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_query")
 
+    async def test_verireel_worker_status_validates_recent_terminal_limit(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_launchplane_service_read_policy(),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/service/verireel-workers/status?recent_terminal_limit=101",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_query")
+
     async def test_worker_status_requires_operation_record_storage(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -1052,6 +1368,23 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         response = await _asgi_get(
             app,
             "/v1/service/odoo-workers/status",
+            headers={"Authorization": "Bearer local-operator-token"},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "operation_record_storage_required")
+
+    async def test_verireel_worker_status_requires_operation_record_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _EmptyStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/service/verireel-workers/status",
             headers={"Authorization": "Bearer local-operator-token"},
         )
 
@@ -1073,6 +1406,10 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         runtime_route = openapi["paths"]["/v1/service/runtime"]["get"]
         worker_route = openapi["paths"]["/v1/service/odoo-workers/status"]["get"]
         reconcile_route = openapi["paths"]["/v1/service/odoo-workers/reconcile"]["post"]
+        verireel_worker_route = openapi["paths"]["/v1/service/verireel-workers/status"]["get"]
+        verireel_reconcile_route = openapi["paths"]["/v1/service/verireel-workers/reconcile"][
+            "post"
+        ]
         self.assertEqual(runtime_route["operationId"], "read_launchplane_runtime")
         self.assertEqual(
             runtime_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
@@ -1095,6 +1432,26 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             "#/components/schemas/OdooStableOperationWorkerReconcileResponse",
         )
         self.assertEqual(
+            verireel_worker_route["operationId"],
+            "read_verireel_prod_backup_gate_operation_worker_status",
+        )
+        self.assertEqual(
+            verireel_worker_route["responses"]["200"]["content"]["application/json"]["schema"][
+                "$ref"
+            ],
+            "#/components/schemas/VeriReelProdBackupGateOperationWorkerStatusResponse",
+        )
+        self.assertEqual(
+            verireel_reconcile_route["operationId"],
+            "reconcile_verireel_prod_backup_gate_operation_workers",
+        )
+        self.assertEqual(
+            verireel_reconcile_route["responses"]["200"]["content"]["application/json"]["schema"][
+                "$ref"
+            ],
+            "#/components/schemas/VeriReelProdBackupGateOperationWorkerReconcileResponse",
+        )
+        self.assertEqual(
             openapi["components"]["schemas"]["LaunchplaneRuntimeResponse"]["additionalProperties"],
             False,
         )
@@ -1110,38 +1467,27 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             ],
             False,
         )
+        self.assertEqual(
+            openapi["components"]["schemas"]["VeriReelProdBackupGateOperationWorkerStatusResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"][
+                "VeriReelProdBackupGateOperationWorkerReconcileResponse"
+            ]["additionalProperties"],
+            False,
+        )
         self.assertTrue(set(runtime_route["responses"]) >= {"200", "401", "403"})
         self.assertTrue(set(worker_route["responses"]) >= {"200", "400", "401", "403", "503"})
         self.assertTrue(set(reconcile_route["responses"]) >= {"200", "400", "401", "403", "503"})
-
-    async def test_fastapi_service_runtime_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            record_store = FilesystemRecordStore(state_dir=state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_local_operator_launchplane_service_read_policy(),
-                record_store_factory=lambda: record_store,
-                bearer_identity_config=_local_operator_bearer_config(),
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                local_record_store_for_tests=record_store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _asgi_get(
-                app,
-                "/v1/service/runtime",
-                headers={"Authorization": "Bearer local-operator-token"},
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
+        self.assertTrue(
+            set(verireel_worker_route["responses"]) >= {"200", "400", "401", "403", "503"}
+        )
+        self.assertTrue(
+            set(verireel_reconcile_route["responses"]) >= {"200", "400", "401", "403", "503"}
+        )
 
 
 class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
@@ -1319,50 +1665,3 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(set(bootstrap_route["responses"]) >= {"200", "401", "403", "404", "503"})
         self.assertTrue(set(replacement_route["responses"]) >= {"200", "401", "403", "404", "503"})
-
-    async def test_fastapi_operation_status_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            record_store = FilesystemRecordStore(state_dir=state_dir)
-            record_store.write_odoo_stable_bootstrap_operation_record(
-                _running_odoo_stable_bootstrap_record()
-            )
-            record_store.write_odoo_stable_target_replacement_operation_record(
-                _running_odoo_target_replacement_record()
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_odoo_operation_status_identity()),
-                authz_policy=_odoo_operation_status_policy(
-                    action="odoo_stable_bootstrap.execute",
-                    actions=(
-                        "odoo_stable_bootstrap.execute",
-                        "odoo_target_replacement_apply.execute",
-                    ),
-                ),
-                record_store_factory=lambda: record_store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                local_record_store_for_tests=record_store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            bootstrap_response = await _asgi_get(
-                app,
-                "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing",
-                headers={"Authorization": "Bearer valid-token"},
-            )
-            replacement_response = await _asgi_get(
-                app,
-                "/v1/drivers/odoo/target-replacement/operations/operation-cm-testing",
-                headers={"Authorization": "Bearer valid-token"},
-            )
-
-        self.assertEqual(bootstrap_response.status_code, 200)
-        self.assertEqual(replacement_response.status_code, 200)
-        self.assertEqual(bootstrap_response.json()["status"], "ok")
-        self.assertEqual(replacement_response.json()["status"], "ok")

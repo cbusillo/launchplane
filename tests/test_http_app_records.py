@@ -2,14 +2,8 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import (
-    Any,
-    cast,
-)
+from typing import cast
 from unittest.mock import patch
-
-from a2wsgi import WSGIMiddleware
-from starlette.types import ASGIApp
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -104,7 +98,6 @@ from tests.test_service import (
     _identity,
     _sqlite_database_url,
     _StubVerifier,
-    create_launchplane_service_app,
 )
 
 
@@ -353,44 +346,6 @@ class FastApiDeploymentPromotionReadTests(unittest.IsolatedAsyncioTestCase):
             False,
         )
 
-    async def test_fastapi_record_reads_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_deployment_record(_deployment_read_record())
-            store.write_promotion_record(_promotion_read_record())
-            policy = _record_read_policy(
-                action="deployment.read",
-                context="example-site",
-                extra_actions=("promotion.read",),
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            deployment_response = await _get_deployment_record(
-                app,
-                "deployment-example-site-prod",
-            )
-            promotion_response = await _get_promotion_record(
-                app,
-                "promotion-example-site-testing-to-prod",
-            )
-
-        self.assertEqual(deployment_response.status_code, 200)
-        self.assertEqual(promotion_response.status_code, 200)
-        self.assertEqual(deployment_response.json()["status"], "ok")
-        self.assertEqual(promotion_response.json()["status"], "ok")
-
 
 class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_inventory_read_returns_record_for_authorized_workflow(self) -> None:
@@ -515,33 +470,6 @@ class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
             False,
         )
 
-    async def test_fastapi_inventory_read_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_environment_inventory(_environment_inventory_read_record())
-            policy = _record_read_policy(
-                action="inventory.read",
-                context="example-site",
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _get_environment_inventory(app, "example-site", "prod")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
-
 
 class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_recent_operations_returns_operator_read_model(self) -> None:
@@ -653,33 +581,6 @@ class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
             openapi["components"]["schemas"]["RecentOperationsResponse"]["additionalProperties"],
             False,
         )
-
-    async def test_fastapi_recent_operations_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            _write_recent_operations_records(store)
-            policy = _record_read_policy(
-                action="operations.read",
-                context="example-site",
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _get_recent_operations(app, "example-site")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
 
 
 class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
@@ -894,39 +795,6 @@ class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
         schema_text = json.dumps(openapi["components"]["schemas"]["SecretStatusReadModel"])
         self.assertNotIn("ciphertext", schema_text)
         self.assertNotIn("plaintext", schema_text)
-
-    async def test_fastapi_secret_status_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            secret_ids = _write_secret_status_records(database_url)
-            app_store = PostgresRecordStore(database_url=database_url)
-            policy = _record_read_policy(
-                action="secret.list",
-                context="example-site",
-                extra_actions=("secret.read",),
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: app_store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            list_response = await _get_context_secret_statuses(app, "example-site")
-            show_response = await _get_secret_status(app, secret_ids["context"])
-            app_store.close()
-
-        self.assertEqual(list_response.status_code, 200)
-        self.assertEqual(show_response.status_code, 200)
-        self.assertEqual(list_response.json()["status"], "ok")
-        self.assertEqual(show_response.json()["status"], "ok")
 
 
 class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
@@ -1144,33 +1012,6 @@ class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             openapi["components"]["schemas"]["BackupGateEvidenceRequest"]["additionalProperties"],
             False,
-        )
-
-    async def test_backup_gate_evidence_native_route_precedes_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_backup_gate_write_identity()),
-                authz_policy=_backup_gate_write_policy(context="example-site"),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _post_backup_gate_evidence(app, _backup_gate_evidence_payload())
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(payload["status"], "accepted")
-        self.assertEqual(
-            payload["records"]["backup_gate_record_id"], "backup-gate-example-site-prod"
         )
 
 
@@ -1476,39 +1317,6 @@ class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
             False,
         )
 
-    async def test_public_ingress_monitor_native_route_precedes_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_public_ingress_monitor_identity()),
-                authz_policy=_public_ingress_monitor_policy(),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-            with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
-                run_monitor.return_value = PublicIngressMonitorResult(
-                    checked_at="2026-05-29T12:00:00Z",
-                    target_count=1,
-                    pass_count=1,
-                    records=(),
-                )
-
-                response = await _post_public_ingress_monitor(
-                    app,
-                    {"schema_version": 1, "product": "launchplane", "notify": False},
-                )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["status"], "accepted")
-        run_monitor.assert_called_once()
-
 
 class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_promotion_evidence_writes_record_and_inventory_for_authorized_workflow(
@@ -1793,33 +1601,6 @@ class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         promotion_schema = openapi["components"]["schemas"]["PromotionEvidenceRequest"]
         self.assertFalse(promotion_schema["additionalProperties"])
-
-    async def test_promotion_evidence_native_route_precedes_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = _promotion_evidence_store(state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_promotion_write_identity()),
-                authz_policy=_promotion_write_policy(context="example-site"),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _post_promotion_evidence(app, _promotion_evidence_payload())
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(payload["status"], "accepted")
-        self.assertEqual(
-            payload["records"]["promotion_record_id"], "promotion-example-site-testing-to-prod"
-        )
 
 
 class FastApiPreviewGenerationEvidenceTests(unittest.IsolatedAsyncioTestCase):
@@ -2136,40 +1917,6 @@ class FastApiPreviewGenerationEvidenceTests(unittest.IsolatedAsyncioTestCase):
         envelope_schema = openapi["components"]["schemas"]["PreviewGenerationEvidenceEnvelope"]
         self.assertFalse(envelope_schema["additionalProperties"])
 
-    async def test_preview_generation_evidence_native_route_precedes_wsgi_fallback(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_preview_generation_write_identity()),
-                authz_policy=_preview_generation_write_policy(context="example-site"),
-                record_store_factory=lambda: store,
-                control_plane_root_path=root,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _post_preview_generation_evidence(
-                app,
-                _preview_generation_evidence_payload(),
-            )
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(payload["status"], "accepted")
-        self.assertEqual(
-            payload["records"]["generation_id"],
-            "preview-example-site-example-site-pr-42-generation-0001",
-        )
-
 
 class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_preview_destroyed_evidence_writes_record_for_authorized_workflow(
@@ -2455,38 +2202,6 @@ class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"]["PreviewDestroyedEvidenceEnvelope"]
         self.assertFalse(envelope_schema["additionalProperties"])
-
-    async def test_preview_destroyed_evidence_native_route_precedes_wsgi_fallback(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_preview_record(_preview_record_for_destroy())
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_preview_destroyed_write_identity()),
-                authz_policy=_preview_destroyed_write_policy(context="example-site"),
-                record_store_factory=lambda: store,
-                control_plane_root_path=root,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _post_preview_destroyed_evidence(
-                app,
-                _preview_destroyed_evidence_payload(),
-            )
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(payload["status"], "accepted")
-        self.assertEqual(payload["records"]["transition"], "destroyed")
 
 
 class FastApiRunnerHostHygieneAuditEvidenceTests(unittest.IsolatedAsyncioTestCase):
@@ -2777,40 +2492,6 @@ class FastApiRunnerHostHygieneAuditEvidenceTests(unittest.IsolatedAsyncioTestCas
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"]["RunnerHostHygieneAuditEvidenceEnvelope"]
         self.assertFalse(envelope_schema["additionalProperties"])
-
-    async def test_runner_host_hygiene_audit_evidence_native_route_precedes_wsgi_fallback(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
-                authz_policy=_runner_host_hygiene_audit_write_policy(),
-                record_store_factory=lambda: store,
-                control_plane_root_path=root,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _post_runner_host_hygiene_audit_evidence(
-                app,
-                _runner_host_hygiene_audit_payload(),
-            )
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(payload["status"], "accepted")
-        self.assertEqual(
-            payload["records"]["runner_host_hygiene_audit_record_key"],
-            "runner-host-hygiene/2026-05-23/chris-testing",
-        )
 
 
 class FastApiRunnerLaneRegistrationAuditEvidenceTests(unittest.IsolatedAsyncioTestCase):
@@ -3109,40 +2790,6 @@ class FastApiRunnerLaneRegistrationAuditEvidenceTests(unittest.IsolatedAsyncioTe
             "RunnerLaneRegistrationAuditEvidenceEnvelope"
         ]
         self.assertFalse(envelope_schema["additionalProperties"])
-
-    async def test_runner_lane_registration_audit_evidence_native_route_precedes_wsgi_fallback(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
-                authz_policy=_runner_lane_registration_audit_write_policy(),
-                record_store_factory=lambda: store,
-                control_plane_root_path=root,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _post_runner_lane_registration_audit_evidence(
-                app,
-                _runner_lane_registration_audit_payload(),
-            )
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(payload["status"], "accepted")
-        self.assertEqual(
-            payload["records"]["runner_lane_registration_audit_record_key"],
-            "runner-lane-registration/2026-06-08/cm-website/dry-run",
-        )
 
 
 class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
@@ -3697,28 +3344,3 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             openapi["components"]["schemas"]["DeploymentEvidenceRequest"]["additionalProperties"],
             False,
         )
-
-    async def test_deployment_evidence_native_route_precedes_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_deployment_write_identity()),
-                authz_policy=_deployment_write_policy(context="example-site"),
-                record_store_factory=lambda: store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _post_deployment_evidence(app, _deployment_evidence_payload())
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(payload["status"], "accepted")
-        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-example-site-prod")

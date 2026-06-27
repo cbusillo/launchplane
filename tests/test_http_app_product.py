@@ -2,14 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import (
-    Any,
-    cast,
-)
 from unittest.mock import patch
-
-from a2wsgi import WSGIMiddleware
-from starlette.types import ASGIApp
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -80,7 +73,6 @@ from tests.test_service import (
     _sqlite_database_url,
     _StubVerifier,
     _work_graph_snapshot_payload,
-    create_launchplane_service_app,
 )
 
 
@@ -431,42 +423,6 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         ]
         self.assertIn("ProductEnvironmentConfigStatusResponse", json.dumps(route))
         self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
-
-    async def test_fastapi_app_can_mount_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            record_store = FilesystemRecordStore(state_dir=root / "state")
-            policy = _product_environment_read_policy(context="example-site")
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: record_store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                local_record_store_for_tests=record_store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            openapi_response = await _asgi_get(app, "/openapi.json")
-            health_response = await _asgi_get(app, "/v1/health")
-
-        self.assertEqual(openapi_response.status_code, 200)
-        self.assertIn(
-            "/v1/health",
-            openapi_response.json()["paths"],
-        )
-        self.assertIn(
-            "/v1/products/{product}/environments/{environment}/config-status",
-            openapi_response.json()["paths"],
-        )
-        self.assertEqual(health_response.status_code, 200)
-        health_payload = health_response.json()
-        self.assertEqual(health_payload["status"], "ok")
-        self.assertEqual(health_payload["storage_backend"], "filesystem")
-        self.assertIn("trace_id", health_payload)
 
 
 class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
@@ -1244,37 +1200,6 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps(reconcile_route["responses"][status_code]),
             )
 
-    async def test_fastapi_agent_context_reads_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_agent_context_read_records(database_url)
-            app_store = PostgresRecordStore(database_url=database_url)
-            policy = _work_graph_read_policy()
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: app_store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "legacy-state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            mapping_response = await _get_repo_product_mapping(app)
-            context_response = await _get_agent_context(app, repository="every/example-site")
-            snapshot_response = await _get_work_graph_snapshot(app)
-            issue_inbox_response = await _get_work_graph_issue_inbox(app)
-            app_store.close()
-
-        self.assertEqual(mapping_response.status_code, 200)
-        self.assertEqual(context_response.status_code, 200)
-        self.assertEqual(snapshot_response.status_code, 200)
-        self.assertEqual(issue_inbox_response.status_code, 200)
-
     async def test_list_products_returns_db_backed_overviews(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -1592,42 +1517,6 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(
                 openapi["components"]["schemas"][response_model_name]["additionalProperties"]
             )
-
-    async def test_fastapi_product_environment_reads_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_product_environment_read_records(database_url)
-            app_store = PostgresRecordStore(database_url=database_url)
-            policy = _product_environment_read_policy(
-                contexts=("launchplane", "example-site"),
-                products=("launchplane", "example-site"),
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: app_store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "legacy-state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            list_response = await _get_products(app)
-            overview_response = await _get_product(app)
-            activity_response = await _get_product_activity(app)
-            environments_response = await _get_product_environments(app)
-            config_status_response = await _get_config_status(app)
-            app_store.close()
-
-        self.assertEqual(list_response.status_code, 200)
-        self.assertEqual(overview_response.status_code, 200)
-        self.assertEqual(activity_response.status_code, 200)
-        self.assertEqual(environments_response.status_code, 200)
-        self.assertEqual(config_status_response.status_code, 200)
 
 
 class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
@@ -2068,74 +1957,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             False,
         )
 
-    async def test_fastapi_product_profile_reads_precede_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            record_store = FilesystemRecordStore(state_dir=root / "state")
-            record_store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane", "sellyouroutboard"],
-                            "contexts": ["launchplane"],
-                            "actions": ["product_profile.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: record_store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "legacy-state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            list_response = await _get_product_profiles(app, driver_id="generic-web")
-            show_response = await _get_product_profile(app)
-
-        self.assertEqual(list_response.status_code, 200)
-        self.assertEqual(show_response.status_code, 200)
-        self.assertEqual(list_response.json()["profiles"][0]["product"], "sellyouroutboard")
-        self.assertEqual(show_response.json()["profile"]["product"], "sellyouroutboard")
-
-    async def test_fastapi_product_profile_write_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            record_store = FilesystemRecordStore(state_dir=root / "state")
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
-                record_store_factory=lambda: record_store,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "legacy-state",
-                verifier=_RejectingVerifier(),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-                control_plane_root_path=root,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _post_product_profile(app, _product_profile_payload())
-            stored_profile = record_store.read_product_profile_record("sellyouroutboard")
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["records"]["product_profile"], "sellyouroutboard")
-        self.assertEqual(stored_profile.driver_id, "generic-web")
-
 
 class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
     async def test_protected_artifacts_returns_launchplane_inventory(self) -> None:
@@ -2265,39 +2086,26 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "authentication_required")
         self.assertEqual(response.headers["WWW-Authenticate"], 'Bearer realm="Launchplane API"')
 
-    async def test_protected_artifacts_accepts_human_session_when_mounted_over_wsgi(
-        self,
-    ) -> None:
+    async def test_protected_artifacts_accepts_human_session_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             record_store = FilesystemRecordStore(state_dir=root / "state")
             seed_protected_artifact_store(record_store)
-            policy = _github_human_artifact_protection_policy(
-                products=("verireel",),
-                contexts=("*",),
-            )
             oauth_config = _github_oauth_config()
-            session_store = InMemoryHumanSessionStore()
             session_manager = HumanSessionManager(
                 config=oauth_config,
-                session_store=session_store,
+                session_store=InMemoryHumanSessionStore(),
             )
             human_session = session_manager.issue(_github_human_identity())
             app = create_launchplane_fastapi_app(
                 verifier=_RejectingVerifier(),
-                authz_policy=policy,
+                authz_policy=_github_human_artifact_protection_policy(
+                    products=("verireel",),
+                    contexts=("*",),
+                ),
                 record_store_factory=lambda: record_store,
                 human_session_manager=session_manager,
             )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_RejectingVerifier(),
-                authz_policy=policy,
-                local_record_store_for_tests=record_store,
-                github_oauth_config=oauth_config,
-                human_session_store=session_store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
 
             response = await _get_protected_artifacts(
                 app,
@@ -2421,34 +2229,3 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("verireel", example_text)
         self.assertNotIn("cbusillo", example_text)
         self.assertNotIn("shinycomputers", example_text)
-
-    async def test_fastapi_protected_artifacts_precedes_legacy_wsgi_fallback(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            record_store = FilesystemRecordStore(state_dir=root / "state")
-            seed_protected_artifact_store(record_store)
-            policy = _local_operator_artifact_protection_policy(
-                products=("verireel",),
-                contexts=("*",),
-            )
-            bearer_config = _local_operator_bearer_config()
-            app = create_launchplane_fastapi_app(
-                verifier=_RejectingVerifier(),
-                authz_policy=policy,
-                record_store_factory=lambda: record_store,
-                bearer_identity_config=bearer_config,
-            )
-            legacy_app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_RejectingVerifier(),
-                authz_policy=policy,
-                local_record_store_for_tests=record_store,
-            )
-            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
-
-            response = await _get_protected_artifacts(app, product="verireel")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertIn("trace_id", payload)
-        self.assertNotIn("authz", payload)

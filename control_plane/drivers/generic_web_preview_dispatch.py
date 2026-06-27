@@ -24,7 +24,6 @@ from control_plane.contracts.preview_record import PreviewState
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.drivers.dispatch import (
-    _DescriptorDriverDispatchResult,
     _DriverRouteExecutionMetadata,
     _ProductRouteEnvelope,
     _ResolvedProductDriverContext,
@@ -44,11 +43,9 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
     GenericWebPreviewDestroyRequest,
     GenericWebPreviewInventoryRequest,
-    GenericWebPreviewProfileStore,
     GenericWebPreviewReadinessRequest,
     GenericWebPreviewRefreshRequest,
     GenericWebPreviewRefreshResult,
-    discover_generic_web_preview_desired_state,
     preview_pr_number_from_slug,
 )
 from control_plane.workflows.launchplane import find_preview_record
@@ -320,30 +317,6 @@ def _write_preview_desired_state_if_supported(
         return ""
     getattr(record_store, "write_preview_desired_state_record")(record)
     return record.desired_state_id
-
-
-def _handle_generic_web_preview_desired_state(
-    request: GenericWebPreviewDesiredStateEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = discover_generic_web_preview_desired_state(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.desired_state,
-        discovered_at=utc_now_timestamp(),
-        profile=resolved_context.profile,
-    )
-    preview_desired_state_id = _write_preview_desired_state_if_supported(
-        record_store=record_store,
-        record=driver_result,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"preview_desired_state_id": preview_desired_state_id},
-        driver_result=driver_result,
-    )
 
 
 def _generic_web_preview_manifest_fingerprint(
