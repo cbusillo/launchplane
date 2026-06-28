@@ -206,8 +206,8 @@ Authz policy grant and removal routes are native FastAPI service routes. They
 require DB-backed policy storage, enforce `authz_policy_grant.write` through
 the active runtime policy, preserve signed-in GitHub human-session callers,
 store `Idempotency-Key` replay/conflict evidence for apply requests, and keep
-dry-runs stateless. Their legacy WSGI branches are deleted; direct WSGI
-fallback calls to those paths fail closed.
+dry-runs stateless. The retired compatibility branches for these paths are not
+production surfaces.
 
 Operators should mutate shared or production authz through the deployed service,
 not by running arbitrary local DB writes from a checkout. Use
@@ -643,9 +643,10 @@ Current derived-state behavior:
   backup-gate records instead of requiring operators to inspect raw JSON first.
 - DB-backed schema changes must land as Alembic revisions. Keep revisions
   additive and rollback-aware so image rollback remains a valid recovery path.
-- Local CLI/file-backed compatibility paths must pass the review checkpoints in
-  [compatibility-retirement.md](compatibility-retirement.md). Product workflows
-  should use service routes once matching OIDC-authenticated routes exist.
+- Local CLI/file-backed compatibility paths are local-development, rehearsal, or
+  emergency-inspection surfaces only. Product workflows should use service
+  routes once matching OIDC-authenticated routes exist; production-capable
+  compatibility paths need an issue-backed removal condition.
 
 ## Dokploy Contracts
 

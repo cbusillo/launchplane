@@ -326,11 +326,11 @@ VeriReel product paths:
   - `POST /v1/drivers/verireel/preview-inventory` (native FastAPI)
   - `POST /v1/drivers/verireel/preview-destroy` (native FastAPI)
 
-## Native Route Checklist
+## Service Route Checklist
 
-New service route families must preserve the completed v2 HTTP boundary:
+New or changed service route families must preserve the completed HTTP boundary:
 
-- The native FastAPI route owns the production path.
+- FastAPI owns the production path.
 - Pydantic request and response models define the HTTP contract; use
   `extra="forbid"` for boundary models unless the route documents a narrower
   reason not to.
@@ -344,15 +344,15 @@ New service route families must preserve the completed v2 HTTP boundary:
   maximum body-size behavior, validation failures, authentication failures,
   authorization failures, and expected `400`, `413`, `401`, and `403` envelope
   shape where those statuses can apply.
-- Route tests preserve relevant behavior directly through FastAPI helpers.
-- The PR deletes obsolete compatibility code when it replaces a legacy surface,
-  or names the issue-backed removal condition when deletion is not in scope.
+- Route tests preserve relevant behavior directly through service helpers.
+- The PR deletes obsolete compatibility code when it replaces an old surface, or
+  names the issue-backed removal condition when deletion is not in scope.
 
 `GET /v1/health` is the first proven pattern: native FastAPI route ownership,
 typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
-The human auth/session family uses native FastAPI routes in the mounted service:
+The human auth/session family uses FastAPI routes in the production service:
 `GET /auth/github/login`, `GET /auth/github/callback`, `GET /v1/auth/session`,
 and `POST /auth/logout`. GitHub OAuth login preserves PKCE state, same-origin
 `return_to` sanitization, GitHub authorization redirect, callback error
