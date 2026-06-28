@@ -2314,9 +2314,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             _git(root, "branch", "-M", "main")
             _checkout_branch(root, "feature/product-fixture")
             workflow.write_text(
-                "name: Deploy\n"
-                "env:\n"
-                "  PRODUCT_DOMAIN: https://real-product.example.test\n",
+                "name: Deploy\nenv:\n  PRODUCT_DOMAIN: https://real-product.example.test\n",
                 encoding="utf-8",
             )
             _commit_all(root)
@@ -2343,6 +2341,245 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         payload = json.loads(result.output.split("Error:", 1)[0])
         gate = cast("dict[str, object]", payload["gate"])
         self.assertEqual(gate["status"], "fail")
+
+    def test_cli_changed_files_gate_allows_preexisting_package_json_finding(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            package_json = root / "package.json"
+            package_json.write_text(
+                json.dumps(
+                    {
+                        "scripts": {"seo:submit-indexnow": "node scripts/seo/submit-indexnow.mjs"},
+                        "devDependencies": {"globals": "^17.6.0"},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "dependabot/dev-dependencies")
+            package_json.write_text(
+                json.dumps(
+                    {
+                        "scripts": {"seo:submit-indexnow": "node scripts/seo/submit-indexnow.mjs"},
+                        "devDependencies": {"globals": "^17.7.0"},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "pass")
+        finding = _findings(payload)[0]
+        self.assertEqual(finding["key"], "scripts.seo:submit-indexnow")
+        self.assertEqual(finding["classification"], "allowed")
+        self.assertEqual(finding["allow_reason"], "preexisting_changed_file_finding")
+
+    def test_cli_changed_files_gate_allows_preexisting_dirty_package_json_finding(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            package_json = root / "package.json"
+            package_json.write_text(
+                json.dumps(
+                    {
+                        "scripts": {"seo:submit-indexnow": "node scripts/seo/submit-indexnow.mjs"},
+                        "devDependencies": {"globals": "^17.6.0"},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            package_json.write_text(
+                json.dumps(
+                    {
+                        "scripts": {"seo:submit-indexnow": "node scripts/seo/submit-indexnow.mjs"},
+                        "devDependencies": {"globals": "^17.7.0"},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        finding = _findings(payload)[0]
+        self.assertEqual(finding["allow_reason"], "preexisting_changed_file_finding")
+
+    def test_cli_changed_files_gate_rejects_new_package_json_finding(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            package_json = root / "package.json"
+            package_json.write_text(
+                json.dumps({"devDependencies": {"globals": "^17.6.0"}}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/new-script")
+            package_json.write_text(
+                json.dumps(
+                    {
+                        "scripts": {"seo:submit-indexnow": "node scripts/seo/submit-indexnow.mjs"},
+                        "devDependencies": {"globals": "^17.6.0"},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+        rejected = cast("list[dict[str, object]]", gate["rejected_findings"])
+        self.assertEqual(rejected[0]["key"], "scripts.seo:submit-indexnow")
+
+    def test_cli_changed_files_gate_rejects_new_duplicate_finding(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            script = root / "scripts" / "deploy.sh"
+            script.parent.mkdir()
+            script.write_text(
+                "#!/usr/bin/env bash\necho cbusillo/launchplane\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/duplicate-finding")
+            script.write_text(
+                "#!/usr/bin/env bash\necho cbusillo/launchplane\necho cbusillo/launchplane\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+        findings = _findings(payload)
+        self.assertEqual(findings[0]["allow_reason"], "preexisting_changed_file_finding")
+        self.assertEqual(findings[1]["classification"], "needs_classification")
+
+    def test_cli_changed_files_gate_fails_closed_without_merge_base(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            package_json = root / "package.json"
+            package_json.write_text(
+                json.dumps({"devDependencies": {"globals": "^17.6.0"}}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+        rejected = cast("list[dict[str, object]]", gate["rejected_findings"])
+        self.assertEqual(rejected[0]["rule_id"], "changed_files_gate_base_unavailable")
 
     def test_cli_product_repo_gate_allows_launchplane_tool_checkout(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -109,21 +109,28 @@ uv run launchplane service audit-config-authority \
 ```
 
 The gate prints the same redacted audit report as the full scanner, adds a JSON
-`gate` summary when enforcement is enabled, then exits non-zero for findings
-that still need classification. Docs, tests, schema fixtures, bootstrap wiring,
-and explicitly allowed thin connector mechanics are reported with allow reasons
-instead of blocking the default gate. The `product-repo` profile keeps ordinary
+`gate` summary when enforcement is enabled, then exits non-zero for new findings
+that still need classification. In changed-file mode, findings that already
+existed at the merge base stay visible in the report with
+`preexisting_changed_file_finding`, but they do not block unrelated edits to the
+same file. Configure product-repo checkouts with enough history for the gate to
+resolve `origin/main` or `main`; when no merge base or dirty local comparison is
+available, the gate fails closed rather than silently passing. Docs, tests,
+schema fixtures, bootstrap wiring, and explicitly allowed thin connector
+mechanics are reported with allow reasons instead of blocking the default gate.
+The `product-repo` profile keeps ordinary
 product-owned test fixtures allowed, but also rejects test fixtures that carry
 Launchplane lifecycle authority such as authz policy, provider target,
 runtime-environment, managed secret, route batch, topology, or target-id
 material.
 
 When a product repository runs the gate from GitHub Actions, use a dedicated
-`.github/workflows/launchplane-config-authority.yml` workflow. Its Launchplane
-tool checkout may reference only `${{ github.repository_owner }}/launchplane`
-and must pin `ref` to a 40-character commit SHA; hard-coded owners, mutable
-branches, and non-checkout `repository` values are rejected by the product-repo
-profile.
+`.github/workflows/launchplane-config-authority.yml` workflow until the gate has
+a Launchplane-owned service/reusable-workflow endpoint. The transitional
+Launchplane tool checkout may reference only
+`${{ github.repository_owner }}/launchplane` and must pin `ref` to a
+40-character commit SHA; hard-coded owners, mutable branches, and non-checkout
+`repository` values are rejected by the product-repo profile.
 
 ## What Product Repos Own
 

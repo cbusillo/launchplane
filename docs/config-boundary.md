@@ -258,13 +258,18 @@ uv run launchplane service audit-config-authority \
 
 `--fail-on-findings` preserves the JSON or Markdown report, adds a JSON `gate`
 summary when enforcement is enabled, and then exits non-zero when the selected
-gate profile rejects a finding. Allowed docs, tests, schema examples,
-Launchplane self-bootstrap wiring, operator-supplied inputs, and thin connector
-mechanics keep explicit allow reasons and do not fail the default gate. The
-`product-repo` profile also rejects test fixtures that carry Launchplane
-lifecycle authority such as authz, runtime-environment, provider target,
-target-id, managed-secret, route-batch, or topology material. Product repos
-should use this changed-file gate to reject reintroduced
+gate profile rejects a finding. In changed-file mode, findings that already
+existed at the merge base remain in the report as
+`preexisting_changed_file_finding`, but only new unclassified findings block the
+gate. If the gate cannot resolve `origin/main` or `main` and has no dirty files
+to compare against `HEAD`, it fails closed instead of returning an empty green
+report. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
+operator-supplied inputs, and thin connector mechanics keep explicit allow
+reasons and do not fail the default gate. The `product-repo` profile also
+rejects test fixtures that carry Launchplane lifecycle authority such as authz,
+runtime-environment, provider target, target-id, managed-secret, route-batch, or
+topology material. Product repos should use this changed-file gate to reject
+reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
 
