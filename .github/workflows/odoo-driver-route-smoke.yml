@@ -103,6 +103,8 @@ jobs:
             exit 1
           fi
 
+          registration_results_file="odoo-driver-route-smoke-registration.jsonl"
+          : > "$registration_results_file"
           for route_path in $ROUTE_PATHS; do
             route_slug="${route_path//\//-}"
             response_file="$RUNNER_TEMP/route-smoke-${GITHUB_RUN_ID}"
@@ -115,8 +117,43 @@ jobs:
               -X POST \
               -H 'content-type: application/json' \
               --data '{"schema_version":1}' \
-              "${LAUNCHPLANE_URL%/}${route_path}")"
+              "${LAUNCHPLANE_URL%/}${route_path}" || true)"
+            if [ -z "$status_code" ] || [ "$status_code" = "000" ]; then
+              status_code="curl_failed"
+            fi
             echo "${route_path} returned HTTP ${status_code}"
+            error_code="$(jq -r '.error.code // ""' "$response_file" 2>/dev/null || true)"
+            trace_id="$(jq -r '.trace_id // ""' "$response_file" 2>/dev/null || true)"
+            ok="true"
+            if [ "$status_code" = "curl_failed" ] \
+              || [ "$status_code" = "404" ] \
+              || { [ "$status_code" != "curl_failed" ] && [ "$status_code" -ge 500 ]; }; then
+              ok="false"
+            fi
+            jq -cn \
+              --arg route_path "$route_path" \
+              --arg status_code "$status_code" \
+              --arg error_code "$error_code" \
+              --arg trace_id "$trace_id" \
+              --arg ok "$ok" \
+              --arg run_id "$GITHUB_RUN_ID" \
+              --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+              '{
+                route_path: $route_path,
+                method: "POST",
+                caller: "public-registration-probe",
+                http_status: $status_code,
+                error_code: $error_code,
+                trace_id: $trace_id,
+                expected: "not 404 and not 5xx",
+                ok: ($ok == "true"),
+                run_id: $run_id,
+                run_attempt: $run_attempt
+              }' | tee -a "$registration_results_file"
+            if [ "$status_code" = "curl_failed" ]; then
+              echo "${route_path} could not be reached on Launchplane." >&2
+              exit 1
+            fi
             if [ "$status_code" = "404" ]; then
               echo "${route_path} is not registered on Launchplane." >&2
               cat "$response_file" >&2
@@ -371,3 +408,44 @@ jobs:
           if [ -f odoo-driver-route-smoke-results.jsonl ]; then
             cat odoo-driver-route-smoke-results.jsonl
           fi
+          if [ -f odoo-driver-route-smoke-registration.jsonl ]; then
+            cat odoo-driver-route-smoke-registration.jsonl
+          fi
+
+      - name: Upload route smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: >-
+            odoo-driver-route-smoke-${{ inputs.product }}-${{
+            inputs.context }}-${{ inputs.instance }}
+          path: |
+            odoo-driver-route-smoke-registration.jsonl
+            odoo-driver-route-smoke-results.jsonl
+          if-no-files-found: error
+
+      - name: Summarize route smoke evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Odoo driver route smoke"
+            echo
+            echo "- Product: $PRODUCT"
+            echo "- Context: $CONTEXT_NAME"
+            echo "- Instance: $INSTANCE"
+            echo "- Evidence artifact: odoo-driver-route-smoke-${PRODUCT}-${CONTEXT_NAME}-${INSTANCE}"
+            echo
+            if [ -f odoo-driver-route-smoke-registration.jsonl ]; then
+              echo "### Public registration probes"
+              jq -r '"- \(.method) \(.route_path): HTTP \(.http_status) ok=\(.ok) trace=\(.trace_id)"' \
+                odoo-driver-route-smoke-registration.jsonl
+              echo
+            fi
+            if [ -f odoo-driver-route-smoke-results.jsonl ]; then
+              echo "### Authenticated route probes"
+              jq -r '"- \(.classification) \(.route_path): HTTP \(.http_status) error=\(.error_code) trace=\(.trace_id)"' \
+                odoo-driver-route-smoke-results.jsonl
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

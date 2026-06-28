@@ -660,6 +660,192 @@ jobs:
             ${{ vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON }}
         run: bash scripts/deploy/ensure-authz-grants.sh
 
+      - name: Capture v2 deployed smoke evidence
+        shell: bash
+        env:
+          DEPLOYED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
+          LAUNCHPLANE_SERVICE_AUDIENCE: ${{ steps.service.outputs.service_audience }}
+          LAUNCHPLANE_SERVICE_URL: ${{ steps.service.outputs.service_url }}
+        run: |
+          set -euo pipefail
+
+          results_file="launchplane-v2-deployed-smoke.jsonl"
+          : > "$results_file"
+
+          append_result() {
+            local route_path="$1"
+            local method="$2"
+            local caller="$3"
+            local status_code="$4"
+            local classification="$5"
+            local trace_id="$6"
+            local expected="$7"
+            local ok="$8"
+            jq -cn \
+              --arg route_path "$route_path" \
+              --arg method "$method" \
+              --arg caller "$caller" \
+              --arg status_code "$status_code" \
+              --arg classification "$classification" \
+              --arg trace_id "$trace_id" \
+              --arg expected "$expected" \
+              --arg ok "$ok" \
+              --arg run_id "$GITHUB_RUN_ID" \
+              --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+              --arg sha "$GITHUB_SHA" \
+              --arg image_reference "$DEPLOYED_IMAGE_REFERENCE" \
+              '{
+                route_path: $route_path,
+                method: $method,
+                caller: $caller,
+                http_status: $status_code,
+                classification: $classification,
+                trace_id: $trace_id,
+                expected: $expected,
+                ok: ($ok == "true"),
+                run_id: $run_id,
+                run_attempt: $run_attempt,
+                sha: $sha,
+                image_reference: $image_reference
+              }' >> "$results_file"
+          }
+
+          health_response_file="$(mktemp)"
+          health_status_code="$(curl -sS \
+            -o "$health_response_file" \
+            -w '%{http_code}' \
+            "${LAUNCHPLANE_SERVICE_URL}/v1/health")"
+          health_status_value="$(jq -r '.status // empty' "$health_response_file" 2>/dev/null || true)"
+          health_trace_id="$(jq -r '.trace_id // empty' "$health_response_file" 2>/dev/null || true)"
+          append_result \
+            "/v1/health" \
+            "GET" \
+            "public" \
+            "$health_status_code" \
+            "health" \
+            "$health_trace_id" \
+            "200 ok" \
+            "$([ "$health_status_code" = "200" ] && [ "$health_status_value" = "ok" ] && echo true || echo false)"
+          if [ "$health_status_code" != "200" ] || [ "$health_status_value" != "ok" ]; then
+            cat "$health_response_file" >&2
+            echo "Launchplane health smoke failed." >&2
+            exit 1
+          fi
+          rm -f "$health_response_file"
+
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              -G \
+              --data-urlencode "audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL" \
+            | jq -r '.value'
+          })"
+          runtime_response_file="$(mktemp)"
+          runtime_status_code="$(curl -sS \
+            -o "$runtime_response_file" \
+            -w '%{http_code}' \
+            -H "Authorization: Bearer ${oidc_token}" \
+            "${LAUNCHPLANE_SERVICE_URL}/v1/service/runtime")"
+          actual_image_reference="$(jq -r '.runtime.docker_image_reference // empty' "$runtime_response_file" 2>/dev/null || true)"
+          runtime_trace_id="$(jq -r '.trace_id // empty' "$runtime_response_file" 2>/dev/null || true)"
+          append_result \
+            "/v1/service/runtime" \
+            "GET" \
+            "github-actions-oidc" \
+            "$runtime_status_code" \
+            "runtime-image" \
+            "$runtime_trace_id" \
+            "200 matching image" \
+            "$([ "$runtime_status_code" = "200" ] && [ "$actual_image_reference" = "$DEPLOYED_IMAGE_REFERENCE" ] && echo true || echo false)"
+          if [ "$runtime_status_code" != "200" ] || [ "$actual_image_reference" != "$DEPLOYED_IMAGE_REFERENCE" ]; then
+            jq '{status, trace_id, error, runtime: {docker_image_reference: .runtime.docker_image_reference}}' "$runtime_response_file" >&2 || cat "$runtime_response_file" >&2
+            echo "Launchplane runtime smoke failed." >&2
+            exit 1
+          fi
+          rm -f "$runtime_response_file"
+
+          openapi_response_file="$(mktemp)"
+          openapi_status_code="$(curl -sS \
+            -o "$openapi_response_file" \
+            -w '%{http_code}' \
+            "${LAUNCHPLANE_SERVICE_URL}/openapi.json")"
+          openapi_ok="true"
+          if [ "$openapi_status_code" != "200" ]; then
+            openapi_ok="false"
+          else
+            for route_path in \
+              /v1/health \
+              /v1/service/runtime \
+              /v1/drivers/launchplane/self-deploy \
+              /v1/drivers/odoo/artifact-publish-inputs \
+              /v1/drivers/odoo/preview-apply-inputs \
+              /v1/drivers/odoo/preview-apply \
+              /v1/previews/pr-feedback \
+              /v1/work-graph/snapshot; do
+              if ! jq -e --arg route_path "$route_path" '.paths[$route_path]' \
+                "$openapi_response_file" >/dev/null; then
+                openapi_ok="false"
+                break
+              fi
+            done
+          fi
+          append_result \
+            "/openapi.json" \
+            "GET" \
+            "public" \
+            "$openapi_status_code" \
+            "openapi-route-coverage" \
+            "" \
+            "200 with representative native route paths" \
+            "$openapi_ok"
+          if [ "$openapi_ok" != "true" ]; then
+            jq '{openapi: .openapi, info: .info, paths: (.paths | keys)}' \
+              "$openapi_response_file" >&2 || cat "$openapi_response_file" >&2
+            echo "Launchplane OpenAPI smoke failed." >&2
+            exit 1
+          fi
+          rm -f "$openapi_response_file"
+
+          jq -s '{status: "ok", results: .}' "$results_file" \
+            > launchplane-v2-deployed-smoke.json
+          jq . launchplane-v2-deployed-smoke.json
+
+      - name: Upload v2 deployed smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: launchplane-v2-deployed-smoke
+          path: |
+            launchplane-v2-deployed-smoke.json
+            launchplane-v2-deployed-smoke.jsonl
+          if-no-files-found: error
+
+      - name: Summarize v2 deployed smoke evidence
+        if: always()
+        shell: bash
+        env:
+          DEPLOYED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
+        run: |
+          set -euo pipefail
+          if [ ! -f launchplane-v2-deployed-smoke.json ]; then
+            {
+              echo "## Launchplane v2 deployed smoke"
+              echo
+              echo "- Evidence artifact: unavailable"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Launchplane v2 deployed smoke"
+            echo
+            echo "- Image: $DEPLOYED_IMAGE_REFERENCE"
+            echo "- Evidence artifact: launchplane-v2-deployed-smoke"
+            echo
+            jq -r '.results[] | "- \(.method) \(.route_path): HTTP \(.http_status) ok=\(.ok) classification=\(.classification) trace=\(.trace_id)"' \
+              launchplane-v2-deployed-smoke.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
   emergency-dokploy-rollback:
     if: github.event_name == 'workflow_dispatch' && inputs.break_glass_confirm == 'ROLL BACK LAUNCHPLANE THROUGH DIRECT DOKPLOY'
     runs-on:
