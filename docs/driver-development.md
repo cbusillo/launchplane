@@ -134,7 +134,7 @@ secrets, or driver-owned derivation.
 2. Add or extend the driver descriptor in the registry.
 3. Add typed request/result models and executor functions in
    `control_plane/workflows/`.
-4. Wire descriptor-backed service dispatch using the shared route primitives in
+4. Wire native FastAPI route handling using the shared route primitives in
    `control_plane/drivers/dispatch.py`; keep driver-family handlers cohesive
    instead of growing unrelated `service.py` route tables.
    Generic-web preview route changes belong in

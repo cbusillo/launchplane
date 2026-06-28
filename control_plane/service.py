@@ -228,7 +228,7 @@ _WHOLE_PRODUCT_CONTEXT = "*"
 _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET"
 _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
     {
-        "/v1/drivers/generic-web/preview-desired-state",
+        _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
@@ -322,12 +322,6 @@ _PREVIEW_REFRESH_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_REFRESH_ROUTE.rou
 _PREVIEW_READINESS_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path})
 _PREVIEW_DESTROY_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path})
 _PREVIEW_VERIFICATION_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path})
-_PREVIEW_DESTROY_IDEMPOTENCY_ROUTE_PATHS = frozenset(
-    {
-        _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
-        "/v1/drivers/verireel/preview-destroy",
-    }
-)
 _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS = frozenset(
     {
         _GENERIC_WEB_DEPLOY_ROUTE.route_path,
@@ -459,22 +453,6 @@ _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = _DriverRouteExecutionMetadata(
         "Workflow cannot apply Odoo target replacement for the requested product/context."
     ),
 )
-
-
-_NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
-    {
-        _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
-        _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
-        _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
-        _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
-        _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
-        _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
-        _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
-        _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
-        _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
-    }
-)
-_PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES = frozenset({_VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path})
 
 
 def _fastapi_route_paths_by_method(app: object, method: str) -> frozenset[str]:

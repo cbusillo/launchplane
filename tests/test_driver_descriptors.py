@@ -811,38 +811,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
             control_plane_service._GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS,
         )
-        self.assertEqual(
-            control_plane_service._NON_IDEMPOTENT_DRIVER_RESULT_ROUTES,
-            frozenset(
-                {
-                    control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
-                    control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
-                    control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
-                    control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
-                    control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
-                    control_plane_service._ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
-                    control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
-                    control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
-                    control_plane_service._VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
-                }
-            ),
-        )
-        self.assertIn(
-            "/v1/drivers/verireel/preview-inventory",
-            control_plane_service._NON_IDEMPOTENT_DRIVER_RESULT_ROUTES,
-        )
-        self.assertIn(
-            "/v1/drivers/odoo/target-replacement-plan",
-            control_plane_service._NON_IDEMPOTENT_DRIVER_RESULT_ROUTES,
-        )
-        self.assertEqual(
-            control_plane_service._PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES,
-            frozenset({control_plane_service._VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path}),
-        )
-        self.assertIn(
-            "/v1/drivers/verireel/prod-backup-gate",
-            control_plane_service._PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES,
-        )
 
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
         descriptor = DriverDescriptor(
