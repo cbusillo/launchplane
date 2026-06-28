@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
@@ -759,6 +760,10 @@ class ConfigAuthorityFinding:
     parser: str
     git_status: str
 
+    @property
+    def fingerprint(self) -> tuple[str, str, str, str]:
+        return (self.path, self.rule_id, self.key, self.value_hash)
+
     def as_payload(self) -> dict[str, object]:
         return {
             "finding_id": self.finding_id,
@@ -800,6 +805,17 @@ def build_config_authority_audit(
     root = control_plane_root.resolve()
     repo_metadata = _repo_metadata(root)
     git_file_state = _git_file_state(root)
+    changed_file_merge_base = _git_merge_base(root) if mode == "changed-files-gate" else ""
+    changed_file_status_entries = _git_status_entries(root) if mode == "changed-files-gate" else []
+    baseline_fingerprint_counts = (
+        _changed_file_baseline_fingerprint_counts(
+            root,
+            merge_base=changed_file_merge_base,
+            status_entries=changed_file_status_entries,
+        )
+        if mode == "changed-files-gate"
+        else Counter()
+    )
     source_files, coverage_gaps = _discover_source_files(
         root=root,
         mode=mode,
@@ -812,24 +828,50 @@ def build_config_authority_audit(
     raw_findings: list[dict[str, object]] = []
     for source_file in source_files:
         file_findings, file_gaps = _scan_source_file(source_file)
+        if baseline_fingerprint_counts:
+            file_findings = _mark_preexisting_changed_file_findings(
+                file_findings,
+                baseline_fingerprint_counts=baseline_fingerprint_counts,
+            )
         findings.extend(file_findings)
         coverage_gaps.extend(file_gaps)
         raw_findings.extend(_raw_finding_payload(finding) for finding in file_findings)
+    if (
+        mode == "changed-files-gate"
+        and not paths
+        and not changed_file_merge_base
+        and not changed_file_status_entries
+    ):
+        gap = CoverageGap(
+            path=".",
+            reason="merge_base_unavailable",
+            detail="Changed-files gate could not resolve origin/main or main and found no dirty files to compare against HEAD.",
+        )
+        finding = _changed_files_gate_base_finding()
+        coverage_gaps.append(gap)
+        findings.append(finding)
+        raw_findings.append(_raw_finding_payload(finding))
 
     findings = sorted(findings, key=lambda item: (item.path, item.line, item.rule_id, item.key))
     finding_payloads = [finding.as_payload() for finding in findings]
     source_payloads = [source_file.as_payload() for source_file in source_files]
+    scanner_payload: dict[str, object] = {
+        "version": HASH_VERSION,
+        "include_untracked": include_untracked,
+        "include_ignored": include_ignored,
+        "max_scanned_file_bytes": MAX_SCANNED_FILE_BYTES,
+    }
+    if mode == "changed-files-gate":
+        scanner_payload["changed_files_gate"] = {
+            "preexisting_findings_are_report_only": True,
+        }
+
     payload: dict[str, object] = {
         "status": "ok",
         "mode": mode,
         "control_plane_root": str(root),
         "repo": repo_metadata,
-        "scanner": {
-            "version": HASH_VERSION,
-            "include_untracked": include_untracked,
-            "include_ignored": include_ignored,
-            "max_scanned_file_bytes": MAX_SCANNED_FILE_BYTES,
-        },
+        "scanner": scanner_payload,
         "coverage": {
             "source_file_count": len(source_files),
             "finding_count": len(findings),
@@ -1088,6 +1130,105 @@ def _scan_source_file(
                 detail=str(error),
             )
         ]
+    return _scan_source_text(source_file=source_file, text=text)
+
+
+def _mark_preexisting_changed_file_findings(
+    findings: Sequence[ConfigAuthorityFinding],
+    *,
+    baseline_fingerprint_counts: Counter[tuple[str, str, str, str]],
+) -> list[ConfigAuthorityFinding]:
+    remaining_counts = baseline_fingerprint_counts.copy()
+    marked_findings: list[ConfigAuthorityFinding] = []
+    for finding in findings:
+        if remaining_counts[finding.fingerprint] > 0:
+            marked_findings.append(_mark_preexisting_changed_file_finding(finding))
+            remaining_counts[finding.fingerprint] -= 1
+            continue
+        marked_findings.append(finding)
+    return marked_findings
+
+
+def _mark_preexisting_changed_file_finding(
+    finding: ConfigAuthorityFinding,
+) -> ConfigAuthorityFinding:
+    if finding.classification != "needs_classification":
+        return finding
+    return ConfigAuthorityFinding(
+        finding_id=finding.finding_id,
+        path=finding.path,
+        line=finding.line,
+        rule_id=finding.rule_id,
+        severity="info",
+        key=finding.key,
+        value_hash=finding.value_hash,
+        evidence=finding.evidence,
+        classification="allowed",
+        allow_reason="preexisting_changed_file_finding",
+        parser=finding.parser,
+        git_status=finding.git_status,
+    )
+
+
+def _changed_file_baseline_fingerprint_counts(
+    root: Path,
+    *,
+    merge_base: str,
+    status_entries: Sequence[tuple[str, str]],
+) -> Counter[tuple[str, str, str, str]]:
+    if not merge_base:
+        return Counter()
+    fingerprints: Counter[tuple[str, str, str, str]] = Counter()
+    baseline_paths = set(_git_branch_changed_relative_paths(root))
+    baseline_paths.update(relative_path for _, relative_path in status_entries)
+    for relative_path in sorted(baseline_paths):
+        baseline_text = _git_output(root, "show", f"{merge_base}:{relative_path}")
+        if not baseline_text:
+            continue
+        path = root / relative_path
+        source_file = AuditSourceFile(
+            path=path,
+            relative_path=relative_path,
+            sha256=_stable_hash(baseline_text),
+            size=len(baseline_text.encode("utf-8")),
+            mtime_ns=0,
+            git_status="baseline",
+            head_blob_sha="",
+            index_blob_sha="",
+            worktree_sha256="",
+        )
+        findings, _ = _scan_source_text(source_file=source_file, text=baseline_text)
+        fingerprints.update(finding.fingerprint for finding in findings)
+    return fingerprints
+
+
+def _changed_files_gate_base_finding() -> ConfigAuthorityFinding:
+    value_hash = _stable_hash("merge_base_unavailable")
+    return ConfigAuthorityFinding(
+        finding_id=_finding_id(
+            path=".",
+            line=0,
+            rule_id="changed_files_gate_base_unavailable",
+            key="changed_files_gate.merge_base",
+            value_hash=value_hash,
+        ),
+        path=".",
+        line=0,
+        rule_id="changed_files_gate_base_unavailable",
+        severity="medium",
+        key="changed_files_gate.merge_base",
+        value_hash=value_hash,
+        evidence="origin/main or main merge base unavailable",
+        classification="needs_classification",
+        allow_reason="",
+        parser="git",
+        git_status="unknown",
+    )
+
+
+def _scan_source_text(
+    *, source_file: AuditSourceFile, text: str
+) -> tuple[list[ConfigAuthorityFinding], list[CoverageGap]]:
     parser = _parser_name(source_file.path)
     candidates: list[tuple[int, str, object]] = []
     coverage_gaps: list[CoverageGap] = []
@@ -2291,15 +2432,20 @@ def _git_changed_files(root: Path) -> list[Path]:
 
 
 def _git_branch_changed_relative_paths(root: Path) -> list[str]:
-    merge_base = _git_output(root, "merge-base", "HEAD", "origin/main")
-    if not merge_base:
-        merge_base = _git_output(root, "merge-base", "HEAD", "main")
+    merge_base = _git_merge_base(root)
     if not merge_base:
         return []
     output = _git_output(root, "diff", "--name-only", "--diff-filter=ACMRT", merge_base, "HEAD")
     if not output:
         return []
     return [line for line in output.splitlines() if line]
+
+
+def _git_merge_base(root: Path) -> str:
+    merge_base = _git_output(root, "merge-base", "HEAD", "origin/main")
+    if merge_base:
+        return merge_base
+    return _git_output(root, "merge-base", "HEAD", "main")
 
 
 def _git_untracked_relative_paths(root: Path) -> list[str]:
