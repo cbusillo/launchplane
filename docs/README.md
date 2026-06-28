@@ -5,10 +5,8 @@ title: Launchplane Docs
 Use these docs as the source of truth for `launchplane`.
 
 - [architecture.md](architecture.md) — ownership boundaries and system shape.
-- [v2-foundation-adr.md](v2-foundation-adr.md) — accepted v2 foundation
-  direction, gated stack decisions, and anti-flapping migration rules.
 - [config-boundary.md](config-boundary.md) — bootstrap-vs-DB config authority
-  and the fallback-removal target.
+  and checked-in config authority limits.
 - [service-boundary.md](service-boundary.md) — Launchplane HTTP ingress, GitHub
   OIDC trust, and first API contracts.
 - [dokploy-service-deployments.md](dokploy-service-deployments.md) — contract
@@ -23,8 +21,6 @@ Use these docs as the source of truth for `launchplane`.
   descriptor, action safety, registry, and read-model endpoint contract.
 - [driver-development.md](driver-development.md) — when and how to add a new
   Launchplane driver type or product driver.
-- [compatibility-retirement.md](compatibility-retirement.md) — checkpoints for
-  deleting or demoting local CLI/file-backed compatibility surfaces.
 - [ui-standards.md](ui-standards.md) — tenant-first Launchplane UI direction and
   review rubric.
 - [operator-experience.md](operator-experience.md) — API-first product,

@@ -3,24 +3,21 @@ from unittest import TestCase
 
 
 class DocsContractsTests(TestCase):
-    def test_v2_route_migration_discipline_is_documented(self) -> None:
+    def test_post_v2_transition_plans_are_issue_backed(self) -> None:
+        docs_index = Path("docs/README.md").read_text(encoding="utf-8")
         service_boundary = Path("docs/service-boundary.md").read_text(encoding="utf-8")
-        foundation_adr = Path("docs/v2-foundation-adr.md").read_text(encoding="utf-8")
-        retirement_doc = Path("docs/compatibility-retirement.md").read_text(encoding="utf-8")
 
-        self.assertIn("Native Route Checklist", service_boundary)
-        self.assertIn("native FastAPI route owns the production path", service_boundary)
+        self.assertFalse(Path("docs/v2-foundation-adr.md").exists())
+        self.assertFalse(Path("docs/compatibility-retirement.md").exists())
+        self.assertNotIn("v2-foundation-adr.md", docs_index)
+        self.assertNotIn("compatibility-retirement.md", docs_index)
+        self.assertIn("Service Route Checklist", service_boundary)
+        self.assertIn("FastAPI owns the production path", service_boundary)
         self.assertIn("stable `operation_id`", service_boundary)
         self.assertIn("maximum body-size behavior", service_boundary)
         self.assertIn("`400`, `413`, `401`, and `403`", service_boundary)
         self.assertIn("deletes obsolete compatibility code", service_boundary)
-        self.assertIn("one route family at a time", foundation_adr)
-        self.assertIn("OpenAPI examples are contract examples", foundation_adr)
-        self.assertIn("production legacy WSGI bridge is removed", foundation_adr)
-        self.assertIn("dead-code removal, and transition-doc cleanup", foundation_adr)
-        self.assertIn("legacy WSGI HTTP fallback has passed this checkpoint", retirement_doc)
-        self.assertIn("explicit search for dead code and stale", retirement_doc)
-        self.assertIn("issue-backed exception", retirement_doc)
+        self.assertIn("issue-backed removal condition", service_boundary)
 
     def test_product_environment_evidence_includes_config_status(self) -> None:
         workflow_text = Path(".github/workflows/product-environment-evidence.yml").read_text(

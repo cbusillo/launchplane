@@ -245,5 +245,8 @@ deployment, promotion, rollback, backup, and preview paths.
 Future driver work should be incremental capability expansion behind the same
 service/read-model contract, not a second migration track.
 
-See [compatibility-retirement.md](compatibility-retirement.md) for the checkpoint
-rules that decide whether a local CLI/file-backed compatibility path can remain.
+Compatibility paths may remain only when they are local-development scaffolding,
+focused tests, read-only diagnostics, local rehearsal, or emergency inspection.
+Production-capable mutation paths must use typed Launchplane service routes with
+DB-backed authority or explicit operator input; obsolete compatibility code must
+be removed or tied to an issue-backed removal condition.

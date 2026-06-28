@@ -8,7 +8,6 @@
   "docs": {
     "index": "docs/README.md",
     "architecture": "docs/architecture.md",
-    "v2FoundationAdr": "docs/v2-foundation-adr.md",
     "configBoundary": "docs/config-boundary.md",
     "serviceBoundary": "docs/service-boundary.md",
     "dokployServiceDeployments": "docs/dokploy-service-deployments.md",
@@ -22,7 +21,6 @@
     "workGraphReadModel": "docs/work-graph-read-model.md",
     "mergeTrainPolicy": "docs/merge-train-policy.md",
     "agentContextBoundary": "docs/agent-context-boundary.md",
-    "compatibilityRetirement": "docs/compatibility-retirement.md",
     "operations": "docs/operations.md",
     "records": "docs/records.md",
     "secrets": "docs/secrets.md",
