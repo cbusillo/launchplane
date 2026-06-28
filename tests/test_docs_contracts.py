@@ -32,6 +32,31 @@ class DocsContractsTests(TestCase):
         self.assertIn("config-status-summary.json", workflow_text)
         self.assertIn("product-environment-evidence-results/*-summary.json", workflow_text)
 
+    def test_post_v2_smoke_evidence_is_durable_and_sanitized(self) -> None:
+        deploy_workflow = Path(".github/workflows/deploy-launchplane.yml").read_text(
+            encoding="utf-8"
+        )
+        odoo_smoke_workflow = Path(".github/workflows/odoo-driver-route-smoke.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Capture v2 deployed smoke evidence", deploy_workflow)
+        self.assertIn("launchplane-v2-deployed-smoke.json", deploy_workflow)
+        self.assertIn("actions/upload-artifact@v7", deploy_workflow)
+        self.assertIn("/v1/health", deploy_workflow)
+        self.assertIn("/v1/service/runtime", deploy_workflow)
+        self.assertIn("/openapi.json", deploy_workflow)
+        self.assertIn("/v1/work-graph/snapshot", deploy_workflow)
+        self.assertIn("image_reference", deploy_workflow)
+        self.assertIn("jq -s '{status: \"ok\", results: .}'", deploy_workflow)
+
+        self.assertIn("odoo-driver-route-smoke-registration.jsonl", odoo_smoke_workflow)
+        self.assertIn("odoo-driver-route-smoke-results.jsonl", odoo_smoke_workflow)
+        self.assertIn("Upload route smoke evidence", odoo_smoke_workflow)
+        self.assertIn("not 404 and not 5xx", odoo_smoke_workflow)
+        self.assertIn("Public registration probes", odoo_smoke_workflow)
+        self.assertIn("Authenticated route probes", odoo_smoke_workflow)
+
     def test_odoo_base_image_promotion_owner_is_documented(self) -> None:
         records_doc = Path("docs/records.md").read_text(encoding="utf-8")
 
