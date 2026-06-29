@@ -323,11 +323,11 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             panels=("lane_health", "deployment_evidence", "promotion_evidence"),
         ),
         DriverCapabilityDescriptor(
-            capability_id="legacy_source_ref_deployable",
-            label="Legacy source-ref deployable",
+            capability_id="source_ref_deployable",
+            label="Source-ref deployable",
             description=(
-                "Bridge legacy provider-backed git-ref deploys while products migrate "
-                "to immutable image deploys."
+                "Bridge provider-backed git-ref deploys for products that have not yet "
+                "moved to immutable image deploys."
             ),
             actions=("source_ref_deploy",),
             panels=("audit",),
