@@ -129,8 +129,10 @@ and HTTP health metadata before they can mutate provider state.
 
 The long-term target is still immutable image deploy. The source-ref bridge does
 not write generic-web deployment records; its durable replay surface is the
-service idempotency record. Treat it as a bounded replacement for legacy direct
-Dokploy workflows only while the product is moved to image publishing.
+service idempotency record. Treat it as a current but bounded Launchplane-owned
+replacement for direct Dokploy workflows only while the product is moved to
+image publishing. #1498 owns the stable product-repo integration surface and
+the eventual replacement/removal condition for this bridge.
 
 Launchplane also injects a non-secret runtime identity into Dokploy env during
 Launchplane-owned deploys. The standard keys are

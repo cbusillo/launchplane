@@ -262,7 +262,8 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(descriptor.base_driver_id, "")
         self.assertEqual(descriptor.context_patterns, ())
         self.assertIn("image_deployable", capability_ids)
-        self.assertIn("legacy_source_ref_deployable", capability_ids)
+        self.assertIn("source_ref_deployable", capability_ids)
+        self.assertNotIn("legacy_source_ref_deployable", capability_ids)
         self.assertIn("health_checked", capability_ids)
         self.assertIn("previewable", capability_ids)
         self.assertIn("preview_inventory_managed", capability_ids)
@@ -272,7 +273,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         }
         self.assertNotIn("source_ref_deploy", capabilities["image_deployable"].actions)
         self.assertEqual(
-            capabilities["legacy_source_ref_deployable"].actions,
+            capabilities["source_ref_deployable"].actions,
             ("source_ref_deploy",),
         )
         actions = {action.action_id: action for action in descriptor.actions}
@@ -532,6 +533,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service._GENERIC_WEB_DEPLOY_ROUTE,
                     control_plane_service.GenericWebDeployEnvelope,
                     "deploy driver",
+                ),
+                "source_ref_deploy": (
+                    control_plane_service._GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
+                    control_plane_service.GenericWebSourceRefDeployEnvelope,
+                    "source-ref deploy driver",
                 ),
                 "prod_promotion": (
                     control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE,

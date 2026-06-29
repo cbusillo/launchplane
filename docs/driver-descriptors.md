@@ -158,7 +158,11 @@ The `source_ref_deploy` action routes to the native FastAPI
 same product profile lane resolution as stable deploy and validates the request
 context and instance against the resolved lane before authorization,
 idempotency replay, or provider mutation. Descriptor discovery and driver authz
-metadata stay intact while native FastAPI owns execution.
+metadata stay intact while native FastAPI owns execution. This remains a
+current Launchplane-owned bridge for provider-backed compose targets that have
+not yet moved to immutable image deploys. The replacement path is tracked by the
+stable product-repo integration and image-deploy work in #1498; do not add new
+product-specific direct provider mutation around this route.
 
 The `prod_promotion` action routes to the native FastAPI
 `POST /v1/drivers/generic-web/prod-promotion` endpoint. It promotes a

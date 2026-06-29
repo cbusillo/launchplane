@@ -1498,7 +1498,11 @@ post-deploy-fail evidence to prevent repeating the completed provider mutation.
 Generic web source-ref deploys use native FastAPI
 `POST /v1/drivers/generic-web/source-ref-deploy`; the route validates the
 request context and instance against the resolved product profile lane before
-authorization, idempotency replay, or provider mutation.
+authorization, idempotency replay, or provider mutation. This route is a
+current but bounded Launchplane-owned bridge for provider-backed compose targets
+that still deploy from a tested source ref. #1498 owns the stable product-repo
+integration surface and the replacement/removal condition; product repos must
+not regain direct Dokploy mutation authority around this route.
 Product environment reads expose neutral provider-target identity only from
 explicit provider-target rows. Paired DB-backed Dokploy target and target-id
 records remain visible as provider-specific execution/history metadata and as
