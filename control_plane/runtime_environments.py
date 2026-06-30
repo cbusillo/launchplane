@@ -70,19 +70,11 @@ def resolve_runtime_environment_values(
         control_plane_root=control_plane_root,
         database_url=database_url,
     )
-    merged_values: dict[str, str] = _normalize_scalar_map(definition.shared_env)
-    context_definition = definition.contexts.get(context_name)
-    if context_definition is None:
-        raise click.ClickException(
-            f"Runtime environments file has no context definition for {context_name!r}."
-        )
-    merged_values.update(_normalize_scalar_map(context_definition.shared_env))
-    instance_definition = context_definition.instances.get(instance_name)
-    if instance_definition is None:
-        raise click.ClickException(
-            f"Runtime environments file has no instance definition for {context_name}/{instance_name}."
-        )
-    merged_values.update(_normalize_scalar_map(instance_definition.env))
+    merged_values = resolve_values_from_definition(
+        definition=definition,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
     merged_values.update(
         resolve_tracked_target_environment_values(
             control_plane_root=control_plane_root,
@@ -97,6 +89,46 @@ def resolve_runtime_environment_values(
         instance_name=instance_name,
         database_url=database_url,
     )
+
+
+def resolve_values_from_definition(
+    *,
+    definition: RuntimeEnvironmentDefinition,
+    context_name: str,
+    instance_name: str,
+) -> dict[str, str]:
+    merged_values: dict[str, str] = _normalize_scalar_map(definition.shared_env)
+    context_definition = definition.contexts.get(context_name)
+    if context_definition is None:
+        raise click.ClickException(
+            f"Runtime environments file has no context definition for {context_name!r}."
+        )
+    merged_values.update(_normalize_scalar_map(context_definition.shared_env))
+    instance_definition = context_definition.instances.get(instance_name)
+    if instance_definition is None:
+        raise click.ClickException(
+            f"Runtime environments file has no instance definition for {context_name}/{instance_name}."
+        )
+    merged_values.update(_normalize_scalar_map(instance_definition.env))
+    return merged_values
+
+
+def resolve_optional_values_from_definition(
+    *,
+    definition: RuntimeEnvironmentDefinition,
+    context_name: str,
+    instance_name: str,
+) -> dict[str, str]:
+    merged_values: dict[str, str] = _normalize_scalar_map(definition.shared_env)
+    context_definition = definition.contexts.get(context_name)
+    if context_definition is None:
+        return merged_values
+    merged_values.update(_normalize_scalar_map(context_definition.shared_env))
+    instance_definition = context_definition.instances.get(instance_name)
+    if instance_definition is None:
+        return merged_values
+    merged_values.update(_normalize_scalar_map(instance_definition.env))
+    return merged_values
 
 
 def resolve_runtime_context_values(

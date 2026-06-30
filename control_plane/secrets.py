@@ -172,10 +172,29 @@ def _scope_matches_record(
     return record.context == context_name and record.instance == instance_name
 
 
-def _binding_for_secret(record_store: SecretReadStore, *, secret_id: str) -> SecretBinding | None:
-    for binding in record_store.list_secret_bindings(limit=None):
-        if binding.secret_id == secret_id and binding.status == SECRET_STATUS_CONFIGURED:
-            return binding
+def _binding_for_secret(
+    record_store: SecretReadStore,
+    *,
+    secret_id: str,
+    integration: str | None = None,
+    context_name: str | None = None,
+    instance_name: str | None = None,
+) -> SecretBinding | None:
+    for binding in record_store.list_secret_bindings(
+        integration=integration or "",
+        context_name=context_name or "",
+        instance_name=instance_name or "",
+        limit=None,
+    ):
+        if binding.secret_id != secret_id or binding.status != SECRET_STATUS_CONFIGURED:
+            continue
+        if integration is not None and binding.integration != integration:
+            continue
+        if context_name is not None and binding.context != context_name:
+            continue
+        if instance_name is not None and binding.instance != instance_name:
+            continue
+        return binding
     return None
 
 
@@ -190,27 +209,48 @@ def resolve_secret_values_for_integration(
     if store is None:
         return {}
     try:
-        candidate_records = [
-            record
-            for record in store.list_secret_records(integration=integration)
-            if record.status == SECRET_STATUS_CONFIGURED
-            and _scope_matches_record(
-                record, context_name=context_name, instance_name=instance_name
-            )
-        ]
-        candidate_records.sort(
-            key=lambda record: (_scope_rank(record.scope), record.updated_at, record.secret_id)
+        return resolve_secret_values_for_integration_from_store(
+            record_store=store,
+            integration=integration,
+            context_name=context_name,
+            instance_name=instance_name,
         )
-        resolved_values: dict[str, str] = {}
-        for record in candidate_records:
-            binding = _binding_for_secret(store, secret_id=record.secret_id)
-            if binding is None:
-                continue
-            version = store.read_secret_version(record.current_version_id)
-            resolved_values[binding.binding_key] = _decrypt_secret_value(version.ciphertext)
-        return resolved_values
     finally:
         store.close()
+
+
+def resolve_secret_values_for_integration_from_store(
+    *,
+    record_store: SecretReadStore,
+    integration: str,
+    context_name: str = "",
+    instance_name: str = "",
+) -> dict[str, str]:
+    candidate_records = [
+        record
+        for record in record_store.list_secret_records(integration=integration)
+        if record.status == SECRET_STATUS_CONFIGURED
+        and _scope_matches_record(
+            record, context_name=context_name, instance_name=instance_name
+        )
+    ]
+    candidate_records.sort(
+        key=lambda record: (_scope_rank(record.scope), record.updated_at, record.secret_id)
+    )
+    resolved_values: dict[str, str] = {}
+    for record in candidate_records:
+        binding = _binding_for_secret(
+            record_store,
+            secret_id=record.secret_id,
+            integration=record.integration,
+            context_name=record.context,
+            instance_name=record.instance,
+        )
+        if binding is None:
+            continue
+        version = record_store.read_secret_version(record.current_version_id)
+        resolved_values[binding.binding_key] = _decrypt_secret_value(version.ciphertext)
+    return resolved_values
 
 
 def overlay_dokploy_environment_values(
@@ -241,6 +281,26 @@ def overlay_runtime_environment_secret_values(
         context_name=context_name,
         instance_name=instance_name,
         database_url=database_url,
+    )
+    if not managed_values:
+        return environment_values
+    merged_values = dict(environment_values)
+    merged_values.update(managed_values)
+    return merged_values
+
+
+def overlay_runtime_environment_secret_values_from_store(
+    *,
+    environment_values: dict[str, str],
+    record_store: SecretReadStore,
+    context_name: str,
+    instance_name: str = "",
+) -> dict[str, str]:
+    managed_values = resolve_secret_values_for_integration_from_store(
+        record_store=record_store,
+        integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=context_name,
+        instance_name=instance_name,
     )
     if not managed_values:
         return environment_values

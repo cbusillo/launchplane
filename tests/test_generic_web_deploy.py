@@ -13,14 +13,23 @@ from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
+    ProductLaneHealthCheck,
+    ProductLaneHealthMonitoringPolicy,
     ProductLaneProfile,
     ProductPreviewProfile,
-    ProductLaneHealthMonitoringPolicy,
-    ProductLaneHealthCheck,
 )
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.secret_record import (
+    SecretAuditEvent,
+    SecretBinding,
+    SecretRecord,
+    SecretScope,
+    SecretVersion,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
+from control_plane import secrets as control_plane_secrets
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     GenericWebDeployStore,
@@ -74,8 +83,16 @@ class _DokployGenericWebDeployStore(_GenericWebDeployStore):
         provider_target: ProviderTargetRecord | None = None,
         dokploy_target: DokployTargetRecord | None = None,
         dokploy_target_id: DokployTargetIdRecord | None = None,
+        runtime_environment_records: tuple[RuntimeEnvironmentRecord, ...] = (),
+        secret_records: tuple[SecretRecord, ...] = (),
+        secret_versions: tuple[SecretVersion, ...] = (),
+        secret_bindings: tuple[SecretBinding, ...] = (),
     ) -> None:
         super().__init__(profile)
+        self.runtime_environment_records = runtime_environment_records
+        self.secret_records = secret_records
+        self.secret_versions = secret_versions
+        self.secret_bindings = secret_bindings
         self.provider_target = provider_target or ProviderTargetRecord(
             context="sellyouroutboard-testing",
             instance="testing",
@@ -133,6 +150,69 @@ class _DokployGenericWebDeployStore(_GenericWebDeployStore):
             return self.dokploy_target_id
         raise FileNotFoundError(f"{context_name}/{instance_name}")
 
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return tuple(
+            record
+            for record in self.runtime_environment_records
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]:
+        records = tuple(
+            record
+            for record in self.secret_records
+            if (not integration or record.integration == integration)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+        return records[:limit] if limit is not None else records
+
+    def read_secret_record(self, secret_id: str) -> SecretRecord:
+        for record in self.secret_records:
+            if record.secret_id == secret_id:
+                return record
+        raise FileNotFoundError(secret_id)
+
+    def read_secret_version(self, version_id: str) -> SecretVersion:
+        for version in self.secret_versions:
+            if version.version_id == version_id:
+                return version
+        raise FileNotFoundError(version_id)
+
+    def list_secret_versions(self, *, secret_id: str) -> tuple[SecretVersion, ...]:
+        return tuple(version for version in self.secret_versions if version.secret_id == secret_id)
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        bindings = tuple(
+            binding
+            for binding in self.secret_bindings
+            if (not integration or binding.integration == integration)
+            and (not context_name or binding.context == context_name)
+            and (not instance_name or binding.instance == instance_name)
+        )
+        return bindings[:limit] if limit is not None else bindings
+
+    def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]:
+        del secret_id
+        return ()
+
 
 def _profile(*, driver_id: str = "generic-web") -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
@@ -177,6 +257,61 @@ def _source_ref_worker_profile() -> LaunchplaneProductProfileRecord:
         ),
         updated_at="2026-06-12T20:00:00Z",
         source="test",
+    )
+
+
+def _runtime_secret_record(
+    *,
+    secret_id: str,
+    scope: SecretScope,
+    name: str,
+    version_id: str,
+    context: str = "",
+    instance: str = "",
+) -> SecretRecord:
+    return SecretRecord(
+        secret_id=secret_id,
+        scope=scope,
+        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        name=name,
+        context=context,
+        instance=instance,
+        description="Runtime secret test fixture",
+        current_version_id=version_id,
+        created_at="2026-04-30T22:00:00Z",
+        updated_at="2026-04-30T22:00:00Z",
+    )
+
+
+def _runtime_secret_version(
+    *, secret_id: str, version_id: str, plaintext_value: str
+) -> SecretVersion:
+    return SecretVersion(
+        version_id=version_id,
+        secret_id=secret_id,
+        created_at="2026-04-30T22:00:00Z",
+        ciphertext=control_plane_secrets._encrypt_secret_value(plaintext_value),
+    )
+
+
+def _runtime_secret_binding(
+    *,
+    secret_id: str,
+    binding_key: str,
+    context: str = "",
+    instance: str = "",
+    binding_id_suffix: str | None = None,
+    updated_at: str = "2026-04-30T22:00:00Z",
+) -> SecretBinding:
+    return SecretBinding(
+        binding_id=f"{secret_id}-binding-{binding_id_suffix or binding_key.lower().replace('_', '-')}",
+        secret_id=secret_id,
+        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        binding_key=binding_key,
+        context=context,
+        instance=instance,
+        created_at="2026-04-30T22:00:00Z",
+        updated_at=updated_at,
     )
 
 
@@ -801,22 +936,18 @@ class GenericWebDeployTests(unittest.TestCase):
         provider = DokployGenericWebDeployProvider()
         store = _DokployGenericWebDeployStore(_profile())
 
-        with patch(
-            "control_plane.workflows.generic_web_deploy_provider.control_plane_runtime_environments.resolve_runtime_environment_values",
-            return_value={},
-        ):
-            resolved = provider.resolve_deploy_target(
-                control_plane_root=Path("."),
-                request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
-                request_source_git_ref="abc123",
-                request_timeout_seconds=45,
-                request_no_cache=True,
-                record_store=store,
-                profile=_profile(),
-                lane=_profile().lanes[0],
-                normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
-                fallback_target_name="fallback-target",
-            )
+        resolved = provider.resolve_deploy_target(
+            control_plane_root=Path("."),
+            request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            request_source_git_ref="abc123",
+            request_timeout_seconds=45,
+            request_no_cache=True,
+            record_store=store,
+            profile=_profile(),
+            lane=_profile().lanes[0],
+            normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            fallback_target_name="fallback-target",
+        )
 
         self.assertEqual(resolved.ship_request.provider_id, "dokploy")
         self.assertEqual(resolved.ship_request.deploy_mode, "dokploy-application-api")
@@ -898,10 +1029,129 @@ class GenericWebDeployTests(unittest.TestCase):
         provider = DokployGenericWebDeployProvider()
         store = StoreWithDangerousListMethods(_profile())
 
-        with patch(
-            "control_plane.workflows.generic_web_deploy_provider.control_plane_runtime_environments.resolve_runtime_environment_values",
-            return_value={},
+        resolved = provider.resolve_deploy_target(
+            control_plane_root=Path("."),
+            request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            request_source_git_ref="abc123",
+            request_timeout_seconds=45,
+            request_no_cache=True,
+            record_store=store,
+            profile=_profile(),
+            lane=_profile().lanes[0],
+            normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            fallback_target_name="fallback-target",
+        )
+
+        self.assertEqual(resolved.resolved_target.target_id, "target-123")
+
+    def test_dokploy_provider_uses_db_runtime_environment_ship_mode_override(
+        self,
+    ) -> None:
+        provider = DokployGenericWebDeployProvider()
+        store = _DokployGenericWebDeployStore(
+            _profile(),
+            runtime_environment_records=(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="sellyouroutboard-testing",
+                    env={"DOKPLOY_SHIP_MODE": "compose"},
+                    updated_at="2026-04-30T22:00:00Z",
+                    source_label="test",
+                ),
+            ),
+        )
+
+        resolved = provider.resolve_deploy_target(
+            control_plane_root=Path("."),
+            request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            request_source_git_ref="abc123",
+            request_timeout_seconds=45,
+            request_no_cache=True,
+            record_store=store,
+            profile=_profile(),
+            lane=_profile().lanes[0],
+            normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            fallback_target_name="fallback-target",
+        )
+
+        self.assertEqual(resolved.ship_request.deploy_mode, "dokploy-compose-api")
+
+    def test_dokploy_provider_ignores_sparse_runtime_environment_records(
+        self,
+    ) -> None:
+        provider = DokployGenericWebDeployProvider()
+        store = _DokployGenericWebDeployStore(
+            _profile(),
+            runtime_environment_records=(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="other-context",
+                    env={"DOKPLOY_SHIP_MODE": "compose"},
+                    updated_at="2026-04-30T22:00:00Z",
+                    source_label="test",
+                ),
+            ),
+        )
+
+        resolved = provider.resolve_deploy_target(
+            control_plane_root=Path("."),
+            request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            request_source_git_ref="abc123",
+            request_timeout_seconds=45,
+            request_no_cache=True,
+            record_store=store,
+            profile=_profile(),
+            lane=_profile().lanes[0],
+            normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            fallback_target_name="fallback-target",
+        )
+
+        self.assertEqual(resolved.ship_request.deploy_mode, "dokploy-application-api")
+
+    def test_dokploy_provider_uses_managed_runtime_secret_ship_mode_override(
+        self,
+    ) -> None:
+        provider = DokployGenericWebDeployProvider()
+        secret_id = "secret-runtime-ship-mode-syo-testing"
+        version_id = f"{secret_id}-version-current"
+
+        with patch.dict(
+            "os.environ",
+            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
         ):
+            store = _DokployGenericWebDeployStore(
+                _profile(),
+                secret_records=(
+                    _runtime_secret_record(
+                        secret_id=secret_id,
+                        scope="context",
+                        name="dokploy-ship-mode",
+                        version_id=version_id,
+                        context="sellyouroutboard-testing",
+                    ),
+                ),
+                secret_versions=(
+                    _runtime_secret_version(
+                        secret_id=secret_id,
+                        version_id=version_id,
+                        plaintext_value="compose",
+                    ),
+                ),
+                secret_bindings=(
+                    _runtime_secret_binding(
+                        secret_id=secret_id,
+                        binding_key="STALE_DOKPLOY_SHIP_MODE",
+                        context="other-context",
+                        binding_id_suffix="stale",
+                        updated_at="2026-04-30T22:01:00Z",
+                    ),
+                    _runtime_secret_binding(
+                        secret_id=secret_id,
+                        binding_key="DOKPLOY_SHIP_MODE",
+                        context="sellyouroutboard-testing",
+                    ),
+                ),
+            )
             resolved = provider.resolve_deploy_target(
                 control_plane_root=Path("."),
                 request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
@@ -915,7 +1165,78 @@ class GenericWebDeployTests(unittest.TestCase):
                 fallback_target_name="fallback-target",
             )
 
-        self.assertEqual(resolved.resolved_target.target_id, "target-123")
+        self.assertEqual(resolved.ship_request.deploy_mode, "dokploy-compose-api")
+
+    def test_dokploy_provider_prefers_context_instance_runtime_secret_over_global(
+        self,
+    ) -> None:
+        provider = DokployGenericWebDeployProvider()
+        global_secret_id = "secret-runtime-ship-mode-global"
+        global_version_id = f"{global_secret_id}-version-current"
+        instance_secret_id = "secret-runtime-ship-mode-syo-testing-instance"
+        instance_version_id = f"{instance_secret_id}-version-current"
+
+        with patch.dict(
+            "os.environ",
+            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+        ):
+            store = _DokployGenericWebDeployStore(
+                _profile(),
+                secret_records=(
+                    _runtime_secret_record(
+                        secret_id=global_secret_id,
+                        scope="global",
+                        name="dokploy-ship-mode-global",
+                        version_id=global_version_id,
+                    ),
+                    _runtime_secret_record(
+                        secret_id=instance_secret_id,
+                        scope="context_instance",
+                        name="dokploy-ship-mode-testing",
+                        version_id=instance_version_id,
+                        context="sellyouroutboard-testing",
+                        instance="testing",
+                    ),
+                ),
+                secret_versions=(
+                    _runtime_secret_version(
+                        secret_id=global_secret_id,
+                        version_id=global_version_id,
+                        plaintext_value="application",
+                    ),
+                    _runtime_secret_version(
+                        secret_id=instance_secret_id,
+                        version_id=instance_version_id,
+                        plaintext_value="compose",
+                    ),
+                ),
+                secret_bindings=(
+                    _runtime_secret_binding(
+                        secret_id=global_secret_id,
+                        binding_key="DOKPLOY_SHIP_MODE",
+                    ),
+                    _runtime_secret_binding(
+                        secret_id=instance_secret_id,
+                        binding_key="DOKPLOY_SHIP_MODE",
+                        context="sellyouroutboard-testing",
+                        instance="testing",
+                    ),
+                ),
+            )
+            resolved = provider.resolve_deploy_target(
+                control_plane_root=Path("."),
+                request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                request_source_git_ref="abc123",
+                request_timeout_seconds=45,
+                request_no_cache=True,
+                record_store=store,
+                profile=_profile(),
+                lane=_profile().lanes[0],
+                normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                fallback_target_name="fallback-target",
+            )
+
+        self.assertEqual(resolved.ship_request.deploy_mode, "dokploy-compose-api")
 
     def test_resolve_generic_web_profile_lane_rejects_missing_lane(self) -> None:
         store = _GenericWebDeployStore(_profile())
