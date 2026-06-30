@@ -1966,6 +1966,7 @@ ODOO_DB_PASSWORD = "file-secret"
                         "--source-label",
                         "issue-110-test",
                         "--apply",
+                        "--allow-direct-db-mutation",
                     ],
                 )
                 resolved_values = (
@@ -1995,6 +1996,51 @@ ODOO_DB_PASSWORD = "file-secret"
                 audit_events = store.list_secret_audit_events(secret_id=secret_records[0].secret_id)
                 self.assertEqual(audit_events[0].actor, "operator@example.com")
                 self.assertEqual(audit_events[0].metadata["source"], "issue-110-test")
+            finally:
+                store.close()
+
+    def test_product_config_apply_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            input_file = control_plane_root / "product-config.json"
+            _write_runtime_key_safety_policy(database_url=database_url)
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                        "runtime_env": {"CONTACT_EMAIL_MODE": "smtp"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_DATABASE_URL": database_url},
+                clear=True,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "product-config",
+                        "apply",
+                        "--input-file",
+                        str(input_file),
+                        "--apply",
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Direct local DB mutation is restricted", result.output)
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                self.assertEqual(store.list_runtime_environment_records(), ())
+                self.assertEqual(store.list_secret_records(), ())
             finally:
                 store.close()
 
@@ -2178,6 +2224,7 @@ ODOO_DB_PASSWORD = "file-secret"
                         "--input-file",
                         str(input_file),
                         "--apply",
+                        "--allow-direct-db-mutation",
                     ],
                 )
 
@@ -2236,6 +2283,7 @@ ODOO_DB_PASSWORD = "file-secret"
                         "--input-file",
                         str(input_file),
                         "--apply",
+                        "--allow-direct-db-mutation",
                     ],
                 )
 

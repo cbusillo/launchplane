@@ -3143,6 +3143,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                     database_url,
                     "--manifest-file",
                     str(manifest_path),
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -3152,6 +3153,28 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(payload["product"], "example-site")
         self.assertEqual(payload["secret_binding_count"], 1)
         self.assertNotIn("secret_id", payload["secret_bindings"][0])
+
+    def test_product_onboarding_cli_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temporary_directory / "db.sqlite3")
+            manifest_path = temporary_directory / "product-onboarding.json"
+            manifest_path.write_text(json.dumps(_manifest_payload()))
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "product-onboarding",
+                    "apply",
+                    "--database-url",
+                    database_url,
+                    "--manifest-file",
+                    str(manifest_path),
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,11 @@ from control_plane.workflows.product_onboarding import apply_product_onboarding_
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
+_DIRECT_DB_MUTATION_MESSAGE = (
+    "Direct local DB mutation is restricted after the Launchplane service boundary. "
+    "Use the deployed service route or operator workflow for shared/production changes, "
+    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
+)
 
 
 def register_product_config_commands(
@@ -72,6 +77,12 @@ def product_onboarding() -> None:
 @click.option("--source-label", default="product-config-apply", show_default=True)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False)
 @click.option("--apply", "apply_changes", is_flag=True, default=False)
+@click.option(
+    "--allow-direct-db-mutation",
+    is_flag=True,
+    default=False,
+    help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+)
 def product_config_apply(
     database_url: str,
     input_file: Path,
@@ -79,9 +90,12 @@ def product_config_apply(
     source_label: str,
     dry_run: bool,
     apply_changes: bool,
+    allow_direct_db_mutation: bool,
 ) -> None:
     if dry_run == apply_changes:
         raise click.ClickException("Choose exactly one of --dry-run or --apply.")
+    if apply_changes and not allow_direct_db_mutation:
+        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
 
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
@@ -114,7 +128,21 @@ def product_config_apply(
     help="Operator-approved JSON product onboarding manifest.",
 )
 @click.option("--updated-at", default="", help="Override manifest updated_at timestamp.")
-def product_onboarding_apply(database_url: str, manifest_file: Path, updated_at: str) -> None:
+@click.option(
+    "--allow-direct-db-mutation",
+    is_flag=True,
+    default=False,
+    help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+)
+def product_onboarding_apply(
+    database_url: str,
+    manifest_file: Path,
+    updated_at: str,
+    allow_direct_db_mutation: bool,
+) -> None:
+    if not allow_direct_db_mutation:
+        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
+
     callbacks = _product_onboarding_apply_callbacks()
     try:
         manifest_payload = json.loads(manifest_file.read_text())
