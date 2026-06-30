@@ -136,6 +136,9 @@ GITHUB_ENV_REFERENCE_PATTERN = re.compile(r"^env\.[A-Za-z0-9_.-]+$")
 GITHUB_STEP_OUTPUT_REFERENCE_PATTERN = re.compile(
     r"^steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+$"
 )
+GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN = re.compile(
+    r"^(?:github|steps\.[A-Za-z0-9_-]+\.outputs)\.[A-Za-z0-9_.-]+$"
+)
 GIT_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_ROUTE_PATH_FORWARDING_PATTERN = re.compile(
     r"^(?:inputs\.[A-Za-z0-9_.-]+|steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+)$"
@@ -176,6 +179,14 @@ WORKFLOW_OPERATOR_INPUT_VALUE_KEYS = frozenset(
         "TARGET_ID",
         "TARGET_NAME",
         "TARGET_TYPE",
+    )
+)
+WORKFLOW_LAUNCHPLANE_OPERATOR_VAR_KEYS = frozenset(
+    (
+        "LAUNCHPLANE_CONTEXT",
+        "LAUNCHPLANE_INSTANCE",
+        "LAUNCHPLANE_PRODUCT",
+        "LAUNCHPLANE_PUBLIC_URL",
     )
 )
 LAUNCHPLANE_SELF_MANAGEMENT_WORKFLOW_PATHS = frozenset(
@@ -1962,6 +1973,12 @@ def _allow_reason(
         value=value,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_image_artifact_mechanic(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_launchplane_tool_checkout_reference(
         path=normalized,
         key=key,
@@ -1999,6 +2016,12 @@ def _allow_reason(
     ):
         return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_operator_input_reference(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_launchplane_operator_var(
         path=normalized,
         key=key,
         value=value,
@@ -2085,8 +2108,8 @@ def _is_launchplane_public_url_reference(*, path: str, key: str, value: object) 
     ):
         return True
     key_text = key.upper().replace(".", "_").replace("-", "_")
-    if key == "LAUNCHPLANE_URL":
-        return value_text == "${{ vars.LAUNCHPLANE_PUBLIC_URL }}"
+    if key == "LAUNCHPLANE_URL" and value_text == "${{ vars.LAUNCHPLANE_PUBLIC_URL }}":
+        return True
     if key_text == "LAUNCHPLANE_URL":
         return value_text in {
             "${{ env.LAUNCHPLANE_SERVICE_URL }}",
@@ -2148,6 +2171,18 @@ def _is_workflow_operator_input_reference(*, path: str, key: str, value: object)
         return False
     value_text = _string_value(value).strip().rstrip(",")
     return value_text in allowed_values
+
+
+def _is_workflow_launchplane_operator_var(*, path: str, key: str, value: object) -> bool:
+    if path != ".github/workflows/launchplane-deploy.yml":
+        return False
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    if key_text == "LAUNCHPLANE_URL":
+        key_text = "LAUNCHPLANE_PUBLIC_URL"
+    if key_text not in WORKFLOW_LAUNCHPLANE_OPERATOR_VAR_KEYS:
+        return False
+    value_text = _string_value(value).strip().rstrip(",")
+    return value_text == f"${{{{ vars.{key_text} }}}}"
 
 
 def _is_workflow_context_reference_restricted_key(key: str) -> bool:
@@ -2253,6 +2288,43 @@ def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
     if key_text == "PATH" and re.fullmatch(r"[A-Za-z0-9_.-]+\.json", value_text):
         return True
     return False
+
+
+def _is_workflow_image_artifact_mechanic(*, path: str, key: str, value: object) -> bool:
+    if path != ".github/workflows/launchplane-deploy.yml":
+        return False
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    value_text = _string_value(value).strip()
+    if key_text == "CONTEXT" and value_text == ".":
+        return True
+    if key_text == "FILE" and re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", value_text):
+        return True
+    if key_text in {"IMAGE_REPOSITORY", "TAGS"} and _is_github_context_or_step_output_reference(
+        value_text
+    ):
+        return True
+    if key_text == "PASSWORD" and value_text == "${{ github.token }}":
+        return True
+    if key_text == "IDEMPOTENCY_KEY" and _is_image_deploy_idempotency_key(value_text):
+        return True
+    return False
+
+
+def _is_github_context_or_step_output_reference(value_text: str) -> bool:
+    match = GITHUB_EXPRESSION_PATTERN.match(value_text)
+    if match is None:
+        return False
+    return bool(GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
+
+
+def _is_image_deploy_idempotency_key(value_text: str) -> bool:
+    if "${{ secrets." in value_text:
+        return False
+    if "${{ vars.LAUNCHPLANE_" not in value_text:
+        return False
+    if "${{ github.event.workflow_run.head_sha }}" not in value_text:
+        return False
+    return "${{ steps." in value_text and ".outputs.artifact_id }}" in value_text
 
 
 def _is_workflow_input_mechanic_default(*, path: str, key: str, value: object) -> bool:

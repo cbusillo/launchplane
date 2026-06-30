@@ -1559,6 +1559,21 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (".github/workflows/ci.yml", "context", "."),
             (
+                ".github/workflows/launchplane-deploy.yml",
+                "IMAGE_REPOSITORY",
+                "${{ steps.image_metadata.outputs.image_repository }}",
+            ),
+            (
+                ".github/workflows/launchplane-deploy.yml",
+                "idempotency-key",
+                "generic-web-deploy:${{ vars.LAUNCHPLANE_PRODUCT }}:${{ vars.LAUNCHPLANE_CONTEXT }}:${{ vars.LAUNCHPLANE_INSTANCE }}:${{ github.event.workflow_run.head_sha }}:${{ steps.launchplane_payload.outputs.artifact_id }}",
+            ),
+            (
+                ".github/workflows/launchplane-deploy.yml",
+                "password",
+                "${{ github.token }}",
+            ),
+            (
                 ".github/workflows/odoo-driver-route-smoke.yml",
                 "odoo-driver-route-smoke",
                 "${{ env.PRODUCT }}:${{ env.CONTEXT_NAME }}",
@@ -1624,6 +1639,26 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
                 "GITHUB_TOKEN",
                 "write",
+            ),
+            (
+                ".github/workflows/generic-workflow.yml",
+                "IMAGE_REPOSITORY",
+                "${{ steps.image_metadata.outputs.image_repository }}",
+            ),
+            (
+                ".github/workflows/launchplane-deploy.yml",
+                "IMAGE_REPOSITORY",
+                "ghcr.io/example/product",
+            ),
+            (
+                ".github/workflows/launchplane-deploy.yml",
+                "idempotency-key",
+                "generic-web-deploy:${{ vars.LAUNCHPLANE_PRODUCT }}:${{ secrets.RUNTIME_SECRET }}:${{ github.event.workflow_run.head_sha }}:${{ steps.launchplane_payload.outputs.artifact_id }}",
+            ),
+            (
+                ".github/workflows/generic-workflow.yml",
+                "password",
+                "${{ github.token }}",
             ),
             (
                 ".github/workflows/launchplane-config-authority.yml",
@@ -2639,6 +2674,106 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         payload = json.loads(result.output)
         gate = cast("dict[str, object]", payload["gate"])
         self.assertEqual(gate["status"], "pass")
+
+    def test_cli_product_repo_gate_allows_image_artifact_deploy_workflow(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-deploy.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Deploy\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/image-deploy")
+            workflow.write_text(
+                "---\n"
+                "name: Launchplane Deploy\n\n"
+                '"on":\n'
+                "  workflow_run:\n"
+                "    workflows: [Test Suite]\n"
+                "    types: [completed]\n\n"
+                "permissions:\n"
+                "  contents: read\n"
+                "  id-token: write\n"
+                "  packages: write\n\n"
+                "jobs:\n"
+                "  deploy:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v6\n"
+                "        with:\n"
+                "          ref: ${{ github.event.workflow_run.head_sha }}\n"
+                "      - name: Prepare image metadata\n"
+                "        id: image_metadata\n"
+                "        run: |\n"
+                "          image_repository=\"ghcr.io/${GITHUB_REPOSITORY,,}\"\n"
+                "          image_tag=\"sha-${GITHUB_SHA}\"\n"
+                "          echo \"image_repository=${image_repository}\" >> \"$GITHUB_OUTPUT\"\n"
+                "          echo \"image_reference=${image_repository}:${image_tag}\" >> \"$GITHUB_OUTPUT\"\n"
+                "      - uses: docker/login-action@v4\n"
+                "        with:\n"
+                "          registry: ghcr.io\n"
+                "          username: ${{ github.actor }}\n"
+                "          password: ${{ github.token }}\n"
+                "      - id: build_image\n"
+                "        uses: docker/build-push-action@v7\n"
+                "        with:\n"
+                "          context: .\n"
+                "          file: docker/Dockerfile.sync\n"
+                "          push: true\n"
+                "          tags: ${{ steps.image_metadata.outputs.image_reference }}\n"
+                "      - id: launchplane_payload\n"
+                "        env:\n"
+                "          IMAGE_REPOSITORY: ${{ steps.image_metadata.outputs.image_repository }}\n"
+                "          IMAGE_DIGEST: ${{ steps.build_image.outputs.digest }}\n"
+                "          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}\n"
+                "          LAUNCHPLANE_PUBLIC_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}\n"
+                "          LAUNCHPLANE_PRODUCT: ${{ vars.LAUNCHPLANE_PRODUCT }}\n"
+                "          LAUNCHPLANE_CONTEXT: ${{ vars.LAUNCHPLANE_CONTEXT }}\n"
+                "          LAUNCHPLANE_INSTANCE: ${{ vars.LAUNCHPLANE_INSTANCE }}\n"
+                "        run: |\n"
+                "          artifact_id=\"${IMAGE_REPOSITORY}@${IMAGE_DIGEST}\"\n"
+                "          echo \"artifact_id=${artifact_id}\" >> \"$GITHUB_OUTPUT\"\n"
+                "      - uses: cbusillo/launchplane/.github/actions/launchplane-request@main\n"
+                "        with:\n"
+                "          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}\n"
+                "          route-path: /v1/drivers/generic-web/deploy\n"
+                "          payload-file: ${{ steps.launchplane_payload.outputs.payload_path }}\n"
+                "          idempotency-key: >-\n"
+                "            generic-web-deploy:${{ vars.LAUNCHPLANE_PRODUCT }}:${{ vars.LAUNCHPLANE_CONTEXT }}:${{ vars.LAUNCHPLANE_INSTANCE }}:${{ github.event.workflow_run.head_sha }}:${{ steps.launchplane_payload.outputs.artifact_id }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "pass")
+        thin_connector_keys = {
+            finding["key"]
+            for finding in _findings(payload)
+            if finding["allow_reason"] == "thin_connector_input"
+        }
+        self.assertTrue(
+            {"password", "context", "file", "IMAGE_REPOSITORY", "idempotency-key"}
+            <= thin_connector_keys
+        )
 
     def test_cli_product_repo_gate_allows_compact_launchplane_tool_checkout(self) -> None:
         with TemporaryDirectory() as temp_dir:

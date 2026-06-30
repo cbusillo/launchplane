@@ -331,6 +331,33 @@ Product workflows that only need to send JSON to an existing Launchplane route
 should not carry their own GitHub OIDC transport client. Use the Launchplane
 repo action instead:
 
+Generic web/service repos that deploy as Dokploy applications should build and
+push their own immutable image, then submit the image digest to Launchplane's
+`generic-web` deploy route. The workflow may derive the GHCR repository from the
+current GitHub repository, publish with `docker/login-action` and
+`docker/build-push-action`, and pass Launchplane product/context/instance values
+from GitHub variables. The checked-in workflow must not hard-code provider
+targets, Dokploy operations, runtime domains, managed secrets, or fixed product
+topology; Launchplane resolves those from DB-backed product and target records.
+
+For this shape, `.github/workflows/launchplane-deploy.yml` is the supported thin
+connector workflow name. It should call:
+
+```yaml
+- name: Request Launchplane deploy
+  uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+  with:
+    launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+    route-path: /v1/drivers/generic-web/deploy
+    payload-file: ${{ steps.launchplane_payload.outputs.payload_path }}
+    idempotency-key: >-
+      generic-web-deploy:${{ vars.LAUNCHPLANE_PRODUCT }}:${{ vars.LAUNCHPLANE_CONTEXT }}:${{ vars.LAUNCHPLANE_INSTANCE }}:${{ github.event.workflow_run.head_sha }}:${{ steps.launchplane_payload.outputs.artifact_id }}
+```
+
+The payload should include the product key, instance, immutable image digest as
+`artifact_id`, and tested source SHA. Mutable image tags and checked-in image
+references are not durable deploy inputs.
+
 ```yaml
 - name: Request Launchplane preview refresh
   uses: cbusillo/launchplane/.github/actions/launchplane-request@main
