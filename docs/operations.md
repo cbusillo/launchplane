@@ -34,8 +34,9 @@ API path instead of running the local command from an arbitrary checkout.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 - `storage provider-target-audit`: run the read-only provider-target parity
   preflight before backfill or provider-target authority cutover.
-- `storage provider-target-backfill`: dry-run or apply explicit provider-target
-  rows from complete Dokploy target/id pairs.
+- `storage provider-target-backfill`: dry-run explicit provider-target row
+  projections from complete Dokploy target/id pairs; shared/live apply uses the
+  service-backed Provider Target Operations workflow.
 
 `deployments write`, `promotions write`, `inventory write-from-deployment`,
 `inventory write-from-promotion`, and `release-tuples write-from-promotion`
@@ -81,29 +82,31 @@ missing, partial Dokploy pairs exist, or explicit rows disagree with the
 Dokploy-derived projection. Backfill and authority cutover should not proceed
 until the audit has no unresolved blockers for the affected lanes.
 
-Use the backfill command to seed missing physical rows after reviewing the audit
-output and after dual-write is deployed:
+Use the backfill command to preview missing physical rows after reviewing the
+audit output and after dual-write is deployed:
 
 ```bash
 uv run launchplane storage provider-target-backfill \
   --database-url "$LAUNCHPLANE_DATABASE_URL"
 ```
 
-Dry-run is the default. It reports `would-create`, `skipped-exists`,
-`skipped-incomplete`, `skipped-conflict`, and `unsupported-provider` rows without
-writing anything. Review incomplete pairs and conflicts before applying; conflicts
-are never overwritten automatically. Apply only after the dry-run output is
-acceptable:
+The local command is report-only. It emits dry-run JSON for `would-create`,
+`skipped-exists`, `skipped-incomplete`, `skipped-conflict`, and
+`unsupported-provider` rows without writing anything. Review incomplete pairs and
+conflicts before applying; conflicts are never overwritten automatically.
+Shared/live apply runs through the deployed service route and is normally
+launched by the manual `Provider Target Operations` workflow:
 
 ```bash
-uv run launchplane storage provider-target-backfill \
-  --database-url "$LAUNCHPLANE_DATABASE_URL" \
-  --apply
+gh workflow run provider-target-operations.yml \
+  -f mode=backfill-apply \
+  -f target_set=all \
+  -f reason="issue-backed provider-target backfill"
 ```
 
-Backfill writes only complete, non-conflicting Dokploy-derived rows and is
-idempotent. Re-run `storage provider-target-audit` after apply and require clean
-evidence before provider-target authority cutover.
+Service-backed backfill writes only complete, non-conflicting Dokploy-derived
+rows and is idempotent. Re-run `storage provider-target-audit` after apply and
+require clean evidence before provider-target authority cutover.
 
 Provider-target dual-write is active for Launchplane-owned target identity
 mutations: product onboarding, Dokploy target adoption/creation, product context

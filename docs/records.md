@@ -188,18 +188,17 @@ an ORM column/table or remains only in the evidence payload.
   with the neutral projection from paired Dokploy target and target-id records,
   reports missing halves and mismatches, and exits nonzero when unresolved
   blockers would make backfill or authority cutover unsafe.
-- `uv run launchplane storage provider-target-backfill` is the seeding path for
-  explicit provider-target rows. Dry-run is the default; `--apply`
-  writes only complete Dokploy target/id projections that have no conflicting
-  physical row. Existing matching physical rows are skipped without churn,
-  incomplete pairs are reported but not guessed, and conflicts or unsupported
-  provider rows are never overwritten automatically.
+- `uv run launchplane storage provider-target-backfill` is the local report-only
+  preview for explicit provider-target row seeding. It emits dry-run output for
+  complete Dokploy target/id projections, existing matching physical rows,
+  incomplete pairs, conflicts, and unsupported provider rows without writing
+  anything.
 - Shared and production backfill uses the deployed service route
   `POST /v1/provider-targets/operations`, normally through the manual
   `Provider Target Operations` workflow. The workflow records per-route audit,
-  dry-run, or apply evidence as artifacts and uses DB-backed
-  `provider_target.audit` or `provider_target.backfill` authz grants instead of
-  local checkout writes.
+  dry-run, or apply evidence as artifacts, writes only complete non-conflicting
+  projections, and uses DB-backed `provider_target.audit` or
+  `provider_target.backfill` authz grants instead of local checkout writes.
 - Shared ship and promotion request contracts require canonical flat target
   fields (`target_name`, `target_type`, `provider_id`, `target_category`, and
   `provider_target_type`) and reject `target_reference` compatibility input.

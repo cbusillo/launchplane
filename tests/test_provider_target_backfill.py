@@ -342,7 +342,7 @@ class ProviderTargetBackfillTests(unittest.TestCase):
             [("testing", "app-syo-testing")],
         )
 
-    def test_cli_dry_run_and_apply_emit_json(self) -> None:
+    def test_cli_dry_run_emits_json_without_writing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = _sqlite_database_url(database_path)
@@ -361,7 +361,27 @@ class ProviderTargetBackfillTests(unittest.TestCase):
                     database_url,
                 ],
             )
-            apply_result = CliRunner().invoke(
+            store = PostgresRecordStore(database_url=database_url)
+            physical_records = store.list_physical_provider_target_records()
+            store.close()
+
+        self.assertEqual(dry_run.exit_code, 0, dry_run.output)
+        dry_run_payload = json.loads(dry_run.output)
+        self.assertFalse(dry_run_payload["applied"])
+        self.assertEqual(dry_run_payload["counts"], {"would-create": 1})
+        self.assertEqual(physical_records, ())
+
+    def test_cli_apply_is_retired_before_writing(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = _sqlite_database_url(database_path)
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_dokploy_target_record(_dokploy_target_record())
+            store.write_dokploy_target_id_record(_dokploy_target_id_record())
+            store.close()
+
+            result = CliRunner().invoke(
                 main,
                 [
                     "storage",
@@ -372,22 +392,27 @@ class ProviderTargetBackfillTests(unittest.TestCase):
                 ],
             )
             store = PostgresRecordStore(database_url=database_url)
-            physical_record = store.read_provider_target_record(
-                context_name="syo", instance_name="prod"
-            )
+            physical_records = store.list_physical_provider_target_records()
             store.close()
 
-        self.assertEqual(dry_run.exit_code, 0, dry_run.output)
-        dry_run_payload = json.loads(dry_run.output)
-        self.assertFalse(dry_run_payload["applied"])
-        self.assertEqual(dry_run_payload["counts"], {"would-create": 1})
-        self.assertEqual(apply_result.exit_code, 0, apply_result.output)
-        apply_payload = json.loads(apply_result.output)
-        self.assertTrue(apply_payload["applied"])
-        self.assertEqual(apply_payload["counts"], {"created": 1})
-        self.assertEqual(physical_record.target_id, "app-syo-prod")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Local provider-target backfill apply is retired", result.output)
+        self.assertEqual(physical_records, ())
 
-    def test_cli_exits_nonzero_on_conflicts(self) -> None:
+    def test_cli_help_points_apply_to_provider_target_operations(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            ["storage", "provider-target-backfill", "--help"],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        normalized_output = " ".join(result.output.split())
+        self.assertIn(
+            "Retired local write path; use Provider Target Operations instead",
+            normalized_output,
+        )
+
+    def test_cli_dry_run_exits_nonzero_on_conflicts(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = _sqlite_database_url(database_path)
@@ -407,7 +432,6 @@ class ProviderTargetBackfillTests(unittest.TestCase):
                     "provider-target-backfill",
                     "--database-url",
                     database_url,
-                    "--apply",
                 ],
             )
 
