@@ -1910,26 +1910,6 @@ def _verify_ship_healthchecks(*, request: ShipRequest) -> None:
     )
 
 
-def _verify_healthcheck_urls(*, health_urls: tuple[str, ...], timeout_seconds: int) -> None:
-    if not health_urls:
-        raise click.ClickException("At least one Launchplane service health URL is required.")
-    if timeout_seconds <= 0:
-        raise click.ClickException(
-            "Launchplane service health timeout must be greater than zero seconds."
-        )
-    healthcheck_errors: list[str] = []
-    for healthcheck_url in health_urls:
-        try:
-            _wait_for_ship_healthcheck(url=healthcheck_url, timeout_seconds=timeout_seconds)
-            return
-        except click.ClickException as error:
-            healthcheck_errors.append(str(error))
-    raise click.ClickException(
-        "Launchplane service health verification failed for all configured URLs:\n"
-        + "\n".join(healthcheck_errors)
-    )
-
-
 def _launchplane_service_env_key_present(*, env_map: dict[str, str], env_key: str) -> bool:
     return bool(env_map.get(env_key, "").strip())
 
@@ -2411,107 +2391,6 @@ def _launchplane_service_target_preflight_error_message(
         return "Launchplane service Dokploy target preflight failed."
     rendered_blockers = "\n".join(f"- {str(blocker)}" for blocker in blockers)
     return f"Launchplane service Dokploy target preflight failed:\n{rendered_blockers}"
-
-
-def _apply_dokploy_image_reference(
-    *,
-    host: str,
-    token: str,
-    target_type: str,
-    target_id: str,
-    image_reference: str,
-    target_payload: control_plane_dokploy.JsonObject | None = None,
-) -> dict[str, object]:
-    normalized_image_reference = image_reference.strip()
-    if not normalized_image_reference:
-        raise click.ClickException(
-            "Launchplane service deploy requires a non-empty image reference."
-        )
-    resolved_target_payload = target_payload or control_plane_dokploy.fetch_dokploy_target_payload(
-        host=host,
-        token=token,
-        target_type=target_type,
-        target_id=target_id,
-    )
-    raw_env_text = str(resolved_target_payload.get("env") or "")
-    env_map = control_plane_dokploy.parse_dokploy_env_text(raw_env_text)
-    previous_value_present = ARTIFACT_IMAGE_REFERENCE_ENV_KEY in env_map
-    previous_image_reference = env_map.get(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, "")
-    updated_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
-        raw_env_text,
-        updates={ARTIFACT_IMAGE_REFERENCE_ENV_KEY: normalized_image_reference},
-    )
-    if updated_env_text != raw_env_text:
-        control_plane_dokploy.update_dokploy_target_env(
-            host=host,
-            token=token,
-            target_type=target_type,
-            target_id=target_id,
-            target_payload=resolved_target_payload,
-            env_text=updated_env_text,
-        )
-    return {
-        "previous_image_reference": previous_image_reference,
-        "previous_image_reference_present": previous_value_present,
-        "image_reference_changed": updated_env_text != raw_env_text,
-    }
-
-
-def _restore_dokploy_image_reference(
-    *,
-    host: str,
-    token: str,
-    target_type: str,
-    target_id: str,
-    image_reference: str,
-    value_present: bool,
-) -> dict[str, object]:
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
-        host=host,
-        token=token,
-        target_type=target_type,
-        target_id=target_id,
-    )
-    raw_env_text = str(target_payload.get("env") or "")
-    if value_present:
-        restored_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
-            raw_env_text,
-            updates={ARTIFACT_IMAGE_REFERENCE_ENV_KEY: image_reference},
-        )
-    else:
-        restored_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
-            raw_env_text,
-            removals=(ARTIFACT_IMAGE_REFERENCE_ENV_KEY,),
-        )
-    if restored_env_text != raw_env_text:
-        control_plane_dokploy.update_dokploy_target_env(
-            host=host,
-            token=token,
-            target_type=target_type,
-            target_id=target_id,
-            target_payload=target_payload,
-            env_text=restored_env_text,
-        )
-    return {"image_reference_changed": restored_env_text != raw_env_text}
-
-
-def _trigger_and_wait_for_dokploy_target_deploy(
-    *,
-    host: str,
-    token: str,
-    target_type: str,
-    target_id: str,
-    deploy_timeout_seconds: int,
-    no_cache: bool,
-) -> dict[str, str]:
-    return control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy(
-        host=host,
-        token=token,
-        target_type=target_type,
-        target_id=target_id,
-        deploy_timeout_seconds=deploy_timeout_seconds,
-        no_cache=no_cache,
-    )
 
 
 def _resolve_dokploy_target(
@@ -3697,10 +3576,6 @@ register_service_commands(
         launchplane_service_target_preflight_error_message=(
             _launchplane_service_target_preflight_error_message
         ),
-        apply_dokploy_image_reference=_apply_dokploy_image_reference,
-        restore_dokploy_image_reference=_restore_dokploy_image_reference,
-        trigger_and_wait_for_dokploy_target_deploy=_trigger_and_wait_for_dokploy_target_deploy,
-        verify_healthcheck_urls=_verify_healthcheck_urls,
         inspect_local_launchplane_config_boundary=_inspect_local_launchplane_config_boundary,
         build_config_authority_audit=build_config_authority_audit,
         evaluate_config_authority_gate=evaluate_config_authority_gate,
