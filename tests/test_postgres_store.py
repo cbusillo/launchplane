@@ -1271,6 +1271,20 @@ class PostgresRecordStoreTests(unittest.TestCase):
             self.assertNotIn("payload", artifact_columns)
             store.close()
 
+    def test_ensure_schema_verifies_non_sqlite_schema_without_create_all(self) -> None:
+        store = object.__new__(PostgresRecordStore)
+        store._engine = Mock()
+        store._engine.url.get_backend_name.return_value = "postgresql"
+
+        with (
+            patch.object(store, "verify_schema") as verify_schema,
+            patch("control_plane.storage.postgres.Base.metadata.create_all") as create_all,
+        ):
+            store.ensure_schema()
+
+        verify_schema.assert_called_once_with()
+        create_all.assert_not_called()
+
     def test_shared_record_store_verifies_existing_schema_without_creating_it(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(

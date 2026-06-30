@@ -24,9 +24,10 @@ Launchplane uses SQLAlchemy ORM models as the persistence boundary and Alembic a
 the versioned migration mechanism for shared-service Postgres databases. Hosted
 service startup runs Alembic to the checked-in head revision before starting the
 HTTP service; schema or payload changes must therefore land as explicit Alembic
-revisions. Runtime code can still call `ensure_schema()` for compatibility and
-ephemeral test/local databases, but new production schema changes should not rely
-on implicit table creation.
+revisions. Runtime code can still call `ensure_schema()` for compatibility, but
+it only creates tables for local SQLite/test databases. For shared-service
+database URLs, `ensure_schema()` verifies that Alembic has already created the
+required tables and columns and fails closed when migrations are missing.
 
 For a fresh database, apply the current schema with:
 

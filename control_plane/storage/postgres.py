@@ -1519,6 +1519,9 @@ class PostgresRecordStore(HumanSessionStore):
         return "postgres"
 
     def ensure_schema(self) -> None:
+        if self._engine.url.get_backend_name() != "sqlite":
+            self.verify_schema()
+            return
         Base.metadata.create_all(self._engine)
 
     def verify_schema(self) -> None:
