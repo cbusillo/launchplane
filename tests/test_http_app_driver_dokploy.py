@@ -717,6 +717,13 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
+    _BOOTSTRAP_ENV = (
+        "DOCKER_IMAGE_REFERENCE=old\n"
+        "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
+        "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
+        "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+    )
+
     def _policy(self) -> LaunchplaneAuthzPolicy:
         return LaunchplaneAuthzPolicy.model_validate(
             {
@@ -776,7 +783,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                    return_value={"env": self._BOOTSTRAP_ENV},
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
@@ -836,7 +843,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                    return_value={"env": self._BOOTSTRAP_ENV},
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
@@ -878,7 +885,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                    return_value={"env": self._BOOTSTRAP_ENV},
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
@@ -918,6 +925,84 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_request")
 
+    async def test_self_deploy_stops_before_mutation_when_bootstrap_env_missing(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                ) as update_env_mock,
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                ) as trigger_mock,
+            ):
+                response = await _post_launchplane_self_deploy(
+                    app,
+                    self._payload(),
+                    idempotency_key="launchplane-self-deploy:missing-bootstrap-env",
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        update_env_mock.assert_not_called()
+        trigger_mock.assert_not_called()
+
+    async def test_self_deploy_accepts_postgres_database_url_alias(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+            bootstrap_env = self._BOOTSTRAP_ENV.replace(
+                "postgresql+psycopg://launchplane:test@db.internal:5432/launchplane",
+                "postgres://launchplane:test@db.internal:5432/launchplane",
+            )
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"env": bootstrap_env},
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                ) as update_env_mock,
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment",
+                    return_value={"deploymentId": "deploy-new"},
+                ) as trigger_mock,
+            ):
+                response = await _post_launchplane_self_deploy(
+                    app,
+                    self._payload(),
+                    idempotency_key="launchplane-self-deploy:postgres-alias",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        update_env_mock.assert_called_once()
+        trigger_mock.assert_called_once()
+
     async def test_self_deploy_rejects_remove_and_update_same_oauth_env_key(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(self._identity()),
@@ -954,10 +1039,12 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
                     return_value={
-                        "env": "DOCKER_IMAGE_REFERENCE=old\n"
-                        "LAUNCHPLANE_NPMPLUS_BASE_URL=https://npmplus.example\n"
-                        "LAUNCHPLANE_NPMPLUS_IDENTITY=automation@example.com\n"
-                        "LAUNCHPLANE_NPMPLUS_SECRET=npmplus-secret\n"
+                        "env": (
+                            self._BOOTSTRAP_ENV
+                            + "LAUNCHPLANE_NPMPLUS_BASE_URL=https://npmplus.example\n"
+                            + "LAUNCHPLANE_NPMPLUS_IDENTITY=automation@example.com\n"
+                            + "LAUNCHPLANE_NPMPLUS_SECRET=npmplus-secret\n"
+                        )
                     },
                 ),
                 patch(

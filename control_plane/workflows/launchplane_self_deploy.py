@@ -4,6 +4,7 @@ import base64
 import hashlib
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,6 +17,13 @@ from control_plane.workflows.ingress_provider import (
 )
 
 LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
+_DATABASE_URL_ENV_KEY = "LAUNCHPLANE_DATABASE_URL"
+_MASTER_ENCRYPTION_KEY_ENV_KEY = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
+_POLICY_ENV_KEYS = (
+    "LAUNCHPLANE_POLICY_TOML",
+    "LAUNCHPLANE_POLICY_B64",
+    "LAUNCHPLANE_POLICY_FILE",
+)
 LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
     {
         "LAUNCHPLANE_GITHUB_CLIENT_ID",
@@ -170,6 +178,8 @@ def execute_launchplane_self_deploy(
         updates=updates,
         removals=removals,
     )
+    updated_env_map = control_plane_dokploy.parse_dokploy_env_text(updated_env_text)
+    _validate_bootstrap_target_env(updated_env_map)
     if updated_env_text != raw_env_text:
         control_plane_dokploy.update_dokploy_target_env(
             host=host,
@@ -210,3 +220,26 @@ def execute_launchplane_self_deploy(
             sorted(env_key for env_key in request.oauth_env_removals if env_key in previous_env_map)
         ),
     )
+
+
+def _validate_bootstrap_target_env(env_map: dict[str, str]) -> None:
+    blockers: list[str] = []
+    database_url = env_map.get(_DATABASE_URL_ENV_KEY, "").strip()
+    if not database_url:
+        blockers.append("Launchplane self deploy target is missing LAUNCHPLANE_DATABASE_URL.")
+    else:
+        parsed_url = urlparse(database_url)
+        if parsed_url.scheme not in {"postgres", "postgresql"} and not parsed_url.scheme.startswith(
+            "postgresql+"
+        ):
+            blockers.append("Launchplane self deploy target database URL is not PostgreSQL.")
+        elif not parsed_url.hostname:
+            blockers.append("Launchplane self deploy target database URL is missing a host.")
+    if not env_map.get(_MASTER_ENCRYPTION_KEY_ENV_KEY, "").strip():
+        blockers.append(
+            "Launchplane self deploy target is missing LAUNCHPLANE_MASTER_ENCRYPTION_KEY."
+        )
+    if not any(env_map.get(env_key, "").strip() for env_key in _POLICY_ENV_KEYS):
+        blockers.append("Launchplane self deploy target is missing LAUNCHPLANE_POLICY_*.")
+    if blockers:
+        raise ValueError("Launchplane self deploy target preflight failed: " + "; ".join(blockers))
