@@ -85,6 +85,13 @@ records as repo-local authority.
 Product repos own image build and publish. Launchplane owns deploy selection and
 evidence after the image exists.
 
+The stable product-repo integration surface for this contract is image-backed
+generic-web deploy through `POST /v1/drivers/generic-web/deploy`, normally via
+the shared `cbusillo/launchplane/.github/actions/launchplane-request` action.
+The product repo submits immutable image identity plus the tested source SHA;
+Launchplane resolves lane, provider target, runtime environment, managed
+secrets, and deployment records from DB-backed authority.
+
 Publish images to the profile's `image.repository` and prefer digest deployment:
 
 ```text
@@ -103,6 +110,14 @@ Dokploy application's Docker image. Do not submit a mutable tag for service
 deploys. If a later slice adds generic artifact-manifest resolution for this
 path, the manifest must still resolve to the same `repository@sha256:digest`
 identity before Dokploy is mutated.
+
+RepairShopr Sync is the first live canary for this stable shape. The
+`cbusillo/repairshopr_api` product workflow built an immutable GHCR image,
+called deployed Launchplane, and received `deploy_status: pass` for deployment
+record `deployment-20260630T034901Z-repairshopr-sync-prod` after Launchplane PR
+#1503 deployed. Treat that run as proof that service-shaped worker products can
+use this contract without source-ref deploy or direct Dokploy mutation in the
+product repo.
 
 Some inherited services still deploy an existing Dokploy compose target directly
 from a Git source ref instead of an immutable image. Use this as a migration
@@ -127,12 +142,13 @@ Dokploy health checks. Image deploy, preview creation, public ingress
 monitoring, provider domains, and provider health checks still require real image
 and HTTP health metadata before they can mutate provider state.
 
-The long-term target is still immutable image deploy. The source-ref bridge does
-not write generic-web deployment records; its durable replay surface is the
-service idempotency record. Treat it as a current but bounded Launchplane-owned
+The stable target is immutable image deploy. The source-ref bridge does not
+write generic-web deployment records; its durable replay surface is the service
+idempotency record. Treat it as a current but bounded Launchplane-owned
 replacement for direct Dokploy workflows only while the product is moved to
-image publishing. #1498 owns the stable product-repo integration surface and
-the eventual replacement/removal condition for this bridge.
+image publishing. Any retained source-ref caller must have an issue-backed
+owner, date, and delete condition; do not use the bridge for products that can
+publish immutable images.
 
 Launchplane also injects a non-secret runtime identity into Dokploy env during
 Launchplane-owned deploys. The standard keys are

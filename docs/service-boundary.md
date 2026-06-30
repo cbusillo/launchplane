@@ -1495,14 +1495,22 @@ remain provider execution configuration for Dokploy-backed lanes and must agree
 with the provider-target identity before deploy proceeds. The route keeps
 optional `Idempotency-Key` replay/conflict handling and stores deploy-pass plus
 post-deploy-fail evidence to prevent repeating the completed provider mutation.
+This image-backed route is the canonical product-repo integration surface for
+simple generic-web services. `cbusillo/repairshopr_api` proved the path in live
+Launchplane after #1503 deployed: Launchplane Deploy run `28415366430` attempt 4
+called `/v1/drivers/generic-web/deploy` with immutable GHCR image identity and
+received `deploy_status: pass` for deployment record
+`deployment-20260630T034901Z-repairshopr-sync-prod` on Dokploy target
+`cm-repairshopr-sync`.
 Generic web source-ref deploys use native FastAPI
 `POST /v1/drivers/generic-web/source-ref-deploy`; the route validates the
 request context and instance against the resolved product profile lane before
 authorization, idempotency replay, or provider mutation. This route is a
 current but bounded Launchplane-owned bridge for provider-backed compose targets
-that still deploy from a tested source ref. #1498 owns the stable product-repo
-integration surface and the replacement/removal condition; product repos must
-not regain direct Dokploy mutation authority around this route.
+that still deploy from a tested source ref. Any retained source-ref caller must
+have an issue-backed owner, date, and delete condition; product repos must not
+regain direct Dokploy mutation authority around this route. Do not choose
+source-ref deploy for products that can publish immutable images.
 Product environment reads expose neutral provider-target identity only from
 explicit provider-target rows. Paired DB-backed Dokploy target and target-id
 records remain visible as provider-specific execution/history metadata and as

@@ -57,6 +57,32 @@ class DocsContractsTests(TestCase):
         self.assertIn("Public registration probes", odoo_smoke_workflow)
         self.assertIn("Authenticated route probes", odoo_smoke_workflow)
 
+    def test_product_repo_integration_contract_prefers_image_deploy(self) -> None:
+        product_repo_contract = Path("docs/product-repo-contract.md").read_text(
+            encoding="utf-8"
+        )
+        dokploy_service_contract = Path("docs/dokploy-service-deployments.md").read_text(
+            encoding="utf-8"
+        )
+        service_boundary = Path("docs/service-boundary.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Canonical Image Deploy Connector", product_repo_contract)
+        self.assertIn("Image-backed generic-web deploy", product_repo_contract)
+        self.assertIn("repairshopr_api", product_repo_contract)
+        self.assertIn("deployment-20260630T034901Z-repairshopr-sync-prod", product_repo_contract)
+        self.assertIn("baseline for retiring older source-ref", product_repo_contract)
+
+        self.assertIn("stable product-repo integration surface", dokploy_service_contract)
+        self.assertIn("RepairShopr Sync is the first live canary", dokploy_service_contract)
+        self.assertIn("without source-ref deploy or direct Dokploy mutation", dokploy_service_contract)
+        self.assertIn("do not use the bridge", dokploy_service_contract)
+        self.assertIn("publish immutable images", dokploy_service_contract)
+
+        self.assertIn("canonical product-repo integration surface", service_boundary)
+        self.assertIn("Do not choose\nsource-ref deploy", service_boundary)
+
     def test_odoo_base_image_promotion_owner_is_documented(self) -> None:
         records_doc = Path("docs/records.md").read_text(encoding="utf-8")
 
