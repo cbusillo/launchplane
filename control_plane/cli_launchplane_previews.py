@@ -49,6 +49,11 @@ from control_plane.workflows.launchplane import (
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
+_DIRECT_DB_MUTATION_MESSAGE = (
+    "Direct local DB mutation is restricted after the Launchplane service boundary. "
+    "Use the deployed service route or operator workflow for shared/production changes, "
+    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
+)
 LaunchplanePreviewRecordStore = FilesystemRecordStore | PostgresRecordStore
 
 
@@ -91,7 +96,11 @@ def _store(state_dir: Path, *, database_url: str | None = None) -> LaunchplanePr
 
 
 def _resolve_preview_mutation_database_url(
-    *, database_url: str, local_rehearsal: bool, command_label: str
+    *,
+    database_url: str,
+    local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
+    command_label: str,
 ) -> str | None:
     if local_rehearsal:
         return None
@@ -107,7 +116,18 @@ def _resolve_preview_mutation_database_url(
             f"{command_label} requires --database-url or LAUNCHPLANE_DATABASE_URL. "
             "Use --local-rehearsal for explicit local filesystem rehearsal."
         )
+    if not allow_direct_db_mutation:
+        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
     return normalized_database_url
+
+
+def _direct_db_mutation_acknowledgement_option(function: Callable[..., object]) -> Callable[..., object]:
+    return click.option(
+        "--allow-direct-db-mutation",
+        is_flag=True,
+        default=False,
+        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+    )(function)
 
 
 def _control_plane_root() -> Path:
@@ -234,13 +254,19 @@ def launchplane_previews() -> None:
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 def launchplane_previews_write_preview(
-    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+    state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
+    input_file: Path,
 ) -> None:
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews write-preview",
     )
     record_store = _store(state_dir, database_url=execution_database_url)
@@ -260,13 +286,19 @@ def launchplane_previews_write_preview(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 def launchplane_previews_write_generation(
-    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+    state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
+    input_file: Path,
 ) -> None:
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews write-generation",
     )
     record_store = _store(state_dir, database_url=execution_database_url)
@@ -285,13 +317,19 @@ def launchplane_previews_write_generation(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 def launchplane_previews_write_enablement(
-    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+    state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
+    input_file: Path,
 ) -> None:
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews write-enablement",
     )
     record_store = _store(state_dir, database_url=execution_database_url)
@@ -310,16 +348,19 @@ def launchplane_previews_write_enablement(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 def launchplane_previews_request_generation(
     state_dir: Path,
     preview_input_file: Path,
     generation_input_file: Path,
     database_url: str,
     local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
 ) -> None:
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews request-generation",
     )
     record_store = _store(state_dir, database_url=execution_database_url)
@@ -346,16 +387,19 @@ def launchplane_previews_request_generation(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 def launchplane_previews_write_from_generation(
     state_dir: Path,
     preview_input_file: Path,
     generation_input_file: Path,
     database_url: str,
     local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
 ) -> None:
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews write-from-generation",
     )
     record_store = _store(state_dir, database_url=execution_database_url)
@@ -378,13 +422,19 @@ def launchplane_previews_write_from_generation(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 def launchplane_previews_write_destroyed(
-    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+    state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
+    input_file: Path,
 ) -> None:
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews write-destroyed",
     )
     record_store = _store(state_dir, database_url=execution_database_url)
@@ -402,13 +452,19 @@ def launchplane_previews_write_destroyed(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 def launchplane_previews_mark_generation_ready(
-    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+    state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
+    input_file: Path,
 ) -> None:
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews mark-generation-ready",
     )
     record_store = _store(state_dir, database_url=execution_database_url)
@@ -456,13 +512,19 @@ def launchplane_previews_mark_generation_ready(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 def launchplane_previews_mark_generation_failed(
-    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+    state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
+    input_file: Path,
 ) -> None:
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews mark-generation-failed",
     )
     record_store = _store(state_dir, database_url=execution_database_url)
@@ -510,13 +572,19 @@ def launchplane_previews_mark_generation_failed(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 def launchplane_previews_destroy_preview(
-    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+    state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
+    input_file: Path,
 ) -> None:
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews destroy-preview",
     )
     record_store = _store(state_dir, database_url=execution_database_url)
@@ -534,6 +602,7 @@ def launchplane_previews_destroy_preview(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--apply", "apply_intent", is_flag=True)
 @click.option("--deliver-feedback", is_flag=True)
@@ -541,6 +610,7 @@ def launchplane_previews_ingest_pr_event(
     state_dir: Path,
     database_url: str,
     local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
     input_file: Path,
     apply_intent: bool,
     deliver_feedback: bool,
@@ -548,6 +618,7 @@ def launchplane_previews_ingest_pr_event(
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews ingest-pr-event",
     )
     event = GitHubPullRequestEvent.model_validate(_load_json_file(input_file))
@@ -567,6 +638,7 @@ def launchplane_previews_ingest_pr_event(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--event-name", default="pull_request", show_default=True)
 @click.option("--delivery-id", default="", help="Optional GitHub delivery id for traceability.")
@@ -582,6 +654,7 @@ def launchplane_previews_ingest_github_webhook(
     state_dir: Path,
     database_url: str,
     local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
     input_file: Path,
     event_name: str,
     delivery_id: str,
@@ -593,6 +666,7 @@ def launchplane_previews_ingest_github_webhook(
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews ingest-github-webhook",
     )
     raw_payload_bytes, webhook_payload = _load_github_webhook_json_file(input_file)
@@ -953,6 +1027,7 @@ def launchplane_previews_build_github_webhook_replay_envelope(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--apply", "apply_intent", is_flag=True)
 @click.option("--deliver-feedback", is_flag=True)
@@ -960,6 +1035,7 @@ def launchplane_previews_replay_github_webhook(
     state_dir: Path,
     database_url: str,
     local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
     input_file: Path,
     apply_intent: bool,
     deliver_feedback: bool,
@@ -967,6 +1043,7 @@ def launchplane_previews_replay_github_webhook(
     execution_database_url = _resolve_preview_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
         command_label="launchplane-previews replay-github-webhook",
     )
     try:

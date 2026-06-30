@@ -616,8 +616,9 @@ Current derived-state behavior:
   the requested artifact, then promotes that exact tuple to the destination
   lane after the deploy passes.
 - `promote execute` and `ship execute` require `--database-url` or
-  `LAUNCHPLANE_DATABASE_URL`; explicit offline filesystem execution must opt in
-  with `--local-rehearsal`.
+  `LAUNCHPLANE_DATABASE_URL` for DB-backed execution and must also pass
+  `--allow-direct-db-mutation`; explicit offline filesystem execution must opt
+  in with `--local-rehearsal`.
 - Current environment inventory is refreshed from successful waited `ship` and
   `promote` executions.
 - Externally produced promotion evidence can also refresh current inventory
@@ -961,8 +962,9 @@ local renders should run with `LAUNCHPLANE_DATABASE_URL` pointed at the same
 shared store that owns the current stable-lane tuple state.
 
 Preview mutation, ingest, replay, and lifecycle transition commands require
-`--database-url` or `LAUNCHPLANE_DATABASE_URL`. Offline JSON writes are local
-rehearsals only and must opt in with `--local-rehearsal`; read and render
+`--database-url` or `LAUNCHPLANE_DATABASE_URL` plus
+`--allow-direct-db-mutation` for DB-backed execution. Offline JSON writes are
+local rehearsals only and must opt in with `--local-rehearsal`; read and render
 commands may still inspect a local `--state-dir`.
 
 Any exported release-tuple catalog is seed/reference material now, not live
