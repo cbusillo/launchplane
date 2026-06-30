@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.deploy_target import (
     DeployedTargetReference,
     DeployTargetCompatibilityType,
@@ -20,6 +21,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
@@ -35,7 +37,7 @@ class GenericWebResolvedDeployTarget(BaseModel):
     deploy_timeout_seconds: int = Field(ge=1)
 
 
-class DokployGenericWebDeployStore(Protocol):
+class DokployGenericWebDeployStore(control_plane_secrets.SecretReadStore, Protocol):
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
     ) -> ProviderTargetRecord: ...
@@ -47,6 +49,10 @@ class DokployGenericWebDeployStore(Protocol):
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
 
 
 class GenericWebDeployProvider(Protocol):
@@ -127,10 +133,11 @@ class DokployGenericWebDeployProvider:
             provider_target=provider_target
         )
 
-        environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-            control_plane_root=control_plane_root,
+        environment_values = _resolve_store_runtime_environment_values(
+            record_store=dokploy_store,
             context_name=lane.context,
             instance_name=lane.instance,
+            target_environment=target_definition.env,
         )
         configured_ship_mode = control_plane_dokploy.resolve_dokploy_ship_mode(
             lane.context,
@@ -210,6 +217,13 @@ def _require_dokploy_deploy_store(
         "read_provider_target_record",
         "read_dokploy_target_record",
         "read_dokploy_target_id_record",
+        "list_runtime_environment_records",
+        "read_secret_record",
+        "list_secret_records",
+        "read_secret_version",
+        "list_secret_versions",
+        "list_secret_bindings",
+        "list_secret_audit_events",
     )
     missing_methods = tuple(
         method_name
@@ -218,10 +232,39 @@ def _require_dokploy_deploy_store(
     )
     if missing_methods:
         raise click.ClickException(
-            "Generic web Dokploy deploy requires DB-backed provider-target and Dokploy target records. "
+            "Generic web Dokploy deploy requires DB-backed provider-target, Dokploy target, "
+            "runtime-environment, and managed-secret records. "
             f"Missing methods: {', '.join(missing_methods)}."
         )
     return cast(DokployGenericWebDeployStore, record_store)
+
+
+def _resolve_store_runtime_environment_values(
+    *,
+    record_store: DokployGenericWebDeployStore,
+    context_name: str,
+    instance_name: str,
+    target_environment: dict[str, str],
+) -> dict[str, str]:
+    definition = control_plane_runtime_environments.load_optional_runtime_environment_definition_from_store(
+        record_store=record_store
+    )
+    merged_values: dict[str, str] = {}
+    if definition is not None:
+        merged_values.update(
+            control_plane_runtime_environments.resolve_optional_values_from_definition(
+                definition=definition,
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+        )
+    merged_values.update(target_environment)
+    return control_plane_secrets.overlay_runtime_environment_secret_values_from_store(
+        environment_values=merged_values,
+        record_store=record_store,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
 
 
 def _dokploy_target_definition_for_lane(
