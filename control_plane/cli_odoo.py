@@ -35,10 +35,6 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
     execute_odoo_prod_backup_gate,
 )
-from control_plane.workflows.odoo_prod_rollback import (
-    OdooProdRollbackRequest,
-    OdooProdRollbackResult,
-)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_stable_target_replacement import (
     build_odoo_stable_target_replacement_plan,
@@ -54,14 +50,12 @@ _DIRECT_DB_MUTATION_MESSAGE = (
     "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
 )
 OdooOverrideApplyStatus = Literal["skipped", "pending", "pass", "fail"]
-OdooProdRollbackSourceChannel = Literal["testing"]
 
 
 @dataclass(frozen=True)
 class OdooCliCallbacks:
     control_plane_root: Callable[[], Path]
     store_factory: Callable[..., object]
-    execute_odoo_prod_rollback: Callable[..., object]
     normalize_odoo_apply_status: Callable[[str], OdooOverrideApplyStatus]
     read_dokploy_config: Callable[..., tuple[str, str]]
 
@@ -74,7 +68,6 @@ def register_odoo_commands(main: click.Group, *, callbacks: OdooCliCallbacks) ->
     _callbacks = callbacks
     main.add_command(odoo_artifacts)
     main.add_command(odoo_backup_gates)
-    main.add_command(odoo_rollbacks)
     main.add_command(odoo_overrides)
     main.add_command(odoo_targets)
     main.add_command(odoo_ownership)
@@ -94,24 +87,8 @@ def _store(state_dir: Path, *, database_url: str | None = None) -> object:
     return _odoo_callbacks().store_factory(state_dir, database_url=database_url)
 
 
-def _execute_odoo_prod_rollback(**kwargs: object) -> OdooProdRollbackResult:
-    return cast(
-        OdooProdRollbackResult,
-        _odoo_callbacks().execute_odoo_prod_rollback(**kwargs),
-    )
-
-
 def normalize_odoo_apply_status(status: str) -> OdooOverrideApplyStatus:
     return _odoo_callbacks().normalize_odoo_apply_status(status)
-
-
-def _normalize_odoo_prod_rollback_source_channel(
-    source_channel: str,
-) -> OdooProdRollbackSourceChannel:
-    normalized_source_channel = source_channel.strip().lower()
-    if normalized_source_channel != "testing":
-        raise click.ClickException("Odoo prod rollback source channel must be testing.")
-    return "testing"
 
 
 def _read_dokploy_config(*, control_plane_root: Path, database_url: str) -> tuple[str, str]:
@@ -168,11 +145,6 @@ def odoo_artifacts() -> None:
 @click.group("odoo-backup-gates")
 def odoo_backup_gates() -> None:
     """Odoo backup-gate driver commands."""
-
-
-@click.group("odoo-rollbacks")
-def odoo_rollbacks() -> None:
-    """Odoo rollback driver commands."""
 
 
 @odoo_artifacts.command("publish")
@@ -255,60 +227,6 @@ def odoo_backup_gates_capture(
     click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
     if result.backup_status != "pass":
         raise click.ClickException(result.error_message or "Odoo backup gate failed.")
-
-
-@odoo_rollbacks.command("execute")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane rollback records.",
-)
-@click.option("--context", required=True)
-@click.option("--instance", default="prod", show_default=True)
-@click.option("--source-channel", default="testing", show_default=True)
-@click.option("--promotion-record-id", default="")
-@click.option("--artifact-id", default="")
-@click.option("--reason", default="")
-@click.option("--wait/--no-wait", default=True, show_default=True)
-@click.option("--timeout", "timeout_seconds", type=int, default=None)
-@click.option("--verify-health/--no-verify-health", default=True, show_default=True)
-@click.option("--health-timeout", "health_timeout_seconds", type=int, default=None)
-@click.option("--no-cache", is_flag=True, default=False)
-def odoo_rollbacks_execute(
-    database_url: str,
-    context: str,
-    instance: str,
-    source_channel: str,
-    promotion_record_id: str,
-    artifact_id: str,
-    reason: str,
-    wait: bool,
-    timeout_seconds: int | None,
-    verify_health: bool,
-    health_timeout_seconds: int | None,
-    no_cache: bool,
-) -> None:
-    result = _execute_odoo_prod_rollback(
-        control_plane_root=_control_plane_root(),
-        record_store=_store(Path("state"), database_url=database_url),
-        request=OdooProdRollbackRequest(
-            context=context,
-            instance=instance,
-            source_channel=_normalize_odoo_prod_rollback_source_channel(source_channel),
-            promotion_record_id=promotion_record_id,
-            artifact_id=artifact_id,
-            reason=reason,
-            wait=wait,
-            timeout_seconds=timeout_seconds,
-            verify_health=verify_health,
-            health_timeout_seconds=health_timeout_seconds,
-            no_cache=no_cache,
-        ),
-    )
-    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
-    if result.rollback_status != "pass":
-        raise click.ClickException(result.error_message or "Odoo prod rollback failed.")
 
 
 def _summarize_odoo_instance_override_record(

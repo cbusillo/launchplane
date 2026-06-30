@@ -187,6 +187,10 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "requires context"):
             OdooProdRollbackRequest(context=" ")
 
+    def test_rollback_request_rejects_non_testing_source_channel(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "Input should be 'testing'"):
+            OdooProdRollbackRequest(context="opw", source_channel="prod")  # type: ignore[arg-type]
+
     def _record_store(self) -> Mock:
         record_store = Mock()
         record_store.read_release_tuple_record.return_value = _release_tuple()
@@ -311,53 +315,22 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(final_promotion.rollback.status, "fail")
 
-    def test_rollback_cli_executes_driver(self) -> None:
-        with (
-            patch(
-                "control_plane.cli.execute_odoo_prod_rollback",
-                return_value=Mock(
-                    rollback_status="pass",
-                    model_dump=Mock(
-                        return_value={
-                            "context": "cm",
-                            "instance": "prod",
-                            "artifact_id": "artifact-cm-previous",
-                            "promotion_record_id": "promotion-cm-prod",
-                            "deployment_record_id": "deployment-cm-prod",
-                            "release_tuple_id": "cm-prod-artifact-cm-previous",
-                            "rollback_status": "pass",
-                            "rollback_health_status": "pass",
-                            "post_deploy_status": "pass",
-                            "error_message": "",
-                        }
-                    ),
-                ),
-            ) as execute_mock,
-            patch("control_plane.cli._store", return_value=Mock()),
-        ):
-            result = CliRunner().invoke(
-                CLI_MAIN,
-                [
-                    "odoo-rollbacks",
-                    "execute",
-                    "--database-url",
-                    "postgresql://launchplane.example/db",
-                    "--context",
-                    "cm",
-                    "--artifact-id",
-                    "artifact-cm-previous",
-                    "--reason",
-                    "drill",
-                ],
-            )
+    def test_rollback_cli_group_is_retired(self) -> None:
+        result = CliRunner().invoke(
+            CLI_MAIN,
+            [
+                "odoo-rollbacks",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("No such command 'odoo-rollbacks'", result.output)
+
+    def test_main_help_omits_retired_rollback_group(self) -> None:
+        result = CliRunner().invoke(CLI_MAIN, ["--help"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("artifact-cm-previous", result.output)
-        execute_mock.assert_called_once()
-        request = execute_mock.call_args.kwargs["request"]
-        self.assertEqual(request.context, "cm")
-        self.assertEqual(request.artifact_id, "artifact-cm-previous")
-        self.assertEqual(request.reason, "drill")
+        self.assertNotIn("odoo-rollbacks", result.output)
 
 
 if __name__ == "__main__":
