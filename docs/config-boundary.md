@@ -140,6 +140,10 @@ Checked-in workflows and repo metadata may route to Launchplane, run quality
 gates, and document examples. They must not define the real product catalog,
 repo catalog, lane topology, target inventory, domain inventory, authz grants,
 operator identities, or mutable runtime values used by production behavior.
+Product-repo deploy workflows may forward operator-owned GitHub variables and
+fresh image build outputs into Launchplane request payloads, but fixed image
+references, provider targets, domains, and secret values remain outside the
+checked-in workflow authority boundary.
 
 ### Stale Local Artifacts
 
