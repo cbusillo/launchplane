@@ -325,6 +325,32 @@ with an `artifact_protection.read` grant that allows wildcard context for that
 product; context-specific cleanup may pass `context=` and use a matching scoped
 grant.
 
+## Canonical Image Deploy Connector
+
+Image-backed generic-web deploy is the canonical stable product-repo connector
+for simple service and website repos. The product repo builds and publishes an
+immutable image, then calls deployed Launchplane over the shared request action.
+Launchplane resolves product profile, lane, provider target, runtime
+environment, managed secrets, authz, idempotency, and deployment evidence from
+service-owned records.
+
+The first real-world proof for this shape is RepairShopr Sync: after PR #1503
+deployed Launchplane commit `9dbdf15904a86eea2b742f1e42e341db138e4860`,
+`cbusillo/repairshopr_api` Launchplane Deploy run `28415366430` attempt 4
+passed through `/v1/drivers/generic-web/deploy`. The product workflow supplied
+`ghcr.io/cbusillo/repairshopr_api@sha256:7efdbf139f7f5263c02d38509841253e719a41c44c55aa79aa4a223379808eea`
+as `artifact_id`; Launchplane returned deployment record
+`deployment-20260630T034901Z-repairshopr-sync-prod`, `deploy_status: pass`,
+target `cm-repairshopr-sync`, target category `compose`, provider `dokploy`,
+and `post_deploy_status: skipped`. That run is the recovery evidence for this
+contract and the baseline for retiring older source-ref or checkout-and-invoke
+patterns.
+
+For new or repaired product repos, prefer this connector over product-repo
+checkout of Launchplane source or direct invocation of Launchplane internals.
+If a repo still needs a compatibility bridge, the bridge must have an issue
+reference, a dated owner, and a delete condition.
+
 ## Reusable Launchplane Request Action
 
 Product workflows that only need to send JSON to an existing Launchplane route
