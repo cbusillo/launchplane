@@ -101,11 +101,11 @@ preview identities and ephemeral preview stacks instead of a durable shared
 
 Use `uv run launchplane dokploy-targets list` or `show` to inspect the tracked
 DB-backed target catalog without reading legacy TOML files. Use
-`uv run launchplane dokploy-targets put-shopify-protected-store-key --context ... --instance ... --key ...`
-and `unset-shopify-protected-store-key` to update the Shopify protected-store-key
-policy carried by a tracked target record. Those commands mutate the shared
-Postgres-backed target record directly; they do not write repo-local fallback
-files.
+`uv run launchplane dokploy-targets put-shopify-protected-store-key --context ... --instance ... --key ... --allow-direct-db-mutation`
+and `unset-shopify-protected-store-key --allow-direct-db-mutation` only for
+explicit local/bootstrap repair of Shopify protected-store-key policy carried by
+a tracked target record. Routine shared/live target setup and provider-target
+authority changes should use the deployed service route or operator workflow.
 
 ## Service Container Deploy
 

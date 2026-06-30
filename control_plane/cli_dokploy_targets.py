@@ -21,6 +21,11 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
+_DIRECT_DB_MUTATION_MESSAGE = (
+    "Direct local DB mutation is restricted after the Launchplane service boundary. "
+    "Use the deployed service route or operator workflow for shared/production changes, "
+    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
+)
 DokployTargetType = Literal["compose", "application"]
 
 
@@ -43,6 +48,21 @@ def register_dokploy_target_commands(
 @click.group("dokploy-targets")
 def dokploy_targets() -> None:
     """Tracked Dokploy target record commands."""
+
+
+def _direct_db_mutation_acknowledgement_option(
+    function: Callable[..., object],
+) -> Callable[..., object]:
+    return click.option(
+        "--allow-direct-db-mutation",
+        is_flag=True,
+        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+    )(function)
+
+
+def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
+    if not allow_direct_db_mutation:
+        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
 
 
 @dokploy_targets.command("list")
@@ -156,6 +176,7 @@ def dokploy_targets_show(database_url: str, context_name: str, instance_name: st
     default=None,
     help="Optional Launchplane repo root used to resolve Dokploy credentials.",
 )
+@_direct_db_mutation_acknowledgement_option
 def dokploy_targets_adopt(
     database_url: str,
     context_name: str,
@@ -172,14 +193,18 @@ def dokploy_targets_adopt(
     updated_at: str,
     apply_changes: bool,
     control_plane_root: Path | None,
+    allow_direct_db_mutation: bool,
 ) -> None:
     if deploy_timeout_seconds is not None and deploy_timeout_seconds < 1:
         raise click.ClickException("--deploy-timeout-seconds must be at least 1.")
+    if apply_changes:
+        _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     callbacks = _dokploy_target_callbacks()
     launchplane_root = control_plane_root or callbacks.control_plane_root()
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
     postgres_store = PostgresRecordStore(database_url=database_url)
-    postgres_store.ensure_schema()
+    if apply_changes:
+        postgres_store.ensure_schema()
     try:
         result = adopt_dokploy_target(
             record_store=postgres_store,
@@ -270,6 +295,7 @@ def dokploy_targets_adopt(
     default=None,
     help="Optional Launchplane repo root used to resolve Dokploy credentials.",
 )
+@_direct_db_mutation_acknowledgement_option
 def dokploy_targets_create_application(
     database_url: str,
     context_name: str,
@@ -292,14 +318,18 @@ def dokploy_targets_create_application(
     updated_at: str,
     apply_changes: bool,
     control_plane_root: Path | None,
+    allow_direct_db_mutation: bool,
 ) -> None:
     if deploy_timeout_seconds is not None and deploy_timeout_seconds < 1:
         raise click.ClickException("--deploy-timeout-seconds must be at least 1.")
+    if apply_changes:
+        _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     callbacks = _dokploy_target_callbacks()
     launchplane_root = control_plane_root or callbacks.control_plane_root()
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
     postgres_store = PostgresRecordStore(database_url=database_url)
-    postgres_store.ensure_schema()
+    if apply_changes:
+        postgres_store.ensure_schema()
     try:
         result = create_dokploy_application_target(
             record_store=postgres_store,
@@ -371,13 +401,16 @@ def dokploy_targets_create_application(
     help="Protected Shopify store key to add for this tracked Dokploy target.",
 )
 @click.option("--source-label", default="cli", show_default=True)
+@_direct_db_mutation_acknowledgement_option
 def dokploy_targets_put_shopify_protected_store_key(
     database_url: str,
     context_name: str,
     instance_name: str,
     keys: tuple[str, ...],
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
@@ -443,13 +476,16 @@ def dokploy_targets_put_shopify_protected_store_key(
     help="Protected Shopify store key to remove from this tracked Dokploy target.",
 )
 @click.option("--source-label", default="cli", show_default=True)
+@_direct_db_mutation_acknowledgement_option
 def dokploy_targets_unset_shopify_protected_store_key(
     database_url: str,
     context_name: str,
     instance_name: str,
     keys: tuple[str, ...],
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
@@ -508,9 +544,15 @@ def dokploy_targets_unset_shopify_protected_store_key(
 @click.option("--context", "context_name", required=True)
 @click.option("--instance", "instance_name", required=True)
 @click.option("--source-label", required=True)
+@_direct_db_mutation_acknowledgement_option
 def dokploy_targets_relabel(
-    database_url: str, context_name: str, instance_name: str, source_label: str
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:

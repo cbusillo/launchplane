@@ -10,7 +10,7 @@ from typing import cast
 from unittest.mock import patch
 
 import click
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
@@ -35,6 +35,18 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _allow_direct_db_mutation_argument() -> list[str]:
+    return ["--allow-direct-db-mutation"]
+
+
+def _assert_direct_db_mutation_rejected(
+    test_case: unittest.TestCase, result: Result
+) -> None:
+    test_case.assertNotEqual(result.exit_code, 0)
+    test_case.assertIn("Direct local DB mutation is restricted", result.output)
+    test_case.assertIn("--allow-direct-db-mutation", result.output)
 
 
 def _write_dokploy_managed_secrets(*, store: PostgresRecordStore, host: str, token: str) -> None:
@@ -867,6 +879,7 @@ target_type = "compose"
                     "yps-your-part-supplier",
                     "--source-label",
                     "policy:test",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
             stored_record = store.read_dokploy_target_record(
@@ -891,6 +904,33 @@ target_type = "compose"
         self.assertEqual(provider_target.target_id, "compose-123")
         self.assertEqual(provider_target.provider_target_type, "compose")
         self.assertEqual(provider_target.source_label, "policy:test")
+
+    def test_dokploy_targets_put_shopify_protected_store_key_requires_direct_db_acknowledgement(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "dokploy-targets",
+                    "put-shopify-protected-store-key",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--key",
+                    "yps-your-part-supplier",
+                ],
+            )
+
+        _assert_direct_db_mutation_rejected(self, result)
 
     def test_dokploy_targets_unset_shopify_protected_store_key_reports_missing_keys(self) -> None:
         runner = CliRunner()
@@ -931,6 +971,7 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
                     "yps-your-part-supplier",
                     "--key",
                     "missing-store",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
             stored_record = store.read_dokploy_target_record(
@@ -948,6 +989,33 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
         self.assertEqual(payload["record"]["shopify_protected_store_keys"], ["spare-store"])
         self.assertEqual(stored_record.policies.shopify.protected_store_keys, ("spare-store",))
         self.assertEqual(provider_target.target_id, "compose-123")
+
+    def test_dokploy_targets_unset_shopify_protected_store_key_requires_direct_db_acknowledgement(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "dokploy-targets",
+                    "unset-shopify-protected-store-key",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--key",
+                    "yps-your-part-supplier",
+                ],
+            )
+
+        _assert_direct_db_mutation_rejected(self, result)
 
     def test_dokploy_targets_put_shopify_protected_store_key_requires_existing_record(self) -> None:
         runner = CliRunner()
@@ -972,11 +1040,88 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
                     "testing",
                     "--key",
                     "yps-your-part-supplier",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Missing DB-backed tracked Dokploy target record", result.output)
+
+    def test_dokploy_targets_relabel_updates_source_metadata(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            _seed_dokploy_target_records(
+                store=store,
+                payload="""
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "testing"
+target_id = "compose-123"
+target_type = "compose"
+""",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "dokploy-targets",
+                    "relabel",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "OPW",
+                    "--instance",
+                    "Testing",
+                    "--source-label",
+                    "repair:operator",
+                    *_allow_direct_db_mutation_argument(),
+                ],
+            )
+            stored_record = store.read_dokploy_target_record(
+                context_name="opw", instance_name="testing"
+            )
+            provider_target = store.read_provider_target_record(
+                context_name="opw", instance_name="testing"
+            )
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["record"]["source_label"], "repair:operator")
+        self.assertEqual(stored_record.source_label, "repair:operator")
+        self.assertEqual(provider_target.source_label, "repair:operator")
+
+    def test_dokploy_targets_relabel_requires_direct_db_acknowledgement(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "dokploy-targets",
+                    "relabel",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--source-label",
+                    "repair:operator",
+                ],
+            )
+
+        _assert_direct_db_mutation_rejected(self, result)
 
     def test_service_inspect_config_boundary_reports_db_only_authority(self) -> None:
         runner = CliRunner()

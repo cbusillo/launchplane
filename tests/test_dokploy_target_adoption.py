@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from click import Command
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
 from control_plane.cli import main
 from control_plane import secrets as control_plane_secrets
@@ -25,6 +25,18 @@ CLI_MAIN = cast(Command, main)
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _allow_direct_db_mutation_argument() -> list[str]:
+    return ["--allow-direct-db-mutation"]
+
+
+def _assert_direct_db_mutation_rejected(
+    test_case: unittest.TestCase, result: Result
+) -> None:
+    test_case.assertNotEqual(result.exit_code, 0)
+    test_case.assertIn("Direct local DB mutation is restricted", result.output)
+    test_case.assertIn("--allow-direct-db-mutation", result.output)
 
 
 def _write_dokploy_managed_secrets(*, store: PostgresRecordStore) -> None:
@@ -532,6 +544,10 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                     "name": "discord-blue-lxc",
                     "environment": {"project": {"name": "Discord Blue"}},
                 },
+            ), patch.object(
+                PostgresRecordStore,
+                "ensure_schema",
+                side_effect=AssertionError("dry-run must not ensure schema"),
             ):
                 with patch.dict(
                     "os.environ",
@@ -640,6 +656,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                             "--updated-at",
                             "2026-05-04T22:45:00Z",
                             "--apply",
+                            *_allow_direct_db_mutation_argument(),
                         ],
                     )
 
@@ -661,6 +678,44 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual(target_record.target_name, "discord-blue-prod")
         self.assertEqual(target_record.source_label, "test:adopt")
         self.assertEqual(target_id_record.target_id, "app-123")
+
+    def test_cli_adopt_apply_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temporary_directory / "db.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                "os.environ",
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(store=store)
+            store.close()
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "dokploy-targets",
+                    "adopt",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "discord-blue",
+                    "--instance",
+                    "prod",
+                    "--target-type",
+                    "application",
+                    "--target-id",
+                    "app-123",
+                    "--apply",
+                ],
+            )
+
+        _assert_direct_db_mutation_rejected(self, result)
 
     def test_create_application_target_dry_run_plans_provider_requests(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1151,7 +1206,11 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                 _write_dokploy_managed_secrets(store=store)
             store.close()
 
-            with patch.dict(
+            with patch.object(
+                PostgresRecordStore,
+                "ensure_schema",
+                side_effect=AssertionError("dry-run must not ensure schema"),
+            ), patch.dict(
                 "os.environ",
                 {
                     "LAUNCHPLANE_DATABASE_URL": database_url,
@@ -1189,6 +1248,135 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual(payload["plan"]["application"]["target_name"], "discord-blue-prod")
         self.assertEqual(len(payload["provider_requests"]), 3)
         self.assertEqual(records, ())
+
+    def test_cli_create_application_apply_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temporary_directory / "db.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                "os.environ",
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(store=store)
+            store.close()
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "dokploy-targets",
+                    "create-application",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "discord-blue",
+                    "--instance",
+                    "prod",
+                    "--target-name",
+                    "discord-blue-prod",
+                    "--project-name",
+                    "Discord Blue",
+                    "--apply",
+                ],
+            )
+
+        _assert_direct_db_mutation_rejected(self, result)
+
+    def test_cli_create_application_apply_writes_records_with_direct_db_acknowledgement(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temporary_directory / "db.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                "os.environ",
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(store=store)
+            store.close()
+
+            def dokploy_request(
+                *,
+                host: str,
+                token: str,
+                path: str,
+                method: str = "GET",
+                payload: JsonObject | None = None,
+                query: dict[str, str | int] | None = None,
+                timeout_seconds: int | float = 60,
+            ) -> JsonObject:
+                del host, token, method, payload, query, timeout_seconds
+                if path == "/api/project.create":
+                    return {"projectId": "project-123"}
+                if path == "/api/environment.create":
+                    return {"environmentId": "env-123"}
+                if path == "/api/application.create":
+                    return {"applicationId": "app-123"}
+                raise AssertionError(path)
+
+            with patch(
+                "control_plane.dokploy.dokploy_request",
+                side_effect=dokploy_request,
+            ), patch(
+                "control_plane.cli.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "discord-blue-prod",
+                    "environment": {"project": {"name": "Discord Blue"}},
+                },
+            ), patch.dict(
+                "os.environ",
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                },
+                clear=True,
+            ):
+                result = CliRunner().invoke(
+                    CLI_MAIN,
+                    [
+                        "dokploy-targets",
+                        "create-application",
+                        "--database-url",
+                        database_url,
+                        "--context",
+                        "discord-blue",
+                        "--instance",
+                        "prod",
+                        "--target-name",
+                        "discord-blue-prod",
+                        "--project-name",
+                        "Discord Blue",
+                        "--apply",
+                        *_allow_direct_db_mutation_argument(),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            store = PostgresRecordStore(database_url=database_url)
+            target_record = store.read_dokploy_target_record(
+                context_name="discord-blue", instance_name="prod"
+            )
+            target_id_record = store.read_dokploy_target_id_record(
+                context_name="discord-blue", instance_name="prod"
+            )
+            store.close()
+
+        payload = json.loads(result.output)
+        self.assertEqual(payload["mode"], "apply")
+        self.assertTrue(payload["applied"])
+        self.assertEqual(target_record.target_name, "discord-blue-prod")
+        self.assertEqual(target_id_record.target_id, "app-123")
 
 
 if __name__ == "__main__":

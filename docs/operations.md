@@ -503,9 +503,12 @@ DB-backed Launchplane records:
 - inspect tracked stable-lane Dokploy target records with
   `uv run launchplane dokploy-targets list` / `show`
 - mutate tracked target Shopify guard policy with
-  `uv run launchplane dokploy-targets put-shopify-protected-store-key ...` and
-  `unset-shopify-protected-store-key ...` instead of editing repo-local target
-  catalogs or ad-hoc DB rows
+  `uv run launchplane dokploy-targets put-shopify-protected-store-key ... --allow-direct-db-mutation`
+  and `unset-shopify-protected-store-key ... --allow-direct-db-mutation` only
+  for explicit local/bootstrap repair instead of editing repo-local target
+  catalogs or ad-hoc DB rows. Routine shared/live target setup and
+  provider-target authority changes should use the deployed service route or
+  operator workflow.
 
 Two deployment prerequisites remain Dokploy-side operational contracts rather
 than Launchplane CLI validations:
