@@ -252,10 +252,13 @@ decryption key state denies the reveal or resolution.
   emits the resolved runtime environment payload for a tenant environment with
   secret-shaped values redacted by default. Use `--include-secret-values` only
   from a trusted operator shell when plaintext resolved values are required.
-- `uv run launchplane environments put --scope <scope> --set KEY=VALUE` writes
-  non-secret runtime values directly to DB-backed runtime-environment records
-  and redacts values from command output. Secret-shaped keys are rejected and
-  should be written with `secrets put`.
+- `uv run launchplane environments put --scope <scope> --set KEY=VALUE --allow-direct-db-mutation`
+  is an explicit local/bootstrap repair path for non-secret runtime values in
+  DB-backed runtime-environment records and redacts values from command output.
+  Secret-shaped keys are rejected and should be written with `secrets put`.
+  Routine shared and production config changes should use product-config
+  dry-run/apply through the deployed service route or operator UI instead of
+  arbitrary local runtime-environment writes.
 - `uv run launchplane product-config apply --input-file bundle.json --dry-run`
   previews an approved product runtime/secret bundle without printing plaintext
   values or writing records. `--apply` writes non-secret runtime keys and
@@ -282,11 +285,12 @@ decryption key state denies the reveal or resolution.
   retires the disabled placeholder from active runtime-secret lookups. Later
   onboarding imports preserve the configured binding instead of recreating the
   disabled placeholder.
-- `uv run launchplane environments unset --scope <scope> --key KEY` removes
-  stale keys from DB-backed runtime-environment records without reading or
-  printing plaintext values.
-- `uv run launchplane environments relabel --scope <scope> --source-label ...`
-  updates stale source metadata without changing runtime values.
+- `uv run launchplane environments unset --scope <scope> --key KEY --allow-direct-db-mutation`
+  removes stale keys from DB-backed runtime-environment records without reading
+  or printing plaintext values. Use it only for explicit local/bootstrap repair.
+- `uv run launchplane environments relabel --scope <scope> --source-label ... --allow-direct-db-mutation`
+  updates stale source metadata without changing runtime values. Use it only for
+  explicit local/bootstrap repair.
 - In steady state that payload comes from Launchplane DB-backed runtime
   environment records.
 - Launchplane preview write/build helpers read `LAUNCHPLANE_PREVIEW_BASE_URL`

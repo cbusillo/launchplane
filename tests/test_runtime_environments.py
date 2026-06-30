@@ -647,6 +647,30 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("No such command", result.output)
 
+    def test_environments_put_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "put",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "global",
+                    "--set",
+                    "PUBLIC_URL=https://example.com",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
+        self.assertIn("--allow-direct-db-mutation", result.output)
+        self.assertIn("--allow-direct-db-mutation", result.output)
+
     def test_environments_put_writes_db_record_without_echoing_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -671,6 +695,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     "VERIREEL_PROD_CT_ID=101",
                     "--source-label",
                     "operator-cli",
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -734,6 +759,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     "prod",
                     "--set",
                     "VERIREEL_PROD_CT_ID=101",
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -775,6 +801,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     "verireel",
                     "--set",
                     "VERIREEL_PROD_CT_ID=101",
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -799,6 +826,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     "verireel",
                     "--set",
                     "GITHUB_TOKEN=secret-value",
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -850,6 +878,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     "MISSING_KEY",
                     "--source-label",
                     "operator-cli",
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -873,6 +902,29 @@ class RuntimeEnvironmentTests(unittest.TestCase):
 
         self.assertNotIn("VERIREEL_PROD_CT_ID", resolved_values)
         self.assertEqual(resolved_values["VERIREEL_PROD_PROXMOX_HOST"], "proxmox.example.com")
+
+    def test_environments_unset_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "unset",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "global",
+                    "--key",
+                    "PUBLIC_URL",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
+        self.assertIn("--allow-direct-db-mutation", result.output)
 
     def test_environments_unset_rejects_empty_result_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -899,6 +951,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     "global",
                     "--key",
                     "ONLY_KEY",
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -1013,6 +1066,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     "--actor",
                     "operator@example.com",
                     "--apply",
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -1042,6 +1096,30 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertEqual(len(delete_events), 1)
         self.assertEqual(delete_events[0].actor, "operator@example.com")
         self.assertEqual(delete_events[0].env_keys, ("TAWK_PROPERTY_ID", "TAWK_WIDGET_ID"))
+
+    def test_environments_delete_record_apply_requires_direct_db_acknowledgement(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "delete-record",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "global",
+                    "--apply",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
+        self.assertIn("--allow-direct-db-mutation", result.output)
 
     def test_environments_delete_record_apply_refuses_changed_snapshot(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1086,6 +1164,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                         "--instance",
                         "prod",
                         "--apply",
+                        "--allow-direct-db-mutation",
                     ],
                 )
 
@@ -1136,6 +1215,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                         "--actor",
                         "operator@example.com",
                         "--apply",
+                        "--allow-direct-db-mutation",
                     ],
                 )
                 self.assertEqual(result.exit_code, 0, result.output)
@@ -1258,6 +1338,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     "--instance",
                     "prod",
                     "--apply",
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -1328,6 +1409,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     "prod",
                     "--allow-tracked-target",
                     "--apply",
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -1415,6 +1497,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     "global",
                     "--source-label",
                     "operator:db-native",
+                    "--allow-direct-db-mutation",
                 ],
             )
 
@@ -1423,6 +1506,28 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["record"]["source_label"], "operator:db-native")
         self.assertEqual(payload["record"]["env_keys"], ["ODOO_DB_USER"])
+
+    def test_environments_relabel_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "relabel",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "global",
+                    "--source-label",
+                    "operator:db-native",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
 
     def test_environments_list_redacts_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

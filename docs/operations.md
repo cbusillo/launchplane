@@ -674,10 +674,12 @@ Current derived-state behavior:
 
 ## Runtime Environment Contracts
 
-- `environments put` writes explicit non-secret `KEY=VALUE` runtime settings
-  directly into DB-backed runtime-environment records for `global`, `context`,
-  or `instance` scope. It rejects secret-shaped keys and returns key metadata
-  only, not plaintext values.
+- `environments put` remains an explicit local/bootstrap repair path for
+  non-secret `KEY=VALUE` runtime settings in DB-backed runtime-environment
+  records. It requires `--allow-direct-db-mutation`, rejects secret-shaped keys,
+  and returns key metadata only, not plaintext values. Routine shared and
+  production runtime config changes should use product-config dry-run/apply
+  through the deployed service route or operator UI.
 - `product-config apply --dry-run --input-file <json>` remains a local planning
   helper for trusted product runtime config bundles. Direct local DB
   `--apply` is restricted after the service boundary and requires
@@ -719,17 +721,21 @@ Current derived-state behavior:
   result before enabling apply, clears rendered secret input values after each
   submit, and shows only key/action/count metadata from Launchplane responses.
 - `environments unset` removes named keys from a DB-backed runtime-environment
-  record without reading or printing plaintext values.
+  record without reading or printing plaintext values. It requires
+  `--allow-direct-db-mutation` and is intended only for explicit local/bootstrap
+  repair.
 - `environments delete-record --dry-run|--apply` deletes a whole mistaken
   runtime-environment record for `global`, `context`, or `instance` scope. The
   dry-run and apply responses include record identity, source label, update
   timestamp, key names, key count, actor, and delete-event metadata only. Apply
-  refuses records that can affect a tracked Dokploy target unless
-  `--allow-tracked-target` is provided. Apply also fails closed if the target
-  record changes after the command reads it; re-run the command after reviewing
-  the current record.
+  requires `--allow-direct-db-mutation` and refuses records that can affect a
+  tracked Dokploy target unless `--allow-tracked-target` is provided. Apply also
+  fails closed if the target record changes after the command reads it; re-run
+  the command after reviewing the current record.
 - `environments relabel` updates runtime-environment record source metadata
-  without reading or printing plaintext values.
+  without reading or printing plaintext values. It requires
+  `--allow-direct-db-mutation` and is intended only for explicit
+  local/bootstrap repair.
 - `environments list` shows DB-backed runtime-environment record metadata and
   keys without echoing plaintext values.
 - `environments resolve` reads the control-plane-owned runtime environment
