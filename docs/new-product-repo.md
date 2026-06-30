@@ -91,9 +91,11 @@ uv run launchplane dokploy-targets adopt \
 The command is a dry run unless `--apply` is supplied. It fetches the live
 Dokploy target, stores only Launchplane-owned target metadata and the target-id
 record, and intentionally does not copy provider env text or secret-shaped
-values. Use `--project-name`, `--target-name`, `--domain`, and
-`--healthcheck-path` when the provider payload does not expose enough redacted
-metadata for the record.
+values. Local apply also requires `--allow-direct-db-mutation` and is explicit
+local/bootstrap repair only; routine shared/live target setup should use the
+manual `Dokploy Target Setup` workflow. Use `--project-name`, `--target-name`,
+`--domain`, and `--healthcheck-path` when the provider payload does not expose
+enough redacted metadata for the record.
 
 For shared or production live mutations, use the manual `Dokploy Target Setup`
 workflow instead of local CLI commands. The workflow calls the deployed
@@ -127,11 +129,13 @@ uv run launchplane dokploy-targets create-application \
   --project-name <dokploy-project-name>
 ```
 
-This command is also dry-run by default. With `--apply`, it can create a
-Dokploy project, environment, and application, then write the matching tracked
-target and target-id records. Use `--project-id` or `--environment-id` to reuse
-existing provider containers, and `--server-id` when the app belongs on a remote
-Dokploy server. It still does not configure secrets or copy provider env text;
+This command is also dry-run by default. With local
+`--apply --allow-direct-db-mutation`, it can create a Dokploy project,
+environment, and application, then write the matching tracked target and
+target-id records. Use `--project-id` or `--environment-id` to reuse existing
+provider containers, and `--server-id` when the app belongs on a remote Dokploy
+server. Routine shared/live creation should use the manual workflow above. It
+still does not configure secrets or copy provider env text;
 runtime and secret records remain separate Launchplane-owned setup steps.
 
 Then import or update DB-backed authz policy records for the product's GitHub

@@ -286,9 +286,12 @@ uv run launchplane dokploy-targets show --context opw --instance testing
 uv run launchplane dokploy-targets put-shopify-protected-store-key \
   --context opw \
   --instance testing \
-  --key yps-your-part-supplier
+  --key yps-your-part-supplier \
+  --allow-direct-db-mutation
 ```
 
-That command family edits the shared `launchplane_dokploy_targets` record set
-directly and keeps target policies in the same DB-backed authority as the rest
-of the tracked stable-lane target definition.
+The mutation commands in that family edit the shared
+`launchplane_dokploy_targets` and provider-target record sets directly, so they
+require `--allow-direct-db-mutation` and are explicit local/bootstrap repair
+only. Routine shared/live target setup should use the deployed service route or
+operator workflow.

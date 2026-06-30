@@ -825,7 +825,11 @@ run` is the foreground loop intended for an external process supervisor, and
 - The operator write path for this record family is the Launchplane CLI,
   including `dokploy-targets list`, `show`,
   `put-shopify-protected-store-key`, and
-  `unset-shopify-protected-store-key`.
+  `unset-shopify-protected-store-key`. Direct local writes, including Shopify
+  protected-store-key mutation, relabel, adoption apply, and application-create
+  apply, require `--allow-direct-db-mutation` and are explicit local/bootstrap
+  repair only; routine shared/live target setup should use the deployed service
+  route or operator workflow.
 - Repo-local Dokploy target TOML files are not a supported runtime authority or
   mutation surface for these records.
 - For service-shaped products, persistent volume mounts remain operator-owned

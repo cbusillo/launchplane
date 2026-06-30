@@ -68,13 +68,16 @@ Each stable lane also needs DB-backed Dokploy target records:
 For an existing Dokploy app, use `launchplane dokploy-targets adopt` to create
 or refresh those target and target-id records from the live provider id. The
 adoption command is dry-run by default and requires `--apply` to write records;
-it does not copy provider env text into Launchplane. Provider application
-creation for application targets is available through
+local `--apply` also requires `--allow-direct-db-mutation` and is explicit
+local/bootstrap repair only. It does not copy provider env text into
+Launchplane. Provider application creation for application targets is available through
 `launchplane dokploy-targets create-application`. That command is also dry-run
-by default; with `--apply`, it can create or reuse the Dokploy project and
-environment, create the application, and immediately persist the matching target
-records. It still leaves runtime env, managed secrets, volumes, ports, and
-health behavior as explicit setup rather than inferred provider state.
+by default; with local `--apply --allow-direct-db-mutation`, it can create or
+reuse the Dokploy project and environment, create the application, and
+immediately persist the matching target records. Routine shared/live target
+setup should use the deployed service route or operator workflow instead. It
+still leaves runtime env, managed secrets, volumes, ports, and health behavior
+as explicit setup rather than inferred provider state.
 
 Product repos may document these expected facts, but they must not store live
 Launchplane product profiles, target ids, provider credentials, or lifecycle
