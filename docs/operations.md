@@ -33,9 +33,9 @@ API path instead of running the local command from an arbitrary checkout.
 - `service`: run the first local Launchplane HTTP ingress slice.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 - `storage provider-target-audit`: run the read-only provider-target parity
-  preflight before Phase Two backfill or provider-target authority cutover.
+  preflight before backfill or provider-target authority cutover.
 - `storage provider-target-backfill`: dry-run or apply explicit provider-target
-  rows from complete Dokploy target/id pairs during Phase Two migration.
+  rows from complete Dokploy target/id pairs.
 
 `deployments write`, `promotions write`, `inventory write-from-deployment`,
 `inventory write-from-promotion`, and `release-tuples write-from-promotion`
@@ -48,24 +48,22 @@ is a long-running service with authenticated HTTP ingress. The CLI should remain
 a client of Launchplane's stable API contract or an explicit DB-backed operator
 tool, not a separate live-state authority.
 
-Provider-target Phase Two data changes for shared or production lanes must use
-the deployed Launchplane service. The manual `Provider Target Operations`
-workflow calls `POST /v1/provider-targets/operations` with GitHub OIDC and is
-authorized through DB-backed `provider_target.audit` and
-`provider_target.backfill` grants for product/context `launchplane`. Run it
-first in `audit` or `backfill-dry-run` mode, review the artifact, then run
-`backfill-apply` only with the exact confirmation phrase and an operator reason.
-The initial Phase Two target set is ordered from the lower-risk proof lane into
-live production lanes: `discord-blue/prod`, `sellyouroutboard/testing`,
-`sellyouroutboard/prod`, `verireel/testing`, `verireel/prod`, `cm/testing`,
-`cm/prod`, `opw/testing`, and `opw/prod`.
+Provider-target data changes for shared or production lanes must use the
+deployed Launchplane service. The manual `Provider Target Operations` workflow
+calls `POST /v1/provider-targets/operations` with GitHub OIDC and is authorized
+through DB-backed `provider_target.audit` and `provider_target.backfill` grants
+for product/context `launchplane`. Run it first in `audit` or
+`backfill-dry-run` mode, review the artifact, then run `backfill-apply` only
+with the exact confirmation phrase and an operator reason. Specific rollout
+lane sets and ordering belong in issue-backed plans and workflow inputs, not in
+checked-in docs.
 
 After the provider-target audit is clean, use the manual
 `Product Environment Evidence` workflow to collect read-model evidence through
 the deployed service. The workflow calls `GET
 /v1/products/{product}/environments/{environment}` with GitHub OIDC, records
 only sanitized provider, target-type, trust-state, and count summaries, and
-fails closed if any Phase Two lane lacks recorded provider-target authority.
+fails closed if any requested lane lacks recorded provider-target authority.
 Raw product environment responses are not uploaded; the artifact contains only
 the route list and sanitized summaries.
 
@@ -1178,11 +1176,9 @@ inside `.github/workflows/preview-control-plane.yml` and
 `.github/workflows/preview-cleanup.yml`. The scheduled orphan backstop in
 `.github/workflows/preview-janitor.yml` should use the same Launchplane destroy
 and evidence contract rather than keeping a second repo-local teardown path.
-Launchplane's handoff contract is moving from evidence-only toward reusable
-preview lifecycle ownership. The target integration is
-OIDC-authenticated HTTP into Launchplane. The local CLI examples below exist only
-to pin the payload shape while the Launchplane service ingress continues to
-absorb the reusable lifecycle behavior.
+Launchplane's reusable preview lifecycle contract is OIDC-authenticated HTTP into
+Launchplane. The local CLI examples below pin the payload shape for local
+rehearsal and repair; shared product workflows should use the service ingress.
 
 For a successful or failed preview refresh, emit two JSON payloads and hand
 them to Launchplane's preview-generation evidence ingress. The current local

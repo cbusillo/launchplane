@@ -8,7 +8,7 @@ Use these docs as the source of truth for `launchplane`.
 - [config-boundary.md](config-boundary.md) — bootstrap-vs-DB config authority
   and checked-in config authority limits.
 - [service-boundary.md](service-boundary.md) — Launchplane HTTP ingress, GitHub
-  OIDC trust, and first API contracts.
+  OIDC trust, and API contracts.
 - [dokploy-service-deployments.md](dokploy-service-deployments.md) — contract
   for simple image-backed services deployed through Dokploy applications.
 - [new-product-repo.md](new-product-repo.md) — checklist for building a new
@@ -16,7 +16,7 @@ Use these docs as the source of truth for `launchplane`.
 - [product-repo-contract.md](product-repo-contract.md) — thin product repo
   approval gate and new website repo checklist.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
-  preview workflow event, idempotency, feedback, and migration contract.
+  preview workflow event, idempotency, feedback, and lifecycle contract.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
   descriptor, action safety, registry, and read-model endpoint contract.
 - [driver-development.md](driver-development.md) — when and how to add a new

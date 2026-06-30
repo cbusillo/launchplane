@@ -462,13 +462,12 @@ backend handler registration, route dispatch, and fail-closed service
 authorization still have to agree.
 
 POST driver descriptor actions and route aliases execute through native FastAPI
-routes. The legacy WSGI descriptor-backed dispatch bridge is removed. The
-service validates this at startup, so adding a writable descriptor route without
-registering a matching native FastAPI route fails closed instead of silently
-advertising an unimplemented action. This keeps descriptor metadata as the
-route/authz source of truth while preventing an advertised descriptor action
-from becoming executable without implementation. Descriptor route metadata and service
-compatibility policy also drive
+routes. The service validates this at startup, so adding a writable descriptor
+route without registering a matching native FastAPI route fails closed instead
+of silently advertising an unimplemented action. This keeps descriptor metadata
+as the route/authz source of truth while preventing an advertised descriptor
+action from becoming executable without implementation. Descriptor route
+metadata and service compatibility policy also drive
 product-driver compatibility checks. A
 product whose descriptor names a `base_driver_id` can use the base driver's
 shared lifecycle routes when its profile owns the requested stable lane or

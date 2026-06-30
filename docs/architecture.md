@@ -233,14 +233,13 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 - Keep schema changes backward-compatible enough that deploy rollback can safely
   return to the previous Launchplane image when possible.
 
-## Driver Migration Status
+## Driver Ownership Status
 
-The first Odoo and VeriReel driver migration is complete enough that the old
-driver-migration working plan has been retired. Product repos now keep source,
-build, verification, and thin OIDC request wrappers, while Launchplane owns the
-durable service routes, DB-backed records, managed-secret/runtime authority,
-driver execution, and operator read models for the current Odoo and VeriReel
-deployment, promotion, rollback, backup, and preview paths.
+Product repos keep source, build, verification, and thin OIDC request wrappers,
+while Launchplane owns the durable service routes, DB-backed records,
+managed-secret/runtime authority, driver execution, and operator read models for
+the current Odoo and VeriReel deployment, promotion, rollback, backup, and
+preview paths.
 
 Future driver work should be incremental capability expansion behind the same
 service/read-model contract, not a second migration track.

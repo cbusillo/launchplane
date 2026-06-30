@@ -495,4 +495,5 @@ When creating a new website repo for Launchplane:
   database bootstrap, data migration, backup gates, restore/rollback behavior,
   product smoke checks, or platform-specific post-deploy actions.
 - Keep Launchplane lifecycle config out of the product repo unless this document
-  or a driver-specific doc explicitly names a temporary compatibility exception.
+  or a driver-specific doc explicitly names a scoped bootstrap or rehearsal
+  exception.

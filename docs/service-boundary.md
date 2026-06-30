@@ -38,7 +38,7 @@ VeriReel product paths:
 - CLI: `uv run launchplane service serve`
 - server runtime: FastAPI served directly by Uvicorn
 - native FastAPI health route: `GET /v1/health`, backed by a Pydantic response
-  model and included in OpenAPI as the first v2 contract proof
+  model and included in OpenAPI as a service contract proof
 - native FastAPI Launchplane service runtime reads:
   - `GET /v1/service/runtime`, requiring `launchplane_service.read` for the
     Launchplane service context and returning runtime metadata only
@@ -382,9 +382,9 @@ metadata rather than echoing workflow refs, human logins, owner-agent subjects,
 or the full policy body.
 
 The service also serves the built operator UI shell at `/`, with `/ui` retained
-as a compatibility alias. This route family is native FastAPI. Built assets live
-under `/ui/assets/...`, while `/ui/*` falls back to the app shell so the frontend
-can own client-side routes. Versioned API ingress remains under `/v1`.
+as a route alias. This route family is native FastAPI. Built assets live under
+`/ui/assets/...`, while `/ui/*` falls back to the app shell so the frontend can
+own client-side routes. Versioned API ingress remains under `/v1`.
 
 Validate the operator UI shell with browser navigation or `GET /ui`. Do not use
 `HEAD /ui` as the only availability check, because static app-shell fallback
@@ -1401,7 +1401,7 @@ deleted runtime identity records under neutral `provider_targets` and
 provider-specific execution/config storage where needed, but service responses
 must not reintroduce Dokploy-named target buckets for these workflows.
 
-Provider-target Phase Two operations use the native FastAPI
+Provider-target operations use the native FastAPI
 `POST /v1/provider-targets/operations` route. The route accepts one
 Launchplane-owned route at a time with mode `audit`, `backfill-dry-run`, or
 `backfill-apply`, `provider_id`, `context`, `instance`, and an apply-only
@@ -1411,7 +1411,7 @@ apply, always scoped to product/context `launchplane`. Apply requests are
 idempotency-keyed and write only complete non-conflicting Dokploy target/id
 projections; existing rows and conflicts are reported rather than overwritten.
 The manual `Provider Target Operations` workflow is the supported shared and
-production caller for Phase Two backfill evidence.
+production caller for backfill evidence.
 
 Launchplane self-deploy uses the native FastAPI
 `POST /v1/drivers/launchplane/self-deploy` route. The route executes only the
@@ -1457,10 +1457,10 @@ workflow is the supported shared and production caller when operators need
 provider evidence without mutating Dokploy or Launchplane records.
 
 The manual `Product Environment Evidence` workflow is the supported read-only
-Phase Two caller for product environment read-model evidence. It uses GitHub
-OIDC and `product_environment.read` to call `GET
-/v1/products/{product}/environments/{environment}` for the same Phase Two target
-set, then uploads sanitized summaries only. It must not upload raw product
+caller for product environment read-model evidence. It uses GitHub OIDC and
+`product_environment.read` to call `GET
+/v1/products/{product}/environments/{environment}` for the requested target set,
+then uploads sanitized summaries only. It must not upload raw product
 environment responses because those responses can include provider target
 identifiers, runtime key names, managed-secret binding keys, and operational
 metadata.
@@ -2319,9 +2319,8 @@ Current commands such as:
 - `control-plane launchplane-previews write-from-generation`
 - `control-plane launchplane-previews write-destroyed`
 
-should be treated as temporary compatibility clients of these Launchplane payloads.
-They should not remain the permanent integration boundary for external product
-workflows.
+are local rehearsal and repair clients for these Launchplane payloads. They are
+not the shared integration boundary for external product workflows.
 
 ## Driver Relationship
 

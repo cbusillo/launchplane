@@ -97,12 +97,12 @@ state block the read or write instead of silently trying another source.
 
 ## Secret Provider Boundary
 
-The accepted v2 provider for this slice is Launchplane-managed secrets backed by
-Launchplane storage and a minimal bootstrap decryption root. Future Vault, HSM,
-KMS, or cloud-secret-manager integrations are deferred provider candidates. They
-require a named Launchplane problem, local/dev bootstrap plan, operational owner,
-failure mode, rollback posture, and proof that live secret values and
-assignments remain out of checked-in files.
+The accepted provider is Launchplane-managed secrets backed by Launchplane
+storage and a minimal bootstrap decryption root. Future Vault, HSM, KMS, or
+cloud-secret-manager integrations are deferred provider candidates. They require
+a named Launchplane problem, local/dev bootstrap plan, operational owner,
+failure mode, rollback posture, and proof that live secret values and assignments
+remain out of checked-in files.
 
 Provider adapters expose generic operations only: write encrypted version,
 resolve metadata, resolve plaintext for an authorized in-process use,
