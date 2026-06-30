@@ -11,7 +11,7 @@ from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.odoo_instance_overrides import render_post_deploy_payload
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 from pydantic import ValidationError
 
 from control_plane.cli import main
@@ -51,6 +51,16 @@ def _ship_request() -> ShipRequest:
         provider_target_type="compose",
         deploy_mode="dokploy-compose-api",
     )
+
+
+def _allow_direct_db_mutation_argument() -> list[str]:
+    return ["--allow-direct-db-mutation"]
+
+
+def _assert_direct_db_mutation_rejected(test_case: unittest.TestCase, result: Result) -> None:
+    test_case.assertNotEqual(result.exit_code, 0)
+    test_case.assertIn("Direct local DB mutation is restricted", result.output)
+    test_case.assertIn("--allow-direct-db-mutation", result.output)
 
 
 class OdooInstanceOverrideTests(unittest.TestCase):
@@ -233,6 +243,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "https://opw-prod.example.com",
                     "--source-label",
                     "test",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
 
@@ -251,6 +262,31 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertEqual(
             stored_record.config_parameters[0].value.value, "https://opw-prod.example.com"
         )
+
+    def test_cli_put_config_param_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-config-param",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "prod",
+                    "--key",
+                    "web.base.url",
+                    "--value",
+                    "https://opw-prod.example.com",
+                ],
+            )
+
+        _assert_direct_db_mutation_rejected(self, result)
 
     def test_cli_put_config_param_adds_deploy_phases_to_existing_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -294,6 +330,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "web.base.url",
                     "--value",
                     "https://opw-prod.example.com",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
             store = PostgresRecordStore(database_url=database_url)
@@ -329,6 +366,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "api_token",
                     "--value",
                     "plain-token",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
 
@@ -358,6 +396,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "api_token",
                     "--secret-binding-id",
                     "secret-binding-shopify-token",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
             list_result = runner.invoke(
@@ -369,6 +408,33 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         payload = json.loads(list_result.output)
         self.assertEqual(payload["records"][0]["addon_settings"], ["shopify.api_token"])
         self.assertNotIn("secret-binding-shopify-token", list_result.output)
+
+    def test_cli_put_addon_setting_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-addon-setting",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "prod",
+                    "--addon",
+                    "shopify",
+                    "--setting",
+                    "shop_url_key",
+                    "--value",
+                    "candidate-store",
+                ],
+            )
+
+        _assert_direct_db_mutation_rejected(self, result)
 
     def test_cli_put_addon_setting_adds_deploy_phases_to_existing_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -416,6 +482,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "api_token",
                     "--secret-binding-id",
                     "secret-binding-shopify-token",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
             store = PostgresRecordStore(database_url=database_url)
@@ -467,6 +534,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "web.base.url",
                     "--value",
                     "https://opw-testing.example.com",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
             put_bootstrap_result = runner.invoke(
@@ -482,6 +550,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "testing",
                     "--payload-file",
                     str(payload_file),
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
             store = PostgresRecordStore(database_url=database_url)
@@ -547,6 +616,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "testing",
                     "--payload-file",
                     str(payload_file),
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
             store = PostgresRecordStore(database_url=database_url)
@@ -557,6 +627,32 @@ class OdooInstanceOverrideTests(unittest.TestCase):
 
         self.assertEqual(put_bootstrap_result.exit_code, 0, msg=put_bootstrap_result.output)
         self.assertEqual(stored_record.apply_on, ("manual", "deploy", "promotion"))
+
+    def test_cli_put_website_bootstrap_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temp_dir = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temp_dir / "launchplane.sqlite3")
+            payload_file = temp_dir / "website-bootstrap.json"
+            payload_file.write_text(
+                json.dumps({"tenant": "opw", "name": "OPW"}), encoding="utf-8"
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-website-bootstrap",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--payload-file",
+                    str(payload_file),
+                ],
+            )
+
+        _assert_direct_db_mutation_rejected(self, result)
 
     def test_cli_put_website_bootstrap_reports_schema_errors(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -578,6 +674,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "testing",
                     "--payload-file",
                     str(payload_file),
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
 
@@ -606,6 +703,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "web.base.url",
                     "--value",
                     "https://opw-prod.example.com",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
             mark_result = runner.invoke(
@@ -625,6 +723,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "2026-04-23T12:00:00Z",
                     "--detail",
                     "Applied through test driver.",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
 
@@ -639,6 +738,29 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertIn('"last_apply_status": "pass"', mark_result.output)
         self.assertEqual(stored_record.last_apply.status, "pass")
         self.assertEqual(stored_record.last_apply.applied_at, "2026-04-23T12:00:00Z")
+
+    def test_cli_mark_apply_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "mark-apply",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "prod",
+                    "--status",
+                    "pass",
+                ],
+            )
+
+        _assert_direct_db_mutation_rejected(self, result)
 
     def test_post_deploy_update_renders_literal_odoo_overrides_and_marks_pass(self) -> None:
         def capture_post_deploy_update(**kwargs: object) -> None:
@@ -939,6 +1061,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "--context",
                     "opw",
                     "--apply",
+                    *_allow_direct_db_mutation_argument(),
                 ],
             )
 
@@ -970,6 +1093,55 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             "configured",
         )
         self.assertNotIn("encrypted-value-placeholder", result.output)
+
+    def test_cli_migrate_secret_transport_apply_requires_direct_db_acknowledgement(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "migrate-secret-transport",
+                    "--database-url",
+                    database_url,
+                    "--apply",
+                ],
+            )
+
+        _assert_direct_db_mutation_rejected(self, result)
+
+    def test_cli_migrate_secret_transport_dry_run_does_not_require_direct_db_acknowledgement(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.close()
+            with patch.object(
+                PostgresRecordStore,
+                "ensure_schema",
+                side_effect=AssertionError("dry-run must not ensure schema"),
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "odoo-overrides",
+                        "migrate-secret-transport",
+                        "--database-url",
+                        database_url,
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["mode"], "dry-run")
 
 
 if __name__ == "__main__":
