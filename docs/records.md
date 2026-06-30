@@ -183,18 +183,18 @@ an ORM column/table or remains only in the evidence payload.
   `provider_target_ids` keys. Dokploy target and target-id records can still be
   the provider-specific source records copied or deleted by those workflows, but
   they are not exposed as Dokploy-named response buckets.
-- `uv run launchplane storage provider-target-audit` is the read-only Phase Two
-  preflight for this record family. It compares explicit provider-target rows
+- `uv run launchplane storage provider-target-audit` is the read-only preflight
+  for this record family. It compares explicit provider-target rows
   with the neutral projection from paired Dokploy target and target-id records,
   reports missing halves and mismatches, and exits nonzero when unresolved
   blockers would make backfill or authority cutover unsafe.
-- `uv run launchplane storage provider-target-backfill` is the Phase Two seeding
-  path for explicit provider-target rows. Dry-run is the default; `--apply`
+- `uv run launchplane storage provider-target-backfill` is the seeding path for
+  explicit provider-target rows. Dry-run is the default; `--apply`
   writes only complete Dokploy target/id projections that have no conflicting
   physical row. Existing matching physical rows are skipped without churn,
   incomplete pairs are reported but not guessed, and conflicts or unsupported
   provider rows are never overwritten automatically.
-- Shared and production Phase Two backfill uses the deployed service route
+- Shared and production backfill uses the deployed service route
   `POST /v1/provider-targets/operations`, normally through the manual
   `Provider Target Operations` workflow. The workflow records per-route audit,
   dry-run, or apply evidence as artifacts and uses DB-backed
@@ -688,8 +688,8 @@ state/
   for a concurrent owner id to settle, then give that owner record its own
   bounded settle window before clearing abandoned empty or orphaned reservations
   so an interrupted writer cannot block the lane forever.
-- The v2 target execution model for these Odoo long-running operation records is
-  a dedicated Launchplane worker process backed by DB leases and heartbeats. The
+- The target execution model for these Odoo long-running operation records is a
+  dedicated Launchplane worker process backed by DB leases and heartbeats. The
   HTTP route creates or replays the operation record and returns the poll URL;
   execution is owned by the supervised worker process, not by request-process
   daemon threads. Operation

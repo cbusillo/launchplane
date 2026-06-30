@@ -42,7 +42,7 @@ Treat this file as the launch checklist for each Every Code session in
   production live mutations. Do not use local CLI live-target commands from an
   arbitrary checkout as a fallback; add or use a service endpoint first.
 - Treat service-host env as bootstrap-only unless a repo doc explicitly calls
-  out a narrower temporary compatibility fallback.
+  out a narrower scoped bootstrap or rehearsal exception.
 - Do not hard-code real tenant, product, repository, branch, domain, or operator
   values into production defaults, fallback behavior, or checked-in catalogs;
   see the coding standards for the docs/tests boundary.
