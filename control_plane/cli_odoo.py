@@ -48,6 +48,11 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
+_DIRECT_DB_MUTATION_MESSAGE = (
+    "Direct local DB mutation is restricted after the Launchplane service boundary. "
+    "Use the deployed service route or operator workflow for shared/production changes, "
+    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
+)
 OdooOverrideApplyStatus = Literal["skipped", "pending", "pass", "fail"]
 OdooProdRollbackSourceChannel = Literal["testing"]
 
@@ -113,6 +118,21 @@ def _read_dokploy_config(*, control_plane_root: Path, database_url: str) -> tupl
     return _odoo_callbacks().read_dokploy_config(
         control_plane_root=control_plane_root, database_url=database_url
     )
+
+
+def _direct_db_mutation_acknowledgement_option(
+    function: Callable[..., object],
+) -> Callable[..., object]:
+    return click.option(
+        "--allow-direct-db-mutation",
+        is_flag=True,
+        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+    )(function)
+
+
+def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
+    if not allow_direct_db_mutation:
+        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
 
 
 def _relabel_odoo_override_secret_binding(
@@ -761,6 +781,7 @@ def odoo_targets_replacement_plan(
     "--secret-binding-id", default="", help="Managed secret binding id for secret values."
 )
 @click.option("--source-label", default="cli", show_default=True)
+@_direct_db_mutation_acknowledgement_option
 def odoo_overrides_put_config_param(
     database_url: str,
     context_name: str,
@@ -769,7 +790,9 @@ def odoo_overrides_put_config_param(
     value: str | None,
     secret_binding_id: str,
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     override_value = _build_odoo_override_value(
         value=value,
         secret_binding_id=secret_binding_id,
@@ -815,6 +838,7 @@ def odoo_overrides_put_config_param(
     "--secret-binding-id", default="", help="Managed secret binding id for secret values."
 )
 @click.option("--source-label", default="cli", show_default=True)
+@_direct_db_mutation_acknowledgement_option
 def odoo_overrides_put_addon_setting(
     database_url: str,
     context_name: str,
@@ -824,7 +848,9 @@ def odoo_overrides_put_addon_setting(
     value: str | None,
     secret_binding_id: str,
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     value_name = f"{addon_name}.{setting_name}"
     override_value = _build_odoo_override_value(
         value=value,
@@ -872,13 +898,16 @@ def odoo_overrides_put_addon_setting(
     help="JSON file containing a typed devkit website_bootstrap payload.",
 )
 @click.option("--source-label", default="cli", show_default=True)
+@_direct_db_mutation_acknowledgement_option
 def odoo_overrides_put_website_bootstrap(
     database_url: str,
     context_name: str,
     instance_name: str,
     payload_file: Path,
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     try:
         raw_payload = json.loads(payload_file.read_text(encoding="utf-8"))
         website_bootstrap = OdooWebsiteBootstrapPayload.model_validate(raw_payload)
@@ -924,20 +953,25 @@ def odoo_overrides_put_website_bootstrap(
     default="odoo-secret-transport-migration",
     show_default=True,
 )
+@_direct_db_mutation_acknowledgement_option
 def odoo_overrides_migrate_secret_transport(
     database_url: str,
     context_name: str,
     instance_name: str,
     apply_changes: bool,
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
     normalized_context = context_name.strip().lower()
     normalized_instance = instance_name.strip().lower()
     if normalized_instance and not normalized_context:
         raise click.ClickException("--instance requires --context.")
+    if apply_changes:
+        _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
 
     postgres_store = PostgresRecordStore(database_url=database_url)
-    postgres_store.ensure_schema()
+    if apply_changes:
+        postgres_store.ensure_schema()
     try:
         records = postgres_store.list_odoo_instance_override_records()
         selected_records = [
@@ -1049,6 +1083,7 @@ def odoo_overrides_show(database_url: str, context_name: str, instance_name: str
 @click.option("--applied-at", default="", help="UTC timestamp for completed apply results.")
 @click.option("--detail", default="")
 @click.option("--source-label", default="cli", show_default=True)
+@_direct_db_mutation_acknowledgement_option
 def odoo_overrides_mark_apply(
     database_url: str,
     context_name: str,
@@ -1057,7 +1092,9 @@ def odoo_overrides_mark_apply(
     applied_at: str,
     detail: str,
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:

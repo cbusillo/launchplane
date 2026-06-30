@@ -838,8 +838,10 @@ context only, and `context_instance` has both context and instance.
 - Odoo rollback is image/release-tuple rollback, not VM snapshot rollback. Do not
   invent artifact ids, source commits, backup gates, or env-file overlays to make
   a rollback proceed; write or import the real Launchplane records first.
-- `odoo-overrides put-config-param` writes a typed Odoo `ir.config_parameter`
-  override for a context and instance.
+- `odoo-overrides put-config-param --allow-direct-db-mutation` writes a typed
+  Odoo `ir.config_parameter` override for a context and instance. This direct
+  local DB path is explicit local/bootstrap repair only; routine shared/live
+  changes should use the trusted service route or operator workflow.
 - For shared/live targets, use the trusted `Odoo Config Parameter Override`
   workflow instead of local CLI writes. It calls
   `POST /v1/drivers/odoo/config-parameter-override` with GitHub Actions OIDC and
@@ -850,15 +852,20 @@ context only, and `context_instance` has both context and instance.
   Service-written `web.base.url` records are always marked for `deploy` and
   `promotion` application so Odoo post-deploy and stable-bootstrap drivers can
   apply the canonical URL before verification.
-- `odoo-overrides put-addon-setting` writes addon-shaped Odoo override intent
-  such as Authentik or Shopify settings for a context and instance.
+- `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
+  addon-shaped Odoo override intent such as Authentik or Shopify settings for a
+  context and instance. Use it only for explicit local/bootstrap repair.
+- `odoo-overrides put-website-bootstrap --allow-direct-db-mutation` writes typed
+  website-bootstrap override intent for explicit local/bootstrap repair only.
 - Secret-shaped override names, including `*_TOKEN`, `*_PASSWORD`, and
   `*_KEY`, must use `--secret-binding-id`; plaintext secret writes are rejected.
 - `odoo-overrides list` and `odoo-overrides show` return keys, counts, source
   labels, and timestamps only. They do not echo literal values or managed secret
   binding ids.
-- `odoo-overrides mark-apply` updates the latest apply status metadata for a
-  record, giving the future Odoo driver a tested result-write path.
+- `odoo-overrides migrate-secret-transport --apply` and `odoo-overrides
+  mark-apply` require `--allow-direct-db-mutation` before they persist local DB
+  changes. `migrate-secret-transport` dry-run, `odoo-overrides list`, and
+  `odoo-overrides show` stay read-only inspection paths.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to Odoo as one typed payload env var. Deploy-phase payloads are
   persisted to the Dokploy compose target environment before the web container
