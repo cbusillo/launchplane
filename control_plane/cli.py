@@ -57,9 +57,6 @@ from control_plane.cli_launchplane_previews import (
     register_launchplane_preview_commands,
 )
 from control_plane.cli_odoo import OdooCliCallbacks, register_odoo_commands
-from control_plane.cli_odoo import (
-    _normalize_odoo_prod_rollback_source_channel as _normalize_odoo_prod_rollback_source_channel,
-)
 from control_plane.cli_preview_workflow import register_preview_workflow_commands
 from control_plane.cli_policy_profiles import (
     PolicyProfileCliCallbacks,
@@ -125,11 +122,6 @@ from control_plane.workflows.launchplane import (
     resolve_pull_request_event_manifest,
 )
 from control_plane.workflows.inventory import build_environment_inventory
-from control_plane.workflows.odoo_prod_rollback import (
-    OdooProdRollbackRequest,
-    OdooProdRollbackResult,
-    execute_odoo_prod_rollback,
-)
 from control_plane.workflows import promotion_ship_execution
 from control_plane.workflows import promotion_ship_resolution
 from control_plane.workflows.ship import utc_now_timestamp
@@ -219,19 +211,6 @@ def _odoo_store_factory(
     state_dir: Path, *, database_url: str | None = None
 ) -> FilesystemRecordStore | PostgresRecordStore:
     return _store(state_dir, database_url=database_url)
-
-
-def _execute_odoo_prod_rollback_from_cli(
-    *,
-    control_plane_root: Path,
-    record_store: object,
-    request: OdooProdRollbackRequest,
-) -> OdooProdRollbackResult:
-    return execute_odoo_prod_rollback(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        request=request,
-    )
 
 
 def _control_plane_root() -> Path:
@@ -3560,7 +3539,6 @@ register_odoo_commands(
     callbacks=OdooCliCallbacks(
         control_plane_root=_control_plane_root,
         store_factory=_odoo_store_factory,
-        execute_odoo_prod_rollback=_execute_odoo_prod_rollback_from_cli,
         normalize_odoo_apply_status=_normalize_odoo_apply_status,
         read_dokploy_config=control_plane_dokploy.read_dokploy_config,
     ),

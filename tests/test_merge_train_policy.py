@@ -244,10 +244,6 @@ class MergeTrainPolicyTests(unittest.TestCase):
         self.assertEqual(normalize_secret_scope(" Context "), "context")
         self.assertEqual(normalize_odoo_apply_status(" PASS "), "pass")
         self.assertEqual(
-            control_plane_cli._normalize_odoo_prod_rollback_source_channel(" testing "),
-            "testing",
-        )
-        self.assertEqual(
             control_plane_cli._normalize_dokploy_target_type(" APPLICATION "),
             "application",
         )
@@ -263,11 +259,6 @@ class MergeTrainPolicyTests(unittest.TestCase):
                 normalize_odoo_apply_status,
                 "success",
                 "Odoo override apply status must be skipped, pending, pass, or fail.",
-            ),
-            (
-                control_plane_cli._normalize_odoo_prod_rollback_source_channel,
-                "prod",
-                "Odoo prod rollback source channel must be testing.",
             ),
             (
                 control_plane_cli._normalize_dokploy_target_type,
