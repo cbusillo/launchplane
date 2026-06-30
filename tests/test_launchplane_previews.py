@@ -4911,6 +4911,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "ingest-github-webhook",
                         "--database-url",
                         database_url,
+                        "--allow-direct-db-mutation",
                         "--state-dir",
                         str(control_plane_root / "empty-state"),
                         "--input-file",
@@ -4925,6 +4926,35 @@ ENV_OVERRIDE_DISABLE_CRON = true
             payload = json.loads(result.output)
             self.assertEqual(payload["webhook"]["signature_verification"]["context"], "opw")
             self.assertTrue(payload["webhook"]["signature_verification"]["verified"])
+
+    def test_launchplane_previews_ingest_github_webhook_requires_direct_db_acknowledgement(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _runtime_environments_database_url(control_plane_root)
+            input_file = control_plane_root / "github-webhook.json"
+            input_file.write_text(json.dumps(_github_pull_request_webhook_payload()), encoding="utf-8")
+
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "launchplane-previews",
+                    "ingest-github-webhook",
+                    "--database-url",
+                    database_url,
+                    "--state-dir",
+                    str(control_plane_root / "empty-state"),
+                    "--input-file",
+                    str(input_file),
+                    "--signature-256",
+                    "sha256=unused",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
 
     def test_launchplane_previews_ingest_github_webhook_adapts_closed_pull_request_destroy_intent(
         self,

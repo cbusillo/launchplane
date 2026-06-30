@@ -21,6 +21,11 @@ from control_plane.workflows.promote import (
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
+_DIRECT_DB_MUTATION_MESSAGE = (
+    "Direct local DB mutation is restricted after the Launchplane service boundary. "
+    "Use the deployed service route or operator workflow for shared/production changes, "
+    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
+)
 
 
 @dataclass(frozen=True)
@@ -64,7 +69,9 @@ def _store(
     return _promotion_ship_callbacks().store_factory(state_dir, database_url=database_url)
 
 
-def _resolve_execution_database_url(*, database_url: str, local_rehearsal: bool) -> str | None:
+def _resolve_execution_database_url(
+    *, database_url: str, local_rehearsal: bool, allow_direct_db_mutation: bool
+) -> str | None:
     if local_rehearsal:
         return None
     normalized_database_url = database_url.strip()
@@ -80,7 +87,18 @@ def _resolve_execution_database_url(*, database_url: str, local_rehearsal: bool)
             "LAUNCHPLANE_DATABASE_URL. Use --local-rehearsal for explicit "
             "local filesystem rehearsal."
         )
+    if not allow_direct_db_mutation:
+        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
     return normalized_database_url
+
+
+def _direct_db_mutation_acknowledgement_option(function: Callable[..., object]) -> Callable[..., object]:
+    return click.option(
+        "--allow-direct-db-mutation",
+        is_flag=True,
+        default=False,
+        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+    )(function)
 
 
 def _load_json_file(input_file: Path) -> dict[str, object]:
@@ -234,18 +252,21 @@ def promote_resolve(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
 def promote_execute(
     state_dir: Path,
     database_url: str,
     local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
     input_file: Path,
     env_file: Path | None,
 ) -> None:
     execution_database_url = _resolve_execution_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
     )
     request = PromotionRequest.model_validate(_load_json_file(input_file))
     record_store = _store(state_dir, database_url=execution_database_url)
@@ -398,18 +419,21 @@ def ship_resolve(
 )
 @click.option("--database-url", default="", show_default=False)
 @click.option("--local-rehearsal", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
 def ship_execute(
     state_dir: Path,
     database_url: str,
     local_rehearsal: bool,
+    allow_direct_db_mutation: bool,
     input_file: Path,
     env_file: Path | None,
 ) -> None:
     execution_database_url = _resolve_execution_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        allow_direct_db_mutation=allow_direct_db_mutation,
     )
     request = ShipRequest.model_validate(_load_json_file(input_file))
     record_path, _record = _execute_ship(
