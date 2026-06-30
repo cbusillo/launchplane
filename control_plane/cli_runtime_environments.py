@@ -22,6 +22,11 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
+_DIRECT_DB_MUTATION_MESSAGE = (
+    "Direct local DB mutation is restricted after the Launchplane service boundary. "
+    "Use the deployed service route or operator workflow for shared/production changes, "
+    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
+)
 _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 _REDACTED_RUNTIME_ENVIRONMENT_VALUE = "<redacted>"
 
@@ -45,6 +50,20 @@ def environments() -> None:
     """Runtime environment contract commands."""
 
 
+def _direct_db_mutation_acknowledgement_option(function: Callable[..., object]) -> Callable[..., object]:
+    return click.option(
+        "--allow-direct-db-mutation",
+        is_flag=True,
+        default=False,
+        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+    )(function)
+
+
+def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
+    if not allow_direct_db_mutation:
+        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
+
+
 @environments.command("put")
 @click.option(
     "--database-url",
@@ -63,6 +82,7 @@ def environments() -> None:
     help="Runtime value assignment as KEY=VALUE.",
 )
 @click.option("--source-label", default="cli", show_default=True)
+@_direct_db_mutation_acknowledgement_option
 def environments_put(
     database_url: str,
     scope: str,
@@ -70,7 +90,9 @@ def environments_put(
     instance_name: str,
     assignments: tuple[str, ...],
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
@@ -116,6 +138,7 @@ def environments_put(
     help="Runtime value key to remove from the record.",
 )
 @click.option("--source-label", default="cli", show_default=True)
+@_direct_db_mutation_acknowledgement_option
 def environments_unset(
     database_url: str,
     scope: str,
@@ -123,7 +146,9 @@ def environments_unset(
     instance_name: str,
     keys: tuple[str, ...],
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
@@ -167,6 +192,7 @@ def environments_unset(
 @click.option("--allow-tracked-target", is_flag=True, default=False)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False)
 @click.option("--apply", "apply_changes", is_flag=True, default=False)
+@_direct_db_mutation_acknowledgement_option
 def environments_delete_record(
     database_url: str,
     scope: str,
@@ -176,9 +202,12 @@ def environments_delete_record(
     allow_tracked_target: bool,
     dry_run: bool,
     apply_changes: bool,
+    allow_direct_db_mutation: bool,
 ) -> None:
     if dry_run == apply_changes:
         raise click.ClickException("Choose exactly one of --dry-run or --apply.")
+    if apply_changes:
+        _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     normalized_context = context_name.strip()
     normalized_instance = instance_name.strip()
     normalized_scope = _validate_runtime_environment_scope_route(
@@ -263,13 +292,16 @@ def environments_delete_record(
 @click.option("--context", "context_name", default="")
 @click.option("--instance", "instance_name", default="")
 @click.option("--source-label", required=True)
+@_direct_db_mutation_acknowledgement_option
 def environments_relabel(
     database_url: str,
     scope: str,
     context_name: str,
     instance_name: str,
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
