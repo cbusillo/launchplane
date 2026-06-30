@@ -47,12 +47,15 @@ as Discord Blue's Every Code bridge port `8787`.
 ## Launchplane Records
 
 Before wiring workflows, seed or verify these records in Launchplane with an
-operator-owned onboarding manifest:
+operator-owned onboarding manifest through the Product Onboarding workflow or
+`POST /v1/product-onboarding/apply`. Direct local DB apply from a checkout is a
+break-glass local/bootstrap repair path and requires an explicit acknowledgement:
 
 ```sh
 uv run launchplane product-onboarding apply \
   --database-url "$LAUNCHPLANE_DATABASE_URL" \
-  --manifest-file state/product-onboarding/<product>.json
+  --manifest-file state/product-onboarding/<product>.json \
+  --allow-direct-db-mutation
 ```
 
 The manifest is applied idempotently and writes Launchplane-owned records for:

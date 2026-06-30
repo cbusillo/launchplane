@@ -679,12 +679,15 @@ Current derived-state behavior:
   directly into DB-backed runtime-environment records for `global`, `context`,
   or `instance` scope. It rejects secret-shaped keys and returns key metadata
   only, not plaintext values.
-- `product-config apply --dry-run|--apply --input-file <json>` is the supported
-  trusted-context bundle path for product runtime config changes. It writes
-  non-secret values to runtime-environment records and secret-shaped values to
-  managed secret records while returning only key names, actions, counts, actor,
-  and source metadata. Use it from a live Launchplane context that already has
-  current `LAUNCHPLANE_DATABASE_URL`; bundles with secrets also require
+- `product-config apply --dry-run --input-file <json>` remains a local planning
+  helper for trusted product runtime config bundles. Direct local DB
+  `--apply` is restricted after the service boundary and requires
+  `--allow-direct-db-mutation`; use it only for explicit local/bootstrap repair,
+  not routine shared or production mutation from an arbitrary checkout. The
+  service route below is the normal shared/prod path. Product-config apply
+  writes non-secret values to runtime-environment records and secret-shaped
+  values to managed secret records while returning only key names, actions,
+  counts, actor, and source metadata. Bundles with secrets require
   `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`. Runtime and secret scopes default from
   the top-level `context`/`instance`; nested `runtime_env` and secret routes must
   match that top-level target. Dry-run validates secret scope/route
