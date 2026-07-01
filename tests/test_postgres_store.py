@@ -2434,6 +2434,51 @@ class PostgresRecordStoreTests(unittest.TestCase):
             listed_records[0].policy.github_actions[0].repository, "cbusillo/launchplane"
         )
 
+    def test_authz_policy_import_allows_explicit_bootstrap_repair(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            policy_file = Path(temporary_directory_name) / "launchplane-authz.toml"
+            policy_file.write_text(
+                """
+schema_version = 1
+
+[[github_actions]]
+repository = "cbusillo/launchplane"
+workflow_refs = ["cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"]
+event_names = ["workflow_dispatch"]
+products = ["launchplane"]
+contexts = ["launchplane"]
+actions = ["launchplane_service_deploy.execute"]
+""".strip(),
+                encoding="utf-8",
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "authz-policies",
+                    "import-toml",
+                    "--database-url",
+                    database_url,
+                    "--policy-file",
+                    str(policy_file),
+                    "--source-label",
+                    "test",
+                    "--allow-direct-db-mutation",
+                ],
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            listed_records = store.list_authz_policy_records(status="active", limit=1)
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(len(listed_records), 1)
+        self.assertEqual(listed_records[0].source, "test")
+        self.assertEqual(
+            listed_records[0].policy.github_actions[0].repository, "cbusillo/launchplane"
+        )
+
     def test_runtime_key_safety_policy_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -2518,6 +2563,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     str(policy_file),
                     "--source-label",
                     "test",
+                    "--allow-direct-db-mutation",
                 ],
             )
             list_result = runner.invoke(
@@ -2555,6 +2601,39 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertIn('"count": 1', list_result.output)
         self.assertEqual(evaluate_result.exit_code, 0, evaluate_result.output)
         self.assertIn('"status": "pass"', evaluate_result.output)
+
+    def test_runtime_key_safety_import_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy_file = Path(temporary_directory_name) / "runtime-key-safety.json"
+            policy_file.write_text(
+                json.dumps(
+                    {
+                        "updated_at": "2026-05-05T20:00:00Z",
+                        "rules": [
+                            {
+                                "binding_key": "SHOPIFY_ACCESS_TOKEN",
+                                "secret_class": "testing",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "runtime-key-safety",
+                    "import-policy",
+                    "--database-url",
+                    "postgresql://launchplane:test@db/launchplane",
+                    "--policy-file",
+                    str(policy_file),
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
+        self.assertIn("--allow-direct-db-mutation", result.output)
 
     def test_merge_train_policy_cli_imports_and_lists_policy(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2598,6 +2677,7 @@ env_var = "GH_TOKEN"
                     str(policy_file),
                     "--source-label",
                     "test",
+                    "--allow-direct-db-mutation",
                 ],
             )
             list_result = runner.invoke(
@@ -2618,6 +2698,70 @@ env_var = "GH_TOKEN"
         self.assertEqual(list_result.exit_code, 0, list_result.output)
         self.assertIn('"count": 1', list_result.output)
         self.assertIn('"cbusillo/codex-skills:main"', list_result.output)
+
+    def test_merge_train_policy_direct_import_requires_direct_db_acknowledgement(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy_file = Path(temporary_directory_name) / "merge-train-policy.toml"
+            policy_file.write_text(
+                """
+schema_version = 1
+
+[[policies]]
+repository = "cbusillo/codex-skills"
+base_branch = "main"
+enqueue_label = "ready-to-merge"
+blocked_label = "merge-blocked"
+merge_method = "merge"
+failure_policy = "pause_train"
+[policies.enqueue]
+label_required = true
+allowed_actor_roles = ["repo_owner"]
+[policies.merge_identity]
+kind = "github_actions_oidc"
+name = "launchplane-merge-train"
+[policies.github_token]
+env_var = "GH_TOKEN"
+""".strip(),
+                encoding="utf-8",
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "merge-train-policies",
+                    "import-policy",
+                    "--database-url",
+                    "postgresql://launchplane:test@db/launchplane",
+                    "--apply",
+                    "--policy-file",
+                    str(policy_file),
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
+        self.assertIn("--allow-direct-db-mutation", result.output)
+
+    def test_authz_policy_import_requires_direct_db_acknowledgement(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy_file = Path(temporary_directory_name) / "launchplane-authz.toml"
+            policy_file.write_text("schema_version = 1\n", encoding="utf-8")
+            result = CliRunner().invoke(
+                main,
+                [
+                    "authz-policies",
+                    "import-toml",
+                    "--database-url",
+                    "postgresql://launchplane:test@db/launchplane",
+                    "--policy-file",
+                    str(policy_file),
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
+        self.assertIn("--allow-direct-db-mutation", result.output)
 
     def test_product_profile_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2726,6 +2870,7 @@ env_var = "GH_TOKEN"
                     "2026-04-30T22:00:00Z",
                     "--source-label",
                     "test",
+                    "--allow-direct-db-mutation",
                 ],
             )
             self.assertEqual(upsert_result.exit_code, 0, upsert_result.output)
@@ -2761,6 +2906,33 @@ env_var = "GH_TOKEN"
         self.assertIn('"preview_enable_label": "preview"', list_result.output)
         self.assertIn('"enable_label": "preview"', show_result.output)
         self.assertIn('"health_path": "/api/health"', show_result.output)
+
+    def test_product_profiles_upsert_requires_direct_db_acknowledgement(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            [
+                "product-profiles",
+                "upsert",
+                "--database-url",
+                "postgresql://launchplane:test@db/launchplane",
+                "--product",
+                "sellyouroutboard",
+                "--display-name",
+                "SellYourOutboard.com",
+                "--repository",
+                "cbusillo/sellyouroutboard",
+                "--image-repository",
+                "ghcr.io/cbusillo/sellyouroutboard",
+                "--runtime-port",
+                "3000",
+                "--health-path",
+                "/api/health",
+            ],
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
+        self.assertIn("--allow-direct-db-mutation", result.output)
 
     def test_preview_lifecycle_plan_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -346,7 +346,9 @@ uv run launchplane service render-authz-policy --policy-file ./bootstrap-policy.
 uv run launchplane service render-authz-policy \
   --policy-file ./bootstrap-policy.toml \
   --format b64
-uv run launchplane authz-policies import-toml --policy-file ./bootstrap-policy.toml
+uv run launchplane authz-policies import-toml \
+  --policy-file ./bootstrap-policy.toml \
+  --allow-direct-db-mutation
 ```
 
 When operators need to preview or apply an explicit emergency bootstrap policy to
