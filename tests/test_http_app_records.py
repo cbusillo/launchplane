@@ -1456,6 +1456,82 @@ class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "invalid_request")
         self.assertNotIn("detail", payload)
 
+    async def test_promotion_evidence_rejects_target_reference_input(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _promotion_evidence_payload()
+            promotion = cast(dict[str, object], request_payload["promotion"])
+            deploy = cast(dict[str, object], promotion["deploy"])
+            deploy["target_reference"] = {
+                "target_name": "example-site-prod",
+                "provider_id": "dokploy",
+                "target_category": "application",
+                "provider_target_type": "application",
+            }
+
+            response = await _post_promotion_evidence(app, request_payload)
+            with self.assertRaises(FileNotFoundError):
+                store.read_promotion_record("promotion-example-site-testing-to-prod")
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Launchplane request validation failed.")
+        self.assertNotIn("detail", payload)
+
+    async def test_promotion_evidence_allows_target_reference_metadata_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _promotion_evidence_payload()
+            promotion = cast(dict[str, object], request_payload["promotion"])
+            backup_gate = cast(dict[str, object], promotion["backup_gate"])
+            evidence = cast(dict[str, object], backup_gate["evidence"])
+            evidence["target_reference"] = "legacy-note"
+
+            response = await _post_promotion_evidence(app, request_payload)
+            promotion_record = store.read_promotion_record("promotion-example-site-testing-to-prod")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(promotion_record.backup_gate.evidence["target_reference"], "legacy-note")
+
+    async def test_promotion_evidence_rejects_null_target_reference_input(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _promotion_evidence_payload()
+            promotion = cast(dict[str, object], request_payload["promotion"])
+            deploy = cast(dict[str, object], promotion["deploy"])
+            deploy["target_reference"] = None
+
+            response = await _post_promotion_evidence(app, request_payload)
+            with self.assertRaises(FileNotFoundError):
+                store.read_promotion_record("promotion-example-site-testing-to-prod")
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Launchplane request validation failed.")
+        self.assertNotIn("detail", payload)
+
     async def test_promotion_evidence_rejects_mismatched_linked_deployment(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2923,6 +2999,81 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "invalid_request")
         self.assertNotIn("detail", payload)
+
+    async def test_deployment_evidence_rejects_target_reference_input(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _deployment_evidence_payload()
+            deployment = cast(dict[str, object], request_payload["deployment"])
+            deploy = cast(dict[str, object], deployment["deploy"])
+            deploy["target_reference"] = {
+                "target_name": "example-site-prod",
+                "provider_id": "dokploy",
+                "target_category": "application",
+                "provider_target_type": "application",
+            }
+
+            response = await _post_deployment_evidence(app, request_payload)
+            with self.assertRaises(FileNotFoundError):
+                store.read_deployment_record("deployment-example-site-prod")
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Launchplane request validation failed.")
+        self.assertNotIn("detail", payload)
+
+    async def test_deployment_evidence_rejects_null_target_reference_input(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _deployment_evidence_payload()
+            deployment = cast(dict[str, object], request_payload["deployment"])
+            deploy = cast(dict[str, object], deployment["deploy"])
+            deploy["target_reference"] = None
+
+            response = await _post_deployment_evidence(app, request_payload)
+            with self.assertRaises(FileNotFoundError):
+                store.read_deployment_record("deployment-example-site-prod")
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Launchplane request validation failed.")
+        self.assertNotIn("detail", payload)
+
+    async def test_deployment_evidence_allows_target_reference_metadata_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _deployment_evidence_payload()
+            deployment = cast(dict[str, object], request_payload["deployment"])
+            runtime_source = cast(dict[str, object], deployment.setdefault("runtime_source", {}))
+            runtime_source["target_reference"] = "legacy-note"
+
+            response = await _post_deployment_evidence(app, request_payload)
+            deployment_record = store.read_deployment_record("deployment-example-site-prod")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(deployment_record.runtime_source["target_reference"], "legacy-note")
 
     async def test_deployment_evidence_requires_json_content_type(self) -> None:
         app = create_launchplane_fastapi_app(

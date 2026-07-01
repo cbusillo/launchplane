@@ -1802,9 +1802,30 @@ class DeploymentEvidenceRequest(BaseModel):
     product: str
     deployment: DeploymentRecord
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_target_reference_compatibility_input(cls, data: object) -> object:
+        if _mapping_path_contains_key(data, "deployment", "deploy", "target_reference"):
+            raise ValueError(
+                "deployment evidence ingress rejects target_reference compatibility input"
+            )
+        return data
+
     def model_post_init(self, _context: object) -> None:
         if not self.product.strip():
             raise ValueError("deployment evidence requires product")
+
+
+def _mapping_path_contains_key(payload: object, *path: str) -> bool:
+    if not path or not isinstance(payload, Mapping):
+        return False
+    *parent_path, terminal_key = path
+    current: object = payload
+    for path_part in parent_path:
+        if not isinstance(current, Mapping):
+            return False
+        current = current.get(path_part)
+    return isinstance(current, Mapping) and terminal_key in current
 
 
 class BackupGateEvidenceRequest(BaseModel):
@@ -1825,6 +1846,15 @@ class PromotionEvidenceRequest(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     product: str
     promotion: PromotionRecord
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_target_reference_compatibility_input(cls, data: object) -> object:
+        if _mapping_path_contains_key(data, "promotion", "deploy", "target_reference"):
+            raise ValueError(
+                "promotion evidence ingress rejects target_reference compatibility input"
+            )
+        return data
 
     def model_post_init(self, _context: object) -> None:
         if not self.product.strip():
