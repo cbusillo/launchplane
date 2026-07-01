@@ -108,7 +108,7 @@ def build_launchplane_action_script(
 ) -> str:
     lines = [
         "# Local rehearsal only. Shared/live mutations must use the deployed "
-        "Launchplane service API or DB-backed operator flows.",
+        "Launchplane service API or operator workflow.",
         'STATE_DIR="/path/to/local-state"',
     ]
     for variable_name, file_path, payload in file_payloads:
@@ -339,7 +339,7 @@ def build_launchplane_backup_gate_write_recipe_script(
     }
     lines = [
         "# Local rehearsal only. Shared/live mutations must use the deployed "
-        "Launchplane service API or DB-backed operator flows.",
+        "Launchplane service API or operator workflow.",
         'STATE_DIR="/path/to/local-state"',
         'BACKUP_GATE_FILE="/tmp/launchplane-backup-gate.json"',
         "cat >\"$BACKUP_GATE_FILE\" <<'JSON'",
@@ -353,11 +353,11 @@ def build_launchplane_backup_gate_write_recipe_script(
 def build_launchplane_promotion_execute_recipe_script(*, state_dir: str) -> str:
     return "\n".join(
         (
-            "# DB-backed execution authority. For offline rehearsal only, replace --database-url with --local-rehearsal.",
-            'LAUNCHPLANE_DATABASE_URL="postgresql+psycopg://..."',
+            "# Local rehearsal only. Shared/live promotion execution must use "
+            "the deployed Launchplane service API or operator workflow.",
             f'STATE_DIR="{state_dir or "/path/to/runtime"}"',
             'PROMOTION_REQUEST_FILE="/tmp/launchplane-promotion-request.json"',
-            'uv run launchplane promote execute --database-url "$LAUNCHPLANE_DATABASE_URL" --allow-direct-db-mutation --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
+            'uv run launchplane promote execute --local-rehearsal --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
         )
     )
 
@@ -372,13 +372,13 @@ def build_launchplane_environment_ship_recipe_script(
     request_file = f"/tmp/launchplane-{context_name}-{instance_name}-ship-request.json"
     return "\n".join(
         (
-            "# DB-backed execution authority. For offline rehearsal only, replace --database-url with --local-rehearsal.",
-            'LAUNCHPLANE_DATABASE_URL="postgresql+psycopg://..."',
+            "# Local rehearsal only. Shared/live ship execution must use "
+            "the deployed Launchplane service API or operator workflow.",
             'STATE_DIR="/path/to/runtime"',
             f'SHIP_REQUEST_FILE="{request_file}"',
             f'uv run launchplane ship resolve --context "{context_name}" --instance "{instance_name}" --artifact-id "{artifact_id}" --source-ref "{source_git_ref}" >"$SHIP_REQUEST_FILE"',
             'cat "$SHIP_REQUEST_FILE"',
-            'uv run launchplane ship execute --database-url "$LAUNCHPLANE_DATABASE_URL" --allow-direct-db-mutation --state-dir "$STATE_DIR" --input-file "$SHIP_REQUEST_FILE"',
+            'uv run launchplane ship execute --local-rehearsal --state-dir "$STATE_DIR" --input-file "$SHIP_REQUEST_FILE"',
         )
     )
 
@@ -3997,7 +3997,7 @@ def render_launchplane_preview_status_page_html(
     <section class=\"preview-detail-section\" id=\"operator-actions\">
       <div class=\"section-label\">Operator actions</div>
       <h2>Write-side Launchplane recipes</h2>
-      <p>Launchplane still renders as a static operator surface here, so each action is shown as a local rehearsal recipe for this preview identity. Shared and production mutations should use the deployed service API or DB-backed operator flows.</p>
+      <p>Launchplane still renders as a static operator surface here, so each action is shown as a local rehearsal recipe for this preview identity. Shared and production mutations should use the deployed service API or operator workflow.</p>
       <div class=\"action-stack\">{operator_actions_html}</div>
     </section>
     """

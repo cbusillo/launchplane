@@ -1407,6 +1407,15 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(payload["environment_actions"]["testing"]["status"], "actionable")
             self.assertEqual(payload["environment_actions"]["prod"]["status"], "actionable")
             self.assertIn("ship resolve", payload["environment_actions"]["testing"]["recipe"])
+            self.assertIn("--local-rehearsal", payload["environment_actions"]["testing"]["recipe"])
+            self.assertNotIn(
+                "--allow-direct-db-mutation",
+                payload["environment_actions"]["testing"]["recipe"],
+            )
+            self.assertNotIn(
+                "LAUNCHPLANE_DATABASE_URL",
+                payload["environment_actions"]["testing"]["recipe"],
+            )
             self.assertEqual(
                 payload["promotion_action"]["candidate_artifact_id"], "artifact-testing"
             )
@@ -1796,6 +1805,9 @@ ODOO_DB_PASSWORD = "local-secret"
             )
             self.assertIn("promote resolve", rendered_html)
             self.assertIn("promote execute", rendered_html)
+            self.assertIn("--local-rehearsal", rendered_html)
+            self.assertNotIn("--allow-direct-db-mutation", rendered_html)
+            self.assertNotIn("LAUNCHPLANE_DATABASE_URL", rendered_html)
             self.assertNotIn("backup-gates write", rendered_html)
             self.assertIn("Why each PR does or does not have a preview", rendered_html)
             self.assertIn("Eligible tenant PR. No preview request is active yet.", rendered_html)
@@ -2652,6 +2664,10 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn(
                 "promotion-2026-04-14T11:10:00Z-opw-testing-to-prod", promotion_detail_html
             )
+            self.assertIn("promote execute", promotion_detail_html)
+            self.assertIn("--local-rehearsal", promotion_detail_html)
+            self.assertNotIn("--allow-direct-db-mutation", promotion_detail_html)
+            self.assertNotIn("LAUNCHPLANE_DATABASE_URL", promotion_detail_html)
 
     def test_launchplane_promotion_status_html_uses_shared_status_tone_for_evidence(
         self,
@@ -4935,7 +4951,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             control_plane_root = Path(temporary_directory_name)
             database_url = _runtime_environments_database_url(control_plane_root)
             input_file = control_plane_root / "github-webhook.json"
-            input_file.write_text(json.dumps(_github_pull_request_webhook_payload()), encoding="utf-8")
+            input_file.write_text(
+                json.dumps(_github_pull_request_webhook_payload()), encoding="utf-8"
+            )
 
             result = runner.invoke(
                 CLI_MAIN,
