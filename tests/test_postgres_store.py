@@ -1939,6 +1939,112 @@ class PostgresRecordStoreTests(unittest.TestCase):
         postgres_store.import_core_records_from_filesystem.assert_called_once()
         self.assertIn('"deployments": 1', result.output)
 
+    def test_secrets_put_requires_direct_db_acknowledgement(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            [
+                "secrets",
+                "put",
+                "--database-url",
+                "postgresql://launchplane:test@db/launchplane",
+                "--scope",
+                "context_instance",
+                "--integration",
+                "dokploy",
+                "--name",
+                "token",
+                "--binding-key",
+                "DOKPLOY_TOKEN",
+                "--value",
+                "secret-value",
+                "--context",
+                "verireel",
+                "--instance",
+                "prod",
+            ],
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
+        self.assertIn("--allow-direct-db-mutation", result.output)
+        self.assertNotIn("secret-value", result.output)
+
+    def test_secrets_put_allows_explicit_bootstrap_repair(self) -> None:
+        postgres_store = Mock()
+        secret_result = {"secret_id": "secret-dokploy-token", "version_id": "version-1"}
+        secret_status = {
+            "secret_id": "secret-dokploy-token",
+            "binding_key": "DOKPLOY_TOKEN",
+            "status": "configured",
+        }
+
+        with (
+            patch(
+                "control_plane.cli_storage_secrets.PostgresRecordStore",
+                return_value=postgres_store,
+            ) as store_class,
+            patch(
+                "control_plane.cli_storage_secrets.control_plane_secrets.write_secret_value",
+                return_value=secret_result,
+            ) as write_secret_value,
+            patch(
+                "control_plane.cli_storage_secrets.control_plane_secrets.build_secret_status",
+                return_value=secret_status,
+            ) as build_secret_status,
+        ):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "secrets",
+                    "put",
+                    "--database-url",
+                    "postgresql://launchplane:test@db/launchplane",
+                    "--scope",
+                    "context_instance",
+                    "--integration",
+                    "dokploy",
+                    "--name",
+                    "token",
+                    "--binding-key",
+                    "DOKPLOY_TOKEN",
+                    "--value",
+                    "secret-value",
+                    "--context",
+                    "verireel",
+                    "--instance",
+                    "prod",
+                    "--actor",
+                    "local-repair",
+                    "--allow-direct-db-mutation",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        store_class.assert_called_once_with(
+            database_url="postgresql://launchplane:test@db/launchplane"
+        )
+        postgres_store.ensure_schema.assert_called_once_with()
+        write_secret_value.assert_called_once_with(
+            record_store=postgres_store,
+            scope="context_instance",
+            integration="dokploy",
+            name="token",
+            plaintext_value="secret-value",
+            binding_key="DOKPLOY_TOKEN",
+            context_name="verireel",
+            instance_name="prod",
+            description="",
+            actor="local-repair",
+        )
+        build_secret_status.assert_called_once_with(
+            postgres_store, secret_id="secret-dokploy-token"
+        )
+        postgres_store.close.assert_called_once_with()
+        self.assertNotIn("secret-value", result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["secret"], secret_status)
+
     def test_write_and_read_deployment_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

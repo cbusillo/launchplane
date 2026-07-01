@@ -16,6 +16,12 @@ _PROVIDER_TARGET_BACKFILL_APPLY_RETIRED_MESSAGE = (
     "Launchplane service route POST /v1/provider-targets/operations or the "
     "Provider Target Operations workflow for shared/live writes."
 )
+_DIRECT_DB_MUTATION_MESSAGE = (
+    "Direct local DB mutation is restricted after the Launchplane service boundary. "
+    "Use product-config apply through the deployed service route or operator workflow "
+    "for shared/production secret writes, or pass --allow-direct-db-mutation only "
+    "for explicit local/bootstrap repair."
+)
 
 
 def register_storage_secret_commands(main: click.Group) -> None:
@@ -46,6 +52,11 @@ def normalize_secret_scope(scope: str) -> SecretScope:
         raise click.ClickException(
             "Secret scope must be one of global, context, or context_instance."
         ) from exc
+
+
+def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
+    if not allow_direct_db_mutation:
+        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
 
 
 @storage.command("import-core-records")
@@ -158,6 +169,12 @@ def storage_provider_target_backfill(
 @click.option("--instance", "instance_name", default="")
 @click.option("--description", default="")
 @click.option("--actor", default="cli", show_default=True)
+@click.option(
+    "--allow-direct-db-mutation",
+    is_flag=True,
+    default=False,
+    help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+)
 def secrets_put(
     database_url: str,
     scope: str,
@@ -169,7 +186,9 @@ def secrets_put(
     instance_name: str,
     description: str,
     actor: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:

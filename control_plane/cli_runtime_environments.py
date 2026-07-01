@@ -50,7 +50,9 @@ def environments() -> None:
     """Runtime environment contract commands."""
 
 
-def _direct_db_mutation_acknowledgement_option(function: Callable[..., object]) -> Callable[..., object]:
+def _direct_db_mutation_acknowledgement_option(
+    function: Callable[..., object],
+) -> Callable[..., object]:
     return click.option(
         "--allow-direct-db-mutation",
         is_flag=True,
@@ -485,7 +487,10 @@ def _parse_runtime_environment_assignment(raw_assignment: str) -> tuple[str, str
         raise click.ClickException("Runtime environment values must be provided as KEY=VALUE.")
     if _runtime_environment_key_requires_secret_store(normalized_key):
         raise click.ClickException(
-            f"Runtime environment key {normalized_key!r} must be written with launchplane secrets put."
+            f"Runtime environment key {normalized_key!r} must be written through "
+            "product-config apply for routine changes, or with "
+            "launchplane secrets put --allow-direct-db-mutation for explicit "
+            "local/bootstrap repair."
         )
     return normalized_key, value
 

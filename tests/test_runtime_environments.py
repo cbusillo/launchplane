@@ -831,7 +831,8 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("must be written with launchplane secrets put", result.output)
+        self.assertIn("must be written through product-config apply", result.output)
+        self.assertIn("secrets put --allow-direct-db-mutation", result.output)
         self.assertNotIn("secret-value", result.output)
 
     def test_environments_unset_removes_keys_without_echoing_values(self) -> None:

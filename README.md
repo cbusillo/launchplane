@@ -84,9 +84,11 @@ UI for routine shared and production runtime config changes. Raw
 `uv run launchplane environments unset --scope ... --key KEY --allow-direct-db-mutation`,
 and `uv run launchplane environments relabel --allow-direct-db-mutation` are
 explicit local/bootstrap repair paths only; they reject secret-shaped keys or
-avoid printing plaintext values. Use `uv run launchplane secrets put ...` for
-managed secret values. TOML/env files are not supported runtime import surfaces
-outside minimal bootstrap policy/env.
+avoid printing plaintext values. Use product-config dry-run/apply for routine
+managed secret values; `uv run launchplane secrets put ... --allow-direct-db-mutation`
+is the matching explicit local/bootstrap repair path for direct managed-secret
+writes. TOML/env files are not supported runtime import surfaces outside minimal
+bootstrap policy/env.
 
 Live authz policy is DB-backed through `authz-policies` records. The service
 still requires a minimal bootstrap policy input at startup so it can fail closed

@@ -259,6 +259,11 @@ decryption key state denies the reveal or resolution.
   Routine shared and production config changes should use product-config
   dry-run/apply through the deployed service route or operator UI instead of
   arbitrary local runtime-environment writes.
+- `uv run launchplane secrets put ... --allow-direct-db-mutation` is the
+  matching explicit local/bootstrap repair path for direct managed-secret
+  writes. Routine shared and production secret changes should use product-config
+  dry-run/apply through the deployed service route or operator UI instead of
+  arbitrary local secret writes.
 - `uv run launchplane product-config apply --input-file bundle.json --dry-run`
   previews an approved product runtime/secret bundle without printing plaintext
   values or writing records. `--apply` writes non-secret runtime keys and
