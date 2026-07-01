@@ -371,7 +371,7 @@ class ProviderTargetBackfillTests(unittest.TestCase):
         self.assertEqual(dry_run_payload["counts"], {"would-create": 1})
         self.assertEqual(physical_records, ())
 
-    def test_cli_apply_is_retired_before_writing(self) -> None:
+    def test_cli_rejects_apply_option_before_writing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = _sqlite_database_url(database_path)
@@ -395,22 +395,20 @@ class ProviderTargetBackfillTests(unittest.TestCase):
             physical_records = store.list_physical_provider_target_records()
             store.close()
 
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("Local provider-target backfill apply is retired", result.output)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("No such option", result.output)
+        self.assertIn("--apply", result.output)
         self.assertEqual(physical_records, ())
 
-    def test_cli_help_points_apply_to_provider_target_operations(self) -> None:
+    def test_cli_help_describes_report_only_mode(self) -> None:
         result = CliRunner().invoke(
             main,
             ["storage", "provider-target-backfill", "--help"],
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        normalized_output = " ".join(result.output.split())
-        self.assertIn(
-            "Retired local write path; use Provider Target Operations instead",
-            normalized_output,
-        )
+        self.assertNotIn("--apply", result.output)
+        self.assertIn("--provider-id", result.output)
 
     def test_cli_dry_run_exits_nonzero_on_conflicts(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

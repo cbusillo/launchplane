@@ -11,11 +11,6 @@ from control_plane.workflows.provider_target_backfill import backfill_provider_t
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
-_PROVIDER_TARGET_BACKFILL_APPLY_RETIRED_MESSAGE = (
-    "Local provider-target backfill apply is retired. Use the deployed "
-    "Launchplane service route POST /v1/provider-targets/operations or the "
-    "Provider Target Operations workflow for shared/live writes."
-)
 _DIRECT_DB_MUTATION_MESSAGE = (
     "Direct local DB mutation is restricted after the Launchplane service boundary. "
     "Use the deployed service route or operator workflow for shared/production "
@@ -125,24 +120,15 @@ def storage_provider_target_audit(
     required=True,
     help="Postgres connection string for Launchplane provider-target records.",
 )
-@click.option(
-    "--apply",
-    "apply_changes",
-    is_flag=True,
-    help="Retired local write path; use Provider Target Operations instead.",
-)
 @click.option("--provider-id", default="", help="Optional provider id filter.")
 @click.option("--context", "context_name", default="", help="Optional context filter.")
 @click.option("--instance", "instance_name", default="", help="Optional instance filter.")
 def storage_provider_target_backfill(
     database_url: str,
-    apply_changes: bool,
     provider_id: str,
     context_name: str,
     instance_name: str,
 ) -> None:
-    if apply_changes:
-        raise click.ClickException(_PROVIDER_TARGET_BACKFILL_APPLY_RETIRED_MESSAGE)
     postgres_store = PostgresRecordStore(database_url=database_url)
     try:
         postgres_store.ensure_schema()
