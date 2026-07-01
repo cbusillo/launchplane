@@ -87,9 +87,7 @@ class ProviderTargetBackfillResult(BaseModel):
             "blocked_count": self.blocked_count,
             "warning_count": self.warning_count,
             "counts": self.counts,
-            "items": [
-                item.model_dump(mode="json", exclude_none=True) for item in self.items
-            ],
+            "items": [item.model_dump(mode="json", exclude_none=True) for item in self.items],
         }
 
 
@@ -117,9 +115,7 @@ def backfill_provider_targets(
         for record in record_store.list_dokploy_target_id_records()
     }
     route_keys = sorted(
-        physical_records.keys()
-        | dokploy_target_records.keys()
-        | dokploy_target_id_records.keys()
+        physical_records.keys() | dokploy_target_records.keys() | dokploy_target_id_records.keys()
     )
     items: list[ProviderTargetBackfillItem] = []
     inspected_route_count = 0
@@ -139,7 +135,7 @@ def backfill_provider_targets(
         ):
             continue
         inspected_route_count += 1
-        item, write_candidate = _plan_backfill_route(
+        item = _plan_backfill_route(
             context=context,
             instance=instance,
             physical_record=physical_record,
@@ -161,9 +157,7 @@ def backfill_provider_targets(
             )
         )
     if apply and not any(item.severity == "blocked" for item in items):
-        conditional_create = getattr(
-            record_store, "create_provider_target_record_if_absent", None
-        )
+        conditional_create = getattr(record_store, "create_provider_target_record_if_absent", None)
         applied_items: list[ProviderTargetBackfillItem] = []
         for item in items:
             if item.status != "would-create":
@@ -242,19 +236,16 @@ def _plan_backfill_route(
     physical_record: ProviderTargetRecord | None,
     target_record: DokployTargetRecord | None,
     target_id_record: DokployTargetIdRecord | None,
-) -> tuple[ProviderTargetBackfillItem, ProviderTargetRecord | None]:
+) -> ProviderTargetBackfillItem:
     if physical_record is not None and physical_record.provider_id != "dokploy":
-        return (
-            _item(
-                context=context,
-                instance=instance,
-                status="unsupported-provider",
-                severity="warning",
-                detail="explicit provider-target row is not managed by Dokploy backfill",
-                provider_id=physical_record.provider_id,
-                physical_record=physical_record,
-            ),
-            None,
+        return _item(
+            context=context,
+            instance=instance,
+            status="unsupported-provider",
+            severity="warning",
+            detail="explicit provider-target row is not managed by Dokploy backfill",
+            provider_id=physical_record.provider_id,
+            physical_record=physical_record,
         )
     if target_record is None or target_id_record is None:
         missing_parts = []
@@ -265,57 +256,45 @@ def _plan_backfill_route(
         severity: ProviderTargetBackfillSeverity = (
             "blocked" if physical_record is not None else "warning"
         )
-        return (
-            _item(
-                context=context,
-                instance=instance,
-                status="skipped-incomplete",
-                severity=severity,
-                detail="Dokploy route is incomplete; missing " + ", ".join(missing_parts),
-                physical_record=physical_record,
-            ),
-            None,
+        return _item(
+            context=context,
+            instance=instance,
+            status="skipped-incomplete",
+            severity=severity,
+            detail="Dokploy route is incomplete; missing " + ", ".join(missing_parts),
+            physical_record=physical_record,
         )
     projected_record = ProviderTargetRecord.from_dokploy_records(
         target_record=target_record,
         target_id_record=target_id_record,
     )
     if physical_record is None:
-        return (
-            _item(
-                context=context,
-                instance=instance,
-                status="would-create",
-                severity="ok",
-                detail="would create explicit provider-target row",
-                projected_record=projected_record,
-            ),
-            projected_record,
-        )
-    if _authority_payload(physical_record) == _authority_payload(projected_record):
-        return (
-            _item(
-                context=context,
-                instance=instance,
-                status="skipped-exists",
-                severity="ok",
-                detail="explicit provider-target row already matches the Dokploy projection",
-                physical_record=physical_record,
-                projected_record=projected_record,
-            ),
-            None,
-        )
-    return (
-        _item(
+        return _item(
             context=context,
             instance=instance,
-            status="skipped-conflict",
-            severity="blocked",
-            detail="existing provider-target row differs from the Dokploy projection",
+            status="would-create",
+            severity="ok",
+            detail="would create explicit provider-target row",
+            projected_record=projected_record,
+        )
+    if _authority_payload(physical_record) == _authority_payload(projected_record):
+        return _item(
+            context=context,
+            instance=instance,
+            status="skipped-exists",
+            severity="ok",
+            detail="explicit provider-target row already matches the Dokploy projection",
             physical_record=physical_record,
             projected_record=projected_record,
-        ),
-        None,
+        )
+    return _item(
+        context=context,
+        instance=instance,
+        status="skipped-conflict",
+        severity="blocked",
+        detail="existing provider-target row differs from the Dokploy projection",
+        physical_record=physical_record,
+        projected_record=projected_record,
     )
 
 
