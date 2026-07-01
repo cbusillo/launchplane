@@ -206,8 +206,9 @@ an ORM column/table or remains only in the evidence payload.
   dry-run, or apply evidence as artifacts, writes only complete non-conflicting
   projections, and uses DB-backed `provider_target.audit` or
   `provider_target.backfill` authz grants instead of local checkout writes.
-- Shared ship and promotion request contracts require canonical flat target
-  fields (`target_name`, `target_type`, `provider_id`, `target_category`, and
+- Shared ship and promotion request contracts and new deployment/promotion
+  evidence ingress require canonical flat target fields (`target_name`,
+  `target_type`, `provider_id`, `target_category`, and
   `provider_target_type`) and reject `target_reference` compatibility input.
   Persisted deployment and promotion evidence still accepts `target_reference`
   while loading historical records, but writes flat compatibility fields. Full
