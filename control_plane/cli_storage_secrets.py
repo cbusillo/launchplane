@@ -18,9 +18,9 @@ _PROVIDER_TARGET_BACKFILL_APPLY_RETIRED_MESSAGE = (
 )
 _DIRECT_DB_MUTATION_MESSAGE = (
     "Direct local DB mutation is restricted after the Launchplane service boundary. "
-    "Use product-config apply through the deployed service route or operator workflow "
-    "for shared/production secret writes, or pass --allow-direct-db-mutation only "
-    "for explicit local/bootstrap repair."
+    "Use the deployed service route or operator workflow for shared/production "
+    "core-record or secret writes, or pass --allow-direct-db-mutation only for "
+    "explicit local/bootstrap repair."
 )
 
 
@@ -69,7 +69,16 @@ def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) 
     required=True,
     help="Postgres connection string for Launchplane shared-service core records.",
 )
-def storage_import_core_records(state_dir: Path, database_url: str) -> None:
+@click.option(
+    "--allow-direct-db-mutation",
+    is_flag=True,
+    default=False,
+    help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+)
+def storage_import_core_records(
+    state_dir: Path, database_url: str, allow_direct_db_mutation: bool
+) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     filesystem_store = FilesystemRecordStore(state_dir=state_dir)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()

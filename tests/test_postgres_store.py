@@ -1413,6 +1413,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "write",
                     "--database-url",
                     database_url,
+                    "--allow-direct-db-mutation",
                     "--input-file",
                     str(input_path),
                 ],
@@ -1928,6 +1929,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                         temporary_directory_name,
                         "--database-url",
                         "postgresql://launchplane:test@db/launchplane",
+                        "--allow-direct-db-mutation",
                     ],
                 )
 
@@ -1938,6 +1940,21 @@ class PostgresRecordStoreTests(unittest.TestCase):
         postgres_store.ensure_schema.assert_called_once_with()
         postgres_store.import_core_records_from_filesystem.assert_called_once()
         self.assertIn('"deployments": 1', result.output)
+
+    def test_storage_import_core_records_requires_direct_db_acknowledgement(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            [
+                "storage",
+                "import-core-records",
+                "--database-url",
+                "postgresql://launchplane:test@db/launchplane",
+            ],
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Direct local DB mutation is restricted", result.output)
+        self.assertIn("--allow-direct-db-mutation", result.output)
 
     def test_secrets_put_requires_direct_db_acknowledgement(self) -> None:
         result = CliRunner().invoke(
