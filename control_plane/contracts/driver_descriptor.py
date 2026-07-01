@@ -41,16 +41,6 @@ class DriverActionDescriptor(BaseModel):
     writes_records: tuple[str, ...] = ()
 
 
-class DriverRouteAliasDescriptor(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    action_id: str
-    route_path: str
-    method: Literal["GET", "POST"] = "POST"
-    authz_action: str
-    operator_visible: bool = False
-
-
 class DriverCapabilityDescriptor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -85,7 +75,6 @@ class DriverDescriptor(BaseModel):
     provider_boundary: str
     capabilities: tuple[DriverCapabilityDescriptor, ...] = ()
     actions: tuple[DriverActionDescriptor, ...] = ()
-    route_aliases: tuple[DriverRouteAliasDescriptor, ...] = ()
     setting_groups: tuple[DriverSettingGroupDescriptor, ...] = ()
 
 

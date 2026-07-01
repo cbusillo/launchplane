@@ -199,9 +199,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_odoo_descriptor_marks_prod_rollback_as_destructive(self) -> None:
         descriptor = read_driver_descriptor("odoo")
         actions = {action.action_id: action for action in descriptor.actions}
-        route_aliases = {
-            route_alias.action_id: route_alias for route_alias in descriptor.route_aliases
-        }
 
         self.assertEqual(descriptor.base_driver_id, "generic-web")
         self.assertEqual(actions["prod_backup_gate"].safety, "safe_write")
@@ -210,15 +207,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(actions["prod_rollback"].safety, "destructive")
         self.assertEqual(actions["prod_rollback"].route_path, "/v1/drivers/odoo/prod-rollback")
         self.assertNotIn("preview_refresh", actions)
-        self.assertNotIn("preview_refresh", route_aliases)
-        self.assertNotIn("preview_destroy", route_aliases)
-        self.assertNotIn("preview_desired_state", route_aliases)
-        self.assertNotIn("preview_inventory", route_aliases)
-        self.assertNotIn("preview_readiness", route_aliases)
         self.assertNotIn("preview_verification", actions)
-        self.assertNotIn("preview_verification", route_aliases)
-        self.assertNotIn("stable_verification", route_aliases)
-        self.assertNotIn("prod_rollback_plan", route_aliases)
         self.assertEqual(actions["stable_bootstrap"].safety, "destructive")
         self.assertEqual(
             actions["stable_bootstrap"].route_path,
@@ -404,19 +393,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             for action in descriptor.actions
             if action.method == "POST" and action.route_path.startswith("/v1/drivers/")
         }
-        descriptor_post_route_metadata.update(
-            {
-                route_alias.route_path: (
-                    descriptor.driver_id,
-                    route_alias.action_id,
-                    route_alias.authz_action,
-                )
-                for descriptor in list_driver_descriptors()
-                for route_alias in descriptor.route_aliases
-                if route_alias.method == "POST"
-                and route_alias.route_path.startswith("/v1/drivers/")
-            }
-        )
         service_route_metadata = control_plane_service._driver_route_metadata_from_descriptors()
 
         self.assertTrue(descriptor_post_route_metadata)
