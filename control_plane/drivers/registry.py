@@ -15,7 +15,6 @@ from control_plane.contracts.driver_descriptor import (
     DriverCapabilityDescriptor,
     DriverContextView,
     DriverDescriptor,
-    DriverRouteAliasDescriptor,
     DriverSettingGroupDescriptor,
     DriverView,
 )
@@ -280,22 +279,6 @@ def _action(
         alternate_authz_actions=alternate_authz_actions,
         operator_visible=operator_visible,
         writes_records=writes_records,
-    )
-
-
-def _route_alias(
-    action_id: str,
-    route_path: str,
-    authz_action: str,
-    *,
-    method: Literal["GET", "POST"] = "POST",
-) -> DriverRouteAliasDescriptor:
-    return DriverRouteAliasDescriptor(
-        action_id=action_id,
-        route_path=route_path,
-        method=method,
-        authz_action=authz_action,
-        operator_visible=False,
     )
 
 

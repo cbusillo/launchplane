@@ -448,8 +448,8 @@ them without parsing free-form descriptions. Some service callback routes, such
 as verification writeback routes, are declared with `operator_visible=false`;
 they remain in the driver route authorization map but are not surfaced as
 operator actions. Compatibility routes that should remain callable but not
-advertised as current driver actions belong in `route_aliases` with
-`operator_visible=false`.
+advertised as current driver actions require an issue-backed bridge and removal
+condition; descriptors no longer carry a separate route-alias catalog.
 Native FastAPI product-driver POST routes read authorization actions from
 descriptor route metadata, so new drivers do not need a second hardcoded
 authz-action entry.
@@ -461,13 +461,13 @@ topology. OpenFGA does not make an advertised action executable by itself;
 backend handler registration, route dispatch, and fail-closed service
 authorization still have to agree.
 
-POST driver descriptor actions and route aliases execute through native FastAPI
-routes. The service validates this at startup, so adding a writable descriptor
-route without registering a matching native FastAPI route fails closed instead
-of silently advertising an unimplemented action. This keeps descriptor metadata
-as the route/authz source of truth while preventing an advertised descriptor
-action from becoming executable without implementation. Descriptor route
-metadata and service compatibility policy also drive
+POST driver descriptor actions execute through native FastAPI routes. The
+service validates this at startup, so adding a writable descriptor route without
+registering a matching native FastAPI route fails closed instead of silently
+advertising an unimplemented action. This keeps descriptor metadata as the
+route/authz source of truth while preventing an advertised descriptor action
+from becoming executable without implementation. Descriptor route metadata and
+service compatibility policy also drive
 product-driver compatibility checks. A
 product whose descriptor names a `base_driver_id` can use the base driver's
 shared lifecycle routes when its profile owns the requested stable lane or
