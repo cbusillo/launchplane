@@ -15,6 +15,13 @@ title: Records
   current baseline revision captures the SQLAlchemy ORM schema that earlier
   deployments created through `create_all`; future GUI/write-flow schema changes
   need explicit migrations instead of relying on implicit table creation.
+- Treat local core-record DB writes as explicit bootstrap/repair only. Direct
+  `artifacts`, `backup-gates`, `promotions`, `deployments`, `inventory`,
+  `release-tuples write-from-promotion`, and `storage import-core-records`
+  mutations require `--allow-direct-db-mutation`; routine shared/live changes
+  should use the deployed Launchplane service route or operator workflow.
+- Direct managed-secret writes through `secrets put` follow the same
+  `--allow-direct-db-mutation` bootstrap/repair boundary.
 - Keep git history separate from operational history.
 - Favor append-style writes for promotion records.
 

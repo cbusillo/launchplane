@@ -2520,6 +2520,54 @@ DOKPLOY_SHIP_MODE = "auto"
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("deployments write requires --database-url", result.output)
 
+    def test_core_record_writes_require_direct_db_acknowledgement(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            input_file = Path(temporary_directory_name) / "record.json"
+            input_file.write_text("{}", encoding="utf-8")
+            command_cases = (
+                ("artifacts write", ["artifacts", "write", "--input-file", str(input_file)]),
+                ("artifacts ingest", ["artifacts", "ingest", "--input-file", str(input_file)]),
+                (
+                    "release-tuples write-from-promotion",
+                    ["release-tuples", "write-from-promotion", "--record-id", "promotion-1"],
+                ),
+                (
+                    "backup-gates write",
+                    ["backup-gates", "write", "--input-file", str(input_file)],
+                ),
+                (
+                    "promotions write",
+                    ["promotions", "write", "--input-file", str(input_file)],
+                ),
+                (
+                    "deployments write",
+                    ["deployments", "write", "--input-file", str(input_file)],
+                ),
+                (
+                    "inventory write-from-deployment",
+                    ["inventory", "write-from-deployment", "--record-id", "deployment-1"],
+                ),
+                (
+                    "inventory write-from-promotion",
+                    ["inventory", "write-from-promotion", "--record-id", "promotion-1"],
+                ),
+            )
+            for command_label, command in command_cases:
+                with self.subTest(command=command_label):
+                    result = runner.invoke(
+                        main,
+                        [
+                            *command,
+                            "--database-url",
+                            "postgresql://launchplane:test@db/launchplane",
+                        ],
+                    )
+
+                    self.assertNotEqual(result.exit_code, 0)
+                    self.assertIn("Direct local DB mutation is restricted", result.output)
+                    self.assertIn("--allow-direct-db-mutation", result.output)
+
     def test_promotions_write_persists_record(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
