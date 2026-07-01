@@ -251,8 +251,8 @@ uv run launchplane merge-train-policies import-policy \
 
 The command reads the bearer token from `LAUNCHPLANE_SERVICE_TOKEN` unless a
 browser `--session-cookie` is supplied. Direct `--database-url --apply` import is
-reserved for local development and DB repair, not shared or production live
-mutation.
+reserved for local development and DB repair, requires
+`--allow-direct-db-mutation`, and is not for shared or production live mutation.
 
 For local development or DB repair only:
 
@@ -261,6 +261,7 @@ uv run launchplane merge-train-policies import-policy \
   --database-url "$LAUNCHPLANE_DATABASE_URL" \
   --policy-file path/to/merge-train-policy.toml \
   --source-label operator:update \
+  --allow-direct-db-mutation \
   --apply
 ```
 

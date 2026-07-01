@@ -45,6 +45,11 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
+_DIRECT_DB_MUTATION_MESSAGE = (
+    "Direct local DB mutation is restricted after the Launchplane service boundary. "
+    "Use the deployed service route or operator workflow for shared/production changes, "
+    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
+)
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,22 @@ def _launchplane_action_slug(value: str) -> str:
 
 def _post_launchplane_service_json(**kwargs: object) -> dict[str, object]:
     return _policy_profile_callbacks().post_launchplane_service_json(**kwargs)
+
+
+def _direct_db_mutation_acknowledgement_option(
+    function: Callable[..., object],
+) -> Callable[..., object]:
+    return click.option(
+        "--allow-direct-db-mutation",
+        is_flag=True,
+        default=False,
+        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+    )(function)
+
+
+def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
+    if not allow_direct_db_mutation:
+        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
 
 
 def _build_authz_policy_record(
@@ -331,7 +352,14 @@ def authz_policies_list(database_url: str, status_filter: str) -> None:
     help="TOML policy file to import into DB-backed authz policy records.",
 )
 @click.option("--source-label", default="cli:import-toml", show_default=True)
-def authz_policies_import_toml(database_url: str, policy_file: Path, source_label: str) -> None:
+@_direct_db_mutation_acknowledgement_option
+def authz_policies_import_toml(
+    database_url: str,
+    policy_file: Path,
+    source_label: str,
+    allow_direct_db_mutation: bool,
+) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     record = _build_authz_policy_record(policy_file=policy_file, source_label=source_label)
@@ -835,6 +863,7 @@ def merge_train_policies_list(database_url: str, status_filter: str) -> None:
 )
 @click.option("--dry-run", "mode", flag_value="dry_run", default="dry_run")
 @click.option("--apply", "mode", flag_value="apply")
+@_direct_db_mutation_acknowledgement_option
 def merge_train_policies_import_policy(
     database_url: str,
     service_url: str,
@@ -846,6 +875,7 @@ def merge_train_policies_import_policy(
     reason: str,
     idempotency_key: str,
     mode: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
     record = _build_merge_train_policy_record(
         policy_file=policy_file,
@@ -881,6 +911,7 @@ def merge_train_policies_import_policy(
         raise click.ClickException("Direct database import requires --apply.")
     if not database_url.strip():
         raise click.ClickException("Provide --service-url or --database-url.")
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
@@ -911,12 +942,15 @@ def merge_train_policies_import_policy(
 )
 @click.option("--status", type=click.Choice(["active", "superseded"]), default="active")
 @click.option("--source-label", default="cli:import-policy", show_default=True)
+@_direct_db_mutation_acknowledgement_option
 def runtime_key_safety_import_policy(
     database_url: str,
     policy_file: Path,
     status: RuntimeKeySafetyPolicyStatus,
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     record = _build_runtime_key_safety_policy_record(
@@ -1117,6 +1151,7 @@ def product_profiles_audit_context_cutover(
 @click.option("--preview-slug-template", default="pr-{number}", show_default=True)
 @click.option("--updated-at", default="", help="Override updated timestamp.")
 @click.option("--source-label", default="cli:product-profiles:upsert", show_default=True)
+@_direct_db_mutation_acknowledgement_option
 def product_profiles_upsert(
     database_url: str,
     product: str,
@@ -1133,7 +1168,9 @@ def product_profiles_upsert(
     preview_slug_template: str,
     updated_at: str,
     source_label: str,
+    allow_direct_db_mutation: bool,
 ) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     try:
         record = LaunchplaneProductProfileRecord(
             product=product,

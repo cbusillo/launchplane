@@ -411,9 +411,11 @@ require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
 
 For initial seed or repair work, operators can write the same DB-backed record
-directly with `uv run launchplane product-profiles upsert --database-url ...`.
-That command is an operator tool for creating the Launchplane record; it is not
-a repo-local manifest and should not become product repo authority.
+directly with
+`uv run launchplane product-profiles upsert --database-url ... --allow-direct-db-mutation`.
+That command is an explicit local/bootstrap repair tool for creating the
+Launchplane record; it is not a repo-local manifest and should not become
+product repo authority.
 
 ## Public Ingress Observation Records
 
