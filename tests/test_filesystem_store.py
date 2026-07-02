@@ -2054,7 +2054,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 ["rollback-plan-newer", "rollback-plan-older"],
             )
 
-    def test_artifacts_ingest_writes_manifest(self) -> None:
+    def test_artifacts_write_writes_manifest(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -2081,7 +2081,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 main,
                 [
                     "artifacts",
-                    "ingest",
+                    "write",
                     "--state-dir",
                     str(state_dir),
                     "--local-rehearsal",

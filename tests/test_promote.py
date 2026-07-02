@@ -2483,7 +2483,7 @@ DOKPLOY_SHIP_MODE = "auto"
                 record,
             )
 
-    def test_deployments_write_requires_database_url_without_local_rehearsal(self) -> None:
+    def test_deployments_write_is_local_rehearsal_only(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -2518,16 +2518,15 @@ DOKPLOY_SHIP_MODE = "auto"
             )
 
             self.assertNotEqual(result.exit_code, 0)
-            self.assertIn("deployments write requires --database-url", result.output)
+            self.assertIn("Core-record write commands are local-rehearsal only", result.output)
 
-    def test_core_record_writes_require_direct_db_acknowledgement(self) -> None:
+    def test_core_record_writes_reject_direct_database_url(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             input_file = Path(temporary_directory_name) / "record.json"
             input_file.write_text("{}", encoding="utf-8")
             command_cases = (
                 ("artifacts write", ["artifacts", "write", "--input-file", str(input_file)]),
-                ("artifacts ingest", ["artifacts", "ingest", "--input-file", str(input_file)]),
                 (
                     "release-tuples write-from-promotion",
                     ["release-tuples", "write-from-promotion", "--record-id", "promotion-1"],
@@ -2565,8 +2564,27 @@ DOKPLOY_SHIP_MODE = "auto"
                     )
 
                     self.assertNotEqual(result.exit_code, 0)
-                    self.assertIn("Direct local DB mutation is restricted", result.output)
-                    self.assertIn("--allow-direct-db-mutation", result.output)
+                    self.assertIn("No such option '--database-url'", result.output)
+
+    def test_core_record_write_help_omits_direct_db_acknowledgement(self) -> None:
+        runner = CliRunner()
+        command_cases = (
+            ["artifacts", "write"],
+            ["release-tuples", "write-from-promotion"],
+            ["backup-gates", "write"],
+            ["promotions", "write"],
+            ["deployments", "write"],
+            ["inventory", "write-from-deployment"],
+            ["inventory", "write-from-promotion"],
+        )
+        for command in command_cases:
+            with self.subTest(command=" ".join(command)):
+                result = runner.invoke(main, [*command, "--help"])
+
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertIn("--local-rehearsal", result.output)
+                self.assertNotIn("--database-url", result.output)
+                self.assertNotIn("--allow-direct-db-mutation", result.output)
 
     def test_promotions_write_persists_record(self) -> None:
         runner = CliRunner()

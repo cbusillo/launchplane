@@ -1,10 +1,8 @@
 import json
-from pathlib import Path
 import click
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.secret_record import SecretScope
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.provider_target_audit import audit_provider_targets
 from control_plane.workflows.provider_target_backfill import backfill_provider_targets
@@ -14,8 +12,8 @@ _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 _DIRECT_DB_MUTATION_MESSAGE = (
     "Direct local DB mutation is restricted after the Launchplane service boundary. "
     "Use the deployed service route or operator workflow for shared/production "
-    "core-record or secret writes, or pass --allow-direct-db-mutation only for "
-    "explicit local/bootstrap repair."
+    "secret writes, or pass --allow-direct-db-mutation only for explicit "
+    "local/bootstrap repair."
 )
 
 
@@ -52,33 +50,6 @@ def normalize_secret_scope(scope: str) -> SecretScope:
 def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
     if not allow_direct_db_mutation:
         raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
-
-
-@storage.command("import-core-records")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane shared-service core records.",
-)
-@click.option(
-    "--allow-direct-db-mutation",
-    is_flag=True,
-    default=False,
-    help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-)
-def storage_import_core_records(
-    state_dir: Path, database_url: str, allow_direct_db_mutation: bool
-) -> None:
-    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
-    filesystem_store = FilesystemRecordStore(state_dir=state_dir)
-    postgres_store = PostgresRecordStore(database_url=database_url)
-    postgres_store.ensure_schema()
-    counts = postgres_store.import_core_records_from_filesystem(filesystem_store)
-    click.echo(json.dumps({"status": "ok", "counts": counts}, indent=2, sort_keys=True))
 
 
 @storage.command("provider-target-audit")
