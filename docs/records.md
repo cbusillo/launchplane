@@ -405,11 +405,9 @@ Simple service products deployed as Dokploy applications use the same product
 profile shape. For a bot or worker service with an HTTP bridge or health
 endpoint, `runtime_port` is the internal HTTP port, `health_path` names the
 product-level health route, and lane `health_url` can point at an internal URL
-reachable by Launchplane. Source-backed compose workers may use `runtime_port=0`
-and empty product-level image/health fields when any observable health surface is
-an explicit lane `health_url`; source-backed workers without an HTTP surface use
-that shape only when preview, public ingress monitoring, and provider health
-checks are disabled. See
+reachable by Launchplane. Generic-web service profiles must name an immutable
+image repository for stable deploys; source-backed compose onboarding is
+retired with the generic-web source-ref deploy bridge. See
 [dokploy-service-deployments.md](dokploy-service-deployments.md) for the
 service-specific contract.
 

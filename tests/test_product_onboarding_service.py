@@ -92,7 +92,6 @@ class ProductOnboardingServiceTests(unittest.TestCase):
                         "target_id": "app-discord-blue",
                         "target_type": "application",
                         "target_name": "discord-blue",
-                        "custom_git_url": "https://github.com/cbusillo/discord-blue.git",
                         "env": {"DISCORD_BLUE_TARGET_ENV": "stored-only"},
                         "domains": ["discord-blue.example.test"],
                         "healthcheck_enabled": False,
@@ -159,7 +158,6 @@ class ProductOnboardingServiceTests(unittest.TestCase):
         self.assertNotIn("secret_bindings", driver_result)
         self.assertNotIn("secret_id", str(driver_result))
         self.assertNotIn("app-discord-blue", str(driver_result))
-        self.assertNotIn("custom_git_url", str(driver_result))
         self.assertNotIn("DISCORD_BLUE_TARGET_ENV", str(driver_result))
         self.assertNotIn("discord-blue.example.test", str(driver_result))
         self.assertNotIn("test:discord-blue-onboarding", str(driver_result))

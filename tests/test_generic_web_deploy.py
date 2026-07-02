@@ -241,7 +241,7 @@ def _profile(*, driver_id: str = "generic-web") -> LaunchplaneProductProfileReco
     )
 
 
-def _source_ref_worker_profile() -> LaunchplaneProductProfileRecord:
+def _missing_image_profile() -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
         product="repairshopr-sync",
         display_name="RepairShopr Sync",
@@ -315,7 +315,7 @@ def _runtime_secret_binding(
     )
 
 
-def _source_ref_worker_lane() -> ProductLaneProfile:
+def _missing_image_lane() -> ProductLaneProfile:
     return ProductLaneProfile(
         instance="prod",
         context="repairshopr-sync",
@@ -431,7 +431,7 @@ class GenericWebDeployTests(unittest.TestCase):
             "Configure an immutable image repository before using generic-web deploy",
         ):
             normalize_generic_web_artifact_id(
-                profile=_source_ref_worker_profile(),
+                profile=_missing_image_profile(),
                 artifact_id="sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c",
             )
 
@@ -541,7 +541,7 @@ class GenericWebDeployTests(unittest.TestCase):
                 image=ProductImageProfile(),
                 runtime_port=0,
                 health_path="/health",
-                lanes=(_source_ref_worker_lane(),),
+                lanes=(_missing_image_lane(),),
                 updated_at="2026-06-12T20:00:00Z",
                 source="test",
             )
@@ -555,7 +555,7 @@ class GenericWebDeployTests(unittest.TestCase):
                 driver_id="generic-web",
                 image=ProductImageProfile(),
                 runtime_port=8000,
-                lanes=(_source_ref_worker_lane(),),
+                lanes=(_missing_image_lane(),),
                 updated_at="2026-06-12T20:00:00Z",
                 source="test",
             )
@@ -628,10 +628,10 @@ class GenericWebDeployTests(unittest.TestCase):
             store.deployments[0].record_id,
         )
 
-    def test_execute_generic_web_deploy_records_failure_for_source_ref_worker_profile(
+    def test_execute_generic_web_deploy_records_failure_for_missing_image_profile(
         self,
     ) -> None:
-        store = _GenericWebDeployStore(_source_ref_worker_profile())
+        store = _GenericWebDeployStore(_missing_image_profile())
         deploy_provider = _FakeGenericWebDeployProvider()
 
         result = execute_generic_web_deploy(
