@@ -1,0 +1,64 @@
+---
+name: Reusable Product Repo Config Authority
+
+"on":
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version used to run the Launchplane audit tool.
+        required: false
+        default: "3.13"
+        type: string
+      fail-on-findings:
+        description: Exit non-zero when the product-repo gate rejects findings.
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  launchplane-config-authority:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out product repository
+        uses: actions/checkout@v7
+        with:
+          path: product-repo
+          fetch-depth: 0
+
+      - name: Check out Launchplane audit tool
+        uses: actions/checkout@v7
+        with:
+          repository: cbusillo/launchplane
+          ref: main
+          path: launchplane
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Run Launchplane config authority gate
+        working-directory: launchplane
+        env:
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        run: |
+          set -euo pipefail
+          args=(
+            uv run launchplane service audit-config-authority
+            --control-plane-root ../product-repo
+            --mode changed-files-gate
+            --gate-profile product-repo
+          )
+          if [ "$FAIL_ON_FINDINGS" = "true" ]; then
+            args+=(--fail-on-findings)
+          fi
+          "${args[@]}"

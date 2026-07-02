@@ -69,6 +69,8 @@ class DocsContractsTests(TestCase):
         self.assertIn("repairshopr_api", product_repo_contract)
         self.assertIn("deployment-20260630T034901Z-repairshopr-sync-prod", product_repo_contract)
         self.assertIn("baseline for retiring older source-ref", product_repo_contract)
+        self.assertIn("reusable-product-repo-config-authority.yml@main", product_repo_contract)
+        self.assertIn("pinned Launchplane tool checkout", product_repo_contract)
 
         self.assertIn("stable product-repo integration surface", dokploy_service_contract)
         self.assertIn("RepairShopr Sync is the first live canary", dokploy_service_contract)

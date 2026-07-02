@@ -564,6 +564,14 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "password": frozenset(("${{ github.token }}",)),
     },
     ".github/workflows/deploy-launchplane.yml": {"context": frozenset((".",))},
+    ".github/workflows/launchplane-config-authority.yml": {
+        "uses": frozenset(
+            (
+                "cbusillo/launchplane/.github/workflows/"
+                "reusable-product-repo-config-authority.yml@main",
+            )
+        ),
+    },
     ".github/workflows/odoo-driver-route-smoke.yml": {
         "IMAGE_REPOSITORY": frozenset(("${{ steps.publish_inputs.outputs.image_repository }}",)),
         "idempotency-key": frozenset(
@@ -1541,7 +1549,10 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 start_index=index + 1,
                 parent_indent=indent,
             )
-            if yaml_key in IGNORED_YAML_SCALAR_KEYS:
+            block_value = " ".join(block_lines).strip()
+            if yaml_key in IGNORED_YAML_SCALAR_KEYS and not _is_yaml_reusable_workflow_reference(
+                block_value
+            ):
                 index = next_index
                 continue
             if yaml_key == "payload-fields":
@@ -1553,7 +1564,6 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 )
                 index = next_index
                 continue
-            block_value = " ".join(block_lines).strip()
             if block_value:
                 candidates.append((line_number, key, block_value))
             index = next_index
@@ -1562,7 +1572,9 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
             scalar_value = _unquote(value)
             if yaml_key == "uses" and scalar_value == "actions/checkout@v6":
                 checkout_uses_indent = indent
-            if yaml_key in IGNORED_YAML_SCALAR_KEYS:
+            if yaml_key in IGNORED_YAML_SCALAR_KEYS and not _is_yaml_reusable_workflow_reference(
+                scalar_value
+            ):
                 index += 1
                 continue
             candidates.append((line_number, key, scalar_value))
@@ -1595,6 +1607,10 @@ def _yaml_list_candidate_key(context_stack: Sequence[tuple[int, str]]) -> str:
     if context_stack and context_stack[-1][1] == "runs-on":
         return "runs-on"
     return ""
+
+
+def _is_yaml_reusable_workflow_reference(value: object) -> bool:
+    return ".github/workflows/" in _string_value(value)
 
 
 def _yaml_workflow_input_name(context_stack: Sequence[tuple[int, str]]) -> str:
