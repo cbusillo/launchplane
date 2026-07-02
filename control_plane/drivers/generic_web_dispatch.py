@@ -28,9 +28,6 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     GenericWebPostDeployExecutor,
 )
-from control_plane.workflows.dokploy_deploy import (
-    DokployComposeSourceRefDeployRequest,
-)
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
 )
@@ -142,27 +139,6 @@ _GENERIC_WEB_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=GenericWebDeployEnvelope,
     denial_message=(
         "Workflow cannot execute the generic web deploy driver for the requested product/context."
-    ),
-)
-
-
-class GenericWebSourceRefDeployEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    deploy: DokployComposeSourceRefDeployRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "GenericWebSourceRefDeployEnvelope":
-        if not self.product.strip():
-            raise ValueError("generic web source-ref deploy requires product")
-        return self
-
-
-_GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/generic-web/source-ref-deploy",
-    envelope_model=GenericWebSourceRefDeployEnvelope,
-    denial_message=(
-        "Workflow cannot execute the generic web source-ref deploy driver"
-        " for the requested product/context."
     ),
 )
 

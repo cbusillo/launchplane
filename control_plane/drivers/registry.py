@@ -306,16 +306,6 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             panels=("lane_health", "deployment_evidence", "promotion_evidence"),
         ),
         DriverCapabilityDescriptor(
-            capability_id="source_ref_deployable",
-            label="Source-ref deployable",
-            description=(
-                "Bridge provider-backed git-ref deploys for products that have not yet "
-                "moved to immutable image deploys."
-            ),
-            actions=("source_ref_deploy",),
-            panels=("audit",),
-        ),
-        DriverCapabilityDescriptor(
             capability_id="health_checked",
             label="Health checked",
             description="Verify HTTP health endpoints and surface freshness through Launchplane read models.",
@@ -352,16 +342,6 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/generic-web/deploy",
             authz_action="generic_web_deploy.execute",
             writes_records=("deployment",),
-        ),
-        _action(
-            "source_ref_deploy",
-            "Deploy source ref",
-            "Deploy a tested source ref to a configured provider-backed product lane.",
-            safety="mutation",
-            scope="instance",
-            route_path="/v1/drivers/generic-web/source-ref-deploy",
-            authz_action="generic_web_source_ref_deploy.execute",
-            writes_records=(),
         ),
         _action(
             "prod_promotion",

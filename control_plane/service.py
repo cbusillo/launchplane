@@ -61,14 +61,12 @@ from control_plane.drivers.generic_web_dispatch import (
     GenericWebRollbackPlanEnvelope as GenericWebRollbackPlanEnvelope,
     GenericWebStableVerificationEnvelope as GenericWebStableVerificationEnvelope,
     GenericWebStableVerificationRequest as GenericWebStableVerificationRequest,
-    GenericWebSourceRefDeployEnvelope as GenericWebSourceRefDeployEnvelope,
     _GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
     _GENERIC_WEB_PROD_PROMOTION_ROUTE as _GENERIC_WEB_PROD_PROMOTION_ROUTE,
     _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE as _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
     _GENERIC_WEB_ROLLBACK_PLAN_ROUTE as _GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
     _GENERIC_WEB_ROLLBACK_ROUTE as _GENERIC_WEB_ROLLBACK_ROUTE,
     _GENERIC_WEB_STABLE_VERIFICATION_ROUTE as _GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
-    _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE as _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
     _stable_verification_health_evidence as _stable_verification_health_evidence,
     _validate_stable_verification_request as _validate_stable_verification_request,
 )
@@ -235,7 +233,6 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
         _GENERIC_WEB_DEPLOY_ROUTE.route_path,
-        _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
@@ -325,7 +322,6 @@ _PREVIEW_VERIFICATION_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_VERIFICATION
 _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS = frozenset(
     {
         _GENERIC_WEB_DEPLOY_ROUTE.route_path,
-        _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
