@@ -202,7 +202,7 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 - `odoo-devkit` is the expected build/publish handoff for those manifests: it
   stages the tenant and shared source inputs into a real downstream image
   build context, pushes the image, resolves the pushed digest, and emits JSON
-  for `artifacts write` / `artifacts ingest` here.
+  for local `artifacts write` rehearsal here.
 - Artifact-backed execution also rejects Dokploy targets that still depend on
   the legacy `odoo-ai` monorepo source or mutable addon repository refs.
 - Native ship requests are artifact-backed and do not carry branch-mutation

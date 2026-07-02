@@ -15,11 +15,11 @@ title: Records
   current baseline revision captures the SQLAlchemy ORM schema that earlier
   deployments created through `create_all`; future GUI/write-flow schema changes
   need explicit migrations instead of relying on implicit table creation.
-- Treat local core-record DB writes as explicit bootstrap/repair only. Direct
-  `artifacts`, `backup-gates`, `promotions`, `deployments`, `inventory`,
-  `release-tuples write-from-promotion`, and `storage import-core-records`
-  mutations require `--allow-direct-db-mutation`; routine shared/live changes
-  should use the deployed Launchplane service route or operator workflow.
+- Shared-service core-record writes use authenticated Launchplane service
+  ingress or operator workflows. Local core-record write commands are
+  file-backed rehearsal helpers only; `storage import-core-records` is removed
+  and arbitrary-checkout core-record DB imports are not a supported v2 mutation
+  path.
 - Direct managed-secret writes through `secrets put` follow the same
   `--allow-direct-db-mutation` bootstrap/repair boundary.
 - Keep git history separate from operational history.
@@ -803,10 +803,11 @@ run` is the foreground loop intended for an external process supervisor, and
 - Promotion execution copies the source channel tuple to the destination
   channel after the destination deploy passes, retaining the promotion and
   deployment record ids that established the promoted state.
-- Externally produced promotion evidence can mint the same destination tuple
-  through `release-tuples write-from-promotion` when the stored promotion
-  record carries explicit `deployment_record_id` linkage and Launchplane already
-  has the current source tuple for the promoted-from lane.
+- Accepted service-backed promotion evidence can mint the same destination tuple
+  when the stored promotion record carries explicit `deployment_record_id`
+  linkage and Launchplane already has the current source tuple for the
+  promoted-from lane. Local `release-tuples write-from-promotion` is a
+  file-backed rehearsal helper only.
 - Launchplane previews are not long-lived release-tuple channels; they derive
   their baseline from stored tuple evidence plus preview generation records.
 - Local-dev tuple records live under `state/`; shared-service runtime baseline
@@ -1215,7 +1216,8 @@ preflights.
   evidence: accepted deployment evidence refreshes inventory immediately, and
   accepted promotion evidence refreshes destination inventory when the
   promotion record carries explicit deployment linkage.
-- For a second product such as VeriReel, inventory should first be derived from
-  ingested deployment/promotion evidence before Launchplane becomes the runtime
-  executor for that product. The first explicit mutation surfaces for that are
-  `inventory write-from-deployment` and `inventory write-from-promotion`.
+- For a second product such as VeriReel, shared inventory should first be
+  derived from accepted service-backed deployment/promotion evidence before
+  Launchplane becomes the runtime executor for that product. Local
+  `inventory write-from-deployment` and `inventory write-from-promotion` remain
+  file-backed rehearsal helpers only.

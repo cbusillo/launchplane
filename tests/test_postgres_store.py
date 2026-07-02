@@ -1394,31 +1394,15 @@ class PostgresRecordStoreTests(unittest.TestCase):
             self.assertEqual(len(listed), 1)
             self.assertEqual(listed[0].image.digest, "sha256:image123")
 
-    def test_artifacts_cli_uses_database_store_when_configured(self) -> None:
+    def test_artifacts_show_uses_database_store_when_configured(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
                 Path(temporary_directory_name) / "launchplane.sqlite3"
             )
-            input_path = Path(temporary_directory_name) / "artifact.json"
-            input_path.write_text(
-                _artifact_manifest().model_dump_json(),
-                encoding="utf-8",
-            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_artifact_manifest(_artifact_manifest())
             runner = CliRunner()
-
-            write_result = runner.invoke(
-                main,
-                [
-                    "artifacts",
-                    "write",
-                    "--database-url",
-                    database_url,
-                    "--allow-direct-db-mutation",
-                    "--input-file",
-                    str(input_path),
-                ],
-            )
-            self.assertEqual(write_result.exit_code, 0, write_result.output)
 
             show_result = runner.invoke(
                 main,
@@ -1902,59 +1886,17 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertIsNone(loaded)
 
-    def test_storage_import_core_records_command_reports_counts(self) -> None:
-        runner = CliRunner()
-        postgres_store = Mock()
-        postgres_store.import_core_records_from_filesystem.return_value = {
-            "backup_gates": 0,
-            "deployments": 1,
-            "promotions": 0,
-            "inventory": 1,
-            "preview_records": 0,
-            "preview_generations": 0,
-            "release_tuples": 0,
-        }
-
-        with TemporaryDirectory() as temporary_directory_name:
-            with patch(
-                "control_plane.cli_storage_secrets.PostgresRecordStore",
-                return_value=postgres_store,
-            ) as store_class:
-                result = runner.invoke(
-                    main,
-                    [
-                        "storage",
-                        "import-core-records",
-                        "--state-dir",
-                        temporary_directory_name,
-                        "--database-url",
-                        "postgresql://launchplane:test@db/launchplane",
-                        "--allow-direct-db-mutation",
-                    ],
-                )
-
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        store_class.assert_called_once_with(
-            database_url="postgresql://launchplane:test@db/launchplane"
-        )
-        postgres_store.ensure_schema.assert_called_once_with()
-        postgres_store.import_core_records_from_filesystem.assert_called_once()
-        self.assertIn('"deployments": 1', result.output)
-
-    def test_storage_import_core_records_requires_direct_db_acknowledgement(self) -> None:
+    def test_storage_import_core_records_is_removed(self) -> None:
         result = CliRunner().invoke(
             main,
             [
                 "storage",
                 "import-core-records",
-                "--database-url",
-                "postgresql://launchplane:test@db/launchplane",
             ],
         )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Direct local DB mutation is restricted", result.output)
-        self.assertIn("--allow-direct-db-mutation", result.output)
+        self.assertIn("No such command 'import-core-records'", result.output)
 
     def test_secrets_put_requires_direct_db_acknowledgement(self) -> None:
         result = CliRunner().invoke(

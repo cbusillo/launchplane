@@ -8,24 +8,24 @@ Use `uv run launchplane --help` for the complete CLI surface. The current
 top-level groups are:
 
 Today this CLI is the local Launchplane operator/client surface around the
-service API. DB-backed commands may create stable-lane deploy and promotion
-records for `testing` and `prod`, plus Launchplane preview records and read
-models for PR review flows. Shared or production mutations must prefer the
-deployed service API with GitHub OIDC or the operator UI that calls it. If a live
-mutation still exists only as a local CLI command, stop and add or use a service
-API path instead of running the local command from an arbitrary checkout.
+service API. Shared or production mutations must prefer the deployed service API
+with GitHub OIDC or the operator UI that calls it. Local core-record write
+commands are file-backed rehearsal helpers, not DB-backed shared-state mutation
+paths. If a live mutation still exists only as a local CLI command, stop and add
+or use a service API path instead of running the local command from an arbitrary
+checkout.
 
-- `artifacts`: write, ingest, inspect artifact manifests, and emit protected
-  artifact inventories for registry cleanup deny sets.
-- `backup-gates`: write and inspect backup-gate records.
-- `deployments`: write and inspect deployment records.
+- `artifacts`: rehearse artifact manifest writes, inspect artifact manifests,
+  and emit protected artifact inventories for registry cleanup deny sets.
+- `backup-gates`: rehearse and inspect backup-gate records.
+- `deployments`: rehearse and inspect deployment records.
 - `environments`: write, list, and resolve DB-backed runtime environment
   contracts.
 - `launchplane-previews`: inspect, mutate, render, ingest, and replay
   Launchplane preview state.
 - `inventory`: inspect current environment inventory.
 - `promote`: record, resolve, and execute artifact-backed promotions.
-- `promotions`: write and inspect promotion records.
+- `promotions`: rehearse and inspect promotion records.
 - `product-config`: dry-run and apply trusted product runtime/secret config
   bundles from a live Launchplane context.
 - `release-tuples`: inspect state-backed tuple records and explicitly export a
@@ -40,9 +40,10 @@ API path instead of running the local command from an arbitrary checkout.
 
 `deployments write`, `promotions write`, `inventory write-from-deployment`,
 `inventory write-from-promotion`, and `release-tuples write-from-promotion`
-are the current small evidence-ingest surfaces that let Launchplane accept
-externally-produced deployment and promotion facts without claiming it
-executed that product's runtime action itself.
+are local rehearsal commands. Shared-service evidence ingress uses
+authenticated Launchplane service routes so Launchplane can accept externally
+produced deployment and promotion facts without claiming it executed that
+product's runtime action itself.
 
 Those commands are current implementation scaffolding. The Launchplane boundary
 is a long-running service with authenticated HTTP ingress. The CLI should remain
