@@ -125,12 +125,23 @@ runtime-environment, managed secret, route batch, topology, or target-id
 material.
 
 When a product repository runs the gate from GitHub Actions, use a dedicated
-`.github/workflows/launchplane-config-authority.yml` workflow until the gate has
-a Launchplane-owned service/reusable-workflow endpoint. The transitional
-Launchplane tool checkout may reference only
-`${{ github.repository_owner }}/launchplane` and must pin `ref` to a
-40-character commit SHA; hard-coded owners, mutable branches, and non-checkout
-`repository` values are rejected by the product-repo profile.
+`.github/workflows/launchplane-config-authority.yml` workflow that calls the
+Launchplane-owned reusable gate:
+
+```yaml
+jobs:
+  launchplane-config-authority:
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@main
+```
+
+The reusable workflow checks out the product repository and Launchplane's `main`
+audit tool, then runs the product-repo changed-file gate. Product repositories
+should not carry a pinned Launchplane tool checkout or run
+`uv run launchplane ...` themselves once they can call the reusable gate.
+The older pinned-checkout workflow remains a bounded compatibility bridge only:
+it may reference `${{ github.repository_owner }}/launchplane` and must pin `ref`
+to a 40-character commit SHA. Hard-coded owners, mutable branches, and
+non-checkout `repository` values are rejected by the product-repo profile.
 
 ## What Product Repos Own
 

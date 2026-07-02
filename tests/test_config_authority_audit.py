@@ -1589,6 +1589,11 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "${{ github.repository_owner }}/launchplane",
                 {"launchplane_tool_checkout_pinned_blocks": {"1"}},
             ),
+            (
+                ".github/workflows/launchplane-config-authority.yml",
+                "uses",
+                "cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@main",
+            ),
         )
         for case in thin_connectors:
             path, key, value, *context = case
@@ -1679,6 +1684,11 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/launchplane-config-authority.yml",
                 "checkout.repository[1]",
                 "${{ github.repository_owner }}/launchplane",
+            ),
+            (
+                ".github/workflows/launchplane-config-authority.yml",
+                "uses",
+                "cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@feature",
             ),
         )
         for path, key, value in rejected_thin_connectors:
@@ -2428,7 +2438,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
+        payload = json.loads(result.output.split("Error:", 1)[0])
         gate = cast("dict[str, object]", payload["gate"])
         self.assertEqual(gate["status"], "pass")
         finding = _findings(payload)[0]
@@ -2675,6 +2685,106 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         gate = cast("dict[str, object]", payload["gate"])
         self.assertEqual(gate["status"], "pass")
 
+    def test_cli_product_repo_gate_allows_reusable_launchplane_gate_workflow(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-authority-gate")
+            workflow.write_text(
+                "---\n"
+                "name: Launchplane Config Authority\n\n"
+                '"on":\n'
+                "  pull_request:\n"
+                "  workflow_dispatch:\n\n"
+                "permissions:\n"
+                "  contents: read\n\n"
+                "jobs:\n"
+                "  launchplane-config-authority:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@main\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "pass")
+        findings = _findings(payload)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["key"], "uses")
+        self.assertEqual(findings[0]["allow_reason"], "thin_connector_input")
+
+    def test_cli_product_repo_gate_rejects_reusable_launchplane_gate_branch(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-authority-gate")
+            workflow.write_text(
+                "---\n"
+                "name: Launchplane Config Authority\n\n"
+                '"on":\n'
+                "  pull_request:\n"
+                "  workflow_dispatch:\n\n"
+                "permissions:\n"
+                "  contents: read\n\n"
+                "jobs:\n"
+                "  launchplane-config-authority:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@feature\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+        findings = _findings(payload)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["key"], "uses")
+        self.assertEqual(findings[0]["allow_reason"], "")
+
     def test_cli_product_repo_gate_allows_image_artifact_deploy_workflow(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2706,10 +2816,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "      - name: Prepare image metadata\n"
                 "        id: image_metadata\n"
                 "        run: |\n"
-                "          image_repository=\"ghcr.io/${GITHUB_REPOSITORY,,}\"\n"
-                "          image_tag=\"sha-${GITHUB_SHA}\"\n"
-                "          echo \"image_repository=${image_repository}\" >> \"$GITHUB_OUTPUT\"\n"
-                "          echo \"image_reference=${image_repository}:${image_tag}\" >> \"$GITHUB_OUTPUT\"\n"
+                '          image_repository="ghcr.io/${GITHUB_REPOSITORY,,}"\n'
+                '          image_tag="sha-${GITHUB_SHA}"\n'
+                '          echo "image_repository=${image_repository}" >> "$GITHUB_OUTPUT"\n'
+                '          echo "image_reference=${image_repository}:${image_tag}" >> "$GITHUB_OUTPUT"\n'
                 "      - uses: docker/login-action@v4\n"
                 "        with:\n"
                 "          registry: ghcr.io\n"
@@ -2732,8 +2842,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "          LAUNCHPLANE_CONTEXT: ${{ vars.LAUNCHPLANE_CONTEXT }}\n"
                 "          LAUNCHPLANE_INSTANCE: ${{ vars.LAUNCHPLANE_INSTANCE }}\n"
                 "        run: |\n"
-                "          artifact_id=\"${IMAGE_REPOSITORY}@${IMAGE_DIGEST}\"\n"
-                "          echo \"artifact_id=${artifact_id}\" >> \"$GITHUB_OUTPUT\"\n"
+                '          artifact_id="${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"\n'
+                '          echo "artifact_id=${artifact_id}" >> "$GITHUB_OUTPUT"\n'
                 "      - uses: cbusillo/launchplane/.github/actions/launchplane-request@main\n"
                 "        with:\n"
                 "          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}\n"
