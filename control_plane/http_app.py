@@ -170,20 +170,12 @@ from control_plane.generic_web_rollback_http import (
 from control_plane.generic_web_deploy_http import (
     GENERIC_WEB_DEPLOY_ACTION,
     GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
-    GENERIC_WEB_SOURCE_REF_DEPLOY_ACTION,
-    GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE as _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
     GenericWebDeployEnvelope,
     GenericWebDeployProductMismatchError,
     GenericWebDeployRouteDependencyError,
-    GenericWebSourceRefDeployEnvelope,
-    GenericWebSourceRefDeployLaneMismatchError,
     execute_generic_web_deploy_result,
-    execute_generic_web_source_ref_deploy_result,
     resolve_generic_web_deploy_lane,
-    resolve_generic_web_source_ref_deploy_lane,
     should_store_generic_web_deploy_idempotency,
-    should_store_generic_web_source_ref_deploy_idempotency,
-    validate_generic_web_source_ref_deploy_lane,
 )
 from control_plane.generic_web_promotion_http import (
     GENERIC_WEB_PROD_PROMOTION_ACTION,
@@ -14199,114 +14191,6 @@ def create_launchplane_fastapi_app(
             )
         return response
 
-    async def apply_generic_web_source_ref_deploy(
-        request: Request,
-        deploy_request: GenericWebSourceRefDeployEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
-        trace_id = next_trace_id()
-        try:
-            profile, lane = resolve_generic_web_source_ref_deploy_lane(
-                record_store=record_store,
-                product=deploy_request.product,
-                context=deploy_request.deploy.context,
-                instance=deploy_request.deploy.instance,
-            )
-            validate_generic_web_source_ref_deploy_lane(
-                request=deploy_request,
-                lane=lane,
-            )
-        except GenericWebDeployRouteDependencyError:
-            return driver_route_dependency_not_found_response(
-                trace_id=trace_id,
-                route_path=_GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
-            )
-        except (
-            GenericWebDeployProductMismatchError,
-            GenericWebSourceRefDeployLaneMismatchError,
-        ) as error:
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="product_driver_mismatch",
-                message="Product is not configured for the requested driver route.",
-            ) from error
-        except (ValueError, click.ClickException) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=GENERIC_WEB_SOURCE_REF_DEPLOY_ACTION,
-            product=profile.product,
-            context=lane.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot execute the generic web source-ref deploy driver"
-                    " for the requested product/context."
-                ),
-            )
-        (
-            normalized_key,
-            payload_fingerprint,
-            replayed_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replayed_response is not None:
-            return replayed_response
-        try:
-            records, result = execute_generic_web_source_ref_deploy_result(
-                control_plane_root=resolved_control_plane_root,
-                record_store=record_store,
-                request=deploy_request,
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=f"No Launchplane route for {_GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE}.",
-            ) from error
-        except (ValueError, click.ClickException) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=records,
-            result=result,
-        )
-        if should_store_generic_web_source_ref_deploy_idempotency(result):
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
-                route_path=_GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
-        return response
-
     async def apply_generic_web_prod_promotion(
         request: Request,
         promotion_request: GenericWebProdPromotionEnvelope,
@@ -17546,35 +17430,6 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_generic_web_deploy",
         summary="Execute generic web deploy",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
-        apply_generic_web_source_ref_deploy,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": GenericWebSourceRefDeployEnvelope.model_json_schema()
-                    }
-                },
-            }
-        },
-        operation_id="apply_generic_web_source_ref_deploy",
-        summary="Execute generic web source-ref deploy",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

@@ -45,8 +45,7 @@ must declare:
 - `repository`: owning GitHub repo, for example `cbusillo/discord-blue`
 - `driver_id`: `generic-web`
 - `image.repository`: immutable image repository, for example
-  `ghcr.io/cbusillo/discord-blue`; leave it empty only for source-backed
-  worker targets that cannot use image deploy yet
+  `ghcr.io/cbusillo/discord-blue`
 - `runtime_port`: the service's internal HTTP port when it exposes one, or `0`
   when the product has no HTTP runtime surface
 - `health_path`: a path beginning with `/` when Launchplane, Dokploy, or public
@@ -122,36 +121,22 @@ record `deployment-20260630T034901Z-repairshopr-sync-prod` after Launchplane PR
 use this contract without source-ref deploy or direct Dokploy mutation in the
 product repo.
 
-Some inherited services still deploy an existing Dokploy compose target directly
-from a Git source ref instead of an immutable image. Use this as a migration
-bridge only when the existing provider target cannot yet be switched to image
-deploy. Product repos may call
-`POST /v1/drivers/generic-web/source-ref-deploy` with the tested commit SHA as
-`source_git_ref` and a provider deploy branch/ref as `provider_source_ref`.
-During this bridge, `source_git_ref` is caller-attested evidence: Launchplane
-does not resolve the provider branch tip before triggering Dokploy. Prefer a
-unique provider ref per tested commit, such as
-`refs/heads/launchplane-deploy/<sha>`, over a shared long-lived branch.
-Launchplane resolves the DB-backed product lane and Dokploy target records,
-temporarily pins the compose target's source branch/ref, triggers the deploy,
-waits for completion, and restores the original source ref only while the live
-target still points at the requested provider ref. Product repos must not keep
-Dokploy host, token, compose id, or provider mutation scripts for this mode.
-If the compose target is a background worker with no HTTP listener, its product
-profile may leave `image.repository` and `health_path` empty and set
-`runtime_port=0`, but every stable lane must disable public ingress monitoring
-and omit HTTP URLs, and every provider target must omit domains and disable
-Dokploy health checks. Image deploy, preview creation, public ingress
-monitoring, provider domains, and provider health checks still require real image
-and HTTP health metadata before they can mutate provider state.
+The inherited source-ref deploy bridge is retired. Services that still deploy a
+Dokploy compose target from Git must migrate the provider target to immutable
+image deploy before using the generic-web service contract; do not use the bridge.
+Product repositories must publish immutable images for Launchplane-owned stable
+deploys.
+Product repos must not keep Dokploy host, token, compose id, provider source-ref
+rewrites, or other direct provider mutation scripts as a replacement for the
+retired route.
 
-The stable target is immutable image deploy. The source-ref bridge does not
-write generic-web deployment records; its durable replay surface is the service
-idempotency record. Treat it as a current but bounded Launchplane-owned
-replacement for direct Dokploy workflows only while the product is moved to
-image publishing. Any retained source-ref caller must have an issue-backed
-owner, date, and delete condition; do not use the bridge for products that can
-publish immutable images.
+The stable target is immutable image deploy. If the target is a background
+worker with no HTTP listener, its product profile may leave `health_path` empty
+and set `runtime_port=0`, but every stable lane must disable public ingress
+monitoring and omit HTTP URLs, and every provider target must omit domains and
+disable Dokploy health checks. Image deploy, preview creation, public ingress
+monitoring, provider domains, and provider health checks still require real
+image and HTTP health metadata before they can mutate provider state.
 
 Launchplane also injects a non-secret runtime identity into Dokploy env during
 Launchplane-owned deploys. The standard keys are
@@ -238,14 +223,6 @@ A normal service deploy does this:
 3. Launchplane resolves the product profile lane and DB-backed Dokploy target.
 4. Launchplane updates the Dokploy application image and triggers deployment.
 5. Launchplane writes a deployment record with the resolved target and status.
-
-A source-ref compose bridge deploy keeps the same authority split but uses a
-tested commit SHA and provider deploy branch/ref instead of an image reference.
-The product workflow may still create or move its own deploy ref to the tested
-SHA, but Launchplane resolves the Dokploy compose target and owns the provider
-source pin, deployment trigger, provider polling, and restore behavior. Repeated
-requests should reuse the same `Idempotency-Key`; a retry with a new key is a
-new provider mutation request.
 
 Generic-web deploy records post-deploy evidence as `skipped` by default. A
 driver that inherits from generic-web can provide a product post-deploy

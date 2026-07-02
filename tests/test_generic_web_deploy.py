@@ -426,7 +426,10 @@ class GenericWebDeployTests(unittest.TestCase):
     def test_normalize_generic_web_artifact_id_rejects_worker_profile_without_image(
         self,
     ) -> None:
-        with self.assertRaisesRegex(click.ClickException, "requires product image.repository"):
+        with self.assertRaisesRegex(
+            click.ClickException,
+            "Configure an immutable image repository before using generic-web deploy",
+        ):
             normalize_generic_web_artifact_id(
                 profile=_source_ref_worker_profile(),
                 artifact_id="sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c",
@@ -645,6 +648,8 @@ class GenericWebDeployTests(unittest.TestCase):
 
         self.assertEqual(result.deploy_status, "fail")
         self.assertIn("requires product image.repository", result.error_message)
+        self.assertIn("immutable image repository", result.error_message)
+        self.assertNotIn("source-ref deploy", result.error_message)
         self.assertEqual(len(store.deployments), 1)
         self.assertEqual(store.deployments[0].deploy.status, "fail")
         self.assertEqual(store.deployments[0].context, "repairshopr-sync")

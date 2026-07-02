@@ -195,7 +195,7 @@ def normalize_generic_web_artifact_id(
     if not image_repository:
         raise click.ClickException(
             "Generic web image deploy requires product image.repository. "
-            "Use a source-ref deploy route for source-backed worker targets."
+            "Configure an immutable image repository before using generic-web deploy."
         )
     if normalized_artifact_id.startswith(
         f"{image_repository}@"

@@ -283,7 +283,6 @@ VeriReel product paths:
 - product driver routes:
   - `POST /v1/drivers/launchplane/self-deploy` (native FastAPI)
   - `POST /v1/drivers/generic-web/deploy` (native FastAPI)
-  - `POST /v1/drivers/generic-web/source-ref-deploy` (native FastAPI)
   - `POST /v1/drivers/generic-web/prod-promotion` (native FastAPI)
   - `POST /v1/drivers/generic-web/prod-promotion-workflow` (native FastAPI)
   - `POST /v1/drivers/generic-web/prod-rollback-plan` (native FastAPI)
@@ -1502,15 +1501,12 @@ called `/v1/drivers/generic-web/deploy` with immutable GHCR image identity and
 received `deploy_status: pass` for deployment record
 `deployment-20260630T034901Z-repairshopr-sync-prod` on Dokploy target
 `cm-repairshopr-sync`.
-Generic web source-ref deploys use native FastAPI
-`POST /v1/drivers/generic-web/source-ref-deploy`; the route validates the
-request context and instance against the resolved product profile lane before
-authorization, idempotency replay, or provider mutation. This route is a
-current but bounded Launchplane-owned bridge for provider-backed compose targets
-that still deploy from a tested source ref. Any retained source-ref caller must
-have an issue-backed owner, date, and delete condition; product repos must not
-regain direct Dokploy mutation authority around this route. Do not choose
-source-ref deploy for products that can publish immutable images.
+The former generic-web source-ref deploy route is retired. Products that once
+depended on Launchplane temporarily rewriting provider source refs must move to
+the image-backed generic-web deploy route instead: the product repo publishes an
+immutable artifact, Launchplane validates DB-backed product/profile identity,
+and Launchplane mutates the provider using stable target records. Do not add
+new product-repo direct provider mutation to replace the retired route.
 Product environment reads expose neutral provider-target identity only from
 explicit provider-target rows. Paired DB-backed Dokploy target and target-id
 records remain visible as provider-specific execution/history metadata and as
