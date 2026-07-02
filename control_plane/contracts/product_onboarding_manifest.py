@@ -102,13 +102,13 @@ class ProductOnboardingTargetManifest(BaseModel):
             raise ValueError("product onboarding target healthcheck_path must start with /")
         return self
 
-    def is_source_backed_compose(self) -> bool:
-        return (
+    def has_source_backed_fields(self) -> bool:
+        return bool(
             self.target_type == "compose"
-            and self.source_type.strip().lower() == "git"
-            and bool(self.custom_git_url.strip())
-            and bool(self.custom_git_branch.strip())
-            and bool(self.compose_path.strip())
+            or self.source_type.strip()
+            or self.custom_git_url.strip()
+            or self.custom_git_branch.strip()
+            or self.compose_path.strip()
         )
 
 
@@ -200,6 +200,7 @@ class ProductOnboardingManifest(BaseModel):
             raise ValueError("product onboarding manifest requires repository")
         if not self.driver_id.strip():
             raise ValueError("product onboarding manifest requires driver_id")
+        self.driver_id = self.driver_id.strip()
         self.image_repository = self.image_repository.strip()
         self.health_path = self.health_path.strip()
         if self.health_path and not self.health_path.startswith("/"):
@@ -255,6 +256,11 @@ class ProductOnboardingManifest(BaseModel):
                     "product onboarding target must match a stable lane: "
                     f"{target.context}/{target.instance}"
                 )
+            if self.driver_id == "generic-web" and target.has_source_backed_fields():
+                raise ValueError(
+                    "generic-web product onboarding no longer accepts source-backed "
+                    "provider target fields; use image-backed application targets"
+                )
             if target.healthcheck_enabled and not (
                 target.healthcheck_path.strip() or self.health_path
             ):
@@ -263,58 +269,9 @@ class ProductOnboardingManifest(BaseModel):
                 )
 
         if not self.image_repository:
-            if self.runtime_port != 0 or self.health_path:
-                raise ValueError(
-                    "image-less product onboarding requires runtime_port=0 and empty health_path"
-                )
-            if not self.provider_targets:
-                raise ValueError(
-                    "image-less product onboarding requires source-backed compose provider target"
-                )
-            source_backed_compose_routes = {
-                (target.context.strip(), target.instance.strip())
-                for target in self.provider_targets
-                if target.is_source_backed_compose()
-            }
-            for lane in self.lanes:
-                if lane.base_url.strip():
-                    raise ValueError(
-                        "image-less product onboarding requires empty base_url; "
-                        "use explicit health_url for source-backed worker health checks"
-                    )
-                has_health_surface = bool(
-                    lane.health_url.strip()
-                    or any(check.enabled for check in lane.health_monitoring.checks)
-                )
-                if not has_health_surface:
-                    continue
-                route = (lane.context.strip(), lane.instance.strip())
-                if route not in source_backed_compose_routes:
-                    raise ValueError(
-                        "image-less product onboarding health surfaces require "
-                        "source-backed compose provider target"
-                    )
-            for target in self.provider_targets:
-                if target.target_type != "compose":
-                    raise ValueError(
-                        "image-less product onboarding requires compose provider targets"
-                    )
-                if target.source_type.strip().lower() != "git" or not target.custom_git_url.strip():
-                    raise ValueError(
-                        "image-less product onboarding requires source-backed compose provider target"
-                    )
-                if not target.custom_git_branch.strip():
-                    raise ValueError("image-less product onboarding requires custom_git_branch")
-                if not target.compose_path.strip():
-                    raise ValueError("image-less product onboarding requires compose_path")
-                if target.domains:
-                    raise ValueError(
-                        "image-less product onboarding requires provider targets without domains"
-                    )
-                if target.healthcheck_enabled:
-                    raise ValueError(
-                        "image-less product onboarding requires disabled provider healthcheck"
-                    )
+            raise ValueError(
+                "product onboarding requires image_repository for immutable image deploy"
+            )
 
         allowed_contexts = {self.product.strip()}
         allowed_contexts.update(lane.context.strip() for lane in self.lanes)
