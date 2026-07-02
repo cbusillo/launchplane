@@ -71,6 +71,14 @@ class DocsContractsTests(TestCase):
         self.assertIn("baseline for retiring older source-ref", product_repo_contract)
         self.assertIn("reusable-product-repo-config-authority.yml@main", product_repo_contract)
         self.assertIn("pinned Launchplane tool checkout", product_repo_contract)
+        self.assertIn("Product repos build, test, smoke, and publish", product_repo_contract)
+        self.assertIn("Launchplane derives lifecycle meaning", product_repo_contract)
+        self.assertIn("Operators act through Launchplane, not around it", product_repo_contract)
+        self.assertIn("changes the hiding place, not the ownership boundary", product_repo_contract)
+        self.assertIn("operator-seeded GitHub variables", product_repo_contract)
+        self.assertIn("scoped adapter", product_repo_contract)
+        self.assertIn("inputs. They are not checked-in product topology", product_repo_contract)
+        self.assertIn("#1528 owns reducing that bridge", product_repo_contract)
 
         self.assertIn("stable product-repo integration surface", dokploy_service_contract)
         self.assertIn("RepairShopr Sync is the first live canary", dokploy_service_contract)
@@ -92,3 +100,14 @@ class DocsContractsTests(TestCase):
         self.assertIn("Launchplane does not create a", records_doc)
         self.assertIn("separate base-image promotion record today", records_doc)
         self.assertIn("Add a Launchplane-owned base-image promotion record only if", records_doc)
+
+    def test_driver_contract_keeps_lifecycle_fixtures_in_launchplane(self) -> None:
+        driver_development = Path("docs/driver-development.md").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Drivers exist to move lifecycle knowledge out of product repos", driver_development
+        )
+        self.assertIn("product-specific hard-coding inside Launchplane", driver_development)
+        self.assertIn("Lifecycle fixtures follow the same boundary", driver_development)
+        self.assertIn("contract builders own fixtures", driver_development)
+        self.assertIn("Odoo is the reference complex-product case", driver_development)

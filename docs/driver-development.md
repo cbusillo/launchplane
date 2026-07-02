@@ -9,6 +9,13 @@ behavior. A driver declares what a product can do, validates requests, executes
 or delegates provider work, writes durable records, and exposes read models for
 operators and future UI actions.
 
+Drivers exist to move lifecycle knowledge out of product repos, not to rename
+product-specific hard-coding inside Launchplane. The common contract is:
+product repos build, test, smoke, and publish immutable artifacts, then pass
+minimal facts; Launchplane derives lifecycle meaning and owns runtime authority
+through driver routes, reusable workflows, DB-backed records, managed secrets,
+provider adapters, and durable evidence.
+
 Use `generic-web` directly when a product fits the common web-app lifecycle. Add
 a new driver type or product driver only when the product has obligations that
 should be named, authorized, tested, and operated separately from the generic
@@ -29,6 +36,17 @@ Add a driver when the product needs one or more of these:
 Do not add a driver just to rename `generic-web` for a product. Prefer a product
 profile using `driver_id="generic-web"` until there is a real product-specific
 capability to model.
+
+Lifecycle fixtures follow the same boundary. Product repos may keep fixtures for
+product behavior, local development, and product-specific smoke tests. Driver
+tests and contract builders own fixtures for lifecycle behavior: product
+profiles, lane profiles, runtime-environment records, managed-secret bindings,
+provider targets, release tuples, artifact manifests,
+deployment/promotion/rollback/backup evidence, preview records, and driver
+request/result shapes.
+Odoo is the reference complex-product case for this split: Odoo repos keep
+source/build/local-DX and product-smoke facts, while the Odoo driver owns Odoo
+lifecycle derivation and fixture setup that Launchplane can prove centrally.
 
 ## Driver Shape
 

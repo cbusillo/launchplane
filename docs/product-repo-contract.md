@@ -16,6 +16,21 @@ existed.
 
 ## Target Shape
 
+The durable north star is:
+
+> Product repos build, test, smoke, and publish immutable artifacts, then pass
+> minimal facts. Launchplane derives lifecycle meaning and owns runtime
+> authority: it authorizes, decides, mutates, records, explains, and protects.
+> Operators act through Launchplane, not around it.
+
+Product repos may document non-authoritative runtime contract facts such as
+ports, health paths, smoke commands, package quality gates, and repo ergonomics
+metadata. That documentation is not authority for live topology, runtime
+configuration, provider targets, secrets, managed environments, promotion
+policy, rollback policy, preview URL policy, or cleanup safety. Moving a live
+value from code into workflow YAML, `.github/github.json`, TOML, JSON, or a
+fixture changes the hiding place, not the ownership boundary.
+
 ```text
 product repo
   - app source
@@ -372,10 +387,15 @@ Generic web/service repos that deploy as Dokploy applications should build and
 push their own immutable image, then submit the image digest to Launchplane's
 `generic-web` deploy route. The workflow may derive the GHCR repository from the
 current GitHub repository, publish with `docker/login-action` and
-`docker/build-push-action`, and pass Launchplane product/context/instance values
-from GitHub variables. The checked-in workflow must not hard-code provider
-targets, Dokploy operations, runtime domains, managed secrets, or fixed product
-topology; Launchplane resolves those from DB-backed product and target records.
+`docker/build-push-action`, then pass the product key, stable-lane intent, tested
+source SHA, and immutable image digest. While the current `generic-web/deploy`
+route still requires context or instance compatibility fields, product workflows
+may supply those values from operator-seeded GitHub variables as scoped adapter
+inputs. They are not checked-in product topology or durable lifecycle authority,
+and #1528 owns reducing that bridge behind Launchplane-owned reusable lifecycle
+contracts. The checked-in workflow must not hard-code provider targets, Dokploy
+operations, runtime domains, managed secrets, or fixed product topology;
+Launchplane resolves those from DB-backed product and target records.
 
 For this shape, `.github/workflows/launchplane-deploy.yml` is the supported thin
 connector workflow name. It should call:
@@ -391,9 +411,10 @@ connector workflow name. It should call:
       generic-web-deploy:${{ vars.LAUNCHPLANE_PRODUCT }}:${{ vars.LAUNCHPLANE_CONTEXT }}:${{ vars.LAUNCHPLANE_INSTANCE }}:${{ github.event.workflow_run.head_sha }}:${{ steps.launchplane_payload.outputs.artifact_id }}
 ```
 
-The payload should include the product key, instance, immutable image digest as
-`artifact_id`, and tested source SHA. Mutable image tags and checked-in image
-references are not durable deploy inputs.
+The payload should include the product key, stable-lane intent required by the
+current route, immutable image digest as `artifact_id`, and tested source SHA.
+Mutable image tags and checked-in image references are not durable deploy
+inputs.
 
 ```yaml
 - name: Request Launchplane preview refresh
