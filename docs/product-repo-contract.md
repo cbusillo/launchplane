@@ -377,11 +377,54 @@ checkout of Launchplane source or direct invocation of Launchplane internals.
 If a repo still needs a compatibility bridge, the bridge must have an issue
 reference, a dated owner, and a delete condition.
 
+## Reusable Generic-Web Lifecycle Workflows
+
+Generic-web product repos should prefer Launchplane-owned reusable workflows
+before calling raw driver routes. The reusable workflow owns the Launchplane
+route path, request JSON shape, response-output mapping, and run-scoped
+idempotency key. The product repo supplies only primitive facts: product key,
+lane instance, immutable artifact identity, and tested source git ref.
+
+Stable deploy uses:
+
+```yaml
+jobs:
+  launchplane-deploy:
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@main
+    with:
+      product: ${{ vars.LAUNCHPLANE_PRODUCT }}
+      instance: testing
+      artifact_id: ${{ needs.build.outputs.image_digest }}
+      source_git_ref: ${{ github.sha }}
+```
+
+Production promotion uses:
+
+```yaml
+jobs:
+  launchplane-prod-promotion:
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-prod-promotion.yml@main
+    with:
+      product: ${{ vars.LAUNCHPLANE_PRODUCT }}
+      artifact_id: ${{ needs.build.outputs.image_digest }}
+      source_git_ref: ${{ github.sha }}
+```
+
+These reusable workflows intentionally do not accept provider targets, target
+ids, health URLs, preview URLs, feedback markdown, record ids, managed secrets,
+runtime environment values, or idempotency keys. Launchplane derives or records
+those values from product profiles, lane profiles, provider-target records,
+runtime-environment records, managed secret bindings, GitHub OIDC claims, driver
+results, and durable evidence. The reusable deploy workflow is the first
+non-prod proof path for #1528; product-repo cleanup should wait for a live
+non-prod deploy proof before deleting older local request-shaping scripts.
+
 ## Reusable Launchplane Request Action
 
 Product workflows that only need to send JSON to an existing Launchplane route
 should not carry their own GitHub OIDC transport client. Use the Launchplane
-repo action instead:
+repo action instead. Raw action calls are a lower-level compatibility surface
+when a Launchplane-owned reusable workflow does not exist yet.
 
 Generic web/service repos that deploy as Dokploy applications should build and
 push their own immutable image, then submit the image digest to Launchplane's
@@ -397,8 +440,8 @@ contracts. The checked-in workflow must not hard-code provider targets, Dokploy
 operations, runtime domains, managed secrets, or fixed product topology;
 Launchplane resolves those from DB-backed product and target records.
 
-For this shape, `.github/workflows/launchplane-deploy.yml` is the supported thin
-connector workflow name. It should call:
+For this compatibility shape, `.github/workflows/launchplane-deploy.yml` is the
+supported thin connector workflow name. It should call:
 
 ```yaml
 - name: Request Launchplane deploy
@@ -434,11 +477,13 @@ inputs.
       error_message=result.error_message
 ```
 
-The preview refresh payload should identify the product, preview slug, immutable
-image reference, and optional PR metadata. New product workflows should omit
-`preview_url`; Launchplane derives the live URL from the product preview context
-and `LAUNCHPLANE_PREVIEW_BASE_URL`. `preview_url` is reserved as a compatibility
-override for older callers.
+The preview refresh payload should identify the product, PR number, immutable
+image reference, source SHA, and optional PR URL. New product workflows should
+omit `preview_slug` and `preview_url`; Launchplane derives the preview slug from
+the product profile slug policy and derives the live URL from the product
+preview context and `LAUNCHPLANE_PREVIEW_BASE_URL`. `preview_slug` and
+`preview_url` are compatibility overrides for older callers, and a supplied slug
+must match the Launchplane-derived slug when PR identity is also present.
 
 The action requests a GitHub OIDC token, sends the JSON request with a stable
 `Idempotency-Key`, exposes the raw response body, and can map response JSON paths

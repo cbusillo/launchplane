@@ -118,6 +118,13 @@ Preview refresh routes receive only product-local facts:
 - run URL
 - primitive smoke/readiness facts when the check is product-specific
 
+Generic-web preview refresh callers should pass `anchor_pr_number` and omit
+`preview_slug` and `preview_url`. Launchplane derives the slug from the product
+profile slug policy, derives the live URL from the preview context's runtime
+environment records, and rejects a supplied slug when it conflicts with the
+derived value. `preview_slug` and `preview_url` remain compatibility fields for
+older adapters, not product-repo authority.
+
 Odoo CM is the exception where Launchplane now owns both the isolated provider
 apply planning inputs and the stage-preview smoke contract after refresh. Product
 workflows should call `POST /v1/drivers/odoo/preview-apply-inputs` with PR,
@@ -145,7 +152,9 @@ Odoo-shaped preview verification alias is retired.
 
 Preview destroy routes receive the PR number, source/run metadata, and an
 explicit destroy reason such as `pull_request_closed`, `preview_label_removed`,
-or `manual_destroy_requested`.
+or `manual_destroy_requested`. Generic-web preview destroy follows the same slug
+policy as refresh: callers should pass PR identity, and Launchplane derives the
+preview slug from the product profile before provider deletion.
 
 Preview feedback routes receive the status and primitive display facts.
 Launchplane derives the marker, rendered markdown, delivery behavior, and record
