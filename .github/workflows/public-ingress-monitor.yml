@@ -38,7 +38,7 @@ jobs:
         inputs.notify && 'true' || 'false' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Run public ingress monitor
         uses: ./.github/actions/launchplane-request

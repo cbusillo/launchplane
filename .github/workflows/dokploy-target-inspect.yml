@@ -45,7 +45,7 @@ jobs:
       TARGET_TYPE: ${{ inputs.target_type }}
       TARGET_ID: ${{ inputs.target_id }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Resolve service endpoint
         id: service

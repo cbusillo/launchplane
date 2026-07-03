@@ -42,7 +42,7 @@ jobs:
       ROUTES_JSON: ${{ inputs.routes_json }}
       PROVIDER_ID: ${{ inputs.provider_id }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Resolve service endpoint
         id: service

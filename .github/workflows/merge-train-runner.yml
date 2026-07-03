@@ -391,7 +391,7 @@ jobs:
           env.MERGE_TRAIN_BATCH_CANDIDATE_MODE != 'none' ||
           env.MERGE_TRAIN_BATCH_LANDING_MODE != 'none' ||
           env.MERGE_TRAIN_STACK_COLLAPSE_MODE != 'none')
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Run one merge-train pass
         if: >-
