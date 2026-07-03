@@ -117,9 +117,13 @@ build the PR head:
 - Any PR without the preview label: `ignore`.
 
 Fork and Dependabot PRs use `pull_request_target` only for an unsupported notice.
-That job must run from the base branch, must not check out untrusted PR code, and
-must only call `POST /v1/previews/pr-feedback` with `status="unsupported"`.
-Launchplane will render and deliver the comment.
+That job must run from the base branch and call
+`cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@main`.
+The reusable workflow owns the trusted event decision, unsupported/cleared
+status selection, failure summary, and `/v1/previews/pr-feedback` handoff.
+Product repos must not check out code, choose a checkout ref, render feedback
+markdown, build request payloads, or call `POST /v1/previews/pr-feedback`
+directly from their own fork/Dependabot notice workflows.
 
 Manual `workflow_dispatch` may request `refresh` or `destroy` when a product repo
 needs an operator retry path. Manual refresh still follows the same build,
