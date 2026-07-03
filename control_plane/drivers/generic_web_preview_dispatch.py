@@ -321,9 +321,12 @@ def _write_preview_desired_state_if_supported(
 
 def _generic_web_preview_manifest_fingerprint(
     request: GenericWebPreviewRefreshRequest,
+    *,
+    preview_slug: str = "",
 ) -> str:
+    resolved_preview_slug = preview_slug.strip() or request.preview_slug
     artifact_token = _repo_token(_image_reference_tail(request.image_reference) or "image")
-    return f"{_repo_token(request.preview_slug)}-{artifact_token}"
+    return f"{_repo_token(resolved_preview_slug)}-{artifact_token}"
 
 
 def _generic_web_preview_anchor_pr_number(
@@ -474,7 +477,10 @@ def _generic_web_preview_refresh_mutation_requests(
         ready_at=finished_at if states.generation_state == "ready" else "",
         finished_at=finished_at if states.generation_state == "ready" or not refresh_passed else "",
         failed_at=finished_at if not refresh_passed else "",
-        resolved_manifest_fingerprint=_generic_web_preview_manifest_fingerprint(request),
+        resolved_manifest_fingerprint=_generic_web_preview_manifest_fingerprint(
+            request,
+            preview_slug=driver_result.preview_slug,
+        ),
         artifact_id=request.image_reference,
         deploy_status=states.deploy_status,
         verify_status=states.verify_status,

@@ -111,3 +111,45 @@ class DocsContractsTests(TestCase):
         self.assertIn("Lifecycle fixtures follow the same boundary", driver_development)
         self.assertIn("contract builders own fixtures", driver_development)
         self.assertIn("Odoo is the reference complex-product case", driver_development)
+
+    def test_generic_web_reusable_workflows_keep_product_inputs_minimal(self) -> None:
+        product_repo_contract = Path("docs/product-repo-contract.md").read_text(encoding="utf-8")
+        preview_contract = Path("docs/preview-workflow-contract.md").read_text(encoding="utf-8")
+        deploy_workflow = Path(
+            ".github/workflows/reusable-generic-web-stable-deploy.yml"
+        ).read_text(encoding="utf-8")
+        promotion_workflow = Path(
+            ".github/workflows/reusable-generic-web-prod-promotion.yml"
+        ).read_text(encoding="utf-8")
+        repo_metadata = Path(".github/github.json").read_text(encoding="utf-8")
+
+        self.assertIn("Reusable Generic-Web Lifecycle Workflows", product_repo_contract)
+        self.assertIn("reusable-generic-web-stable-deploy.yml@main", product_repo_contract)
+        self.assertIn("reusable-generic-web-prod-promotion.yml@main", product_repo_contract)
+        self.assertIn("route path, request JSON shape", product_repo_contract)
+        self.assertIn("idempotency key", product_repo_contract)
+        self.assertIn("do not accept provider targets", product_repo_contract)
+        self.assertIn("`preview_slug`", product_repo_contract)
+        self.assertIn("`preview_url` are compatibility overrides", product_repo_contract)
+        self.assertIn("anchor_pr_number` and omit", preview_contract)
+        self.assertIn("conflicts with the", preview_contract)
+        self.assertIn("derived value", preview_contract)
+
+        self.assertIn("workflow_call:", deploy_workflow)
+        self.assertIn("route-path: /v1/drivers/generic-web/deploy", deploy_workflow)
+        self.assertIn("generic-web-stable-deploy", deploy_workflow)
+        self.assertIn("deploy.artifact_id=${{ inputs.artifact_id }}", deploy_workflow)
+        self.assertNotIn("target_id", deploy_workflow)
+        self.assertNotIn("health_url", deploy_workflow)
+        self.assertNotIn("preview_url", deploy_workflow)
+
+        self.assertIn("workflow_call:", promotion_workflow)
+        self.assertIn("route-path: /v1/drivers/generic-web/prod-promotion", promotion_workflow)
+        self.assertIn("generic-web-prod-promotion", promotion_workflow)
+        self.assertIn("promotion.artifact_id=${{ inputs.artifact_id }}", promotion_workflow)
+        self.assertNotIn("target_id", promotion_workflow)
+        self.assertNotIn("health_url", promotion_workflow)
+        self.assertNotIn("preview_url", promotion_workflow)
+
+        self.assertIn("Reusable Generic Web Stable Deploy", repo_metadata)
+        self.assertIn("Reusable Generic Web Prod Promotion", repo_metadata)

@@ -39,6 +39,7 @@ from control_plane.workflows.generic_web_preview import (
     execute_generic_web_preview_refresh,
     preview_pr_number_from_slug,
     resolve_generic_web_preview_profile,
+    resolve_generic_web_preview_slug,
     resolve_generic_web_preview_url,
     _wait_for_preview_health,
 )
@@ -318,6 +319,28 @@ class GenericWebPreviewTests(unittest.TestCase):
             )
         )
 
+    def test_resolve_generic_web_preview_slug_derives_from_pr_number(self) -> None:
+        self.assertEqual(
+            resolve_generic_web_preview_slug(
+                profile=_profile(),
+                preview_slug="",
+                anchor_pr_number=42,
+                label="Generic web preview refresh",
+            ),
+            "preview-42-site",
+        )
+
+    def test_resolve_generic_web_preview_slug_rejects_mismatched_supplied_slug(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(click.ClickException, "slug policy"):
+            resolve_generic_web_preview_slug(
+                profile=_profile(),
+                preview_slug="preview-41-site",
+                anchor_pr_number=42,
+                label="Generic web preview refresh",
+            )
+
     def test_execute_generic_web_preview_inventory_filters_by_app_prefix(self) -> None:
         store = _GenericWebPreviewStore(_profile())
         raw_projects = [
@@ -353,7 +376,9 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.app_name_prefix, "syo-preview")
         self.assertEqual([item.previewSlug for item in result.previews], ["preview-42-site"])
 
-    def test_execute_generic_web_preview_inventory_ignores_retired_odoo_compose_domains(self) -> None:
+    def test_execute_generic_web_preview_inventory_ignores_retired_odoo_compose_domains(
+        self,
+    ) -> None:
         store = _GenericWebPreviewStore(_odoo_compose_profile())
         requests: list[dict[str, object]] = []
 
@@ -692,7 +717,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                 profile=profile,
                 request=GenericWebPreviewRefreshRequest(
                     product="sellyouroutboard",
-                    preview_slug="pr-42",
+                    anchor_pr_number=42,
                     preview_url="",
                     image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
                 ),
@@ -728,7 +753,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                     profile=profile,
                     request=GenericWebPreviewRefreshRequest(
                         product="sellyouroutboard",
-                        preview_slug="pr-42",
+                        anchor_pr_number=42,
                         preview_url="",
                         image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
                     ),
@@ -921,7 +946,9 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch("control_plane.workflows.generic_web_preview.urlopen", return_value=_Response()),
-            patch("control_plane.workflows.generic_web_preview.time.sleep", side_effect=sleeps.append),
+            patch(
+                "control_plane.workflows.generic_web_preview.time.sleep", side_effect=sleeps.append
+            ),
         ):
             with self.assertRaisesRegex(click.ClickException, "Runtime identity"):
                 _wait_for_preview_health(
@@ -968,7 +995,9 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch("control_plane.workflows.generic_web_preview.urlopen", return_value=_Response()),
-            patch("control_plane.workflows.generic_web_preview.time.sleep", side_effect=sleeps.append),
+            patch(
+                "control_plane.workflows.generic_web_preview.time.sleep", side_effect=sleeps.append
+            ),
         ):
             _wait_for_preview_health(
                 preview_url="https://preview-42.example.test",
@@ -1014,7 +1043,9 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch("control_plane.workflows.generic_web_preview.urlopen", return_value=_Response()),
-            patch("control_plane.workflows.generic_web_preview.time.sleep", side_effect=sleeps.append),
+            patch(
+                "control_plane.workflows.generic_web_preview.time.sleep", side_effect=sleeps.append
+            ),
         ):
             with self.assertRaisesRegex(click.ClickException, "did not match"):
                 _wait_for_preview_health(
@@ -1268,7 +1299,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                     anchor_head_sha="abc123",
                     timeout_seconds=240,
                 ),
-        )
+            )
 
         self.assertEqual(result.refresh_status, "blocked")
         self.assertEqual(result.error_message, "Generic web preview readiness blocked refresh.")
@@ -1458,6 +1489,91 @@ class GenericWebPreviewTests(unittest.TestCase):
                 "/api/application.delete",
             ],
         )
+
+    def test_execute_generic_web_preview_destroy_derives_slug_from_pr_number(self) -> None:
+        store = _GenericWebPreviewStore(_profile())
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return [
+                    {
+                        "environments": [
+                            {
+                                "applications": [
+                                    {
+                                        "applicationId": "app-42",
+                                        "name": "syo-preview-preview-42-site",
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            if path == "/api/domain.byApplicationId":
+                return []
+            return {}
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.utc_now_timestamp",
+                side_effect=["2026-04-30T21:00:00Z", "2026-04-30T21:00:02Z"],
+            ),
+        ):
+            result = execute_generic_web_preview_destroy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewDestroyRequest(
+                    product="sellyouroutboard",
+                    anchor_pr_number=42,
+                    destroy_reason="test",
+                ),
+            )
+
+        self.assertEqual(result.destroy_status, "pass")
+        self.assertEqual(result.preview_slug, "preview-42-site")
+        self.assertEqual(result.application_name, "syo-preview-preview-42-site")
+        self.assertEqual(result.application_id, "app-42")
+        self.assertEqual(
+            [request["path"] for request in requests],
+            [
+                "/api/project.all",
+                "/api/domain.byApplicationId",
+                "/api/application.delete",
+            ],
+        )
+
+    def test_execute_generic_web_preview_destroy_rejects_mismatched_slug_before_provider(
+        self,
+    ) -> None:
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config"
+            ) as read_dokploy_config,
+            self.assertRaisesRegex(click.ClickException, "slug policy"),
+        ):
+            execute_generic_web_preview_destroy(
+                control_plane_root=Path("."),
+                record_store=_GenericWebPreviewStore(_profile()),
+                request=GenericWebPreviewDestroyRequest(
+                    product="sellyouroutboard",
+                    preview_slug="preview-41-site",
+                    anchor_pr_number=42,
+                    destroy_reason="test",
+                ),
+            )
+
+        read_dokploy_config.assert_not_called()
 
     def test_execute_generic_web_preview_destroy_fails_when_application_missing(self) -> None:
         store = _GenericWebPreviewStore(_profile())

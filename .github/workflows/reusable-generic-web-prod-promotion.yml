@@ -1,0 +1,170 @@
+---
+name: Reusable Generic Web Prod Promotion
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key.
+        required: true
+        type: string
+      artifact_id:
+        description: Immutable image or Launchplane-resolvable artifact identity.
+        required: true
+        type: string
+      source_git_ref:
+        description: Source git ref attached to promotion evidence.
+        required: true
+        type: string
+      from_instance:
+        description: Source stable lane instance.
+        required: false
+        default: testing
+        type: string
+      to_instance:
+        description: Destination stable lane instance.
+        required: false
+        default: prod
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "2700000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      promotion_record_id:
+        description: Launchplane promotion record ID.
+        value: ${{ jobs.prod-promotion.outputs.promotion_record_id }}
+      deployment_record_id:
+        description: Launchplane deployment record ID.
+        value: ${{ jobs.prod-promotion.outputs.deployment_record_id }}
+      promotion_status:
+        description: Generic-web promotion status.
+        value: ${{ jobs.prod-promotion.outputs.promotion_status }}
+      deployment_status:
+        description: Destination deployment status.
+        value: ${{ jobs.prod-promotion.outputs.deployment_status }}
+      source_health_status:
+        description: Source lane health status.
+        value: ${{ jobs.prod-promotion.outputs.source_health_status }}
+      destination_health_status:
+        description: Destination lane health status.
+        value: ${{ jobs.prod-promotion.outputs.destination_health_status }}
+      error_message:
+        description: Launchplane driver error message, when present.
+        value: ${{ jobs.prod-promotion.outputs.error_message }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prod-promotion:
+    outputs:
+      promotion_record_id: ${{ steps.lp.outputs.promotion_record_id }}
+      deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
+      promotion_status: ${{ steps.lp.outputs.promotion_status }}
+      deployment_status: ${{ steps.lp.outputs.deployment_status }}
+      source_health_status: ${{ steps.lp.outputs.source_health_status }}
+      destination_health_status: ${{ steps.lp.outputs.destination_health_status }}
+      error_message: ${{ steps.lp.outputs.error_message }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane promotion request
+        id: request
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          FROM_INSTANCE: ${{ inputs.from_instance }}
+          PRODUCT: ${{ inputs.product }}
+          SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+          TO_INSTANCE: ${{ inputs.to_instance }}
+        run: |
+          set -euo pipefail
+          for required in PRODUCT FROM_INSTANCE TO_INSTANCE ARTIFACT_ID SOURCE_GIT_REF; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "product=$PRODUCT"
+            echo "from_instance=$FROM_INSTANCE"
+            echo "to_instance=$TO_INSTANCE"
+            printf '%s=%s:%s:%s:%s:%s\n' \
+              idempotency_key \
+              generic-web-prod-promotion \
+              "$PRODUCT" \
+              "$FROM_INSTANCE" \
+              "$TO_INSTANCE" \
+              "$run_scope"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane generic-web prod promotion
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/drivers/generic-web/prod-promotion
+          payload: |-
+            {
+              "schema_version": 1,
+              "promotion": {
+                "schema_version": 1,
+                "wait": true
+              }
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            promotion.product=${{ steps.request.outputs.product }}
+            promotion.from_instance=${{ steps.request.outputs.from_instance }}
+            promotion.to_instance=${{ steps.request.outputs.to_instance }}
+            promotion.artifact_id=${{ inputs.artifact_id }}
+            promotion.source_git_ref=${{ inputs.source_git_ref }}
+          idempotency-key: >-
+            ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: >-
+            result.promotion_status,result.deployment_status,
+            result.source_health_status,result.destination_health_status,
+            result.release_status
+          output-paths: >-
+            trace_id=trace_id,
+            promotion_record_id=records.promotion_record_id,
+            deployment_record_id=records.deployment_record_id,
+            promotion_status=result.promotion_status,
+            deployment_status=result.deployment_status,
+            source_health_status=result.source_health_status,
+            destination_health_status=result.destination_health_status,
+            error_message=result.error_message
+
+      - name: Report result
+        env:
+          DEPLOYMENT_RECORD_ID: ${{ steps.lp.outputs.deployment_record_id }}
+          DEPLOYMENT_STATUS: ${{ steps.lp.outputs.deployment_status }}
+          DESTINATION_HEALTH_STATUS: >-
+            ${{ steps.lp.outputs.destination_health_status }}
+          PROMOTION_RECORD_ID: ${{ steps.lp.outputs.promotion_record_id }}
+          PROMOTION_STATUS: ${{ steps.lp.outputs.promotion_status }}
+          SOURCE_HEALTH_STATUS: ${{ steps.lp.outputs.source_health_status }}
+        run: |
+          echo "promotion_record_id=$PROMOTION_RECORD_ID"
+          echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
+          echo "promotion_status=$PROMOTION_STATUS"
+          echo "deployment_status=$DEPLOYMENT_STATUS"
+          echo "source_health_status=$SOURCE_HEALTH_STATUS"
+          echo "destination_health_status=$DESTINATION_HEALTH_STATUS"

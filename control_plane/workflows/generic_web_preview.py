@@ -35,7 +35,10 @@ from control_plane.runtime_key_safety import (
     latest_active_runtime_key_safety_policy,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
-from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
+from control_plane.workflows.preview_desired_state import (
+    discover_github_preview_desired_state,
+    render_preview_slug,
+)
 from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
@@ -131,7 +134,8 @@ class GenericWebPreviewDestroyRequest(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     product: str
-    preview_slug: str
+    preview_slug: str = ""
+    anchor_pr_number: int | None = Field(default=None, ge=1)
     destroy_reason: str
     timeout_seconds: int = Field(default=300, ge=1)
 
@@ -139,8 +143,10 @@ class GenericWebPreviewDestroyRequest(BaseModel):
     def _validate_request(self) -> "GenericWebPreviewDestroyRequest":
         if not self.product.strip():
             raise ValueError("Generic web preview destroy requires product.")
-        if not self.preview_slug.strip():
-            raise ValueError("Generic web preview destroy requires preview_slug.")
+        if not self.preview_slug.strip() and self.anchor_pr_number is None:
+            raise ValueError(
+                "Generic web preview destroy requires preview_slug or anchor_pr_number."
+            )
         if not self.destroy_reason.strip():
             raise ValueError("Generic web preview destroy requires destroy_reason.")
         return self
@@ -167,7 +173,7 @@ class GenericWebPreviewRefreshRequest(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     product: str
-    preview_slug: str
+    preview_slug: str = ""
     preview_url: str = ""
     image_reference: str
     anchor_pr_number: int | None = Field(default=None, ge=1)
@@ -181,8 +187,10 @@ class GenericWebPreviewRefreshRequest(BaseModel):
     def _validate_request(self) -> "GenericWebPreviewRefreshRequest":
         if not self.product.strip():
             raise ValueError("Generic web preview refresh requires product.")
-        if not self.preview_slug.strip():
-            raise ValueError("Generic web preview refresh requires preview_slug.")
+        if not self.preview_slug.strip() and self.anchor_pr_number is None:
+            raise ValueError(
+                "Generic web preview refresh requires preview_slug or anchor_pr_number."
+            )
         if self.preview_url.strip():
             parsed = urlparse(self.preview_url.strip())
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -333,6 +341,64 @@ def _build_preview_runtime_identity(
 def _preview_slug_prefix(slug_template: str) -> str:
     prefix, _, _ = slug_template.partition("{number}")
     return prefix or "pr-"
+
+
+def resolve_generic_web_preview_slug(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    preview_slug: str,
+    anchor_pr_number: int | None,
+    label: str,
+) -> str:
+    supplied_slug = preview_slug.strip()
+    if anchor_pr_number is None:
+        if supplied_slug:
+            return supplied_slug
+        raise click.ClickException(f"{label} requires preview_slug or anchor_pr_number.")
+    derived_slug = render_preview_slug(
+        anchor_pr_number=anchor_pr_number,
+        preview_slug_prefix=_preview_slug_prefix(profile.preview.slug_template),
+        preview_slug_template=profile.preview.slug_template,
+    )
+    if supplied_slug and supplied_slug != derived_slug:
+        raise click.ClickException(
+            f"{label} preview_slug does not match the product profile slug policy."
+        )
+    return derived_slug
+
+
+def _refresh_request_with_resolved_preview_slug(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    request: GenericWebPreviewRefreshRequest,
+) -> GenericWebPreviewRefreshRequest:
+    return request.model_copy(
+        update={
+            "preview_slug": resolve_generic_web_preview_slug(
+                profile=profile,
+                preview_slug=request.preview_slug,
+                anchor_pr_number=request.anchor_pr_number,
+                label="Generic web preview refresh",
+            )
+        }
+    )
+
+
+def _destroy_request_with_resolved_preview_slug(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    request: GenericWebPreviewDestroyRequest,
+) -> GenericWebPreviewDestroyRequest:
+    return request.model_copy(
+        update={
+            "preview_slug": resolve_generic_web_preview_slug(
+                profile=profile,
+                preview_slug=request.preview_slug,
+                anchor_pr_number=request.anchor_pr_number,
+                label="Generic web preview destroy",
+            )
+        }
+    )
 
 
 def effective_preview_app_name_prefix(*, profile: LaunchplaneProductProfileRecord) -> str:
@@ -773,7 +839,12 @@ def resolve_generic_web_preview_url(
             f"Missing {_PREVIEW_BASE_URL_ENV_KEY} in Launchplane runtime-environment records for {profile.preview.context}."
         )
     return _preview_url_from_base_url(
-        preview_slug=request.preview_slug,
+        preview_slug=resolve_generic_web_preview_slug(
+            profile=profile,
+            preview_slug=request.preview_slug,
+            anchor_pr_number=request.anchor_pr_number,
+            label="Generic web preview refresh",
+        ),
         preview_base_url=preview_base_url,
     )
 
@@ -990,7 +1061,6 @@ def evaluate_generic_web_preview_readiness(
             record_store=record_store,
             product=request.product,
         )
-
     checks: list[GenericWebPreviewReadinessCheck] = []
     template_lane = _template_lane(profile=resolved_profile)
     if template_lane is None:
@@ -1152,6 +1222,10 @@ def execute_generic_web_preview_refresh(
             record_store=record_store,
             product=request.product,
         )
+    request = _refresh_request_with_resolved_preview_slug(
+        profile=resolved_profile,
+        request=request,
+    )
     started_at = utc_now_timestamp()
     app_name_prefix = effective_preview_app_name_prefix(profile=resolved_profile)
     application_name = preview_application_name(
@@ -1431,6 +1505,10 @@ def execute_generic_web_preview_destroy(
             record_store=record_store,
             product=request.product,
         )
+    request = _destroy_request_with_resolved_preview_slug(
+        profile=resolved_profile,
+        request=request,
+    )
     started_at = utc_now_timestamp()
     app_name_prefix = effective_preview_app_name_prefix(profile=resolved_profile)
     application_name = preview_application_name(

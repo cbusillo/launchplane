@@ -1,0 +1,135 @@
+---
+name: Reusable Generic Web Stable Deploy
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key.
+        required: true
+        type: string
+      instance:
+        description: Stable Launchplane lane instance, such as testing or prod.
+        required: true
+        type: string
+      artifact_id:
+        description: Immutable image or Launchplane-resolvable artifact identity.
+        required: true
+        type: string
+      source_git_ref:
+        description: Source git ref attached to deployment evidence.
+        required: true
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "1800000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      deployment_record_id:
+        description: Launchplane deployment record ID.
+        value: ${{ jobs.stable-deploy.outputs.deployment_record_id }}
+      deploy_status:
+        description: Generic-web deploy status.
+        value: ${{ jobs.stable-deploy.outputs.deploy_status }}
+      post_deploy_status:
+        description: Generic-web post-deploy extension status.
+        value: ${{ jobs.stable-deploy.outputs.post_deploy_status }}
+      error_message:
+        description: Launchplane driver error message, when present.
+        value: ${{ jobs.stable-deploy.outputs.error_message }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  stable-deploy:
+    outputs:
+      deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
+      deploy_status: ${{ steps.lp.outputs.deploy_status }}
+      post_deploy_status: ${{ steps.lp.outputs.post_deploy_status }}
+      error_message: ${{ steps.lp.outputs.error_message }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane deploy request
+        id: request
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          INSTANCE: ${{ inputs.instance }}
+          PRODUCT: ${{ inputs.product }}
+          SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+        run: |
+          set -euo pipefail
+          for required in PRODUCT INSTANCE ARTIFACT_ID SOURCE_GIT_REF; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "product=$PRODUCT"
+            echo "instance=$INSTANCE"
+            printf '%s=%s:%s:%s:%s\n' \
+              idempotency_key \
+              generic-web-stable-deploy \
+              "$PRODUCT" \
+              "$INSTANCE" \
+              "$run_scope"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane generic-web stable deploy
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/drivers/generic-web/deploy
+          payload: |-
+            {
+              "schema_version": 1,
+              "deploy": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            deploy.product=${{ steps.request.outputs.product }}
+            deploy.instance=${{ steps.request.outputs.instance }}
+            deploy.artifact_id=${{ inputs.artifact_id }}
+            deploy.source_git_ref=${{ inputs.source_git_ref }}
+          idempotency-key: >-
+            ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: >-
+            result.deploy_status,result.post_deploy_status
+          output-paths: >-
+            trace_id=trace_id,
+            deployment_record_id=records.deployment_record_id,
+            deploy_status=result.deploy_status,
+            post_deploy_status=result.post_deploy_status,
+            error_message=result.error_message
+
+      - name: Report result
+        env:
+          DEPLOYMENT_RECORD_ID: ${{ steps.lp.outputs.deployment_record_id }}
+          DEPLOY_STATUS: ${{ steps.lp.outputs.deploy_status }}
+          POST_DEPLOY_STATUS: ${{ steps.lp.outputs.post_deploy_status }}
+        run: |
+          echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
+          echo "deploy_status=$DEPLOY_STATUS"
+          echo "post_deploy_status=$POST_DEPLOY_STATUS"
