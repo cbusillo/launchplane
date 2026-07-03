@@ -410,6 +410,27 @@ jobs:
       source_git_ref: ${{ github.sha }}
 ```
 
+Preview refresh, destroy, and unsupported-notice handoff use:
+
+```yaml
+jobs:
+  launchplane-preview:
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@main
+    with:
+      operation: refresh
+      anchor_pr_number: ${{ github.event.pull_request.number }}
+      anchor_pr_url: ${{ github.event.pull_request.html_url }}
+      anchor_head_sha: ${{ github.event.pull_request.head.sha }}
+      image_reference: ${{ needs.build.outputs.image_digest }}
+```
+
+Destroy calls set `operation: destroy` and pass `destroy_reason`, while fork and
+Dependabot notices call the same reusable workflow from a trusted base-branch
+job with `operation: unsupported_notice`. Product repos do not pass preview
+slugs, preview URLs, provider application names, feedback markdown, or
+idempotency keys; Launchplane derives those from product profiles, runtime
+records, GitHub OIDC claims, and the run-scoped workflow context.
+
 These reusable workflows intentionally do not accept provider targets, target
 ids, health URLs, preview URLs, feedback markdown, record ids, managed secrets,
 runtime environment values, or idempotency keys. Launchplane derives or records

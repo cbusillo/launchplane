@@ -95,6 +95,7 @@
     "Reusable Odoo Prod Rollback",
     "Reusable Generic Web Stable Deploy",
     "Reusable Generic Web Prod Promotion",
+    "Reusable Generic Web Preview Lifecycle",
     "Odoo Target Replacement Plan",
     "Odoo Target Replacement Apply",
     "Preview Lifecycle",
