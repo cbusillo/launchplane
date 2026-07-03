@@ -1576,9 +1576,11 @@ Generic web preview inventory and destroy use
 `POST /v1/drivers/generic-web/preview-destroy`. Both routes run through native
 FastAPI. Inventory scans stateless Dokploy preview applications by the preview
 application-name prefix in the DB-backed product profile. Destroy deletes
-matching preview applications and keeps the legacy preview-destroy idempotency
-fingerprint that ignores `destroy_reason` so reason-only retry metadata does not
-conflict with the original teardown request. Lifecycle cleanup can dispatch to
+matching preview applications and treats an already-missing preview application
+as clean so PR-close cleanup remains idempotent when no preview was ever created.
+The route keeps the legacy preview-destroy idempotency fingerprint that ignores
+`destroy_reason` so reason-only retry metadata does not conflict with the
+original teardown request. Lifecycle cleanup can dispatch to
 this generic path only after a passing plan and a matching stored preview record
 are present. The descriptor routes remain discoverable.
 

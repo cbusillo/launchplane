@@ -141,7 +141,7 @@ def _build_generic_web_cleanup_record(
                 timeout_seconds=timeout_seconds,
             ),
         )
-        if destroy_result.destroy_status == "pass" and destroy_result.application_id.strip():
+        if destroy_result.destroy_status == "pass":
             try:
                 apply_launchplane_destroy_preview(
                     record_store=record_store,
@@ -179,9 +179,6 @@ def _build_generic_web_cleanup_record(
                 )
             continue
         failed_slugs.append(preview_slug)
-        error_message = destroy_result.error_message
-        if destroy_result.destroy_status == "pass":
-            error_message = "Preview destroy returned pass without a provider application id."
         results.append(
             PreviewLifecycleCleanupResult(
                 preview_slug=preview_slug,
@@ -190,7 +187,7 @@ def _build_generic_web_cleanup_record(
                 status="failed",
                 application_name=destroy_result.application_name,
                 application_id=destroy_result.application_id,
-                error_message=error_message,
+                error_message=destroy_result.error_message,
             )
         )
 

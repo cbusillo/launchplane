@@ -1575,7 +1575,7 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         read_dokploy_config.assert_not_called()
 
-    def test_execute_generic_web_preview_destroy_fails_when_application_missing(self) -> None:
+    def test_execute_generic_web_preview_destroy_passes_when_application_missing(self) -> None:
         store = _GenericWebPreviewStore(_profile())
         requests: list[dict[str, object]] = []
 
@@ -1623,9 +1623,114 @@ class GenericWebPreviewTests(unittest.TestCase):
                 ),
             )
 
+        self.assertEqual(result.destroy_status, "pass")
+        self.assertEqual(result.application_id, "")
+        self.assertEqual(result.error_message, "")
+        self.assertEqual([request["path"] for request in requests], ["/api/project.all"])
+
+    def test_execute_generic_web_preview_destroy_uses_inventory_id_fallback(self) -> None:
+        store = _GenericWebPreviewStore(_profile())
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return [
+                    {
+                        "environments": [
+                            {
+                                "applications": [
+                                    {
+                                        "id": "app-42",
+                                        "name": "syo-preview-preview-42-site",
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            if path == "/api/domain.byApplicationId":
+                return []
+            return {}
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.utc_now_timestamp",
+                side_effect=["2026-04-30T21:00:00Z", "2026-04-30T21:00:02Z"],
+            ),
+        ):
+            result = execute_generic_web_preview_destroy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewDestroyRequest(
+                    product="sellyouroutboard",
+                    preview_slug="preview-42-site",
+                    destroy_reason="test",
+                ),
+            )
+
+        self.assertEqual(result.destroy_status, "pass")
+        self.assertEqual(result.application_id, "app-42")
+        self.assertEqual(
+            [request["path"] for request in requests],
+            [
+                "/api/project.all",
+                "/api/domain.byApplicationId",
+                "/api/application.delete",
+            ],
+        )
+
+    def test_execute_generic_web_preview_destroy_fails_when_application_id_missing(
+        self,
+    ) -> None:
+        store = _GenericWebPreviewStore(_profile())
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return [
+                    {"environments": [{"applications": [{"name": "syo-preview-preview-42-site"}]}]}
+                ]
+            return {}
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.utc_now_timestamp",
+                side_effect=["2026-04-30T21:00:00Z", "2026-04-30T21:00:02Z"],
+            ),
+        ):
+            result = execute_generic_web_preview_destroy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewDestroyRequest(
+                    product="sellyouroutboard",
+                    preview_slug="preview-42-site",
+                    destroy_reason="test",
+                ),
+            )
+
         self.assertEqual(result.destroy_status, "fail")
         self.assertEqual(result.application_id, "")
-        self.assertIn("syo-preview-preview-42-site", result.error_message)
+        self.assertIn("does not expose applicationId", result.error_message)
         self.assertEqual([request["path"] for request in requests], ["/api/project.all"])
 
     def test_execute_generic_web_preview_destroy_ignores_retired_odoo_compose_domains(self) -> None:
@@ -1660,10 +1765,10 @@ class GenericWebPreviewTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual(result.destroy_status, "fail")
+        self.assertEqual(result.destroy_status, "pass")
         self.assertEqual(result.provider_type, "application")
         self.assertEqual(result.application_id, "")
-        self.assertIn("cm-odoo-preview-pr-28", result.error_message)
+        self.assertEqual(result.error_message, "")
         self.assertEqual([request["path"] for request in requests], ["/api/project.all"])
 
 
