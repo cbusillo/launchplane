@@ -1521,7 +1521,19 @@ def execute_generic_web_preview_destroy(
         token=token,
         application_name=application_name,
     )
-    application_id = str((application or {}).get("applicationId") or "").strip()
+    if application is None:
+        finished_at = utc_now_timestamp()
+        return GenericWebPreviewDestroyResult(
+            destroy_status="pass",
+            destroy_started_at=started_at,
+            destroy_finished_at=finished_at,
+            product=resolved_profile.product,
+            context=resolved_profile.preview.context,
+            preview_slug=request.preview_slug,
+            application_name=application_name,
+            application_id="",
+        )
+    application_id = str(application.get("applicationId") or application.get("id") or "").strip()
     if not application_id:
         finished_at = utc_now_timestamp()
         return GenericWebPreviewDestroyResult(
@@ -1533,7 +1545,10 @@ def execute_generic_web_preview_destroy(
             preview_slug=request.preview_slug,
             application_name=application_name,
             application_id="",
-            error_message=f"Preview application {application_name!r} was not found.",
+            error_message=(
+                f"Preview application {application_name!r} exists but does not expose "
+                "applicationId."
+            ),
         )
     destroy_result = destroy_dokploy_preview_resource(
         host=host,

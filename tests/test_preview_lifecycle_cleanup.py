@@ -104,7 +104,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
         self.assertEqual(record.status, "blocked")
         self.assertEqual(record.blocked_slugs, ("bad-slug",))
 
-    def test_generic_web_cleanup_fails_pass_without_application_id(self) -> None:
+    def test_generic_web_cleanup_treats_missing_application_as_destroyed(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             store = FilesystemRecordStore(state_dir=root / "state")
@@ -160,11 +160,15 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                     preview_slug_template="preview-{number}-site",
                 )
 
-            self.assertEqual(record.status, "fail")
-            self.assertEqual(record.failed_slugs, ("preview-42-site",))
-            self.assertIn("provider application id", record.results[0].error_message)
+            self.assertEqual(record.status, "pass")
+            self.assertEqual(record.destroyed_slugs, ("preview-42-site",))
+            self.assertEqual(record.failed_slugs, ())
+            self.assertEqual(record.results[0].status, "destroyed")
+            self.assertEqual(record.results[0].application_id, "")
+            self.assertEqual(record.results[0].error_message, "")
             preview = store.read_preview_record("preview-syo-testing-sellyouroutboard-pr-42")
-            self.assertEqual(preview.state, "active")
+            self.assertEqual(preview.state, "destroyed")
+            self.assertEqual(preview.destroy_reason, "test_cleanup")
 
     def test_verireel_cleanup_uses_plan_product_as_anchor_repo(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
