@@ -1,0 +1,194 @@
+---
+name: Reusable Preview PR Feedback
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: >-
+          Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: >-
+          Launchplane preview context. Defaults to the resolved product key.
+        required: false
+        default: ""
+        type: string
+      anchor_pr_number:
+        description: Pull request number that owns the preview feedback.
+        required: true
+        type: string
+      anchor_pr_url:
+        description: Pull request URL attached to preview feedback evidence.
+        required: true
+        type: string
+      status:
+        description: Preview feedback status to render.
+        required: true
+        type: string
+      preview_url:
+        description: Ready preview URL, when available.
+        required: false
+        default: ""
+        type: string
+      immutable_image_reference:
+        description: Immutable image or artifact reference, when available.
+        required: false
+        default: ""
+        type: string
+      refresh_image_reference:
+        description: Floating refresh image or artifact reference, when available.
+        required: false
+        default: ""
+        type: string
+      revision:
+        description: Source revision attached to preview evidence.
+        required: false
+        default: ""
+        type: string
+      run_url:
+        description: Workflow run URL to show in feedback.
+        required: false
+        default: ""
+        type: string
+      failure_summary:
+        description: Short failure summary for failed feedback states.
+        required: false
+        default: ""
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "300000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      feedback_status:
+        description: Preview feedback status returned by Launchplane.
+        value: ${{ jobs.feedback.outputs.feedback_status }}
+      error_message:
+        description: Launchplane feedback error message, when present.
+        value: ${{ jobs.feedback.outputs.error_message }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  feedback:
+    outputs:
+      error_message: ${{ steps.lp.outputs.error_message }}
+      feedback_status: ${{ steps.lp.outputs.feedback_status }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane preview feedback request
+        id: request
+        env:
+          ANCHOR_PR_NUMBER: ${{ inputs.anchor_pr_number }}
+          ANCHOR_PR_URL: ${{ inputs.anchor_pr_url }}
+          CONTEXT: ${{ inputs.context }}
+          PRODUCT: ${{ inputs.product }}
+          STATUS: ${{ inputs.status }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "$CONTEXT" ]; then
+            CONTEXT="$PRODUCT"
+          fi
+          STATUS="$(printf '%s' "$STATUS" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
+          for required in PRODUCT CONTEXT ANCHOR_PR_NUMBER ANCHOR_PR_URL STATUS; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          case "$STATUS" in
+            pending|ready|destroyed|failed|cleanup_failed|unsupported|cleared)
+              ;;
+            *)
+              echo "status must be pending, ready, destroyed, failed, cleanup_failed, unsupported, or cleared." >&2
+              exit 1
+              ;;
+          esac
+          case "$ANCHOR_PR_NUMBER" in
+            ''|*[!0-9]*)
+              echo "ANCHOR_PR_NUMBER must be a positive integer." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$ANCHOR_PR_NUMBER" -lt 1 ]; then
+            echo "ANCHOR_PR_NUMBER must be a positive integer." >&2
+            exit 1
+          fi
+          run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "anchor_pr_number=$ANCHOR_PR_NUMBER"
+            echo "context=$CONTEXT"
+            printf '%s=%s:%s:%s:pr-%s:%s:%s\n' \
+              idempotency_key \
+              preview-pr-feedback \
+              "$PRODUCT" \
+              "$CONTEXT" \
+              "$ANCHOR_PR_NUMBER" \
+              "$STATUS" \
+              "$run_scope"
+            echo "product=$PRODUCT"
+            echo "run_url=${{ inputs.run_url || '' }}"
+            echo "source_url=$run_url"
+            echo "status=$STATUS"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane preview PR feedback
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/previews/pr-feedback
+          payload: |-
+            {
+              "schema_version": 1
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            context=${{ steps.request.outputs.context }}
+            source=${{ steps.request.outputs.source_url }}
+            repository=${{ github.repository }}
+            anchor_repo=${{ github.repository }}
+            anchor_pr_number=${{ steps.request.outputs.anchor_pr_number }}
+            anchor_pr_url=${{ inputs.anchor_pr_url }}
+            status=${{ steps.request.outputs.status }}
+            preview_url=${{ inputs.preview_url }}
+            immutable_image_reference=${{ inputs.immutable_image_reference }}
+            refresh_image_reference=${{ inputs.refresh_image_reference }}
+            revision=${{ inputs.revision }}
+            run_url=${{ steps.request.outputs.run_url || steps.request.outputs.source_url }}
+            failure_summary=${{ inputs.failure_summary }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.delivery_status
+          output-paths: >-
+            trace_id=trace_id,
+            feedback_status=result.feedback_status,
+            error_message=result.error_message
+
+      - name: Report preview feedback result
+        run: |
+          echo "feedback_status=${{ steps.lp.outputs.feedback_status }}"

@@ -98,6 +98,13 @@ destroy status, or feedback status as job outputs. It does not accept
 `preview_slug`, `preview_url`, provider target ids, feedback markdown, or
 idempotency keys as caller inputs.
 
+Preview comment updates that are not part of the lifecycle workflow use
+`cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main`.
+Callers provide only primitive display facts such as PR number, status, preview
+URL, image references, revision, run URL, and failure summary. The reusable
+feedback workflow owns the `/v1/previews/pr-feedback` route, marker, payload
+shape, delivery behavior, and run-scoped idempotency key.
+
 ## Required Workflow Shape
 
 Same-repository PRs use `pull_request` because the workflow may check out and
@@ -187,6 +194,10 @@ configured, emits operator notification attempts from the control plane. Product
 workflows should not render fallback PR comments themselves; missing runtime
 GitHub credentials and GitHub API failures are Launchplane-owned operator
 signals.
+
+Product repos should call the reusable preview feedback workflow instead of
+assembling `/v1/previews/pr-feedback` payloads, markers, or idempotency keys in
+repo-local scripts.
 
 Use `cbusillo/launchplane/.github/actions/launchplane-request@main` for the OIDC
 transport only when a Launchplane-owned reusable workflow does not exist yet.

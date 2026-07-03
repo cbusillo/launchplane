@@ -19,6 +19,26 @@ from control_plane.contracts.preview_workflow_contract import (
 
 
 CLI_MAIN = cast(Command, main)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _workflow_call_inputs(workflow: str) -> set[str]:
+    inputs: set[str] = set()
+    in_inputs = False
+    input_indent = 0
+    for line in workflow.splitlines():
+        stripped = line.strip()
+        if stripped == "inputs:":
+            in_inputs = True
+            input_indent = len(line) - len(line.lstrip())
+            continue
+        if in_inputs:
+            indent = len(line) - len(line.lstrip())
+            if stripped and indent <= input_indent:
+                break
+            if indent == input_indent + 2 and stripped.endswith(":"):
+                inputs.add(stripped[:-1])
+    return inputs
 
 
 def _event(**overrides: object) -> PreviewWorkflowEvent:
@@ -141,6 +161,37 @@ class PreviewWorkflowContractTests(unittest.TestCase):
                 run_id="123456",
                 run_attempt="2",
             )
+
+    def test_reusable_preview_feedback_workflow_owns_request_details(self) -> None:
+        workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-pr-feedback.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        workflow_inputs = _workflow_call_inputs(workflow)
+
+        self.assertIn("route-path: /v1/previews/pr-feedback", workflow)
+        self.assertIn("status=${{ steps.request.outputs.status }}", workflow)
+        self.assertIn("idempotency_key", workflow)
+        self.assertIn("preview-pr-feedback", workflow)
+
+        self.assertNotIn("marker", workflow_inputs)
+        self.assertNotIn("idempotency-key", workflow_inputs)
+        self.assertNotIn("payload", workflow_inputs)
+        self.assertNotIn("route-path", workflow_inputs)
+
+    def test_reusable_preview_feedback_workflow_accepts_all_preview_statuses(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/reusable-preview-pr-feedback.yml").read_text(
+            encoding="utf-8"
+        )
+
+        for status in (
+            "pending",
+            "ready",
+            "destroyed",
+            "failed",
+            "cleanup_failed",
+            "unsupported",
+            "cleared",
+        ):
+            self.assertIn(status, workflow)
 
 
 class PreviewWorkflowDecisionCliTests(unittest.TestCase):
