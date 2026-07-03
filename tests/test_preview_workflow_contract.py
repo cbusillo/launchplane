@@ -199,6 +199,32 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         ):
             self.assertIn(status, workflow)
 
+    def test_reusable_preview_request_notice_owns_notice_decision(self) -> None:
+        workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-request-notice.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        workflow_inputs = _workflow_call_inputs(workflow)
+
+        self.assertIn("pull_request_target", workflow)
+        self.assertIn("context.eventName !== 'pull_request_target'", workflow)
+        self.assertIn("uses: actions/github-script@v8", workflow)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main",
+            workflow,
+        )
+        self.assertIn("status: ${{ needs.resolve.outputs.status }}", workflow)
+        self.assertIn("failure_summary: ${{ needs.resolve.outputs.failure_summary }}", workflow)
+        self.assertIn("const unsupportedTrust =", workflow)
+        self.assertIn("action === 'edited'", workflow)
+        self.assertIn("const shouldSetUnsupported =", workflow)
+        self.assertNotIn("status = 'pending'", workflow)
+
+        self.assertNotIn("actions/checkout", workflow)
+        self.assertNotIn("ref:", workflow)
+        self.assertNotIn("marker", workflow_inputs)
+        self.assertNotIn("idempotency-key", workflow_inputs)
+        self.assertNotIn("payload", workflow_inputs)
+        self.assertNotIn("route-path", workflow_inputs)
+
     def test_reusable_generic_web_preview_lifecycle_derives_preview_slug(self) -> None:
         workflow = (
             REPO_ROOT / ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
@@ -207,8 +233,12 @@ class PreviewWorkflowContractTests(unittest.TestCase):
 
         self.assertIn("route-path: /v1/drivers/generic-web/preview-refresh", workflow)
         self.assertIn("route-path: /v1/drivers/generic-web/preview-destroy", workflow)
-        self.assertIn("refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow)
-        self.assertIn("destroy.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow)
+        self.assertIn(
+            "refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow
+        )
+        self.assertIn(
+            "destroy.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow
+        )
 
         self.assertNotIn("preview_slug", workflow_inputs)
         self.assertNotIn("preview_url", workflow_inputs)

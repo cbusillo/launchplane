@@ -1,0 +1,167 @@
+---
+name: Reusable Preview Request Notice
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: >-
+          Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: >-
+          Launchplane preview context. Defaults to the resolved product key.
+        required: false
+        default: ""
+        type: string
+      preview_label:
+        description: Label that requests preview automation.
+        required: false
+        default: preview
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "300000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      feedback_status:
+        description: Preview feedback status returned by Launchplane.
+        value: ${{ jobs.feedback.outputs.feedback_status }}
+      notice_status:
+        description: Resolved notice status.
+        value: ${{ jobs.resolve.outputs.status }}
+      should_record:
+        description: Whether the event required a feedback mutation.
+        value: ${{ jobs.resolve.outputs.should_record }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  resolve:
+    outputs:
+      anchor_pr_number: ${{ steps.notice.outputs.anchor_pr_number }}
+      anchor_pr_url: ${{ steps.notice.outputs.anchor_pr_url }}
+      failure_summary: ${{ steps.notice.outputs.failure_summary }}
+      run_url: ${{ steps.notice.outputs.run_url }}
+      should_record: ${{ steps.notice.outputs.should_record }}
+      status: ${{ steps.notice.outputs.status }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve preview request notice
+        id: notice
+        uses: actions/github-script@v8
+        env:
+          PREVIEW_LABEL: ${{ inputs.preview_label }}
+          RUN_URL: >-
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
+              github.run_id }}
+        with:
+          script: |
+            if (context.eventName !== 'pull_request_target') {
+              throw new Error('reusable-preview-request-notice must run from pull_request_target.');
+            }
+
+            const pullRequest = context.payload.pull_request;
+            if (!pullRequest) {
+              throw new Error('pull_request payload is required.');
+            }
+
+            const previewLabelName = String(process.env.PREVIEW_LABEL || 'preview')
+              .trim()
+              .toLowerCase();
+            if (!previewLabelName) {
+              throw new Error('preview_label must not be empty.');
+            }
+
+            const labels = pullRequest.labels || [];
+            const previewRequested = labels.some((label) =>
+              String(typeof label === 'string' ? label : label?.name || '')
+                .trim()
+                .toLowerCase() === previewLabelName,
+            );
+            const headRepoFullName = String(pullRequest.head.repo?.full_name || '');
+            const repositoryFullName = String(context.payload.repository?.full_name || '');
+            const sameRepo =
+              Boolean(headRepoFullName) &&
+              Boolean(repositoryFullName) &&
+              headRepoFullName === repositoryFullName;
+            const prAuthor = String(pullRequest.user.login || '')
+              .trim()
+              .toLowerCase();
+            const executionTrust =
+              prAuthor === 'dependabot[bot]'
+                ? 'dependabot'
+                : sameRepo
+                  ? 'same_repo'
+                  : 'fork';
+            const unsupportedTrust =
+              executionTrust === 'dependabot' || executionTrust === 'fork';
+            const action = String(context.payload.action || '').trim();
+            const closed = action === 'closed';
+            const changedLabel = String(context.payload.label?.name || '')
+              .trim()
+              .toLowerCase();
+            const previewLabelChanged = changedLabel === previewLabelName;
+            const previewRefreshAction =
+              action === 'opened' ||
+              action === 'reopened' ||
+              action === 'edited' ||
+              action === 'synchronize';
+            const shouldSetUnsupported =
+              unsupportedTrust &&
+              ((previewRefreshAction && previewRequested) ||
+                (action === 'labeled' && previewLabelChanged));
+            const shouldClear =
+              unsupportedTrust &&
+              (closed || (action === 'unlabeled' && previewLabelChanged));
+            const shouldRecord = shouldSetUnsupported || shouldClear;
+
+            let status = 'cleared';
+            let failureSummary = '';
+            if (shouldSetUnsupported) {
+              status = 'unsupported';
+              failureSummary =
+                executionTrust === 'dependabot'
+                  ? 'Preview automation is disabled for Dependabot PRs because GitHub withholds the deployment secrets needed for artifact publication and provider mutation.'
+                  : 'Preview automation currently supports only branches in this repository, not forked PRs.';
+            }
+
+            core.setOutput('anchor_pr_number', String(pullRequest.number));
+            core.setOutput('anchor_pr_url', String(pullRequest.html_url || ''));
+            core.setOutput('failure_summary', failureSummary);
+            core.setOutput('run_url', process.env.RUN_URL);
+            core.setOutput('should_record', String(shouldRecord));
+            core.setOutput('status', status);
+
+  feedback:
+    if: ${{ needs.resolve.outputs.should_record == 'true' }}
+    needs: resolve
+    uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      anchor_pr_number: ${{ needs.resolve.outputs.anchor_pr_number }}
+      anchor_pr_url: ${{ needs.resolve.outputs.anchor_pr_url }}
+      status: ${{ needs.resolve.outputs.status }}
+      run_url: ${{ needs.resolve.outputs.run_url }}
+      failure_summary: ${{ needs.resolve.outputs.failure_summary }}
+      timeout-ms: ${{ inputs['timeout-ms'] }}
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
