@@ -9,21 +9,21 @@ description = "Launchplane control-plane contracts and workflows for deployment 
 requires-python = ">=3.13"
 dependencies = [
     "Authlib>=1.7.0",
-    "click>=8.4.1",
-    "fastapi>=0.137.2",
+    "click>=8.4.2",
+    "fastapi>=0.139.0",
     "pydantic>=2.13.4",
     "psycopg[binary]>=3.3.4",
     "pyjwt[crypto]>=2.13.0",
     "requests>=2.34.2",
     "sqlalchemy>=2.0.51",
     "uvicorn>=0.38.0",
-    "alembic>=1.18.4",
+    "alembic>=1.18.5",
 ]
 
 [project.optional-dependencies]
 dev = [
     "mypy>=2.1.0",
-    "ruff>=0.15.18",
+    "ruff>=0.15.20",
 ]
 
 [project.scripts]
