@@ -338,7 +338,7 @@ jobs:
           fail-result-paths: result.delivery_status
           output-paths: >-
             trace_id=trace_id,
-            feedback_status=result.feedback_status,
+            feedback_status=result.status,
             error_message=result.error_message
 
       - name: Report unsupported notice result
