@@ -424,12 +424,14 @@ jobs:
       image_reference: ${{ needs.build.outputs.image_digest }}
 ```
 
-Destroy calls set `operation: destroy` and pass `destroy_reason`, while fork and
-Dependabot notices call the same reusable workflow from a trusted base-branch
-job with `operation: unsupported_notice`. Product repos do not pass preview
-slugs, preview URLs, provider application names, feedback markdown, or
-idempotency keys; Launchplane derives those from product profiles, runtime
-records, GitHub OIDC claims, and the run-scoped workflow context.
+Destroy calls set `operation: destroy` and pass `destroy_reason`. Fork and
+Dependabot notices call
+`cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@main`
+from a trusted `pull_request_target` workflow. Product repos do not choose a
+trusted checkout ref, pass preview slugs, preview URLs, provider application
+names, feedback markdown, route payloads, or idempotency keys; Launchplane
+derives those from product profiles, runtime records, GitHub OIDC claims, the PR
+event, and the run-scoped workflow context.
 
 These reusable workflows intentionally do not accept provider targets, target
 ids, health URLs, preview URLs, feedback markdown, record ids, managed secrets,
