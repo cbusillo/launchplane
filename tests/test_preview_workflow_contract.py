@@ -16,6 +16,10 @@ from control_plane.contracts.preview_workflow_contract import (
     decide_preview_workflow_operation,
     preview_workflow_idempotency_key,
 )
+from control_plane.workflows.generic_web_preview import (
+    GenericWebPreviewDestroyRequest,
+    GenericWebPreviewRefreshRequest,
+)
 
 
 CLI_MAIN = cast(Command, main)
@@ -169,6 +173,8 @@ class PreviewWorkflowContractTests(unittest.TestCase):
 
         self.assertIn("route-path: /v1/previews/pr-feedback", workflow)
         self.assertIn("status=${{ steps.request.outputs.status }}", workflow)
+        self.assertIn("feedback_status=result.status", workflow)
+        self.assertNotIn("result.feedback_status", workflow)
         self.assertIn("idempotency_key", workflow)
         self.assertIn("preview-pr-feedback", workflow)
 
@@ -192,6 +198,52 @@ class PreviewWorkflowContractTests(unittest.TestCase):
             "cleared",
         ):
             self.assertIn(status, workflow)
+
+    def test_reusable_generic_web_preview_lifecycle_derives_preview_slug(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
+        ).read_text(encoding="utf-8")
+        workflow_inputs = _workflow_call_inputs(workflow)
+
+        self.assertIn("route-path: /v1/drivers/generic-web/preview-refresh", workflow)
+        self.assertIn("route-path: /v1/drivers/generic-web/preview-destroy", workflow)
+        self.assertIn("refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow)
+        self.assertIn("destroy.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow)
+
+        self.assertNotIn("preview_slug", workflow_inputs)
+        self.assertNotIn("preview_url", workflow_inputs)
+        self.assertNotIn("refresh.preview_slug=", workflow)
+        self.assertNotIn("destroy.preview_slug=", workflow)
+
+    def test_reusable_generic_web_preview_lifecycle_feedback_maps_record_status(
+        self,
+    ) -> None:
+        workflow = (
+            REPO_ROOT / ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("route-path: /v1/previews/pr-feedback", workflow)
+        self.assertIn("feedback_status=result.status", workflow)
+        self.assertNotIn("result.feedback_status", workflow)
+
+    def test_generic_web_preview_requests_accept_anchor_pr_number_without_slug(
+        self,
+    ) -> None:
+        refresh_request = GenericWebPreviewRefreshRequest(
+            product="demo",
+            image_reference="ghcr.io/example/demo@sha256:abc123",
+            anchor_pr_number=42,
+        )
+        destroy_request = GenericWebPreviewDestroyRequest(
+            product="demo",
+            anchor_pr_number=42,
+            destroy_reason="preview_label_removed",
+        )
+
+        self.assertEqual(refresh_request.preview_slug, "")
+        self.assertEqual(refresh_request.anchor_pr_number, 42)
+        self.assertEqual(destroy_request.preview_slug, "")
+        self.assertEqual(destroy_request.anchor_pr_number, 42)
 
 
 class PreviewWorkflowDecisionCliTests(unittest.TestCase):
