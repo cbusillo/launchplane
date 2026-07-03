@@ -1393,6 +1393,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             (".github/workflows/reusable-odoo-prod-rollback.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-testing-deploy.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-testing-deploy.yml", "LAUNCHPLANE_URL"),
+            (
+                ".github/workflows/reusable-generic-web-preview-lifecycle.yml",
+                "launchplane-url",
+            ),
         ):
             with self.subTest(path=path, key=key):
                 self.assertEqual(
@@ -1607,6 +1611,11 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "uses",
                 "cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@main",
             ),
+            (
+                ".github/workflows/preview.yml",
+                "uses",
+                "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@main",
+            ),
         )
         for case in thin_connectors:
             path, key, value, *context = case
@@ -1632,6 +1641,16 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/launchplane-deploy.yml",
                 "uses",
                 "cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@feature",
+            ),
+            (
+                ".github/workflows/preview.yml",
+                "uses",
+                "cbusillo/not-launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@main",
+            ),
+            (
+                ".github/workflows/preview.yml",
+                "uses",
+                "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@feature",
             ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
@@ -3019,6 +3038,79 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("uses", thin_connector_keys)
         self.assertNotIn("product", thin_connector_keys)
         self.assertNotIn("instance", thin_connector_keys)
+
+    def test_cli_product_repo_gate_allows_reusable_generic_web_preview_workflow(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "preview.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Preview\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/reusable-preview")
+            workflow.write_text(
+                "---\n"
+                "name: Preview\n\n"
+                '"on":\n'
+                "  pull_request:\n"
+                "    types: [opened, synchronize, reopened, labeled, unlabeled, closed]\n\n"
+                "permissions:\n"
+                "  contents: read\n"
+                "  id-token: write\n"
+                "  packages: write\n\n"
+                "jobs:\n"
+                "  build-image:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      image_reference: ${{ steps.image.outputs.image_reference }}\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v6\n"
+                "      - id: image\n"
+                "        run: echo 'image_reference=ghcr.io/example/app@sha256:test' >> \"$GITHUB_OUTPUT\"\n"
+                "  preview:\n"
+                "    needs: build-image\n"
+                "    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@main\n"
+                "    with:\n"
+                "      operation: refresh\n"
+                "      launchplane_url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}\n"
+                "      anchor_pr_number: ${{ github.event.pull_request.number }}\n"
+                "      anchor_pr_url: ${{ github.event.pull_request.html_url }}\n"
+                "      anchor_head_sha: ${{ github.event.pull_request.head.sha }}\n"
+                "      image_reference: ${{ needs.build-image.outputs.image_reference }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "pass")
+        thin_connector_keys = {
+            finding["key"]
+            for finding in _findings(payload)
+            if finding["allow_reason"] == "thin_connector_input"
+        }
+        self.assertIn("uses", thin_connector_keys)
+        self.assertNotIn("preview_slug", thin_connector_keys)
+        self.assertNotIn("preview_url", thin_connector_keys)
+        self.assertNotIn("idempotency-key", thin_connector_keys)
 
     def test_cli_product_repo_gate_allows_compact_launchplane_tool_checkout(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -75,6 +75,29 @@ event, decision, route path, feedback status, and run-scoped idempotency key as
 JSON so product workflows can branch on the shared contract instead of
 duplicating event semantics.
 
+Once the product workflow has decided to refresh, destroy, or send an
+unsupported notice, it should hand off to Launchplane's reusable workflow instead
+of constructing route payloads locally:
+
+```yaml
+jobs:
+  launchplane-preview:
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@main
+    with:
+      operation: refresh
+      anchor_pr_number: ${{ github.event.pull_request.number }}
+      anchor_pr_url: ${{ github.event.pull_request.html_url }}
+      anchor_head_sha: ${{ github.event.pull_request.head.sha }}
+      image_reference: ${{ needs.build.outputs.image_digest }}
+```
+
+The reusable workflow derives the product key from the caller repository by
+default, derives a run-scoped idempotency key, calls the correct Launchplane
+route, and exposes the returned preview slug, preview URL, refresh status,
+destroy status, or feedback status as job outputs. It does not accept
+`preview_slug`, `preview_url`, provider target ids, feedback markdown, or
+idempotency keys as caller inputs.
+
 ## Required Workflow Shape
 
 Same-repository PRs use `pull_request` because the workflow may check out and
@@ -166,7 +189,7 @@ GitHub credentials and GitHub API failures are Launchplane-owned operator
 signals.
 
 Use `cbusillo/launchplane/.github/actions/launchplane-request@main` for the OIDC
-transport whenever a product workflow only needs to send JSON to Launchplane.
+transport only when a Launchplane-owned reusable workflow does not exist yet.
 
 ## Migration Checklist
 
