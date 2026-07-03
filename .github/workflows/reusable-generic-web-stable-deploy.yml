@@ -5,12 +5,15 @@ name: Reusable Generic Web Stable Deploy
   workflow_call:
     inputs:
       product:
-        description: Launchplane product key.
-        required: true
+        description: >-
+          Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
         type: string
       instance:
-        description: Stable Launchplane lane instance, such as testing or prod.
-        required: true
+        description: Stable Launchplane lane instance. Defaults to testing.
+        required: false
+        default: "testing"
         type: string
       artifact_id:
         description: Immutable image or Launchplane-resolvable artifact identity.
@@ -73,6 +76,12 @@ jobs:
           SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
         run: |
           set -euo pipefail
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "$INSTANCE" ]; then
+            INSTANCE="testing"
+          fi
           for required in PRODUCT INSTANCE ARTIFACT_ID SOURCE_GIT_REF; do
             if [ -z "${!required}" ]; then
               echo "${required} is required." >&2

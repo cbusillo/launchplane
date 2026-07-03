@@ -2985,8 +2985,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@main\n"
                 "    with:\n"
                 "      launchplane_url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}\n"
-                "      product: ${{ vars.LAUNCHPLANE_PRODUCT }}\n"
-                "      instance: ${{ vars.LAUNCHPLANE_INSTANCE }}\n"
                 "      artifact_id: ${{ needs.build-image.outputs.artifact_id }}\n"
                 "      source_git_ref: ${{ needs.build-image.outputs.source_git_ref }}\n",
                 encoding="utf-8",
@@ -3018,13 +3016,9 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             for finding in _findings(payload)
             if finding["allow_reason"] == "thin_connector_input"
         }
-        operator_input_keys = {
-            finding["key"]
-            for finding in _findings(payload)
-            if finding["allow_reason"] == "operator_supplied_runtime_input"
-        }
         self.assertIn("uses", thin_connector_keys)
-        self.assertTrue({"product", "instance"} <= operator_input_keys)
+        self.assertNotIn("product", thin_connector_keys)
+        self.assertNotIn("instance", thin_connector_keys)
 
     def test_cli_product_repo_gate_allows_compact_launchplane_tool_checkout(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -127,6 +127,8 @@ class DocsContractsTests(TestCase):
         self.assertIn("reusable-generic-web-stable-deploy.yml@main", product_repo_contract)
         self.assertIn("reusable-generic-web-prod-promotion.yml@main", product_repo_contract)
         self.assertIn("route path, request JSON shape", product_repo_contract)
+        self.assertIn("product key from the caller repository name", product_repo_contract)
+        self.assertIn("`testing` stable lane", product_repo_contract)
         self.assertIn("idempotency key", product_repo_contract)
         self.assertIn("do not accept provider targets", product_repo_contract)
         self.assertIn("`preview_slug`", product_repo_contract)
@@ -136,6 +138,8 @@ class DocsContractsTests(TestCase):
         self.assertIn("derived value", preview_contract)
 
         self.assertIn("workflow_call:", deploy_workflow)
+        self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', deploy_workflow)
+        self.assertIn('INSTANCE="testing"', deploy_workflow)
         self.assertIn("route-path: /v1/drivers/generic-web/deploy", deploy_workflow)
         self.assertIn("generic-web-stable-deploy", deploy_workflow)
         self.assertIn("deploy.artifact_id=${{ inputs.artifact_id }}", deploy_workflow)

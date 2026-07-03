@@ -382,8 +382,10 @@ reference, a dated owner, and a delete condition.
 Generic-web product repos should prefer Launchplane-owned reusable workflows
 before calling raw driver routes. The reusable workflow owns the Launchplane
 route path, request JSON shape, response-output mapping, and run-scoped
-idempotency key. The product repo supplies only primitive facts: product key,
-lane instance, immutable artifact identity, and tested source git ref.
+idempotency key. The product repo supplies only primitive facts: immutable
+artifact identity and tested source git ref. The stable deploy workflow derives
+the product key from the caller repository name by default and uses the
+`testing` stable lane unless the caller supplies a narrower operator override.
 
 Stable deploy uses:
 
@@ -392,8 +394,6 @@ jobs:
   launchplane-deploy:
     uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@main
     with:
-      product: ${{ vars.LAUNCHPLANE_PRODUCT }}
-      instance: testing
       artifact_id: ${{ needs.build.outputs.image_digest }}
       source_git_ref: ${{ github.sha }}
 ```
