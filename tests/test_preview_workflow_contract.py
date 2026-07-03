@@ -175,6 +175,9 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertIn("status=${{ steps.request.outputs.status }}", workflow)
         self.assertIn("feedback_status=result.status", workflow)
         self.assertNotIn("result.feedback_status", workflow)
+        self.assertIn("for required in PRODUCT ANCHOR_PR_NUMBER ANCHOR_PR_URL STATUS", workflow)
+        self.assertIn("context=${{ steps.request.outputs.context }}", workflow)
+        self.assertNotIn('CONTEXT="$PRODUCT"', workflow)
         self.assertIn("idempotency_key", workflow)
         self.assertIn("preview-pr-feedback", workflow)
 
