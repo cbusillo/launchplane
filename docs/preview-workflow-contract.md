@@ -103,7 +103,9 @@ Preview comment updates that are not part of the lifecycle workflow use
 Callers provide only primitive display facts such as PR number, status, preview
 URL, image references, revision, run URL, and failure summary. The reusable
 feedback workflow owns the `/v1/previews/pr-feedback` route, marker, payload
-shape, delivery behavior, and run-scoped idempotency key.
+shape, delivery behavior, and run-scoped idempotency key. Callers may omit
+preview context; Launchplane derives it from the product profile before
+authorization and recording.
 
 ## Required Workflow Shape
 
@@ -140,13 +142,14 @@ preview-workflow:<product>:<context>:<operation>:pr-<number>:<run-id>:<run-attem
 
 Run-scoped keys make repeated HTTP attempts safe while preserving a distinct
 record for a later retry or GitHub rerun. Ignored decisions do not have
-idempotency keys.
+idempotency keys. Launchplane-owned reusable workflows may use an equivalent
+route-specific key when the service derives context from product records.
 
 ## Route Handoff
 
 Preview refresh routes receive only product-local facts:
 
-- product key and context when the route still requires them
+- product key, and context only for compatibility routes that still require it
 - PR number and source SHA
 - immutable image or artifact reference
 - run URL

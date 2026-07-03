@@ -12,7 +12,8 @@ name: Reusable Preview PR Feedback
         type: string
       context:
         description: >-
-          Launchplane preview context. Defaults to the resolved product key.
+          Optional Launchplane preview context. When omitted, Launchplane
+          derives it from the product profile.
         required: false
         default: ""
         type: string
@@ -107,11 +108,8 @@ jobs:
           if [ -z "$PRODUCT" ]; then
             PRODUCT="${GITHUB_REPOSITORY#*/}"
           fi
-          if [ -z "$CONTEXT" ]; then
-            CONTEXT="$PRODUCT"
-          fi
           STATUS="$(printf '%s' "$STATUS" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
-          for required in PRODUCT CONTEXT ANCHOR_PR_NUMBER ANCHOR_PR_URL STATUS; do
+          for required in PRODUCT ANCHOR_PR_NUMBER ANCHOR_PR_URL STATUS; do
             if [ -z "${!required}" ]; then
               echo "${required} is required." >&2
               exit 1

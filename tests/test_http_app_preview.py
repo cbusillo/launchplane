@@ -770,6 +770,84 @@ class FastApiPreviewPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Launchplane preview is ready", payload["result"]["comment_markdown"])
         self.assertIn("GITHUB_TOKEN", feedback_records[0].error_message)
 
+    async def test_preview_pr_feedback_derives_context_from_product_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload("verireel"))
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_preview_pr_feedback(
+                app,
+                _preview_pr_feedback_payload(context=None),
+            )
+            feedback_records = store.list_preview_pr_feedback_records(
+                context_name="verireel-testing"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["result"]["context"], "verireel-testing")
+        self.assertEqual(feedback_records[0].context, "verireel-testing")
+
+    async def test_preview_pr_feedback_context_derivation_requires_product_profile(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_preview_pr_feedback(
+                app,
+                _preview_pr_feedback_payload(context=None),
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_preview_pr_feedback_context_derivation_requires_enabled_preview(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            product_profile = _product_profile_payload("verireel")
+            product_profile["preview"] = {
+                "enabled": False,
+                "context": "verireel-testing",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(product_profile)
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_pr_feedback_identity()),
+                authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_preview_pr_feedback(
+                app,
+                _preview_pr_feedback_payload(context=None),
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
     async def test_preview_pr_feedback_replays_idempotent_notification(self) -> None:
         sent_payloads: list[tuple[str, dict[str, object]]] = []
 
@@ -860,15 +938,19 @@ class FastApiPreviewPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload("verireel"))
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_preview_pr_feedback_identity()),
                 authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+                control_plane_root_path=root,
                 record_store_factory=lambda: store,
             )
 
             response = await _post_preview_pr_feedback(
                 app,
-                _preview_pr_feedback_payload(dry_run=True),
+                _preview_pr_feedback_payload(context=None, dry_run=True),
             )
             feedback_records = store.list_preview_pr_feedback_records(
                 context_name="verireel-testing"
@@ -876,6 +958,7 @@ class FastApiPreviewPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["result"]["preview_pr_feedback"], "authorized")
+        self.assertEqual(response.json()["result"]["context"], "verireel-testing")
         self.assertEqual(feedback_records, ())
 
     async def test_preview_pr_feedback_accepts_lifecycle_refresh_grant(self) -> None:

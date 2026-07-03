@@ -2303,11 +2303,11 @@ def _preview_pr_feedback_policy(*, action: str) -> LaunchplaneAuthzPolicy:
 def _preview_pr_feedback_payload(
     *,
     status: str = "ready",
+    context: str | None = "verireel-testing",
     dry_run: bool = False,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "product": "verireel",
-        "context": "verireel-testing",
         "source": "preview-control-plane",
         "repository": "every/verireel",
         "anchor_repo": "verireel",
@@ -2320,6 +2320,8 @@ def _preview_pr_feedback_payload(
         "revision": "a1b2c3d4",
         "run_url": "https://github.com/every/verireel/actions/runs/123",
     }
+    if context is not None:
+        payload["context"] = context
     if dry_run:
         payload["dry_run"] = True
     return payload

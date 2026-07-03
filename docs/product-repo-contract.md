@@ -429,9 +429,9 @@ Dependabot `unsupported_notice` handoffs call
 `cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@main`
 from a trusted `pull_request_target` workflow. Product repos do not choose a
 trusted checkout ref, pass preview slugs, preview URLs, provider application
-names, feedback markdown, route payloads, or idempotency keys; Launchplane
-derives those from product profiles, runtime records, GitHub OIDC claims, the PR
-event, and the run-scoped workflow context.
+names, feedback context, feedback markdown, route payloads, or idempotency keys;
+Launchplane derives those from product profiles, runtime records, GitHub OIDC
+claims, the PR event, and the run-scoped workflow context.
 
 These reusable workflows intentionally do not accept provider targets, target
 ids, health URLs, preview URLs, feedback markdown, record ids, managed secrets,
