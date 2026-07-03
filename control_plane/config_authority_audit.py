@@ -146,6 +146,9 @@ GITHUB_ROUTE_PATH_FORWARDING_PATTERN = re.compile(
 GITHUB_INPUT_REFERENCE_PATTERN = re.compile(
     r"^(?:inputs|github\.event\.inputs)\.(?P<input_name>[A-Za-z0-9_.-]+)$"
 )
+LAUNCHPLANE_REUSABLE_WORKFLOW_PATTERN = re.compile(
+    r"^[A-Za-z0-9_.-]+/launchplane/\.github/workflows/[A-Za-z0-9_.-]+\.yml@main$"
+)
 WORKFLOW_RUNTIME_AUTHORITY_KEYS = frozenset(
     ("GITHUB_TOKEN", "ID_TOKEN", "LAUNCHPLANE_PRODUCT", "LAUNCHPLANE_URL")
 )
@@ -2014,6 +2017,11 @@ def _allow_reason(
         value=value,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_launchplane_reusable_workflow(
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_response_summary_field(
         path=normalized,
         key=key,
@@ -2190,15 +2198,20 @@ def _is_workflow_operator_input_reference(*, path: str, key: str, value: object)
 
 
 def _is_workflow_launchplane_operator_var(*, path: str, key: str, value: object) -> bool:
-    if path != ".github/workflows/launchplane-deploy.yml":
-        return False
     key_text = key.upper().replace(".", "_").replace("-", "_")
     if key_text == "LAUNCHPLANE_URL":
         key_text = "LAUNCHPLANE_PUBLIC_URL"
-    if key_text not in WORKFLOW_LAUNCHPLANE_OPERATOR_VAR_KEYS:
-        return False
     value_text = _string_value(value).strip().rstrip(",")
-    return value_text == f"${{{{ vars.{key_text} }}}}"
+    if key_text in WORKFLOW_LAUNCHPLANE_OPERATOR_VAR_KEYS:
+        return value_text == f"${{{{ vars.{key_text} }}}}"
+    match = GITHUB_EXPRESSION_PATTERN.match(value_text)
+    if match is None:
+        return False
+    body = match.group("body").strip()
+    if not body.startswith("vars."):
+        return False
+    var_key = body.removeprefix("vars.").upper().replace(".", "_").replace("-", "_")
+    return var_key in WORKFLOW_LAUNCHPLANE_OPERATOR_VAR_KEYS
 
 
 def _is_workflow_context_reference_restricted_key(key: str) -> bool:
@@ -2380,6 +2393,13 @@ def _is_workflow_thin_connector_key_value(*, path: str, key: str, value: object)
         return False
     value_text = _string_value(value).strip().rstrip(",")
     return value_text in allowed_values
+
+
+def _is_launchplane_reusable_workflow(*, key: str, value: object) -> bool:
+    if key != "uses":
+        return False
+    value_text = _string_value(value).strip().rstrip(",")
+    return bool(LAUNCHPLANE_REUSABLE_WORKFLOW_PATTERN.match(value_text))
 
 
 def _workflow_path_key_values(

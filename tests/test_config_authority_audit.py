@@ -649,7 +649,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         public_url = next(
             finding for finding in _findings(payload) if finding["key"] == "public-url"
         )
-        self.assertEqual(public_url["allow_reason"], "")
+        self.assertEqual(public_url["allow_reason"], "operator_supplied_runtime_input")
         findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
         for key in ("product-input", "event-product-input"):
             finding = findings_by_key[key]
@@ -1416,7 +1416,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         for key, value in (
             ("LAUNCHPLANE_URL", "${{ vars.OTHER_URL }}"),
             ("LAUNCHPLANE_URL", "https://launchplane.example.invalid"),
-            ("launchplane-url", "${{ vars.LAUNCHPLANE_PUBLIC_URL }}"),
         ):
             with self.subTest(key=key, value=value):
                 self.assertEqual(
@@ -1427,6 +1426,15 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     ),
                     "",
                 )
+
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/merge-train-runner.yml",
+                key="launchplane-url",
+                value="${{ vars.LAUNCHPLANE_PUBLIC_URL }}",
+            ),
+            "operator_supplied_runtime_input",
+        )
 
     def test_workflow_connector_findings_are_classified_narrowly(self) -> None:
         self.assertEqual(
@@ -1594,6 +1602,11 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "uses",
                 "cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@main",
             ),
+            (
+                ".github/workflows/launchplane-deploy.yml",
+                "uses",
+                "cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@main",
+            ),
         )
         for case in thin_connectors:
             path, key, value, *context = case
@@ -1610,6 +1623,16 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         rejected_thin_connectors = (
+            (
+                ".github/workflows/launchplane-deploy.yml",
+                "uses",
+                "cbusillo/not-launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@main",
+            ),
+            (
+                ".github/workflows/launchplane-deploy.yml",
+                "uses",
+                "cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@feature",
+            ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
                 "idempotency-key",
@@ -1701,6 +1724,31 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     ),
                     "",
                 )
+
+        operator_supplied_values = (
+            ("launchplane_url", "${{ vars.LAUNCHPLANE_PUBLIC_URL }}"),
+            ("product", "${{ vars.LAUNCHPLANE_PRODUCT }}"),
+            ("instance", "${{ vars.LAUNCHPLANE_INSTANCE }}"),
+        )
+        for key, value in operator_supplied_values:
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/launchplane-deploy.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "operator_supplied_runtime_input",
+                )
+
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/launchplane-deploy.yml",
+                key="product",
+                value="${{ vars.DEFAULT_REPOSITORY }}",
+            ),
+            "",
+        )
 
     def test_reusable_odoo_workflow_aliases_are_path_scoped(self) -> None:
         reusable_workflow_cases = (
@@ -2884,6 +2932,99 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             {"password", "context", "file", "IMAGE_REPOSITORY", "idempotency-key"}
             <= thin_connector_keys
         )
+
+    def test_cli_product_repo_gate_allows_reusable_generic_web_deploy_workflow(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-deploy.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Deploy\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/reusable-image-deploy")
+            workflow.write_text(
+                "---\n"
+                "name: Launchplane Deploy\n\n"
+                '"on":\n'
+                "  workflow_run:\n"
+                "    workflows: [Test Suite]\n"
+                "    types: [completed]\n\n"
+                "permissions:\n"
+                "  contents: read\n"
+                "  id-token: write\n"
+                "  packages: write\n\n"
+                "jobs:\n"
+                "  build-image:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      artifact_id: ${{ steps.launchplane_artifact.outputs.artifact_id }}\n"
+                "      source_git_ref: ${{ github.event.workflow_run.head_sha }}\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v6\n"
+                "        with:\n"
+                "          ref: ${{ github.event.workflow_run.head_sha }}\n"
+                "      - uses: docker/login-action@v4\n"
+                "        with:\n"
+                "          registry: ghcr.io\n"
+                "          username: ${{ github.actor }}\n"
+                "          password: ${{ github.token }}\n"
+                "      - id: build_image\n"
+                "        uses: docker/build-push-action@v7\n"
+                "        with:\n"
+                "          context: .\n"
+                "          file: docker/Dockerfile.sync\n"
+                "          push: true\n"
+                "          tags: ${{ steps.image_metadata.outputs.image_reference }}\n"
+                "      - id: launchplane_artifact\n"
+                "        run: |\n"
+                '          artifact_id="${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"\n'
+                '          echo "artifact_id=${artifact_id}" >> "$GITHUB_OUTPUT"\n'
+                "  deploy:\n"
+                "    needs: build-image\n"
+                "    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@main\n"
+                "    with:\n"
+                "      launchplane_url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}\n"
+                "      product: ${{ vars.LAUNCHPLANE_PRODUCT }}\n"
+                "      instance: ${{ vars.LAUNCHPLANE_INSTANCE }}\n"
+                "      artifact_id: ${{ needs.build-image.outputs.artifact_id }}\n"
+                "      source_git_ref: ${{ needs.build-image.outputs.source_git_ref }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "pass")
+        thin_connector_keys = {
+            finding["key"]
+            for finding in _findings(payload)
+            if finding["allow_reason"] == "thin_connector_input"
+        }
+        operator_input_keys = {
+            finding["key"]
+            for finding in _findings(payload)
+            if finding["allow_reason"] == "operator_supplied_runtime_input"
+        }
+        self.assertIn("uses", thin_connector_keys)
+        self.assertTrue({"product", "instance"} <= operator_input_keys)
 
     def test_cli_product_repo_gate_allows_compact_launchplane_tool_checkout(self) -> None:
         with TemporaryDirectory() as temp_dir:
