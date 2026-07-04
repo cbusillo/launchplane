@@ -16,6 +16,7 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackStatus,
     build_preview_pr_feedback_id,
 )
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.every_code_worker import every_code_worktree_branch
 from control_plane.workflows.launchplane import (
     create_github_issue_comment,
@@ -70,6 +71,17 @@ class EveryCodePreviewValidationStore(EveryCodeWorkRequestReadStore, Protocol):
     ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
 
 
+class PreviewPrFeedbackPreviewReadStore(Protocol):
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]: ...
+
+
 def _comment_url(payload: dict[str, object]) -> str:
     html_url = payload.get("html_url")
     return html_url if isinstance(html_url, str) else ""
@@ -112,6 +124,29 @@ def _find_every_code_work_request_for_preview(
         if expected_branch == normalized_head_branch:
             return record
     return None
+
+
+def _preview_url_from_latest_record(
+    *,
+    record_store: PreviewPrFeedbackPreviewReadStore | None,
+    context: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+) -> str:
+    if record_store is None:
+        return ""
+    for preview in record_store.list_preview_records(
+        context_name=context,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+        limit=5,
+    ):
+        if preview.state != "active":
+            continue
+        preview_url = preview.canonical_url.strip()
+        if preview_url:
+            return preview_url
+    return ""
 
 
 def _every_code_preview_ready_marker(*, repository: str, pr_number: int) -> str:
@@ -220,9 +255,7 @@ def _render_every_code_ready_to_merge_pr_comment(
     return "\n".join(lines)
 
 
-def _github_issue_author_login(
-    *, owner: str, repo: str, issue_number: int, token: str
-) -> str:
+def _github_issue_author_login(*, owner: str, repo: str, issue_number: int, token: str) -> str:
     payload = github_api_request(
         path=f"/repos/{owner}/{repo}/issues/{issue_number}",
         token=token,
@@ -838,12 +871,26 @@ def build_preview_pr_feedback_record(
     run_url: str = "",
     failure_summary: str = "",
     every_code_record_store: EveryCodeWorkRequestReadStore | None = None,
+    preview_record_store: PreviewPrFeedbackPreviewReadStore | None = None,
 ) -> PreviewPrFeedbackRecord:
+    resolved_preview_url = preview_url.strip()
+    if status == "ready" and not resolved_preview_url:
+        resolved_preview_url = _preview_url_from_latest_record(
+            record_store=preview_record_store,
+            context=context,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+        )
+    if status == "ready" and not resolved_preview_url:
+        raise click.ClickException(
+            "Ready preview feedback requires an explicit preview URL or an active "
+            "Launchplane preview record."
+        )
     comment_markdown = _render_preview_pr_feedback_markdown(
         marker=marker,
         status=status,
         anchor_pr_number=anchor_pr_number,
-        preview_url=preview_url.strip(),
+        preview_url=resolved_preview_url,
         immutable_image_reference=immutable_image_reference.strip(),
         refresh_image_reference=refresh_image_reference.strip(),
         revision=revision.strip(),
@@ -916,7 +963,7 @@ def build_preview_pr_feedback_record(
                 delivery_action = "created_comment"
                 comment_id = created_comment_id if isinstance(created_comment_id, int) else 0
                 comment_url = _comment_url(created_comment)
-            if status == "ready" and preview_url.strip():
+            if status == "ready" and resolved_preview_url:
                 source_issue_action = _notify_every_code_preview_ready_source_issue(
                     record_store=every_code_record_store,
                     owner=github_reference["owner"],
@@ -924,7 +971,7 @@ def build_preview_pr_feedback_record(
                     pr_number=github_reference["pr_number"],
                     anchor_pr_url=anchor_pr_url,
                     repository=repository,
-                    preview_url=preview_url,
+                    preview_url=resolved_preview_url,
                     token=github_token,
                 )
                 if not delivery_action:
@@ -950,7 +997,7 @@ def build_preview_pr_feedback_record(
         status=status,
         marker=marker,
         comment_markdown=comment_markdown,
-        preview_url=preview_url,
+        preview_url=resolved_preview_url,
         immutable_image_reference=immutable_image_reference,
         refresh_image_reference=refresh_image_reference,
         revision=revision,

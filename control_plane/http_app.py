@@ -594,6 +594,7 @@ from control_plane.workflows.preview_desired_state import discover_github_previe
 from control_plane.workflows.preview_pr_feedback import (
     DEFAULT_PREVIEW_FEEDBACK_MARKER,
     EveryCodeWorkRequestReadStore,
+    PreviewPrFeedbackPreviewReadStore,
     build_preview_pr_feedback_record,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
@@ -1950,7 +1951,7 @@ class PreviewPrFeedbackEnvelope(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     product: str
-    context: str
+    context: str = ""
     source: str = "workflow"
     repository: str
     anchor_repo: str
@@ -1970,8 +1971,6 @@ class PreviewPrFeedbackEnvelope(BaseModel):
     def _validate_request(self) -> "PreviewPrFeedbackEnvelope":
         if not self.product.strip():
             raise ValueError("preview PR feedback requires product")
-        if not self.context.strip():
-            raise ValueError("preview PR feedback requires context")
         if not self.source.strip():
             raise ValueError("preview PR feedback requires source")
         if not self.repository.strip():
@@ -3197,6 +3196,28 @@ def allows_preview_pr_feedback_write(
         )
         for action in lifecycle_actions_by_status.get(status, ())
     )
+
+
+def resolve_preview_pr_feedback_context(*, record_store: object, product: str, context: str) -> str:
+    requested_context = context.strip()
+    try:
+        profile_store = require_product_profile_read_store(record_store)
+        profile = profile_store.read_product_profile_record(product.strip())
+    except TypeError as error:
+        raise TypeError(
+            "Preview PR feedback context derivation requires product profile reads: "
+            "read_product_profile_record"
+        ) from error
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            "Preview PR feedback context derivation requires an existing product profile."
+        ) from error
+    if not profile.preview.enabled or not profile.preview.context.strip():
+        raise ValueError("Product profile does not define an enabled preview context.")
+    profile_context = profile.preview.context.strip()
+    if requested_context and requested_context != profile_context:
+        raise ValueError("Preview PR feedback context does not match product profile.")
+    return profile_context
 
 
 def read_generic_web_preview_profile(
@@ -13487,11 +13508,38 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
+        try:
+            effective_context = resolve_preview_pr_feedback_context(
+                record_store=record_store,
+                product=feedback_request.product,
+                context=feedback_request.context,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error),
+            ) from error
         if not allows_preview_pr_feedback_write(
             authz_policy=resolved_authz_policy_runtime.policy,
             identity=identity,
             product=feedback_request.product,
-            context=feedback_request.context,
+            context=effective_context,
             status=feedback_request.status,
         ):
             raise _launchplane_http_error(
@@ -13507,7 +13555,7 @@ def create_launchplane_fastapi_app(
                 "dry_run": True,
                 "preview_pr_feedback": "authorized",
                 "product": feedback_request.product,
-                "context": feedback_request.context,
+                "context": effective_context,
                 "status": feedback_request.status,
                 "anchor_pr_number": feedback_request.anchor_pr_number,
             }
@@ -13545,26 +13593,39 @@ def create_launchplane_fastapi_app(
             if supports_every_code_work_requests(record_store)
             else None
         )
-        feedback_record = build_preview_pr_feedback_record(
-            control_plane_root=resolved_control_plane_root,
-            product=feedback_request.product,
-            context=feedback_request.context,
-            source=feedback_request.source,
-            requested_at=utc_now_timestamp(),
-            repository=feedback_request.repository,
-            anchor_repo=feedback_request.anchor_repo,
-            anchor_pr_number=feedback_request.anchor_pr_number,
-            anchor_pr_url=feedback_request.anchor_pr_url,
-            status=feedback_request.status,
-            marker=feedback_request.marker,
-            preview_url=feedback_request.preview_url,
-            immutable_image_reference=feedback_request.immutable_image_reference,
-            refresh_image_reference=feedback_request.refresh_image_reference,
-            revision=feedback_request.revision,
-            run_url=feedback_request.run_url,
-            failure_summary=feedback_request.failure_summary,
-            every_code_record_store=every_code_record_store,
-        )
+        try:
+            feedback_record = build_preview_pr_feedback_record(
+                control_plane_root=resolved_control_plane_root,
+                product=feedback_request.product,
+                context=effective_context,
+                source=feedback_request.source,
+                requested_at=utc_now_timestamp(),
+                repository=feedback_request.repository,
+                anchor_repo=feedback_request.anchor_repo,
+                anchor_pr_number=feedback_request.anchor_pr_number,
+                anchor_pr_url=feedback_request.anchor_pr_url,
+                status=feedback_request.status,
+                marker=feedback_request.marker,
+                preview_url=feedback_request.preview_url,
+                immutable_image_reference=feedback_request.immutable_image_reference,
+                refresh_image_reference=feedback_request.refresh_image_reference,
+                revision=feedback_request.revision,
+                run_url=feedback_request.run_url,
+                failure_summary=feedback_request.failure_summary,
+                every_code_record_store=every_code_record_store,
+                preview_record_store=(
+                    cast(PreviewPrFeedbackPreviewReadStore, record_store)
+                    if callable(getattr(record_store, "list_preview_records", None))
+                    else None
+                ),
+            )
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_url_unavailable",
+                message=str(error),
+            ) from error
         feedback_store.write_preview_pr_feedback_record(feedback_record)
         notification_attempts = deliver_preview_pr_feedback_notifications(
             record_store=record_store,
@@ -15719,6 +15780,7 @@ def create_launchplane_fastapi_app(
         )
         if replayed_response is not None:
             return replayed_response
+        verification_request.verification.context = profile.preview.context
         try:
             result = apply_generic_web_preview_verification_result(
                 control_plane_root=resolved_control_plane_root,

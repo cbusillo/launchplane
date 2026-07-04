@@ -16,9 +16,33 @@ from control_plane.contracts.preview_workflow_contract import (
     decide_preview_workflow_operation,
     preview_workflow_idempotency_key,
 )
+from control_plane.workflows.generic_web_preview import (
+    GenericWebPreviewDestroyRequest,
+    GenericWebPreviewRefreshRequest,
+)
 
 
 CLI_MAIN = cast(Command, main)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _workflow_call_inputs(workflow: str) -> set[str]:
+    inputs: set[str] = set()
+    in_inputs = False
+    input_indent = 0
+    for line in workflow.splitlines():
+        stripped = line.strip()
+        if stripped == "inputs:":
+            in_inputs = True
+            input_indent = len(line) - len(line.lstrip())
+            continue
+        if in_inputs:
+            indent = len(line) - len(line.lstrip())
+            if stripped and indent <= input_indent:
+                break
+            if indent == input_indent + 2 and stripped.endswith(":"):
+                inputs.add(stripped[:-1])
+    return inputs
 
 
 def _event(**overrides: object) -> PreviewWorkflowEvent:
@@ -141,6 +165,143 @@ class PreviewWorkflowContractTests(unittest.TestCase):
                 run_id="123456",
                 run_attempt="2",
             )
+
+    def test_reusable_preview_feedback_workflow_owns_request_details(self) -> None:
+        workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-pr-feedback.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        workflow_inputs = _workflow_call_inputs(workflow)
+
+        self.assertIn("route-path: /v1/previews/pr-feedback", workflow)
+        self.assertIn("status=${{ steps.request.outputs.status }}", workflow)
+        self.assertIn("feedback_status=result.status", workflow)
+        self.assertNotIn("result.feedback_status", workflow)
+        self.assertIn("for required in PRODUCT ANCHOR_PR_NUMBER ANCHOR_PR_URL STATUS", workflow)
+        self.assertIn("context=${{ steps.request.outputs.context }}", workflow)
+        self.assertNotIn('CONTEXT="$PRODUCT"', workflow)
+        self.assertIn("idempotency_key", workflow)
+        self.assertIn("preview-pr-feedback", workflow)
+
+        self.assertNotIn("marker", workflow_inputs)
+        self.assertNotIn("idempotency-key", workflow_inputs)
+        self.assertNotIn("payload", workflow_inputs)
+        self.assertNotIn("route-path", workflow_inputs)
+
+    def test_reusable_preview_feedback_workflow_accepts_all_preview_statuses(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/reusable-preview-pr-feedback.yml").read_text(
+            encoding="utf-8"
+        )
+
+        for status in (
+            "pending",
+            "ready",
+            "destroyed",
+            "failed",
+            "cleanup_failed",
+            "unsupported",
+            "cleared",
+        ):
+            self.assertIn(status, workflow)
+
+    def test_reusable_preview_request_notice_owns_notice_decision(self) -> None:
+        workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-request-notice.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        workflow_inputs = _workflow_call_inputs(workflow)
+
+        self.assertIn("pull_request_target", workflow)
+        self.assertIn("context.eventName !== 'pull_request_target'", workflow)
+        self.assertIn("uses: actions/github-script@v8", workflow)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main",
+            workflow,
+        )
+        self.assertIn("status: ${{ needs.resolve.outputs.status }}", workflow)
+        self.assertIn("failure_summary: ${{ needs.resolve.outputs.failure_summary }}", workflow)
+        self.assertIn("const unsupportedTrust =", workflow)
+        self.assertIn("action === 'edited'", workflow)
+        self.assertIn("const shouldSetUnsupported =", workflow)
+        self.assertNotIn("status = 'pending'", workflow)
+
+        self.assertNotIn("actions/checkout", workflow)
+        self.assertNotIn("ref:", workflow)
+        self.assertNotIn("marker", workflow_inputs)
+        self.assertNotIn("idempotency-key", workflow_inputs)
+        self.assertNotIn("payload", workflow_inputs)
+        self.assertNotIn("route-path", workflow_inputs)
+
+    def test_reusable_generic_web_preview_lifecycle_derives_preview_slug(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
+        ).read_text(encoding="utf-8")
+        workflow_inputs = _workflow_call_inputs(workflow)
+
+        self.assertIn("route-path: /v1/drivers/generic-web/preview-refresh", workflow)
+        self.assertIn("route-path: /v1/drivers/generic-web/preview-destroy", workflow)
+        self.assertIn(
+            "refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow
+        )
+        self.assertIn(
+            "destroy.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow
+        )
+
+        self.assertNotIn("preview_slug", workflow_inputs)
+        self.assertNotIn("preview_url", workflow_inputs)
+        self.assertNotIn('CONTEXT="$PRODUCT"', workflow)
+        self.assertNotIn("PRODUCT CONTEXT ANCHOR_PR_NUMBER", workflow)
+        self.assertNotIn("refresh.preview_slug=", workflow)
+        self.assertNotIn("destroy.preview_slug=", workflow)
+
+    def test_reusable_generic_web_preview_lifecycle_feedback_maps_record_status(
+        self,
+    ) -> None:
+        workflow = (
+            REPO_ROOT / ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("route-path: /v1/previews/pr-feedback", workflow)
+        self.assertIn("feedback_status=result.status", workflow)
+        self.assertNotIn("result.feedback_status", workflow)
+
+    def test_reusable_generic_web_preview_verification_derives_context(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github/workflows/reusable-generic-web-preview-verification.yml"
+        ).read_text(encoding="utf-8")
+        workflow_inputs = _workflow_call_inputs(workflow)
+
+        self.assertIn("route-path: /v1/drivers/generic-web/preview-verification", workflow)
+        self.assertIn("verification.context=${{ inputs.context }}", workflow)
+        self.assertIn(
+            "verification.anchor_pr_number=${{ steps.request.outputs.anchor_pr_number }}",
+            workflow,
+        )
+        self.assertIn(
+            "verification.verification_status=${{ steps.request.outputs.verification_status }}",
+            workflow,
+        )
+        self.assertIn("verification_status=result.verification_status", workflow)
+        self.assertIn("generic-web-preview-verification", workflow)
+
+        self.assertNotIn("idempotency-key", workflow_inputs)
+        self.assertNotIn("payload", workflow_inputs)
+        self.assertNotIn("route-path", workflow_inputs)
+
+    def test_generic_web_preview_requests_accept_anchor_pr_number_without_slug(
+        self,
+    ) -> None:
+        refresh_request = GenericWebPreviewRefreshRequest(
+            product="demo",
+            image_reference="ghcr.io/example/demo@sha256:abc123",
+            anchor_pr_number=42,
+        )
+        destroy_request = GenericWebPreviewDestroyRequest(
+            product="demo",
+            anchor_pr_number=42,
+            destroy_reason="preview_label_removed",
+        )
+
+        self.assertEqual(refresh_request.preview_slug, "")
+        self.assertEqual(refresh_request.anchor_pr_number, 42)
+        self.assertEqual(destroy_request.preview_slug, "")
+        self.assertEqual(destroy_request.anchor_pr_number, 42)
 
 
 class PreviewWorkflowDecisionCliTests(unittest.TestCase):

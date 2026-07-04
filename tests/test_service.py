@@ -4360,7 +4360,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.service.resolve_launchplane_github_token",
+                "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
                 return_value="github-token",
             ),
             patch(
@@ -4443,6 +4443,238 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         create_comment.assert_called_once()
         self.assertIn("@cbusillo", create_comment.call_args.kwargs["body"])
+
+    def test_preview_pr_feedback_hydrates_ready_url_from_preview_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.github_api_request",
+                return_value={"user": {"login": "author"}, "head": {"ref": "pr-42"}},
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.create_github_issue_comment",
+                return_value={"id": 987, "html_url": "https://github.example/comment"},
+            ) as create_comment,
+        ):
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-syo-pr-42",
+                    context="sellyouroutboard-testing",
+                    anchor_repo="sellyouroutboard",
+                    anchor_pr_number=42,
+                    anchor_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/42",
+                    preview_label="preview",
+                    canonical_url="https://pr-42.syo-preview.example.test",
+                    state="active",
+                    created_at="2026-05-03T15:00:00Z",
+                    updated_at="2026-05-03T15:05:00Z",
+                    eligible_at="2026-05-03T15:00:00Z",
+                    active_generation_id="generation-syo-pr-42",
+                    serving_generation_id="generation-syo-pr-42",
+                    latest_generation_id="generation-syo-pr-42",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "source": "workflow",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "anchor_repo": "sellyouroutboard",
+                    "anchor_pr_number": 42,
+                    "anchor_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/42",
+                    "status": "ready",
+                    "run_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/42",
+                },
+                headers={"Idempotency-Key": "preview-pr-feedback-ready-hydrate-url"},
+            )
+
+        self.assertEqual(status_code, 202, payload)
+        self.assertEqual(
+            payload["result"]["preview_url"],
+            "https://pr-42.syo-preview.example.test",
+        )
+        self.assertEqual(payload["result"]["delivery_status"], "delivered", payload)
+        create_comment.assert_called_once()
+        self.assertIn(
+            "https://pr-42.syo-preview.example.test",
+            create_comment.call_args.kwargs["body"],
+        )
+
+    def test_preview_pr_feedback_ready_requires_active_preview_url(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.github_api_request",
+                return_value={"user": {"login": "author"}, "head": {"ref": "pr-42"}},
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.create_github_issue_comment",
+                return_value={"id": 987, "html_url": "https://github.example/comment"},
+            ) as create_comment,
+        ):
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-syo-pr-42",
+                    context="sellyouroutboard-testing",
+                    anchor_repo="sellyouroutboard",
+                    anchor_pr_number=42,
+                    anchor_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/42",
+                    preview_label="preview",
+                    canonical_url="https://failed-pr-42.syo-preview.example.test",
+                    state="failed",
+                    created_at="2026-05-03T15:00:00Z",
+                    updated_at="2026-05-03T15:05:00Z",
+                    eligible_at="2026-05-03T15:00:00Z",
+                    latest_generation_id="generation-syo-pr-42",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "source": "workflow",
+                "repository": "cbusillo/sellyouroutboard",
+                "anchor_repo": "sellyouroutboard",
+                "anchor_pr_number": 42,
+                "anchor_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/42",
+                "status": "ready",
+                "run_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/42",
+            }
+            headers = {"Idempotency-Key": "preview-pr-feedback-ready-retry-after-active"}
+
+            failed_status, failed_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload=request_payload,
+                headers=headers,
+            )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-syo-pr-42",
+                    context="sellyouroutboard-testing",
+                    anchor_repo="sellyouroutboard",
+                    anchor_pr_number=42,
+                    anchor_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/42",
+                    preview_label="preview",
+                    canonical_url="https://pr-42.syo-preview.example.test",
+                    state="active",
+                    created_at="2026-05-03T15:00:00Z",
+                    updated_at="2026-05-03T15:06:00Z",
+                    eligible_at="2026-05-03T15:00:00Z",
+                    active_generation_id="generation-syo-pr-42",
+                    serving_generation_id="generation-syo-pr-42",
+                    latest_generation_id="generation-syo-pr-42",
+                )
+            )
+            ready_status, ready_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload=request_payload,
+                headers=headers,
+            )
+
+        self.assertEqual(failed_status, 409, failed_payload)
+        self.assertEqual(failed_payload["error"]["code"], "preview_url_unavailable")
+        self.assertEqual(ready_status, 202, ready_payload)
+        self.assertEqual(
+            ready_payload["result"]["preview_url"],
+            "https://pr-42.syo-preview.example.test",
+        )
+        create_comment.assert_called_once()
 
     def test_every_code_preview_validation_failure_returns_generic_webhook_response(
         self,
@@ -11621,7 +11853,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "product": "sellyouroutboard",
                         "verification": {
                             "schema_version": 1,
-                            "context": "sellyouroutboard-testing",
                             "anchor_repo": "sellyouroutboard",
                             "anchor_pr_number": 42,
                             "verification_status": "pass",
@@ -11635,6 +11866,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["records"]["transition"], "ready")
         apply_records.assert_called_once()
         self.assertEqual(apply_records.call_args.kwargs["control_plane_root_path"], root)
+        self.assertEqual(
+            apply_records.call_args.kwargs["request"].context,
+            "sellyouroutboard-testing",
+        )
 
     def test_generic_web_preview_verification_route_rejects_unauthorized_context(
         self,

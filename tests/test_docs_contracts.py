@@ -121,21 +121,30 @@ class DocsContractsTests(TestCase):
         promotion_workflow = Path(
             ".github/workflows/reusable-generic-web-prod-promotion.yml"
         ).read_text(encoding="utf-8")
+        preview_workflow = Path(
+            ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
+        ).read_text(encoding="utf-8")
         repo_metadata = Path(".github/github.json").read_text(encoding="utf-8")
 
         self.assertIn("Reusable Generic-Web Lifecycle Workflows", product_repo_contract)
         self.assertIn("reusable-generic-web-stable-deploy.yml@main", product_repo_contract)
         self.assertIn("reusable-generic-web-prod-promotion.yml@main", product_repo_contract)
+        self.assertIn("reusable-generic-web-preview-lifecycle.yml@main", product_repo_contract)
         self.assertIn("route path, request JSON shape", product_repo_contract)
         self.assertIn("product key from the caller repository name", product_repo_contract)
         self.assertIn("`testing` stable lane", product_repo_contract)
         self.assertIn("idempotency key", product_repo_contract)
+        self.assertIn("Destroy calls set `operation: destroy`", product_repo_contract)
+        self.assertIn("unsupported_notice", product_repo_contract)
         self.assertIn("do not accept provider targets", product_repo_contract)
         self.assertIn("`preview_slug`", product_repo_contract)
         self.assertIn("`preview_url` are compatibility overrides", product_repo_contract)
         self.assertIn("anchor_pr_number` and omit", preview_contract)
         self.assertIn("conflicts with the", preview_contract)
         self.assertIn("derived value", preview_contract)
+        self.assertIn("reusable-generic-web-preview-lifecycle.yml@main", preview_contract)
+        self.assertIn("does not accept", preview_contract)
+        self.assertIn("idempotency keys as caller inputs", preview_contract)
 
         self.assertIn("workflow_call:", deploy_workflow)
         self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', deploy_workflow)
@@ -155,5 +164,29 @@ class DocsContractsTests(TestCase):
         self.assertNotIn("health_url", promotion_workflow)
         self.assertNotIn("preview_url", promotion_workflow)
 
+        self.assertIn("workflow_call:", preview_workflow)
+        self.assertIn("operation:", preview_workflow)
+        self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', preview_workflow)
+        self.assertIn("route-path: /v1/drivers/generic-web/preview-refresh", preview_workflow)
+        self.assertIn("route-path: /v1/drivers/generic-web/preview-destroy", preview_workflow)
+        self.assertIn("route-path: /v1/previews/pr-feedback", preview_workflow)
+        self.assertIn("generic-web-preview-lifecycle", preview_workflow)
+        self.assertIn(
+            "refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}",
+            preview_workflow,
+        )
+        self.assertIn("refresh.image_reference=${{ inputs.image_reference }}", preview_workflow)
+        self.assertIn(
+            "destroy.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}",
+            preview_workflow,
+        )
+        self.assertIn("status=${{ inputs.feedback_status }}", preview_workflow)
+        self.assertNotIn("inputs.preview_slug", preview_workflow)
+        self.assertNotIn("inputs.preview_url", preview_workflow)
+        self.assertNotIn("target_id", preview_workflow)
+        self.assertNotIn("provider_target", preview_workflow)
+        self.assertNotIn("feedback_markdown", preview_workflow)
+
         self.assertIn("Reusable Generic Web Stable Deploy", repo_metadata)
         self.assertIn("Reusable Generic Web Prod Promotion", repo_metadata)
+        self.assertIn("Reusable Generic Web Preview Lifecycle", repo_metadata)

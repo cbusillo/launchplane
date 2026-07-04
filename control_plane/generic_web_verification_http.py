@@ -97,7 +97,7 @@ def resolve_generic_web_preview_verification_profile(
         raise click.ClickException(
             f"Product {profile.product!r} does not define a preview context."
         )
-    if profile.preview.context.strip() != context.strip():
+    if context.strip() and profile.preview.context.strip() != context.strip():
         raise GenericWebVerificationProductMismatchError(
             "Product profile does not own the requested preview context."
         )
