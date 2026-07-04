@@ -190,3 +190,53 @@ class DocsContractsTests(TestCase):
         self.assertIn("Reusable Generic Web Stable Deploy", repo_metadata)
         self.assertIn("Reusable Generic Web Prod Promotion", repo_metadata)
         self.assertIn("Reusable Generic Web Preview Lifecycle", repo_metadata)
+
+    def test_product_driver_reusable_workflows_keep_route_shaping_in_launchplane(
+        self,
+    ) -> None:
+        product_repo_contract = Path("docs/product-repo-contract.md").read_text(encoding="utf-8")
+        stable_deploy_workflow = Path(
+            ".github/workflows/reusable-product-driver-stable-deploy.yml"
+        ).read_text(encoding="utf-8")
+        prod_promotion_workflow = Path(
+            ".github/workflows/reusable-product-driver-prod-promotion.yml"
+        ).read_text(encoding="utf-8")
+        prod_rollback_workflow = Path(
+            ".github/workflows/reusable-product-driver-prod-rollback.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Reusable Product-Driver Workflows", product_repo_contract)
+        self.assertIn("reusable-product-driver-stable-deploy.yml@main", product_repo_contract)
+        self.assertIn("reusable-product-driver-prod-promotion.yml@main", product_repo_contract)
+        self.assertIn("reusable-product-driver-prod-rollback.yml@main", product_repo_contract)
+        self.assertIn("route path, envelope JSON, output mapping", product_repo_contract)
+        self.assertIn("transitional connectors", product_repo_contract)
+        self.assertIn("should not own Launchplane route construction", product_repo_contract)
+
+        self.assertIn("workflow_call:", stable_deploy_workflow)
+        self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', stable_deploy_workflow)
+        self.assertIn("route_path=/v1/drivers/verireel/$INSTANCE-deploy", stable_deploy_workflow)
+        self.assertIn("deploy.artifact_id=${{ inputs.artifact_id }}", stable_deploy_workflow)
+        self.assertIn("deploy.source_git_ref=${{ inputs.source_git_ref }}", stable_deploy_workflow)
+        self.assertIn("target_category=result.target_category", stable_deploy_workflow)
+        self.assertNotIn("target_type=result.target_type", stable_deploy_workflow)
+        self.assertNotIn("provider_target", stable_deploy_workflow)
+
+        self.assertIn("workflow_call:", prod_promotion_workflow)
+        self.assertIn("route_path=/v1/drivers/verireel/prod-promotion", prod_promotion_workflow)
+        self.assertIn(
+            "promotion.backup_record_id=${{ inputs.backup_record_id }}", prod_promotion_workflow
+        )
+        self.assertIn(
+            "promotion.source_health_status=${{ inputs.source_health_status }}",
+            prod_promotion_workflow,
+        )
+        self.assertIn("target_category=result.target_category", prod_promotion_workflow)
+        self.assertNotIn("target_type=result.target_type", prod_promotion_workflow)
+
+        self.assertIn("workflow_call:", prod_rollback_workflow)
+        self.assertIn("route_path=/v1/drivers/verireel/prod-rollback", prod_rollback_workflow)
+        self.assertIn(
+            "rollback.backup_record_id=${{ inputs.backup_record_id }}", prod_rollback_workflow
+        )
+        self.assertIn("rollback.snapshot_name=${{ inputs.snapshot_name }}", prod_rollback_workflow)

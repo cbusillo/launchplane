@@ -1,0 +1,146 @@
+---
+name: Reusable Product Driver Stable Environment
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: Stable context. Defaults to the product key.
+        required: false
+        default: ""
+        type: string
+      instance:
+        description: Stable lane instance to resolve.
+        required: true
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "300000"
+        type: string
+      launchplane_url:
+        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      context:
+        description: Resolved Launchplane context.
+        value: ${{ jobs.stable-environment.outputs.context }}
+      instance:
+        description: Resolved stable lane instance.
+        value: ${{ jobs.stable-environment.outputs.instance }}
+      target_name:
+        description: Resolved target name.
+        value: ${{ jobs.stable-environment.outputs.target_name }}
+      target_type:
+        description: Resolved target type.
+        value: ${{ jobs.stable-environment.outputs.target_type }}
+      target_id:
+        description: Resolved target id.
+        value: ${{ jobs.stable-environment.outputs.target_id }}
+      primary_base_url:
+        description: Primary public base URL for the stable lane.
+        value: ${{ jobs.stable-environment.outputs.primary_base_url }}
+      healthcheck_path:
+        description: Stable lane healthcheck path.
+        value: ${{ jobs.stable-environment.outputs.healthcheck_path }}
+      health_urls_json:
+        description: JSON array of stable lane health URLs.
+        value: ${{ jobs.stable-environment.outputs.health_urls_json }}
+      trace_id:
+        description: Launchplane trace id for request debugging.
+        value: ${{ jobs.stable-environment.outputs.trace_id }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  stable-environment:
+    outputs:
+      context: ${{ steps.lp.outputs.context }}
+      instance: ${{ steps.lp.outputs.instance }}
+      target_name: ${{ steps.lp.outputs.target_name }}
+      target_type: ${{ steps.lp.outputs.target_type }}
+      target_id: ${{ steps.lp.outputs.target_id }}
+      primary_base_url: ${{ steps.lp.outputs.primary_base_url }}
+      healthcheck_path: ${{ steps.lp.outputs.healthcheck_path }}
+      health_urls_json: ${{ steps.lp.outputs.health_urls_json }}
+      trace_id: ${{ steps.lp.outputs.trace_id }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane stable environment request
+        id: request
+        env:
+          CONTEXT: ${{ inputs.context }}
+          INSTANCE: ${{ inputs.instance }}
+          PRODUCT: ${{ inputs.product }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "$CONTEXT" ]; then
+            CONTEXT="$PRODUCT"
+          fi
+          for required in PRODUCT CONTEXT INSTANCE; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          {
+            echo "context=$CONTEXT"
+            printf '%s=%s:%s:%s:%s\n' \
+              idempotency_key \
+              product-driver-stable-environment \
+              "$PRODUCT" \
+              "$CONTEXT" \
+              "$INSTANCE"
+            echo "instance=$INSTANCE"
+            echo "product=$PRODUCT"
+            echo "route_path=/v1/drivers/verireel/stable-environment"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane stable environment
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.request.outputs.route_path }}
+          payload: |-
+            {
+              "schema_version": 1,
+              "environment": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            environment.context=${{ steps.request.outputs.context }}
+            environment.instance=${{ steps.request.outputs.instance }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          output-paths: >-
+            trace_id=trace_id,
+            context=result.context,
+            instance=result.instance,
+            target_name=result.target_name,
+            target_type=result.target_type,
+            target_id=result.target_id,
+            primary_base_url=result.primary_base_url,
+            healthcheck_path=result.healthcheck_path,
+            health_urls_json=result.health_urls

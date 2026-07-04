@@ -442,6 +442,37 @@ results, and durable evidence. The reusable deploy workflow is the first
 non-prod proof path for #1528; product-repo cleanup should wait for a live
 non-prod deploy proof before deleting older local request-shaping scripts.
 
+## Reusable Product-Driver Workflows
+
+Some products still need product-driver actions while their product-specific
+post-deploy, maintenance, backup, or rollback behavior is being generalized.
+Product repos should call Launchplane-owned product-driver reusable workflows
+instead of carrying local `request-launchplane-*` scripts. These workflows keep
+the driver route path, envelope JSON, output mapping, polling settings, and
+idempotency key in Launchplane while allowing the product repo to pass primitive
+facts such as product, context, instance, artifact id, source git ref, backup
+record id, and product-owned verification statuses. The route ids are
+Launchplane-owned driver routes; product repos should not derive them from
+product keys or keep local copies of route construction logic.
+
+The product-driver reusable surface is:
+
+- `reusable-product-driver-stable-environment.yml@main`
+- `reusable-product-driver-runtime-verification.yml@main`
+- `reusable-product-driver-stable-deploy.yml@main`
+- `reusable-product-driver-app-maintenance.yml@main`
+- `reusable-product-driver-testing-verification.yml@main`
+- `reusable-product-driver-prod-backup-gate.yml@main`
+- `reusable-product-driver-prod-promotion.yml@main`
+- `reusable-product-driver-prod-rollback.yml@main`
+
+These workflows are transitional connectors, not permission to move product
+lifecycle authority back into product repos. A product repo may still own image
+build/publish, release tagging, and product-specific browser checks, but it
+should not own Launchplane route construction, request envelopes, idempotency
+recipes, polling behavior, or record-output extraction once a reusable workflow
+exists.
+
 ## Reusable Launchplane Request Action
 
 Product workflows that only need to send JSON to an existing Launchplane route
