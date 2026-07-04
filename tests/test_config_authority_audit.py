@@ -2170,6 +2170,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
     ) -> None:
         path = ".github/workflows/reusable-product-driver-prod-promotion.yml"
         path_scoped_cases = (
+            ("launchplane_url", "${{ inputs.launchplane_url }}"),
             ("timeout-ms", "${{ inputs['timeout-ms'] }}"),
             ("FROM_INSTANCE", "${{ inputs.from_instance }}"),
             ("TO_INSTANCE", "${{ inputs.to_instance }}"),
@@ -2209,11 +2210,106 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("payload-fields.promotion.artifact_id", "ghcr.io/example/app:latest"),
             ("payload-fields.promotion.provider_target", "${{ inputs.provider_target }}"),
             ("payload-fields.promotion.artifact_id", "${{ github.token }}"),
+            ("action", "drop-prod"),
+            ("action", "reset-testing"),
+            ("instance", "testing"),
+            ("intent", "operator-local-reset"),
+            ("intent", "stable-testing-reset"),
+            ("launchplane_url", "https://example.test"),
             ("TO_INSTANCE", "${{ github.token }}"),
             ("inputs.to_instance.default", "production"),
         ):
             with self.subTest(key=key, value=value):
                 self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
+
+    def test_product_driver_operation_wrapper_literals_are_exact_path_scoped(
+        self,
+    ) -> None:
+        allowed_cases = (
+            (
+                ".github/workflows/reusable-product-driver-prod-launch-readiness.yml",
+                "instance",
+                "prod",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-testing-reset.yml",
+                "instance",
+                "testing",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-testing-reset.yml",
+                "action",
+                "reset-testing",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-testing-reset.yml",
+                "intent",
+                "stable-testing-reset",
+            ),
+        )
+        for path, key, value in allowed_cases:
+            with self.subTest(path=path, key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        rejected_cases = (
+            (
+                ".github/workflows/reusable-product-driver-prod-promotion.yml",
+                "instance",
+                "testing",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-prod-launch-readiness.yml",
+                "instance",
+                "testing",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-testing-reset.yml",
+                "action",
+                "drop-prod",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-testing-reset.yml",
+                "intent",
+                "operator-local-reset",
+            ),
+        )
+        for path, key, value in rejected_cases:
+            with self.subTest(path=path, key=key, value=value):
+                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
+
+    def test_workflow_output_references_are_thin_connector_inputs(self) -> None:
+        for key, value in (
+            ("PRIMARY_BASE_URL", "${{ needs.resolve.outputs.primary_base_url }}"),
+            ("healthcheck_path", "${{ needs.resolve.outputs.healthcheck_path }}"),
+            ("BASE_URL", "${{ needs.verify.outputs.base_url }}"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/prod-launch-readiness.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("PRIMARY_BASE_URL", "https://example.test"),
+            ("instance", "${{ needs.resolve.outputs.instance }}"),
+            ("instance", "prod"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/prod-launch-readiness.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
 
     def test_ingress_workflow_jq_forwards_and_route_options_are_narrow(self) -> None:
         for key, value in (
