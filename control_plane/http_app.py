@@ -594,6 +594,7 @@ from control_plane.workflows.preview_desired_state import discover_github_previe
 from control_plane.workflows.preview_pr_feedback import (
     DEFAULT_PREVIEW_FEEDBACK_MARKER,
     EveryCodeWorkRequestReadStore,
+    PreviewPrFeedbackPreviewReadStore,
     build_preview_pr_feedback_record,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
@@ -13592,26 +13593,39 @@ def create_launchplane_fastapi_app(
             if supports_every_code_work_requests(record_store)
             else None
         )
-        feedback_record = build_preview_pr_feedback_record(
-            control_plane_root=resolved_control_plane_root,
-            product=feedback_request.product,
-            context=effective_context,
-            source=feedback_request.source,
-            requested_at=utc_now_timestamp(),
-            repository=feedback_request.repository,
-            anchor_repo=feedback_request.anchor_repo,
-            anchor_pr_number=feedback_request.anchor_pr_number,
-            anchor_pr_url=feedback_request.anchor_pr_url,
-            status=feedback_request.status,
-            marker=feedback_request.marker,
-            preview_url=feedback_request.preview_url,
-            immutable_image_reference=feedback_request.immutable_image_reference,
-            refresh_image_reference=feedback_request.refresh_image_reference,
-            revision=feedback_request.revision,
-            run_url=feedback_request.run_url,
-            failure_summary=feedback_request.failure_summary,
-            every_code_record_store=every_code_record_store,
-        )
+        try:
+            feedback_record = build_preview_pr_feedback_record(
+                control_plane_root=resolved_control_plane_root,
+                product=feedback_request.product,
+                context=effective_context,
+                source=feedback_request.source,
+                requested_at=utc_now_timestamp(),
+                repository=feedback_request.repository,
+                anchor_repo=feedback_request.anchor_repo,
+                anchor_pr_number=feedback_request.anchor_pr_number,
+                anchor_pr_url=feedback_request.anchor_pr_url,
+                status=feedback_request.status,
+                marker=feedback_request.marker,
+                preview_url=feedback_request.preview_url,
+                immutable_image_reference=feedback_request.immutable_image_reference,
+                refresh_image_reference=feedback_request.refresh_image_reference,
+                revision=feedback_request.revision,
+                run_url=feedback_request.run_url,
+                failure_summary=feedback_request.failure_summary,
+                every_code_record_store=every_code_record_store,
+                preview_record_store=(
+                    cast(PreviewPrFeedbackPreviewReadStore, record_store)
+                    if callable(getattr(record_store, "list_preview_records", None))
+                    else None
+                ),
+            )
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_url_unavailable",
+                message=str(error),
+            ) from error
         feedback_store.write_preview_pr_feedback_record(feedback_record)
         notification_attempts = deliver_preview_pr_feedback_notifications(
             record_store=record_store,
