@@ -1,0 +1,158 @@
+---
+name: Reusable Product Driver Testing Verification
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: Testing context. Defaults to the product key.
+        required: false
+        default: ""
+        type: string
+      instance:
+        description: Testing lane instance.
+        required: false
+        default: testing
+        type: string
+      deployment_record_id:
+        description: Launchplane deployment record ID being verified.
+        required: true
+        type: string
+      migration_status:
+        description: Product migration verification status.
+        required: false
+        default: skipped
+        type: string
+      verification_status:
+        description: Product smoke verification status.
+        required: false
+        default: skipped
+        type: string
+      owner_routes_status:
+        description: Product owner-route verification status.
+        required: false
+        default: skipped
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "300000"
+        type: string
+      launchplane_url:
+        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      deployment_health_status:
+        description: Deployment health status after product-owned verification.
+        value: ${{ jobs.testing-verification.outputs.deployment_health_status }}
+      post_deploy_status:
+        description: Post-deploy status after product-owned verification.
+        value: ${{ jobs.testing-verification.outputs.post_deploy_status }}
+      error_message:
+        description: Testing verification error message, when present.
+        value: ${{ jobs.testing-verification.outputs.error_message }}
+      trace_id:
+        description: Launchplane trace id for request debugging.
+        value: ${{ jobs.testing-verification.outputs.trace_id }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  testing-verification:
+    outputs:
+      deployment_health_status: ${{ steps.lp.outputs.deployment_health_status }}
+      post_deploy_status: ${{ steps.lp.outputs.post_deploy_status }}
+      error_message: ${{ steps.lp.outputs.error_message }}
+      trace_id: ${{ steps.lp.outputs.trace_id }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane testing verification request
+        id: request
+        env:
+          CONTEXT: ${{ inputs.context }}
+          DEPLOYMENT_RECORD_ID: ${{ inputs.deployment_record_id }}
+          INSTANCE: ${{ inputs.instance }}
+          MIGRATION_STATUS: ${{ inputs.migration_status }}
+          OWNER_ROUTES_STATUS: ${{ inputs.owner_routes_status }}
+          PRODUCT: ${{ inputs.product }}
+          VERIFICATION_STATUS: ${{ inputs.verification_status }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "$CONTEXT" ]; then
+            CONTEXT="$PRODUCT"
+          fi
+          if [ -z "$INSTANCE" ]; then
+            INSTANCE="testing"
+          fi
+          for required in PRODUCT CONTEXT INSTANCE DEPLOYMENT_RECORD_ID MIGRATION_STATUS VERIFICATION_STATUS OWNER_ROUTES_STATUS; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          {
+            echo "context=$CONTEXT"
+            printf '%s=%s:%s:%s:%s:%s:%s:%s:%s\n' \
+              idempotency_key \
+              product-driver-testing-verification \
+              "$PRODUCT" \
+              "$CONTEXT" \
+              "$INSTANCE" \
+              "$DEPLOYMENT_RECORD_ID" \
+              "$MIGRATION_STATUS" \
+              "$VERIFICATION_STATUS" \
+              "$OWNER_ROUTES_STATUS"
+            echo "instance=$INSTANCE"
+            echo "product=$PRODUCT"
+            echo "route_path=/v1/drivers/verireel/testing-verification"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane testing verification
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.request.outputs.route_path }}
+          payload: |-
+            {
+              "schema_version": 1,
+              "verification": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            verification.context=${{ steps.request.outputs.context }}
+            verification.instance=${{ steps.request.outputs.instance }}
+            verification.deployment_record_id=${{ inputs.deployment_record_id }}
+            verification.migration_status=${{ inputs.migration_status }}
+            verification.verification_status=${{ inputs.verification_status }}
+            verification.owner_routes_status=${{ inputs.owner_routes_status }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.deployment_health_status,result.post_deploy_status
+          output-paths: >-
+            trace_id=trace_id,
+            deployment_record_id=records.deployment_record_id,
+            deployment_health_status=result.deployment_health_status,
+            post_deploy_status=result.post_deploy_status,
+            error_message=result.error_message

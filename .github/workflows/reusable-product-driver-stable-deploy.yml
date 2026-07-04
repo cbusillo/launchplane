@@ -1,0 +1,177 @@
+---
+name: Reusable Product Driver Stable Deploy
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: Stable context. Defaults to the product key.
+        required: false
+        default: ""
+        type: string
+      instance:
+        description: Stable lane instance to deploy.
+        required: true
+        type: string
+      artifact_id:
+        description: Immutable image or Launchplane-resolvable artifact identity.
+        required: true
+        type: string
+      source_git_ref:
+        description: Source git ref attached to deployment evidence.
+        required: true
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "1800000"
+        type: string
+      launchplane_url:
+        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      deployment_record_id:
+        description: Launchplane deployment record ID.
+        value: ${{ jobs.stable-deploy.outputs.deployment_record_id }}
+      deploy_status:
+        description: Product driver deploy status.
+        value: ${{ jobs.stable-deploy.outputs.deploy_status }}
+      deploy_started_at:
+        description: Deployment start timestamp.
+        value: ${{ jobs.stable-deploy.outputs.deploy_started_at }}
+      deploy_finished_at:
+        description: Deployment finish timestamp.
+        value: ${{ jobs.stable-deploy.outputs.deploy_finished_at }}
+      rollout_status:
+        description: Product driver rollout status, when returned.
+        value: ${{ jobs.stable-deploy.outputs.rollout_status }}
+      target_name:
+        description: Resolved target name.
+        value: ${{ jobs.stable-deploy.outputs.target_name }}
+      target_category:
+        description: Resolved target category.
+        value: ${{ jobs.stable-deploy.outputs.target_category }}
+      target_id:
+        description: Resolved target id.
+        value: ${{ jobs.stable-deploy.outputs.target_id }}
+      rollout_base_url:
+        description: Rollout base URL, when returned.
+        value: ${{ jobs.stable-deploy.outputs.rollout_base_url }}
+      rollout_health_urls_json:
+        description: JSON array of rollout health URLs, when returned.
+        value: ${{ jobs.stable-deploy.outputs.rollout_health_urls_json }}
+      error_message:
+        description: Driver error message, when present.
+        value: ${{ jobs.stable-deploy.outputs.error_message }}
+      trace_id:
+        description: Launchplane trace id for request debugging.
+        value: ${{ jobs.stable-deploy.outputs.trace_id }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  stable-deploy:
+    outputs:
+      deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
+      deploy_status: ${{ steps.lp.outputs.deploy_status }}
+      deploy_started_at: ${{ steps.lp.outputs.deploy_started_at }}
+      deploy_finished_at: ${{ steps.lp.outputs.deploy_finished_at }}
+      rollout_status: ${{ steps.lp.outputs.rollout_status }}
+      target_name: ${{ steps.lp.outputs.target_name }}
+      target_category: ${{ steps.lp.outputs.target_category }}
+      target_id: ${{ steps.lp.outputs.target_id }}
+      rollout_base_url: ${{ steps.lp.outputs.rollout_base_url }}
+      rollout_health_urls_json: ${{ steps.lp.outputs.rollout_health_urls_json }}
+      error_message: ${{ steps.lp.outputs.error_message }}
+      trace_id: ${{ steps.lp.outputs.trace_id }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane stable deploy request
+        id: request
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          CONTEXT: ${{ inputs.context }}
+          INSTANCE: ${{ inputs.instance }}
+          PRODUCT: ${{ inputs.product }}
+          SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "$CONTEXT" ]; then
+            CONTEXT="$PRODUCT"
+          fi
+          for required in PRODUCT CONTEXT INSTANCE ARTIFACT_ID SOURCE_GIT_REF; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "context=$CONTEXT"
+            printf '%s=%s:%s:%s:%s:%s:%s\n' \
+              idempotency_key \
+              product-driver-stable-deploy \
+              "$PRODUCT" \
+              "$CONTEXT" \
+              "$INSTANCE" \
+              "$ARTIFACT_ID" \
+              "$run_scope"
+            echo "instance=$INSTANCE"
+            echo "product=$PRODUCT"
+            echo "route_path=/v1/drivers/verireel/$INSTANCE-deploy"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane stable deploy
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.request.outputs.route_path }}
+          payload: |-
+            {
+              "schema_version": 1,
+              "deploy": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            deploy.context=${{ steps.request.outputs.context }}
+            deploy.instance=${{ steps.request.outputs.instance }}
+            deploy.artifact_id=${{ inputs.artifact_id }}
+            deploy.source_git_ref=${{ inputs.source_git_ref }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.deploy_status,result.rollout_status
+          output-paths: >-
+            trace_id=trace_id,
+            deployment_record_id=records.deployment_record_id,
+            deploy_status=result.deploy_status,
+            deploy_started_at=result.deploy_started_at,
+            deploy_finished_at=result.deploy_finished_at,
+            target_name=result.target_name,
+            target_category=result.target_category,
+            target_id=result.target_id,
+            rollout_status=result.rollout_status,
+            rollout_base_url=result.rollout_base_url,
+            rollout_health_urls_json=result.rollout_health_urls,
+            error_message=result.error_message

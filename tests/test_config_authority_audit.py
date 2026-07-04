@@ -2165,6 +2165,56 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "thin_connector_input",
                 )
 
+    def test_product_driver_reusable_workflow_mechanics_are_path_scoped(
+        self,
+    ) -> None:
+        path = ".github/workflows/reusable-product-driver-prod-promotion.yml"
+        path_scoped_cases = (
+            ("timeout-ms", "${{ inputs['timeout-ms'] }}"),
+            ("FROM_INSTANCE", "${{ inputs.from_instance }}"),
+            ("TO_INSTANCE", "${{ inputs.to_instance }}"),
+            ("inputs.from_instance.default", "testing"),
+            ("inputs.to_instance.default", "prod"),
+        )
+        for key, value in path_scoped_cases:
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/generic-workflow.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+        globally_thin_cases = (
+            ("route-path", "${{ steps.request.outputs.route_path }}"),
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("payload-fields.promotion.artifact_id", "${{ inputs.artifact_id }}"),
+            ("payload-fields.promotion.to_instance", "${{ steps.request.outputs.to_instance }}"),
+        )
+        for key, value in globally_thin_cases:
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("idempotency-key", "${{ inputs.idempotency_key }}"),
+            ("payload-fields.promotion.artifact_id", "ghcr.io/example/app:latest"),
+            ("payload-fields.promotion.provider_target", "${{ inputs.provider_target }}"),
+            ("payload-fields.promotion.artifact_id", "${{ github.token }}"),
+            ("TO_INSTANCE", "${{ github.token }}"),
+            ("inputs.to_instance.default", "production"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
+
     def test_ingress_workflow_jq_forwards_and_route_options_are_narrow(self) -> None:
         for key, value in (
             ("domain_names", "[$domain],"),

@@ -399,6 +399,72 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
         )
     },
 }
+PRODUCT_DRIVER_REUSABLE_WORKFLOW_PATH_PREFIX = ".github/workflows/reusable-product-driver-"
+PRODUCT_DRIVER_REUSABLE_WORKFLOW_PATH_SUFFIX = ".yml"
+PRODUCT_DRIVER_REUSABLE_INPUT_DEFAULT_VALUES = frozenset(
+    (
+        "",
+        "5",
+        "300",
+        "30000",
+        "300000",
+        "1800000",
+        "2400000",
+        "2700000",
+        "prod",
+        "skipped",
+        "testing",
+    )
+)
+PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS = frozenset(
+    (
+        "backup_gate.backup_record_id",
+        "backup_gate.context",
+        "backup_gate.instance",
+        "deploy.artifact_id",
+        "deploy.context",
+        "deploy.instance",
+        "deploy.source_git_ref",
+        "environment.context",
+        "environment.instance",
+        "maintenance.action",
+        "maintenance.application_name",
+        "maintenance.context",
+        "maintenance.email",
+        "maintenance.instance",
+        "maintenance.intent",
+        "maintenance.preview_slug",
+        "maintenance.timeout_seconds",
+        "product",
+        "promotion.artifact_id",
+        "promotion.backup_record_id",
+        "promotion.context",
+        "promotion.expected_build_revision",
+        "promotion.expected_build_tag",
+        "promotion.from_instance",
+        "promotion.promotion_record_id",
+        "promotion.source_git_ref",
+        "promotion.source_health_status",
+        "promotion.to_instance",
+        "rollback.backup_record_id",
+        "rollback.context",
+        "rollback.expected_build_revision",
+        "rollback.expected_build_tag",
+        "rollback.instance",
+        "rollback.promotion_record_id",
+        "rollback.snapshot_name",
+        "verification.context",
+        "verification.deployment_record_id",
+        "verification.expected_build_revision",
+        "verification.expected_build_tag",
+        "verification.instance",
+        "verification.interval_seconds",
+        "verification.migration_status",
+        "verification.owner_routes_status",
+        "verification.timeout_seconds",
+        "verification.verification_status",
+    )
+)
 WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
         "DEFAULT_GITHUB_TOKEN": frozenset(("${{ secrets.GITHUB_TOKEN }}",)),
@@ -2044,6 +2110,7 @@ def _allow_reason(
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized.endswith(".py") and (
         key_text.startswith("ALLOW_REASON_")
+        or key_text.startswith("PRODUCT_DRIVER_REUSABLE_")
         or key_text.endswith(("FIELDS", "SCHEMA", "MODEL_CONFIG"))
         or "PATH_GLOBS" in key_text
     ):
@@ -2104,6 +2171,20 @@ def _allow_reason(
         value=value,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(
+        ".github/workflows/"
+    ) and _is_product_driver_reusable_workflow_mechanic(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if (
+        normalized.startswith(PRODUCT_DRIVER_REUSABLE_WORKFLOW_PATH_PREFIX)
+        and normalized.endswith(PRODUCT_DRIVER_REUSABLE_WORKFLOW_PATH_SUFFIX)
+        and key.startswith("payload-fields.")
+    ):
+        return ""
     if normalized.startswith(".github/workflows/") and _is_workflow_thin_connector_key_value(
         path=normalized,
         key=key,
@@ -2439,6 +2520,13 @@ def _is_github_context_or_step_output_reference(value_text: str) -> bool:
     return bool(GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
 
 
+def _is_github_step_output_reference(value_text: str) -> bool:
+    match = GITHUB_EXPRESSION_PATTERN.match(value_text)
+    if match is None:
+        return False
+    return bool(GITHUB_STEP_OUTPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
+
+
 def _is_image_deploy_idempotency_key(value_text: str) -> bool:
     if "${{ secrets." in value_text:
         return False
@@ -2457,6 +2545,83 @@ def _is_workflow_input_mechanic_default(*, path: str, key: str, value: object) -
         return False
     value_text = _string_value(value).strip()
     return value_text in allowed_values
+
+
+def _is_product_driver_reusable_workflow_mechanic(*, path: str, key: str, value: object) -> bool:
+    if not (
+        path.startswith(PRODUCT_DRIVER_REUSABLE_WORKFLOW_PATH_PREFIX)
+        and path.endswith(PRODUCT_DRIVER_REUSABLE_WORKFLOW_PATH_SUFFIX)
+    ):
+        return False
+    value_text = _string_value(value).strip().rstrip(",")
+    key_text = _semantic_full_key_text(key)
+    if key == "launchplane-url":
+        return value_text == "${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}"
+    if key == "idempotency-key":
+        return value_text == "${{ steps.request.outputs.idempotency_key }}"
+    if key == "route-path":
+        return value_text == "${{ steps.request.outputs.route_path }}"
+    if _is_workflow_input_default_key(key):
+        return value_text in PRODUCT_DRIVER_REUSABLE_INPUT_DEFAULT_VALUES
+    if key.startswith("payload-fields."):
+        if key.removeprefix("payload-fields.") not in PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS:
+            return False
+        return (
+            _is_github_step_output_reference(value_text)
+            or _is_github_direct_input_reference(value)
+            or _is_github_bracket_input_reference(value_text)
+        )
+    if key_text in {
+        "APPLICATION_ID",
+        "APPLICATION_NAME",
+        "BACKUP_GATE_RECORD_ID",
+        "BACKUP_RECORD_ID",
+        "BACKUP_STATUS",
+        "BASE_URL",
+        "CONTEXT",
+        "DEPLOYMENT_RECORD_ID",
+        "DEPLOYMENT_HEALTH_STATUS",
+        "FROM_INSTANCE",
+        "HEALTHCHECK_PATH",
+        "HEALTH_STATUS",
+        "INSTANCE",
+        "MAINTENANCE_STATUS",
+        "MIGRATION_STATUS",
+        "OWNER_ROUTES_STATUS",
+        "POST_DEPLOY_STATUS",
+        "PRIMARY_BASE_URL",
+        "PROMOTION_RECORD_ID",
+        "ROLLBACK_HEALTH_STATUS",
+        "ROLLBACK_STATUS",
+        "ROLLOUT_BASE_URL",
+        "ROLLOUT_STATUS",
+        "SCHEDULE_NAME",
+        "SNAPSHOT_NAME",
+        "STATUS",
+        "TARGET_CATEGORY",
+        "TARGET_ID",
+        "TARGET_NAME",
+        "TARGET_TYPE",
+        "TIMEOUT_MS",
+        "POLL_INTERVAL_MS",
+        "POLL_TIMEOUT_MS",
+        "TO_INSTANCE",
+        "VERIFICATION_STATUS",
+    }:
+        return (
+            _is_github_step_output_reference(value_text)
+            or _is_github_direct_input_reference(value)
+            or _is_github_bracket_input_reference(value_text)
+        )
+    return False
+
+
+def _is_github_bracket_input_reference(value_text: str) -> bool:
+    match = GITHUB_EXPRESSION_PATTERN.match(value_text)
+    if match is None:
+        return False
+    body = match.group("body").strip()
+    return bool(re.fullmatch(r"inputs\[['\"][A-Za-z0-9_.-]+['\"]\]", body))
 
 
 def _is_launchplane_tool_checkout_reference(

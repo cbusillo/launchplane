@@ -1,0 +1,164 @@
+---
+name: Reusable Product Driver Runtime Verification
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: Stable context. Defaults to the product key.
+        required: false
+        default: ""
+        type: string
+      instance:
+        description: Stable lane instance to verify.
+        required: true
+        type: string
+      expected_build_revision:
+        description: Expected runtime build revision, when known.
+        required: false
+        default: ""
+        type: string
+      expected_build_tag:
+        description: Expected runtime build tag, when known.
+        required: false
+        default: ""
+        type: string
+      timeout-seconds:
+        description: Runtime verification timeout in seconds.
+        required: false
+        default: "300"
+        type: string
+      interval-seconds:
+        description: Runtime verification poll interval in seconds.
+        required: false
+        default: "5"
+        type: string
+      launchplane_url:
+        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      status:
+        description: Runtime verification status.
+        value: ${{ jobs.runtime-verification.outputs.status }}
+      base_url:
+        description: Verified runtime base URL.
+        value: ${{ jobs.runtime-verification.outputs.base_url }}
+      health_urls_json:
+        description: JSON array of checked health URLs.
+        value: ${{ jobs.runtime-verification.outputs.health_urls_json }}
+      error_message:
+        description: Runtime verification error message, when present.
+        value: ${{ jobs.runtime-verification.outputs.error_message }}
+      trace_id:
+        description: Launchplane trace id for request debugging.
+        value: ${{ jobs.runtime-verification.outputs.trace_id }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  runtime-verification:
+    outputs:
+      status: ${{ steps.lp.outputs.status }}
+      base_url: ${{ steps.lp.outputs.base_url }}
+      health_urls_json: ${{ steps.lp.outputs.health_urls_json }}
+      error_message: ${{ steps.lp.outputs.error_message }}
+      trace_id: ${{ steps.lp.outputs.trace_id }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane runtime verification request
+        id: request
+        env:
+          CONTEXT: ${{ inputs.context }}
+          EXPECTED_BUILD_REVISION: ${{ inputs.expected_build_revision }}
+          EXPECTED_BUILD_TAG: ${{ inputs.expected_build_tag }}
+          INSTANCE: ${{ inputs.instance }}
+          INTERVAL_SECONDS: ${{ inputs['interval-seconds'] }}
+          PRODUCT: ${{ inputs.product }}
+          TIMEOUT_SECONDS: ${{ inputs['timeout-seconds'] }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "$CONTEXT" ]; then
+            CONTEXT="$PRODUCT"
+          fi
+          for required in PRODUCT CONTEXT INSTANCE TIMEOUT_SECONDS INTERVAL_SECONDS; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          case "$TIMEOUT_SECONDS" in
+            ''|*[!0-9]*) echo "timeout-seconds must be a positive integer." >&2; exit 1 ;;
+          esac
+          case "$INTERVAL_SECONDS" in
+            ''|*[!0-9]*) echo "interval-seconds must be a positive integer." >&2; exit 1 ;;
+          esac
+          if [ "$TIMEOUT_SECONDS" -lt 1 ] || [ "$INTERVAL_SECONDS" -lt 1 ]; then
+            echo "timeout-seconds and interval-seconds must be positive integers." >&2
+            exit 1
+          fi
+          timeout_ms=$((TIMEOUT_SECONDS * 1000 + 30000))
+          {
+            echo "context=$CONTEXT"
+            printf '%s=%s:%s:%s:%s:%s:%s\n' \
+              idempotency_key \
+              product-driver-runtime-verification \
+              "$PRODUCT" \
+              "$CONTEXT" \
+              "$INSTANCE" \
+              "$EXPECTED_BUILD_REVISION" \
+              "$EXPECTED_BUILD_TAG"
+            echo "instance=$INSTANCE"
+            echo "product=$PRODUCT"
+            echo "route_path=/v1/drivers/verireel/runtime-verification"
+            echo "timeout_ms=$timeout_ms"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane runtime verification
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.request.outputs.route_path }}
+          payload: |-
+            {
+              "schema_version": 1,
+              "verification": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            verification.context=${{ steps.request.outputs.context }}
+            verification.instance=${{ steps.request.outputs.instance }}
+            verification.expected_build_revision=${{ inputs.expected_build_revision }}
+            verification.expected_build_tag=${{ inputs.expected_build_tag }}
+            verification.timeout_seconds=${{ inputs['timeout-seconds'] }}
+            verification.interval_seconds=${{ inputs['interval-seconds'] }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ steps.request.outputs.timeout_ms }}
+          fail-result-paths: result.status
+          output-paths: >-
+            trace_id=trace_id,
+            status=result.status,
+            base_url=result.base_url,
+            health_urls_json=result.health_urls,
+            error_message=result.error_message
