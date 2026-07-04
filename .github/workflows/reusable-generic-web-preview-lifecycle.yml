@@ -16,7 +16,8 @@ name: Reusable Generic Web Preview Lifecycle
         type: string
       context:
         description: >-
-          Launchplane preview context. Defaults to the resolved product key.
+          Optional preview context compatibility override. Omit to let Launchplane
+          derive the preview context from the product profile.
         required: false
         default: ""
         type: string
@@ -129,10 +130,7 @@ jobs:
           if [ -z "$PRODUCT" ]; then
             PRODUCT="${GITHUB_REPOSITORY#*/}"
           fi
-          if [ -z "$CONTEXT" ]; then
-            CONTEXT="$PRODUCT"
-          fi
-          for required in PRODUCT CONTEXT ANCHOR_PR_NUMBER OPERATION; do
+          for required in PRODUCT ANCHOR_PR_NUMBER OPERATION; do
             if [ -z "${!required}" ]; then
               echo "${required} is required." >&2
               exit 1

@@ -245,6 +245,8 @@ class PreviewWorkflowContractTests(unittest.TestCase):
 
         self.assertNotIn("preview_slug", workflow_inputs)
         self.assertNotIn("preview_url", workflow_inputs)
+        self.assertNotIn('CONTEXT="$PRODUCT"', workflow)
+        self.assertNotIn("PRODUCT CONTEXT ANCHOR_PR_NUMBER", workflow)
         self.assertNotIn("refresh.preview_slug=", workflow)
         self.assertNotIn("destroy.preview_slug=", workflow)
 
