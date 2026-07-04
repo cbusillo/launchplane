@@ -319,6 +319,15 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "inputs.timeout-ms.default": frozenset(("2700000",)),
     },
+    ".github/workflows/reusable-generic-web-preview-lifecycle.yml": {
+        "inputs.feedback_status.default": frozenset(("unsupported",)),
+        "inputs.timeout-ms.default": frozenset(("1800000",)),
+        "inputs.timeout-seconds.default": frozenset(("300",)),
+    },
+    ".github/workflows/reusable-generic-web-preview-verification.yml": {
+        "inputs.timeout-ms.default": frozenset(("300000",)),
+        "inputs.timeout-seconds.default": frozenset(("null",)),
+    },
     ".github/workflows/runner-host-hygiene.yml": {
         "inputs.action.default": frozenset(("prune_docker_cache",)),
         "inputs.minimum_free_disk_bytes.default": frozenset(("0",)),
@@ -378,6 +387,16 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
         "launchplane-url": frozenset(
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         ),
+    },
+    ".github/workflows/reusable-generic-web-preview-lifecycle.yml": {
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
+    },
+    ".github/workflows/reusable-generic-web-preview-verification.yml": {
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
     },
 }
 WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
@@ -509,6 +528,16 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
         "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
     },
+    ".github/workflows/reusable-generic-web-preview-lifecycle.yml": {
+        "ANCHOR_PR_NUMBER": frozenset(("${{ inputs.anchor_pr_number }}",)),
+        "CONTEXT": frozenset(("${{ inputs.context }}",)),
+        "DESTROY_REASON": frozenset(("${{ inputs.destroy_reason }}",)),
+        "GITHUB_EVENT_NAME": frozenset(("${{ github.event_name }}",)),
+        "IMAGE_REFERENCE": frozenset(("${{ inputs.image_reference }}",)),
+        "OPERATION": frozenset(("${{ inputs.operation }}",)),
+        "PRODUCT": frozenset(("${{ inputs.product }}",)),
+        "TIMEOUT_SECONDS": frozenset(("${{ inputs['timeout-seconds'] }}",)),
+    },
     ".github/workflows/odoo-config-parameter-override.yml": {
         "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
         "KEY_NAME": frozenset(("${{ inputs.key }}",)),
@@ -636,6 +665,70 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
+    },
+    ".github/workflows/reusable-generic-web-preview-lifecycle.yml": {
+        "anchor_pr_number": frozenset(
+            (
+                "${{ needs.resolve.outputs.anchor_pr_number }}",
+                "${{ steps.request.outputs.anchor_pr_number }}",
+            )
+        ),
+        "anchor_repo": frozenset(("${{ github.repository }}",)),
+        "context": frozenset(
+            (
+                "${{ needs.resolve.outputs.context }}",
+                "${{ steps.request.outputs.context }}",
+            )
+        ),
+        "destroy.anchor_pr_number": frozenset(("${{ needs.resolve.outputs.anchor_pr_number }}",)),
+        "destroy.destroy_reason": frozenset(("${{ needs.resolve.outputs.destroy_reason }}",)),
+        "destroy.product": frozenset(("${{ needs.resolve.outputs.product }}",)),
+        "destroy.timeout_seconds": frozenset(("${{ inputs['timeout-seconds'] }}",)),
+        "destroy_reason": frozenset(("${{ steps.request.outputs.destroy_reason }}",)),
+        "idempotency-key": frozenset(("${{ needs.resolve.outputs.idempotency_key }}",)),
+        "idempotency_key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "preview_slug": frozenset(("${{ steps.lp.outputs.preview_slug }}",)),
+        "preview_url": frozenset(("${{ steps.lp.outputs.preview_url }}",)),
+        "product": frozenset(
+            (
+                "${{ needs.resolve.outputs.product }}",
+                "${{ steps.request.outputs.product }}",
+            )
+        ),
+        "refresh.anchor_pr_number": frozenset(("${{ needs.resolve.outputs.anchor_pr_number }}",)),
+        "refresh.source": frozenset(("${{ needs.resolve.outputs.run_url }}",)),
+        "refresh.product": frozenset(("${{ needs.resolve.outputs.product }}",)),
+        "refresh.timeout_seconds": frozenset(("${{ inputs['timeout-seconds'] }}",)),
+        "repository": frozenset(("${{ github.repository }}",)),
+        "run_url": frozenset(
+            (
+                "${{ needs.resolve.outputs.run_url }}",
+                "${{ steps.request.outputs.run_url }}",
+            )
+        ),
+        "source": frozenset(("${{ needs.resolve.outputs.run_url }}",)),
+    },
+    ".github/workflows/reusable-generic-web-preview-verification.yml": {
+        "anchor_pr_number": frozenset(("${{ steps.request.outputs.anchor_pr_number }}",)),
+        "anchor_repo": frozenset(("${{ steps.request.outputs.anchor_repo }}",)),
+        "context": frozenset(("${{ inputs.context }}",)),
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "idempotency_key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "product": frozenset(("${{ steps.request.outputs.product }}",)),
+        "verification.anchor_pr_number": frozenset(
+            ("${{ steps.request.outputs.anchor_pr_number }}",)
+        ),
+        "verification.anchor_repo": frozenset(("${{ steps.request.outputs.anchor_repo }}",)),
+        "verification.checked_urls": frozenset(("${{ inputs.checked_urls }}",)),
+        "verification.context": frozenset(("${{ inputs.context }}",)),
+        "verification.failure_summary": frozenset(("${{ inputs.failure_summary }}",)),
+        "verification.timeout_seconds": frozenset(("${{ inputs['timeout-seconds'] }}",)),
+        "verification.verification_status": frozenset(
+            ("${{ steps.request.outputs.verification_status }}",)
+        ),
+        "verification.verified_at": frozenset(("${{ steps.request.outputs.verified_at }}",)),
+        "verification_status": frozenset(("${{ steps.lp.outputs.verification_status }}",)),
+        "verified_at": frozenset(("${{ steps.request.outputs.verified_at }}",)),
     },
     ".github/workflows/public-ingress-monitor.yml": {
         "idempotency-key": frozenset(

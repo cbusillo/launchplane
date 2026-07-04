@@ -1,0 +1,344 @@
+---
+name: Reusable Generic Web Preview Lifecycle
+
+"on":
+  workflow_call:
+    inputs:
+      operation:
+        description: Preview lifecycle operation to execute.
+        required: true
+        type: string
+      product:
+        description: >-
+          Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: >-
+          Optional preview context compatibility override. Omit to let Launchplane
+          derive the preview context from the product profile.
+        required: false
+        default: ""
+        type: string
+      anchor_pr_number:
+        description: Pull request number that owns the preview.
+        required: true
+        type: string
+      anchor_pr_url:
+        description: Pull request URL attached to preview evidence.
+        required: false
+        default: ""
+        type: string
+      anchor_head_sha:
+        description: Pull request head SHA attached to refresh evidence.
+        required: false
+        default: ""
+        type: string
+      image_reference:
+        description: Immutable preview image or artifact reference.
+        required: false
+        default: ""
+        type: string
+      destroy_reason:
+        description: Explicit reason for destroy operations.
+        required: false
+        default: ""
+        type: string
+      feedback_status:
+        description: Status for unsupported preview feedback.
+        required: false
+        default: unsupported
+        type: string
+      timeout-seconds:
+        description: Driver operation timeout in seconds.
+        required: false
+        default: "300"
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "1800000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      operation:
+        description: Resolved preview operation.
+        value: ${{ jobs.resolve.outputs.operation }}
+      preview_slug:
+        description: Launchplane-derived preview slug when returned.
+        value: >-
+          ${{ jobs.refresh.outputs.preview_slug || jobs.destroy.outputs.preview_slug }}
+      preview_url:
+        description: Launchplane-derived preview URL when returned.
+        value: ${{ jobs.refresh.outputs.preview_url }}
+      refresh_status:
+        description: Generic-web preview refresh status.
+        value: ${{ jobs.refresh.outputs.refresh_status }}
+      destroy_status:
+        description: Generic-web preview destroy status.
+        value: ${{ jobs.destroy.outputs.destroy_status }}
+      feedback_status:
+        description: Preview feedback status.
+        value: ${{ jobs.unsupported-notice.outputs.feedback_status }}
+      error_message:
+        description: Launchplane driver or feedback error message, when present.
+        value: >-
+          ${{ jobs.refresh.outputs.error_message || jobs.destroy.outputs.error_message || jobs.unsupported-notice.outputs.error_message }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  resolve:
+    outputs:
+      anchor_pr_number: ${{ steps.request.outputs.anchor_pr_number }}
+      context: ${{ steps.request.outputs.context }}
+      destroy_reason: ${{ steps.request.outputs.destroy_reason }}
+      idempotency_key: ${{ steps.request.outputs.idempotency_key }}
+      operation: ${{ steps.request.outputs.operation }}
+      product: ${{ steps.request.outputs.product }}
+      run_url: ${{ steps.request.outputs.run_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane preview request
+        id: request
+        env:
+          ANCHOR_PR_NUMBER: ${{ inputs.anchor_pr_number }}
+          CONTEXT: ${{ inputs.context }}
+          DESTROY_REASON: ${{ inputs.destroy_reason }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          IMAGE_REFERENCE: ${{ inputs.image_reference }}
+          OPERATION: ${{ inputs.operation }}
+          PRODUCT: ${{ inputs.product }}
+          TIMEOUT_SECONDS: ${{ inputs['timeout-seconds'] }}
+        run: |
+          set -euo pipefail
+          OPERATION="$(printf '%s' "$OPERATION" | tr '[:upper:]' '[:lower:]')"
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          for required in PRODUCT ANCHOR_PR_NUMBER OPERATION; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          case "$OPERATION" in
+            refresh)
+              if [ "$GITHUB_EVENT_NAME" = "pull_request_target" ]; then
+                echo "refresh must not run from pull_request_target." >&2
+                exit 1
+              fi
+              if [ -z "$IMAGE_REFERENCE" ]; then
+                echo "IMAGE_REFERENCE is required for refresh." >&2
+                exit 1
+              fi
+              ;;
+            destroy)
+              if [ -z "$DESTROY_REASON" ]; then
+                DESTROY_REASON="manual_destroy_requested"
+              fi
+              ;;
+            unsupported_notice)
+              if [ "$GITHUB_EVENT_NAME" != "pull_request_target" ]; then
+                echo "unsupported_notice must run from pull_request_target." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "operation must be refresh, destroy, or unsupported_notice." >&2
+              exit 1
+              ;;
+          esac
+          case "$ANCHOR_PR_NUMBER" in
+            ''|*[!0-9]*)
+              echo "ANCHOR_PR_NUMBER must be a positive integer." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$ANCHOR_PR_NUMBER" -lt 1 ]; then
+            echo "ANCHOR_PR_NUMBER must be a positive integer." >&2
+            exit 1
+          fi
+          if [ -z "$TIMEOUT_SECONDS" ]; then
+            TIMEOUT_SECONDS="300"
+          fi
+          case "$TIMEOUT_SECONDS" in
+            ''|*[!0-9]*)
+              echo "timeout-seconds must be a positive integer." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$TIMEOUT_SECONDS" -lt 1 ]; then
+            echo "timeout-seconds must be a positive integer." >&2
+            exit 1
+          fi
+          run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "anchor_pr_number=$ANCHOR_PR_NUMBER"
+            echo "context=$CONTEXT"
+            echo "destroy_reason=$DESTROY_REASON"
+            printf '%s=%s:%s:%s:pr-%s:%s\n' \
+              idempotency_key \
+              generic-web-preview-lifecycle \
+              "$PRODUCT" \
+              "$OPERATION" \
+              "$ANCHOR_PR_NUMBER" \
+              "$run_scope"
+            echo "operation=$OPERATION"
+            echo "product=$PRODUCT"
+            echo "run_url=$run_url"
+          } >>"$GITHUB_OUTPUT"
+
+  refresh:
+    if: ${{ needs.resolve.outputs.operation == 'refresh' }}
+    needs: resolve
+    outputs:
+      error_message: ${{ steps.lp.outputs.error_message }}
+      preview_slug: ${{ steps.lp.outputs.preview_slug }}
+      preview_url: ${{ steps.lp.outputs.preview_url }}
+      refresh_status: ${{ steps.lp.outputs.refresh_status }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request Launchplane generic-web preview refresh
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/drivers/generic-web/preview-refresh
+          payload: |-
+            {
+              "schema_version": 1,
+              "refresh": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ needs.resolve.outputs.product }}
+            refresh.product=${{ needs.resolve.outputs.product }}
+            refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}
+            refresh.anchor_pr_url=${{ inputs.anchor_pr_url }}
+            refresh.anchor_head_sha=${{ inputs.anchor_head_sha }}
+            refresh.image_reference=${{ inputs.image_reference }}
+            refresh.source=${{ needs.resolve.outputs.run_url }}
+            refresh.timeout_seconds=${{ inputs['timeout-seconds'] }}
+          idempotency-key: >-
+            ${{ needs.resolve.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.refresh_status,result.readiness.health_status
+          output-paths: >-
+            trace_id=trace_id,
+            preview_slug=result.preview_slug,
+            preview_url=result.preview_url,
+            refresh_status=result.refresh_status,
+            error_message=result.error_message
+
+      - name: Report refresh result
+        run: |
+          echo "preview_slug=${{ steps.lp.outputs.preview_slug }}"
+          echo "preview_url=${{ steps.lp.outputs.preview_url }}"
+          echo "refresh_status=${{ steps.lp.outputs.refresh_status }}"
+
+  destroy:
+    if: ${{ needs.resolve.outputs.operation == 'destroy' }}
+    needs: resolve
+    outputs:
+      destroy_status: ${{ steps.lp.outputs.destroy_status }}
+      error_message: ${{ steps.lp.outputs.error_message }}
+      preview_slug: ${{ steps.lp.outputs.preview_slug }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request Launchplane generic-web preview destroy
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/drivers/generic-web/preview-destroy
+          payload: |-
+            {
+              "schema_version": 1,
+              "destroy": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ needs.resolve.outputs.product }}
+            destroy.product=${{ needs.resolve.outputs.product }}
+            destroy.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}
+            destroy.destroy_reason=${{ needs.resolve.outputs.destroy_reason }}
+            destroy.timeout_seconds=${{ inputs['timeout-seconds'] }}
+          idempotency-key: >-
+            ${{ needs.resolve.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.destroy_status
+          output-paths: >-
+            trace_id=trace_id,
+            preview_slug=result.preview_slug,
+            destroy_status=result.destroy_status,
+            error_message=result.error_message
+
+      - name: Report destroy result
+        run: |
+          echo "preview_slug=${{ steps.lp.outputs.preview_slug }}"
+          echo "destroy_status=${{ steps.lp.outputs.destroy_status }}"
+
+  unsupported-notice:
+    if: ${{ needs.resolve.outputs.operation == 'unsupported_notice' }}
+    needs: resolve
+    outputs:
+      error_message: ${{ steps.lp.outputs.error_message }}
+      feedback_status: ${{ steps.lp.outputs.feedback_status }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request Launchplane unsupported preview feedback
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/previews/pr-feedback
+          payload: |-
+            {
+              "schema_version": 1
+            }
+          payload-fields: |-
+            product=${{ needs.resolve.outputs.product }}
+            context=${{ needs.resolve.outputs.context }}
+            repository=${{ github.repository }}
+            anchor_repo=${{ github.repository }}
+            anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}
+            anchor_pr_url=${{ inputs.anchor_pr_url }}
+            status=${{ inputs.feedback_status }}
+            source=${{ needs.resolve.outputs.run_url }}
+            run_url=${{ needs.resolve.outputs.run_url }}
+          idempotency-key: >-
+            ${{ needs.resolve.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.delivery_status
+          output-paths: >-
+            trace_id=trace_id,
+            feedback_status=result.status,
+            error_message=result.error_message
+
+      - name: Report unsupported notice result
+        run: |
+          echo "feedback_status=${{ steps.lp.outputs.feedback_status }}"
