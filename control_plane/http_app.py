@@ -15766,6 +15766,7 @@ def create_launchplane_fastapi_app(
         )
         if replayed_response is not None:
             return replayed_response
+        verification_request.verification.context = profile.preview.context
         try:
             result = apply_generic_web_preview_verification_result(
                 control_plane_root=resolved_control_plane_root,

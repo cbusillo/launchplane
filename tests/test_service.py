@@ -11621,7 +11621,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "product": "sellyouroutboard",
                         "verification": {
                             "schema_version": 1,
-                            "context": "sellyouroutboard-testing",
                             "anchor_repo": "sellyouroutboard",
                             "anchor_pr_number": 42,
                             "verification_status": "pass",
@@ -11635,6 +11634,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["records"]["transition"], "ready")
         apply_records.assert_called_once()
         self.assertEqual(apply_records.call_args.kwargs["control_plane_root_path"], root)
+        self.assertEqual(
+            apply_records.call_args.kwargs["request"].context,
+            "sellyouroutboard-testing",
+        )
 
     def test_generic_web_preview_verification_route_rejects_unauthorized_context(
         self,
