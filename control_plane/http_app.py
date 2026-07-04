@@ -3199,8 +3199,6 @@ def allows_preview_pr_feedback_write(
 
 def resolve_preview_pr_feedback_context(*, record_store: object, product: str, context: str) -> str:
     requested_context = context.strip()
-    if requested_context:
-        return requested_context
     try:
         profile_store = require_product_profile_read_store(record_store)
         profile = profile_store.read_product_profile_record(product.strip())
@@ -3215,7 +3213,10 @@ def resolve_preview_pr_feedback_context(*, record_store: object, product: str, c
         ) from error
     if not profile.preview.enabled or not profile.preview.context.strip():
         raise ValueError("Product profile does not define an enabled preview context.")
-    return profile.preview.context.strip()
+    profile_context = profile.preview.context.strip()
+    if requested_context and requested_context != profile_context:
+        raise ValueError("Preview PR feedback context does not match product profile.")
+    return profile_context
 
 
 def read_generic_web_preview_profile(
