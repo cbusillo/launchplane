@@ -102,13 +102,17 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
         self.assertEqual(source_issue_call.kwargs["issue_number"], 82)
         self.assertIn("@Mbanks89", source_issue_call.kwargs["body"])
         self.assertIn("https://pr-88.sellyouroutboard.dev", source_issue_call.kwargs["body"])
-        self.assertIn("Confirm the preview resolves: Improve image previews", source_issue_call.kwargs["body"])
+        self.assertIn(
+            "Confirm the preview resolves: Improve image previews", source_issue_call.kwargs["body"]
+        )
         self.assertIn("/preview ok", source_issue_call.kwargs["body"])
         self.assertNotIn("/preview approve", source_issue_call.kwargs["body"])
         self.assertIn("author%3AMbanks89", source_issue_call.kwargs["body"])
         self.assertIn("assignee%3Acbusillo", source_issue_call.kwargs["body"])
         self.assertEqual(github_request.call_args_list[3].kwargs["method"], "POST")
-        self.assertEqual(github_request.call_args_list[3].kwargs["body"], {"labels": ["preview-ready"]})
+        self.assertEqual(
+            github_request.call_args_list[3].kwargs["body"], {"labels": ["preview-ready"]}
+        )
 
     def test_ready_feedback_updates_issue_comment_without_review_request(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
