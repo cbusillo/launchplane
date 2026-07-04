@@ -167,7 +167,7 @@ class GenericWebPreviewVerificationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    context: str
+    context: str = ""
     anchor_repo: str
     anchor_pr_number: int = Field(ge=1)
     verification_status: ReleaseStatus
@@ -190,8 +190,6 @@ class GenericWebPreviewVerificationRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "GenericWebPreviewVerificationRequest":
-        if not self.context.strip():
-            raise ValueError("Generic web preview verification requires context.")
         if not self.anchor_repo.strip():
             raise ValueError("Generic web preview verification requires anchor_repo.")
         if self.verification_status not in {"pass", "fail"}:

@@ -261,6 +261,29 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertIn("feedback_status=result.status", workflow)
         self.assertNotIn("result.feedback_status", workflow)
 
+    def test_reusable_generic_web_preview_verification_derives_context(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github/workflows/reusable-generic-web-preview-verification.yml"
+        ).read_text(encoding="utf-8")
+        workflow_inputs = _workflow_call_inputs(workflow)
+
+        self.assertIn("route-path: /v1/drivers/generic-web/preview-verification", workflow)
+        self.assertIn("verification.context=${{ inputs.context }}", workflow)
+        self.assertIn(
+            "verification.anchor_pr_number=${{ steps.request.outputs.anchor_pr_number }}",
+            workflow,
+        )
+        self.assertIn(
+            "verification.verification_status=${{ steps.request.outputs.verification_status }}",
+            workflow,
+        )
+        self.assertIn("verification_status=result.verification_status", workflow)
+        self.assertIn("generic-web-preview-verification", workflow)
+
+        self.assertNotIn("idempotency-key", workflow_inputs)
+        self.assertNotIn("payload", workflow_inputs)
+        self.assertNotIn("route-path", workflow_inputs)
+
     def test_generic_web_preview_requests_accept_anchor_pr_number_without_slug(
         self,
     ) -> None:

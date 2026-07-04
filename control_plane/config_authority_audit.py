@@ -324,6 +324,10 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
         "inputs.timeout-ms.default": frozenset(("1800000",)),
         "inputs.timeout-seconds.default": frozenset(("300",)),
     },
+    ".github/workflows/reusable-generic-web-preview-verification.yml": {
+        "inputs.timeout-ms.default": frozenset(("300000",)),
+        "inputs.timeout-seconds.default": frozenset(("null",)),
+    },
     ".github/workflows/runner-host-hygiene.yml": {
         "inputs.action.default": frozenset(("prune_docker_cache",)),
         "inputs.minimum_free_disk_bytes.default": frozenset(("0",)),
@@ -385,6 +389,11 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
         ),
     },
     ".github/workflows/reusable-generic-web-preview-lifecycle.yml": {
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
+    },
+    ".github/workflows/reusable-generic-web-preview-verification.yml": {
         "launchplane-url": frozenset(
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         )
@@ -698,6 +707,28 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
             )
         ),
         "source": frozenset(("${{ needs.resolve.outputs.run_url }}",)),
+    },
+    ".github/workflows/reusable-generic-web-preview-verification.yml": {
+        "anchor_pr_number": frozenset(("${{ steps.request.outputs.anchor_pr_number }}",)),
+        "anchor_repo": frozenset(("${{ steps.request.outputs.anchor_repo }}",)),
+        "context": frozenset(("${{ inputs.context }}",)),
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "idempotency_key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "product": frozenset(("${{ steps.request.outputs.product }}",)),
+        "verification.anchor_pr_number": frozenset(
+            ("${{ steps.request.outputs.anchor_pr_number }}",)
+        ),
+        "verification.anchor_repo": frozenset(("${{ steps.request.outputs.anchor_repo }}",)),
+        "verification.checked_urls": frozenset(("${{ inputs.checked_urls }}",)),
+        "verification.context": frozenset(("${{ inputs.context }}",)),
+        "verification.failure_summary": frozenset(("${{ inputs.failure_summary }}",)),
+        "verification.timeout_seconds": frozenset(("${{ inputs['timeout-seconds'] }}",)),
+        "verification.verification_status": frozenset(
+            ("${{ steps.request.outputs.verification_status }}",)
+        ),
+        "verification.verified_at": frozenset(("${{ steps.request.outputs.verified_at }}",)),
+        "verification_status": frozenset(("${{ steps.lp.outputs.verification_status }}",)),
+        "verified_at": frozenset(("${{ steps.request.outputs.verified_at }}",)),
     },
     ".github/workflows/public-ingress-monitor.yml": {
         "idempotency-key": frozenset(

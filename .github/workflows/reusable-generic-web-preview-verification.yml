@@ -1,0 +1,186 @@
+---
+name: Reusable Generic Web Preview Verification
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: >-
+          Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: >-
+          Optional preview context compatibility override. Omit to let Launchplane
+          derive the preview context from the product profile.
+        required: false
+        default: ""
+        type: string
+      anchor_repo:
+        description: >-
+          Repository name used by Launchplane preview records. Defaults to the
+          caller repository name.
+        required: false
+        default: ""
+        type: string
+      anchor_pr_number:
+        description: Pull request number that owns the preview.
+        required: true
+        type: string
+      verification_status:
+        description: Product smoke verification status.
+        required: true
+        type: string
+      verified_at:
+        description: RFC3339 timestamp for the verification result.
+        required: true
+        type: string
+      checked_urls:
+        description: Optional JSON array of URLs checked by product smoke.
+        required: false
+        default: "[]"
+        type: string
+      timeout-seconds:
+        description: Timeout used for checked URLs, when supplied.
+        required: false
+        default: "null"
+        type: string
+      failure_summary:
+        description: Short failure summary for failed verification states.
+        required: false
+        default: ""
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "300000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      error_message:
+        description: Launchplane verification error message, when present.
+        value: ${{ jobs.verification.outputs.error_message }}
+      verification_status:
+        description: Generic-web preview verification status.
+        value: ${{ jobs.verification.outputs.verification_status }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verification:
+    outputs:
+      error_message: ${{ steps.lp.outputs.error_message }}
+      verification_status: ${{ steps.lp.outputs.verification_status }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane preview verification request
+        id: request
+        env:
+          ANCHOR_PR_NUMBER: ${{ inputs.anchor_pr_number }}
+          ANCHOR_REPO: ${{ inputs.anchor_repo }}
+          PRODUCT: ${{ inputs.product }}
+          VERIFICATION_STATUS: ${{ inputs.verification_status }}
+          VERIFIED_AT: ${{ inputs.verified_at }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "$ANCHOR_REPO" ]; then
+            ANCHOR_REPO="${GITHUB_REPOSITORY#*/}"
+          fi
+          VERIFICATION_STATUS="$(printf '%s' "$VERIFICATION_STATUS" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
+          case "$VERIFICATION_STATUS" in
+            success|passed|pass)
+              VERIFICATION_STATUS=pass
+              ;;
+            failure|failed|fail|cancelled|canceled|timed_out)
+              VERIFICATION_STATUS=fail
+              ;;
+            *)
+              echo "verification_status must be success/pass or failure/fail." >&2
+              exit 1
+              ;;
+          esac
+          for required in PRODUCT ANCHOR_REPO ANCHOR_PR_NUMBER VERIFIED_AT; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          case "$ANCHOR_PR_NUMBER" in
+            ''|*[!0-9]*)
+              echo "ANCHOR_PR_NUMBER must be a positive integer." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$ANCHOR_PR_NUMBER" -lt 1 ]; then
+            echo "ANCHOR_PR_NUMBER must be a positive integer." >&2
+            exit 1
+          fi
+          run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "anchor_pr_number=$ANCHOR_PR_NUMBER"
+            echo "anchor_repo=$ANCHOR_REPO"
+            printf '%s=%s:%s:pr-%s:%s:%s\n' \
+              idempotency_key \
+              generic-web-preview-verification \
+              "$PRODUCT" \
+              "$ANCHOR_PR_NUMBER" \
+              "$VERIFICATION_STATUS" \
+              "$run_scope"
+            echo "product=$PRODUCT"
+            echo "verification_status=$VERIFICATION_STATUS"
+            echo "verified_at=$VERIFIED_AT"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane generic-web preview verification
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/drivers/generic-web/preview-verification
+          payload: |-
+            {
+              "schema_version": 1,
+              "verification": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            verification.context=${{ inputs.context }}
+            verification.anchor_repo=${{ steps.request.outputs.anchor_repo }}
+            verification.anchor_pr_number=${{ steps.request.outputs.anchor_pr_number }}
+            verification.verification_status=${{ steps.request.outputs.verification_status }}
+            verification.verified_at=${{ steps.request.outputs.verified_at }}
+            verification.checked_urls=${{ inputs.checked_urls }}
+            verification.timeout_seconds=${{ inputs['timeout-seconds'] }}
+            verification.failure_summary=${{ inputs.failure_summary }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.verification_status
+          output-paths: >-
+            trace_id=trace_id,
+            verification_status=result.verification_status,
+            error_message=result.generic_web_preview_verification.failure_summary
+
+      - name: Report verification result
+        run: |
+          echo "verification_status=${{ steps.lp.outputs.verification_status }}"

@@ -1397,6 +1397,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/reusable-generic-web-preview-lifecycle.yml",
                 "launchplane-url",
             ),
+            (
+                ".github/workflows/reusable-generic-web-preview-verification.yml",
+                "launchplane-url",
+            ),
         ):
             with self.subTest(path=path, key=key):
                 self.assertEqual(
@@ -1616,6 +1620,26 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "uses",
                 "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@main",
             ),
+            (
+                ".github/workflows/preview.yml",
+                "uses",
+                "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@main",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-preview-verification.yml",
+                "verification.timeout_seconds",
+                "${{ inputs['timeout-seconds'] }}",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-preview-verification.yml",
+                "verification.checked_urls",
+                "${{ inputs.checked_urls }}",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-preview-verification.yml",
+                "verification.verified_at",
+                "${{ steps.request.outputs.verified_at }}",
+            ),
         )
         for case in thin_connectors:
             path, key, value, *context = case
@@ -1651,6 +1675,16 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/preview.yml",
                 "uses",
                 "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@feature",
+            ),
+            (
+                ".github/workflows/preview.yml",
+                "uses",
+                "cbusillo/not-launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@main",
+            ),
+            (
+                ".github/workflows/preview.yml",
+                "uses",
+                "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@feature",
             ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
@@ -2112,6 +2146,23 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 self.assertEqual(
                     _allow_reason(path=path, key=key, value="${{ inputs.idempotency_key }}"),
                     "",
+                )
+
+    def test_generic_web_preview_verification_workflow_defaults_are_thin_connector_inputs(
+        self,
+    ) -> None:
+        for key, value in (
+            ("inputs.timeout-ms.default", "300000"),
+            ("inputs.timeout-seconds.default", "null"),
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/reusable-generic-web-preview-verification.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
                 )
 
     def test_ingress_workflow_jq_forwards_and_route_options_are_narrow(self) -> None:

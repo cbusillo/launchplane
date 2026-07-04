@@ -180,14 +180,16 @@ ready-to-comment signal instead of independently deciding readiness from raw
 health checks.
 If a later browser or product-specific smoke workflow needs to publish common
 preview evidence, it should call
-`POST /v1/drivers/generic-web/preview-verification` with the product key, PR
-identity, `verification_status`, `verified_at`, optional checked URLs plus
-timeout, and optional failure summary. Launchplane resolves generic-web base
-driver compatibility from the product profile, updates the latest preview
-generation, and returns a typed `generic_web_preview_verification` result while
-preserving durable status/failure evidence in the same preview records used by
-refresh. Odoo preview verification uses this generic-web route; the former
-Odoo-shaped preview verification alias is retired.
+`cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@main`
+with the PR number, `verification_status`, `verified_at`, optional checked URLs
+plus timeout, and optional failure summary. The reusable workflow owns the
+`POST /v1/drivers/generic-web/preview-verification` payload, route handoff, and
+run-scoped idempotency key. Launchplane resolves the preview context and
+generic-web base-driver compatibility from the product profile, updates the
+latest preview generation, and returns a typed `generic_web_preview_verification`
+result while preserving durable status/failure evidence in the same preview
+records used by refresh. Odoo preview verification uses this generic-web route;
+the former Odoo-shaped preview verification alias is retired.
 
 Preview destroy routes receive the PR number, source/run metadata, and an
 explicit destroy reason such as `pull_request_closed`, `preview_label_removed`,
