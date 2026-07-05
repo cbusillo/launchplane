@@ -2209,6 +2209,11 @@ def _allow_reason(
         value=value,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_preview_feedback_url_output_forward(
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_launchplane_reusable_workflow(
         key=key,
         value=value,
@@ -2559,6 +2564,17 @@ def _is_workflow_read_model_output_forward(*, key: str, value: object) -> bool:
     if match is None:
         return False
     return bool(GITHUB_NEEDS_OUTPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
+
+
+def _is_preview_feedback_url_output_forward(*, key: str, value: object) -> bool:
+    if _semantic_full_key_text(key) != "PREVIEW_URL":
+        return False
+    value_text = _string_value(value).strip()
+    match = GITHUB_EXPRESSION_PATTERN.match(value_text)
+    if match is None:
+        return False
+    body = match.group("body").strip()
+    return body == "needs.provision_preview.outputs.preview_url"
 
 
 def _is_image_deploy_idempotency_key(value_text: str) -> bool:

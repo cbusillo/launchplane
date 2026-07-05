@@ -2045,6 +2045,31 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "operator_supplied_runtime_input",
                 )
 
+    def test_preview_feedback_url_output_forward_is_narrow(self) -> None:
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/preview-control-plane.yml",
+                key="preview_url",
+                value="${{ needs.provision_preview.outputs.preview_url }}",
+            ),
+            "thin_connector_input",
+        )
+
+        for value in (
+            "https://pr-186.syo-preview.example.test",
+            "${{ needs.other_job.outputs.preview_url }}",
+            "${{ vars.PREVIEW_URL }}",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/preview-control-plane.yml",
+                        key="preview_url",
+                        value=value,
+                    ),
+                    "",
+                )
+
     def test_workflow_block_fields_are_classified_by_path_only(self) -> None:
         for path, key, value in (
             (".github/workflows/edge-endpoint-apply.yml", "endpoint_key", "$endpoint_key,"),
