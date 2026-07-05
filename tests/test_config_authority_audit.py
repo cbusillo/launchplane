@@ -3261,6 +3261,74 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("product", thin_connector_keys)
         self.assertNotIn("instance", thin_connector_keys)
 
+    def test_cli_product_repo_gate_allows_product_driver_stable_deploy_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "publish-image.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Publish Image\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/product-driver-stable-deploy")
+            workflow.write_text(
+                "---\n"
+                "name: Publish Image\n\n"
+                '"on":\n'
+                "  push:\n"
+                "    branches: [main]\n\n"
+                "jobs:\n"
+                "  publish:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      artifact_id: ${{ steps.image.outputs.artifact_id }}\n"
+                "      source_git_ref: ${{ github.sha }}\n"
+                "    steps:\n"
+                "      - id: image\n"
+                "        run: echo 'artifact_id=ghcr.io/example/product:sha' >> \"$GITHUB_OUTPUT\"\n"
+                "  deploy:\n"
+                "    needs: publish\n"
+                "    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-stable-deploy.yml@main\n"
+                "    with:\n"
+                "      launchplane_url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}\n"
+                "      artifact_id: ${{ needs.publish.outputs.artifact_id }}\n"
+                "      source_git_ref: ${{ needs.publish.outputs.source_git_ref }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "pass")
+        thin_connector_keys = {
+            finding["key"]
+            for finding in _findings(payload)
+            if finding["allow_reason"] == "thin_connector_input"
+        }
+        self.assertIn("uses", thin_connector_keys)
+        self.assertNotIn("product", thin_connector_keys)
+        self.assertNotIn("context", thin_connector_keys)
+        self.assertNotIn("instance", thin_connector_keys)
+
     def test_cli_product_repo_gate_allows_reusable_generic_web_preview_workflow(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
