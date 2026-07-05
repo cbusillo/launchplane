@@ -1025,11 +1025,15 @@ def _wait_for_preview_health(
                             if status == "match":
                                 return
                             if status == "mismatch":
-                                raise click.ClickException(
-                                    "Preview runtime identity did not match the expected "
-                                    f"deployment identity: {detail}."
-                                )
-                            last_detail = detail
+                                if _preview_runtime_identity_mismatch_is_converging(detail):
+                                    last_detail = detail
+                                else:
+                                    raise click.ClickException(
+                                        "Preview runtime identity did not match the expected "
+                                        f"deployment identity: {detail}."
+                                    )
+                            else:
+                                last_detail = detail
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             if "dokploy dead host" in body.lower():
@@ -1045,6 +1049,26 @@ def _wait_for_preview_health(
     raise click.ClickException(
         f"Timed out waiting for {health_url} to report healthy: {last_detail}."
     )
+
+
+def _runtime_identity_mismatch_fields(detail: str) -> tuple[str, ...]:
+    prefix = "Runtime identity mismatched fields: "
+    if not detail.startswith(prefix):
+        return ()
+    return tuple(
+        field.strip()
+        for field in detail.removeprefix(prefix).split(",")
+        if field.strip()
+    )
+
+
+def _preview_runtime_identity_mismatch_is_converging(detail: str) -> bool:
+    fields = set(_runtime_identity_mismatch_fields(detail))
+    return bool(fields) and fields <= {
+        "deployment_record_id",
+        "artifact_id",
+        "source_git_ref",
+    }
 
 
 def evaluate_generic_web_preview_readiness(

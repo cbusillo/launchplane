@@ -146,6 +146,13 @@ record for a later retry or GitHub rerun. Ignored decisions do not have
 idempotency keys. Launchplane-owned reusable workflows may use an equivalent
 route-specific key when the service derives context from product records.
 
+Preview refresh readiness should allow the serving runtime identity to converge
+after a provider deploy trigger. A health response that still reports the prior
+deployment/artifact/source identity for the same product, context, preview slug,
+and environment kind remains a polling signal until the route timeout; a
+different product, context, preview slug, or environment kind remains a hard
+mismatch.
+
 ## Route Handoff
 
 Preview refresh routes receive only product-local facts:

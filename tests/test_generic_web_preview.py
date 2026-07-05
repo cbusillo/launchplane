@@ -1008,7 +1008,7 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         self.assertEqual(sleeps, [5])
 
-    def test_wait_for_preview_health_fails_fast_on_mismatched_runtime_identity(self) -> None:
+    def test_wait_for_preview_health_waits_for_rollout_runtime_identity(self) -> None:
         expected_identity = RuntimeIdentity(
             product="sellyouroutboard",
             context="sellyouroutboard-testing",
@@ -1021,10 +1021,63 @@ class GenericWebPreviewTests(unittest.TestCase):
             preview_id="pr-42",
         )
         stale_identity = expected_identity.model_copy(
-            update={"artifact_id": "ghcr.io/cbusillo/sellyouroutboard:stale"}
+            update={
+                "deployment_record_id": "deployment-20260614T195500Z-syo-pr-42",
+                "artifact_id": "ghcr.io/cbusillo/sellyouroutboard:stale",
+                "source_git_ref": "previous-sha",
+            }
         )
         responses = iter(
-            ({"ok": True, "runtime_identity": stale_identity.model_dump(mode="json")},)
+            (
+                {"ok": True, "runtime_identity": stale_identity.model_dump(mode="json")},
+                {"ok": True, "runtime_identity": expected_identity.model_dump(mode="json")},
+            )
+        )
+
+        class _Response:
+            status = 200
+
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps(next(responses)).encode("utf-8")
+
+        sleeps: list[float] = []
+
+        with (
+            patch("control_plane.workflows.generic_web_preview.urlopen", return_value=_Response()),
+            patch(
+                "control_plane.workflows.generic_web_preview.time.sleep", side_effect=sleeps.append
+            ),
+        ):
+            _wait_for_preview_health(
+                preview_url="https://preview-42.example.test",
+                health_path="/api/health",
+                timeout_seconds=30,
+                expected_runtime_identity=expected_identity,
+            )
+
+        self.assertEqual(sleeps, [5])
+
+    def test_wait_for_preview_health_fails_fast_on_wrong_preview_identity(self) -> None:
+        expected_identity = RuntimeIdentity(
+            product="sellyouroutboard",
+            context="sellyouroutboard-testing",
+            instance="pr-42",
+            environment_kind="preview",
+            deployment_record_id="deployment-20260614T200000Z-syo-pr-42",
+            artifact_id="ghcr.io/cbusillo/sellyouroutboard:sha",
+            source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+            image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+            preview_id="pr-42",
+        )
+        wrong_identity = expected_identity.model_copy(update={"instance": "pr-41"})
+        responses = iter(
+            ({"ok": True, "runtime_identity": wrong_identity.model_dump(mode="json")},)
         )
 
         class _Response:
