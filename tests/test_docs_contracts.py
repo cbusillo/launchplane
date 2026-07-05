@@ -206,6 +206,10 @@ class DocsContractsTests(TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("Reusable Product-Driver Workflows", product_repo_contract)
+        self.assertIn(
+            "defaults to the `testing` lane",
+            product_repo_contract,
+        )
         self.assertIn("reusable-product-driver-stable-deploy.yml@main", product_repo_contract)
         self.assertIn("reusable-product-driver-prod-promotion.yml@main", product_repo_contract)
         self.assertIn("reusable-product-driver-prod-rollback.yml@main", product_repo_contract)
@@ -214,6 +218,8 @@ class DocsContractsTests(TestCase):
         self.assertIn("should not own Launchplane route construction", product_repo_contract)
 
         self.assertIn("workflow_call:", stable_deploy_workflow)
+        self.assertIn("Stable lane instance to deploy. Defaults to testing.", stable_deploy_workflow)
+        self.assertIn('default: "testing"', stable_deploy_workflow)
         self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', stable_deploy_workflow)
         self.assertIn("route_path=/v1/drivers/verireel/$INSTANCE-deploy", stable_deploy_workflow)
         self.assertIn("deploy.artifact_id=${{ inputs.artifact_id }}", stable_deploy_workflow)

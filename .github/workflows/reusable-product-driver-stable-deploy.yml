@@ -15,8 +15,9 @@ name: Reusable Product Driver Stable Deploy
         default: ""
         type: string
       instance:
-        description: Stable lane instance to deploy.
-        required: true
+        description: Stable lane instance to deploy. Defaults to testing.
+        required: false
+        default: "testing"
         type: string
       artifact_id:
         description: Immutable image or Launchplane-resolvable artifact identity.
