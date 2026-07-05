@@ -462,7 +462,9 @@ The product-driver reusable surface is:
 - `reusable-product-driver-stable-deploy.yml@main`
 - `reusable-product-driver-app-maintenance.yml@main`
 - `reusable-product-driver-testing-verification.yml@main`
+- `reusable-product-driver-testing-reset.yml@main`
 - `reusable-product-driver-prod-backup-gate.yml@main`
+- `reusable-product-driver-prod-launch-readiness.yml@main`
 - `reusable-product-driver-prod-promotion.yml@main`
 - `reusable-product-driver-prod-rollback.yml@main`
 
@@ -472,6 +474,15 @@ build/publish, release tagging, and product-specific browser checks, but it
 should not own Launchplane route construction, request envelopes, idempotency
 recipes, polling behavior, or record-output extraction once a reusable workflow
 exists.
+
+When a workflow operation has implied lane or maintenance semantics, prefer an
+operation-level reusable workflow over passing checked-in lane, action, or
+intent strings from the product repository. For example, a product repo should
+call `reusable-product-driver-testing-reset.yml@main` rather than wiring
+`instance: testing`, `action: reset-testing`, and `intent:
+stable-testing-reset` itself. Product-owned smoke checks may still consume
+Launchplane reusable outputs, such as a resolved `primary_base_url`, as
+pass-through evidence for product behavior checks.
 
 ## Reusable Launchplane Request Action
 

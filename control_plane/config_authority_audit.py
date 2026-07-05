@@ -136,6 +136,9 @@ GITHUB_ENV_REFERENCE_PATTERN = re.compile(r"^env\.[A-Za-z0-9_.-]+$")
 GITHUB_STEP_OUTPUT_REFERENCE_PATTERN = re.compile(
     r"^steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+$"
 )
+GITHUB_NEEDS_OUTPUT_REFERENCE_PATTERN = re.compile(
+    r"^needs\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+$"
+)
 GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN = re.compile(
     r"^(?:github|steps\.[A-Za-z0-9_-]+\.outputs)\.[A-Za-z0-9_.-]+$"
 )
@@ -465,6 +468,16 @@ PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS = frozenset(
         "verification.verification_status",
     )
 )
+PRODUCT_DRIVER_REUSABLE_WRAPPER_LITERAL_VALUES = {
+    ".github/workflows/reusable-product-driver-prod-launch-readiness.yml": {
+        "INSTANCE": frozenset(("prod",)),
+    },
+    ".github/workflows/reusable-product-driver-testing-reset.yml": {
+        "ACTION": frozenset(("reset-testing",)),
+        "INSTANCE": frozenset(("testing",)),
+        "INTENT": frozenset(("stable-testing-reset",)),
+    },
+}
 WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
         "DEFAULT_GITHUB_TOKEN": frozenset(("${{ secrets.GITHUB_TOKEN }}",)),
@@ -2191,6 +2204,11 @@ def _allow_reason(
         value=value,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_read_model_output_forward(
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_launchplane_reusable_workflow(
         key=key,
         value=value,
@@ -2527,6 +2545,22 @@ def _is_github_step_output_reference(value_text: str) -> bool:
     return bool(GITHUB_STEP_OUTPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
 
 
+def _is_workflow_read_model_output_forward(*, key: str, value: object) -> bool:
+    key_text = _semantic_full_key_text(key)
+    if key_text not in {
+        "BASE_URL",
+        "HEALTH_URLS_JSON",
+        "HEALTHCHECK_PATH",
+        "PRIMARY_BASE_URL",
+    }:
+        return False
+    value_text = _string_value(value).strip()
+    match = GITHUB_EXPRESSION_PATTERN.match(value_text)
+    if match is None:
+        return False
+    return bool(GITHUB_NEEDS_OUTPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
+
+
 def _is_image_deploy_idempotency_key(value_text: str) -> bool:
     if "${{ secrets." in value_text:
         return False
@@ -2557,12 +2591,18 @@ def _is_product_driver_reusable_workflow_mechanic(*, path: str, key: str, value:
     key_text = _semantic_full_key_text(key)
     if key == "launchplane-url":
         return value_text == "${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}"
+    if key_text == "LAUNCHPLANE_URL":
+        return _is_github_direct_input_reference(value)
     if key == "idempotency-key":
         return value_text == "${{ steps.request.outputs.idempotency_key }}"
     if key == "route-path":
         return value_text == "${{ steps.request.outputs.route_path }}"
     if _is_workflow_input_default_key(key):
         return value_text in PRODUCT_DRIVER_REUSABLE_INPUT_DEFAULT_VALUES
+    if value_text in PRODUCT_DRIVER_REUSABLE_WRAPPER_LITERAL_VALUES.get(path, {}).get(
+        key_text, frozenset()
+    ):
+        return True
     if key.startswith("payload-fields."):
         if key.removeprefix("payload-fields.") not in PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS:
             return False

@@ -1,0 +1,98 @@
+---
+name: Reusable Product Driver Prod Launch Readiness
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: Stable context. Defaults to the product key.
+        required: false
+        default: ""
+        type: string
+      launchplane_url:
+        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      context:
+        description: Resolved Launchplane context.
+        value: ${{ jobs.resolve-prod-environment.outputs.context }}
+      instance:
+        description: Resolved production lane instance.
+        value: ${{ jobs.resolve-prod-environment.outputs.instance }}
+      target_name:
+        description: Resolved target name.
+        value: ${{ jobs.resolve-prod-environment.outputs.target_name }}
+      target_type:
+        description: Resolved target type.
+        value: ${{ jobs.resolve-prod-environment.outputs.target_type }}
+      target_id:
+        description: Resolved target id.
+        value: ${{ jobs.resolve-prod-environment.outputs.target_id }}
+      primary_base_url:
+        description: Primary public base URL for the production lane.
+        value: ${{ jobs.resolve-prod-environment.outputs.primary_base_url }}
+      healthcheck_path:
+        description: Production lane healthcheck path.
+        value: ${{ jobs.resolve-prod-environment.outputs.healthcheck_path }}
+      health_urls_json:
+        description: JSON array of production lane health URLs.
+        value: ${{ jobs.resolve-prod-environment.outputs.health_urls_json }}
+      runtime_status:
+        description: Runtime verification status.
+        value: ${{ jobs.verify-prod-runtime.outputs.status }}
+      runtime_base_url:
+        description: Verified runtime base URL.
+        value: ${{ jobs.verify-prod-runtime.outputs.base_url }}
+      runtime_error_message:
+        description: Runtime verification error message, when present.
+        value: ${{ jobs.verify-prod-runtime.outputs.error_message }}
+      environment_trace_id:
+        description: Launchplane trace id for environment resolution.
+        value: ${{ jobs.resolve-prod-environment.outputs.trace_id }}
+      runtime_trace_id:
+        description: Launchplane trace id for runtime verification.
+        value: ${{ jobs.verify-prod-runtime.outputs.trace_id }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  resolve-prod-environment:
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-stable-environment.yml@main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: prod
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+    permissions:
+      contents: read
+      id-token: write
+
+  verify-prod-runtime:
+    needs: resolve-prod-environment
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-runtime-verification.yml@main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: prod
+      timeout-seconds: "300"
+      interval-seconds: "5"
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+    permissions:
+      contents: read
+      id-token: write
