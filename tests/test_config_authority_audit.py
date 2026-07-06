@@ -471,6 +471,40 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(findings[0]["allow_reason"], "schema_only")
         self.assertEqual(findings[0]["classification"], "allowed")
 
+    def test_github_action_metadata_paths_are_action_mechanics(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            action = root / ".github" / "actions" / "setup-client" / "action.yml"
+            action.parent.mkdir(parents=True)
+            action.write_text(
+                "---\n"
+                "name: Setup client\n"
+                "inputs:\n"
+                "  output-path:\n"
+                "    default: .launchplane/client.mjs\n"
+                "  product-path:\n"
+                "    default: products/concrete-product.yml\n"
+                "runs:\n"
+                "  using: node24\n"
+                "  main: dist/index.js\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        default_findings = [finding for finding in _findings(payload) if finding["key"] == "default"]
+        output_default = next(finding for finding in default_findings if finding["line"] == 5)
+        product_path_default = next(finding for finding in default_findings if finding["line"] == 7)
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        self.assertEqual(output_default["classification"], "allowed")
+        self.assertEqual(output_default["allow_reason"], "thin_connector_input")
+        self.assertEqual(findings_by_key["main"]["classification"], "allowed")
+        self.assertEqual(findings_by_key["main"]["allow_reason"], "thin_connector_input")
+        self.assertEqual(product_path_default["classification"], "needs_classification")
+        self.assertEqual(product_path_default["allow_reason"], "")
+
     def test_artifact_publish_schema_constants_are_schema_only(self) -> None:
         for key, value in (
             ("DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY", "ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON"),

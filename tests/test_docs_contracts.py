@@ -125,6 +125,9 @@ class DocsContractsTests(TestCase):
             ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
         ).read_text(encoding="utf-8")
         repo_metadata = Path(".github/github.json").read_text(encoding="utf-8")
+        preview_prepare_action = Path(
+            ".github/actions/setup-preview-prepare-client/action.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("Reusable Generic-Web Lifecycle Workflows", product_repo_contract)
         self.assertIn("reusable-generic-web-stable-deploy.yml@main", product_repo_contract)
@@ -143,8 +146,11 @@ class DocsContractsTests(TestCase):
         self.assertIn("conflicts with the", preview_contract)
         self.assertIn("derived value", preview_contract)
         self.assertIn("reusable-generic-web-preview-lifecycle.yml@main", preview_contract)
+        self.assertIn("setup-preview-prepare-client@main", preview_contract)
+        self.assertIn("setup-preview-prepare-client@main", product_repo_contract)
         self.assertIn("does not accept", preview_contract)
         self.assertIn("idempotency keys as caller inputs", preview_contract)
+        self.assertIn("read-only adapter", product_repo_contract)
 
         self.assertIn("workflow_call:", deploy_workflow)
         self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', deploy_workflow)
@@ -190,6 +196,8 @@ class DocsContractsTests(TestCase):
         self.assertIn("Reusable Generic Web Stable Deploy", repo_metadata)
         self.assertIn("Reusable Generic Web Prod Promotion", repo_metadata)
         self.assertIn("Reusable Generic Web Preview Lifecycle", repo_metadata)
+        self.assertIn("using: node24", preview_prepare_action)
+        self.assertIn("preview-prepare-client.mjs", preview_prepare_action)
 
     def test_product_driver_reusable_workflows_keep_route_shaping_in_launchplane(
         self,

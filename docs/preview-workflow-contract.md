@@ -75,6 +75,16 @@ event, decision, route path, feedback status, and run-scoped idempotency key as
 JSON so product workflows can branch on the shared contract instead of
 duplicating event semantics.
 
+Same-repository preview build jobs that need an importable helper for GitHub
+event labels and image tags should use
+`cbusillo/launchplane/.github/actions/setup-preview-prepare-client@main`. The
+generated client is read-only and product-agnostic: callers pass the current
+repository, head repository, PR author, PR number, source SHA, image name,
+labels, and run URL; the client returns refresh/unsupported/noop mode, same-repo
+support flags, `pr-<number>` image tags, and full image references. It does not
+call Launchplane, choose provider targets, render comments, derive preview URLs,
+or store lifecycle truth.
+
 Once the product workflow has decided to refresh, destroy, or send an
 unsupported notice, it should hand off to Launchplane's reusable workflow instead
 of constructing route payloads locally:

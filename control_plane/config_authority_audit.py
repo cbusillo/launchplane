@@ -2165,6 +2165,12 @@ def _allow_reason(
         value=value,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/actions/") and _is_github_action_metadata_mechanic(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_image_artifact_mechanic(
         path=normalized,
         key=key,
@@ -2513,6 +2519,21 @@ def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
         return True
     if key_text == "PATH" and re.fullmatch(r"[A-Za-z0-9_.-]+\.json", value_text):
         return True
+    return False
+
+
+def _is_github_action_metadata_mechanic(*, path: str, key: str, value: object) -> bool:
+    if not path.endswith("/action.yml"):
+        return False
+    value_text = _string_value(value).strip()
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    if key_text == "MAIN":
+        return re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.js", value_text) is not None
+    if key_text == "DEFAULT":
+        return re.fullmatch(
+            r"\.[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.mjs",
+            value_text,
+        ) is not None
     return False
 
 
