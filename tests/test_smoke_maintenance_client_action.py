@@ -150,6 +150,58 @@ console.log(JSON.stringify(request.payload.maintenance));
             "owner-route-promote-owner",
         )
 
+    def test_client_derives_stable_grant_smoke_intent(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            client_path = Path(temporary_directory) / "smoke-client.mjs"
+            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+
+            result = self.run_client_script(
+                client_path,
+                """
+const request = client.buildLaunchplaneSmokeMaintenanceRequest({
+  product: 'verireel',
+  context: 'verireel',
+  instance: 'testing',
+  action: 'grant-sponsored',
+  email: 'creator@example.com',
+  timeoutSeconds: 300,
+});
+console.log(JSON.stringify(request.payload.maintenance));
+""",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout)["intent"],
+            "stable-testing-remote-e2e-grant-sponsored",
+        )
+
+    def test_client_derives_stable_delete_smoke_intent(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            client_path = Path(temporary_directory) / "smoke-client.mjs"
+            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+
+            result = self.run_client_script(
+                client_path,
+                """
+const request = client.buildLaunchplaneSmokeMaintenanceRequest({
+  product: 'verireel',
+  context: 'verireel',
+  instance: 'testing',
+  action: 'delete-user',
+  email: 'owner@example.com',
+  timeoutSeconds: 300,
+});
+console.log(JSON.stringify(request.payload.maintenance));
+""",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout)["intent"],
+            "owner-route-delete-user",
+        )
+
     def test_client_rejects_mismatched_smoke_intent(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
