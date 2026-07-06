@@ -183,6 +183,22 @@ Launchplane rather than defining product topology, target inventory, domains, or
 runtime authority. Generic runtime health and revision checks should move to
 Launchplane drivers once the driver has the necessary profile data.
 
+When product smoke checks need Launchplane-backed generated-user setup or
+cleanup during the same browser run, the workflow should install a
+Launchplane-owned smoke maintenance client with
+`cbusillo/launchplane/.github/actions/setup-smoke-maintenance-client@main` and
+pass the generated client path to the product script. The workflow job must
+grant `id-token: write` so the client can request a GitHub OIDC token for
+Launchplane. The initial client covers VeriReel generated-user smoke
+maintenance; add new Launchplane-owned clients for other products rather than
+copying or generalizing product-specific route logic in product repos. The
+product script may pass primitive smoke facts such as action, email, context,
+instance, preview slug, and timeout. The client derives the Launchplane driver
+intent for supported smoke actions. The product script should not own
+Launchplane route paths, request envelopes, driver intent strings,
+idempotency-key recipes, GitHub OIDC token exchange, retry behavior, or
+driver-result failure rules.
+
 ## What Launchplane Owns
 
 - Product profile records, lane profiles, preview policy, runtime port, health
@@ -493,6 +509,13 @@ call `reusable-product-driver-testing-reset.yml@main` rather than wiring
 stable-testing-reset` itself. Product-owned smoke checks may still consume
 Launchplane reusable outputs, such as a resolved `primary_base_url`, as
 pass-through evidence for product behavior checks.
+
+Generated-user smoke setup that must happen inside a product browser flow should
+use `setup-smoke-maintenance-client@main` instead of a workflow-level
+app-maintenance call. The setup action writes an importable Node ESM client into
+the product job so the browser script can keep its dynamic test email while
+Launchplane owns request shaping, driver intent derivation, and OIDC transport.
+The job using the generated client must include `permissions: id-token: write`.
 
 ## Reusable Launchplane Request Action
 

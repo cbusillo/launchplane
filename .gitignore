@@ -31,6 +31,8 @@ __pycache__/
 .venv/
 build/
 dist/
+!.github/actions/*/dist/
+!.github/actions/*/dist/**
 *.egg-info/
 node_modules/
 frontend/node_modules/
