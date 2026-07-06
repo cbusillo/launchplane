@@ -71,6 +71,7 @@ console.log(Object.keys(client).sort().join(','));
             )
             self.assertEqual(import_result.returncode, 0, import_result.stderr)
             self.assertIn("requestLaunchplaneSmokeMaintenance", import_result.stdout)
+            self.assertIn("smokeMaintenanceIntentForAction", import_result.stdout)
 
     def test_client_builds_verireel_smoke_request(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -85,7 +86,6 @@ const request = client.buildLaunchplaneSmokeMaintenanceRequest({
   context: 'verireel-testing',
   instance: 'preview',
   action: 'grant-sponsored',
-  intent: 'remote-e2e-grant-sponsored',
   email: 'creator@example.com',
   previewSlug: 'pr-42',
   timeoutSeconds: 300,
@@ -95,7 +95,6 @@ const idempotencyKey = client.buildLaunchplaneSmokeMaintenanceIdempotencyKey({
   context: 'verireel-testing',
   instance: 'preview',
   action: 'grant-sponsored',
-  intent: 'remote-e2e-grant-sponsored',
   email: 'creator@example.com',
   previewSlug: 'pr-42',
 });
@@ -125,6 +124,79 @@ console.log(JSON.stringify({ request, idempotencyKey }));
             "product-smoke-maintenance:verireel:verireel-testing:preview:grant-sponsored:remote-e2e-grant-sponsored::pr-42:creator@example.com",
         )
 
+    def test_client_derives_stable_owner_smoke_intent(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            client_path = Path(temporary_directory) / "smoke-client.mjs"
+            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+
+            result = self.run_client_script(
+                client_path,
+                """
+const request = client.buildLaunchplaneSmokeMaintenanceRequest({
+  product: 'verireel',
+  context: 'verireel',
+  instance: 'testing',
+  action: 'promote-owner',
+  email: 'owner@example.com',
+  timeoutSeconds: 300,
+});
+console.log(JSON.stringify(request.payload.maintenance));
+""",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout)["intent"],
+            "owner-route-promote-owner",
+        )
+
+    def test_client_rejects_mismatched_smoke_intent(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            client_path = Path(temporary_directory) / "smoke-client.mjs"
+            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+
+            result = self.run_client_script(
+                client_path,
+                """
+client.buildLaunchplaneSmokeMaintenanceRequest({
+  product: 'verireel',
+  context: 'verireel-testing',
+  instance: 'preview',
+  action: 'delete-user',
+  intent: 'owner-route-delete-user',
+  email: 'creator@example.com',
+  previewSlug: 'pr-42',
+  timeoutSeconds: 300,
+});
+""",
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match derived intent 'remote-e2e-delete-user'", result.stderr)
+
+    def test_client_rejects_unsupported_smoke_context_action(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            client_path = Path(temporary_directory) / "smoke-client.mjs"
+            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+
+            result = self.run_client_script(
+                client_path,
+                """
+client.buildLaunchplaneSmokeMaintenanceRequest({
+  product: 'verireel',
+  context: 'verireel-testing',
+  instance: 'preview',
+  action: 'promote-owner',
+  email: 'creator@example.com',
+  previewSlug: 'pr-42',
+  timeoutSeconds: 300,
+});
+""",
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unsupported VeriReel smoke maintenance context/action combination", result.stderr)
+
     def test_client_rejects_workflow_maintenance_action(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
@@ -138,7 +210,6 @@ client.buildLaunchplaneSmokeMaintenanceRequest({
   context: 'verireel',
   instance: 'testing',
   action: 'migrate',
-  intent: 'stable-testing-migration',
   timeoutSeconds: 300,
 });
 """,
@@ -172,7 +243,6 @@ const result = await client.requestLaunchplaneSmokeMaintenance({
   context: 'verireel',
   instance: 'testing',
   action: 'promote-owner',
-  intent: 'owner-route-promote-owner',
   email: 'owner@example.com',
   timeoutSeconds: 300,
 }, {
@@ -216,7 +286,6 @@ await client.requestLaunchplaneSmokeMaintenance({
   context: 'verireel',
   instance: 'testing',
   action: 'delete-user',
-  intent: 'owner-route-delete-user',
   email: 'owner@example.com',
   timeoutSeconds: 300,
 }, {
@@ -254,7 +323,6 @@ await client.requestLaunchplaneSmokeMaintenance({
   context: 'verireel',
   instance: 'testing',
   action: 'delete-user',
-  intent: 'owner-route-delete-user',
   email: 'owner@example.com',
   timeoutSeconds: 300,
 }, {
@@ -281,7 +349,6 @@ await client.requestLaunchplaneSmokeMaintenance({
   context: 'verireel',
   instance: 'testing',
   action: 'delete-user',
-  intent: 'owner-route-delete-user',
   email: 'owner@example.com',
   timeoutSeconds: 300,
 }, {}, async () => new Response('{}', { status: 200 }));

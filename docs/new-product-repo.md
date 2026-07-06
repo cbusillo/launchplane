@@ -178,8 +178,8 @@ Launchplane-owned smoke maintenance client with
 `cbusillo/launchplane/.github/actions/setup-smoke-maintenance-client@main` and
 import the generated client from the smoke script. The workflow job must grant
 `id-token: write` for the client to authenticate to Launchplane. Do not copy
-Launchplane OIDC, route, payload, idempotency, or retry helpers into the product
-repo for that path.
+Launchplane OIDC, route, payload, driver intent, idempotency, or retry helpers
+into the product repo for that path.
 
 ## Choose A Driver
 

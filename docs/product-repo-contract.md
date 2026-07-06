@@ -193,9 +193,11 @@ Launchplane. The initial client covers VeriReel generated-user smoke
 maintenance; add new Launchplane-owned clients for other products rather than
 copying or generalizing product-specific route logic in product repos. The
 product script may pass primitive smoke facts such as action, email, context,
-instance, preview slug, and timeout. It should not own Launchplane route paths,
-request envelopes, idempotency-key recipes, GitHub OIDC token exchange, retry
-behavior, or driver-result failure rules.
+instance, preview slug, and timeout. The client derives the Launchplane driver
+intent for supported smoke actions. The product script should not own
+Launchplane route paths, request envelopes, driver intent strings,
+idempotency-key recipes, GitHub OIDC token exchange, retry behavior, or
+driver-result failure rules.
 
 ## What Launchplane Owns
 
@@ -512,8 +514,8 @@ Generated-user smoke setup that must happen inside a product browser flow should
 use `setup-smoke-maintenance-client@main` instead of a workflow-level
 app-maintenance call. The setup action writes an importable Node ESM client into
 the product job so the browser script can keep its dynamic test email while
-Launchplane owns request shaping and OIDC transport. The job using the generated
-client must include `permissions: id-token: write`.
+Launchplane owns request shaping, driver intent derivation, and OIDC transport.
+The job using the generated client must include `permissions: id-token: write`.
 
 ## Reusable Launchplane Request Action
 

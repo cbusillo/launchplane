@@ -4,6 +4,14 @@ const SMOKE_MAINTENANCE_ACTIONS = new Set([
   "promote-owner",
 ]);
 
+const VERIREEL_SMOKE_MAINTENANCE_INTENTS = new Map([
+  ["verireel:delete-user", "owner-route-delete-user"],
+  ["verireel:grant-sponsored", "stable-testing-remote-e2e-grant-sponsored"],
+  ["verireel:promote-owner", "owner-route-promote-owner"],
+  ["verireel-testing:delete-user", "remote-e2e-delete-user"],
+  ["verireel-testing:grant-sponsored", "remote-e2e-grant-sponsored"],
+]);
+
 function normalizeRequiredText(value, label) {
   const normalized = String(value ?? "").trim();
   if (!normalized) {
@@ -24,6 +32,31 @@ function normalizeSmokeMaintenanceAction(action) {
     );
   }
   return normalizedAction;
+}
+
+export function smokeMaintenanceIntentForAction(context, action) {
+  const normalizedContext = normalizeRequiredText(context, "Context");
+  const normalizedAction = normalizeSmokeMaintenanceAction(action);
+  const intent = VERIREEL_SMOKE_MAINTENANCE_INTENTS.get(
+    `${normalizedContext}:${normalizedAction}`,
+  );
+  if (!intent) {
+    throw new Error(
+      `Unsupported VeriReel smoke maintenance context/action combination: ${normalizedContext}/${normalizedAction}.`,
+    );
+  }
+  return intent;
+}
+
+function normalizeSmokeMaintenanceIntent(options, context, action) {
+  const derivedIntent = smokeMaintenanceIntentForAction(context, action);
+  const explicitIntent = normalizeOptionalText(options.intent);
+  if (explicitIntent && explicitIntent !== derivedIntent) {
+    throw new Error(
+      `VeriReel smoke maintenance intent '${explicitIntent}' does not match derived intent '${derivedIntent}'.`,
+    );
+  }
+  return derivedIntent;
 }
 
 function parsePositiveInteger(value, label) {
@@ -130,14 +163,16 @@ async function requestGitHubOidcToken(audience, options) {
 }
 
 export function buildLaunchplaneSmokeMaintenanceIdempotencyKey(options) {
+  const context = normalizeRequiredText(options.context, "Context");
   const action = normalizeSmokeMaintenanceAction(options.action);
+  const intent = normalizeSmokeMaintenanceIntent(options, context, action);
   return [
     "product-smoke-maintenance",
     normalizeRequiredText(options.product, "Product"),
-    normalizeRequiredText(options.context, "Context"),
+    context,
     normalizeRequiredText(options.instance, "Instance"),
     action,
-    normalizeRequiredText(options.intent, "Intent"),
+    intent,
     normalizeOptionalText(options.applicationName),
     normalizeOptionalText(options.previewSlug),
     normalizeOptionalText(options.email),
@@ -145,13 +180,15 @@ export function buildLaunchplaneSmokeMaintenanceIdempotencyKey(options) {
 }
 
 export function buildLaunchplaneSmokeMaintenanceRequest(options) {
+  const context = normalizeRequiredText(options.context, "Context");
   const action = normalizeSmokeMaintenanceAction(options.action);
+  const intent = normalizeSmokeMaintenanceIntent(options, context, action);
   const maintenance = {
     schema_version: 1,
-    context: normalizeRequiredText(options.context, "Context"),
+    context,
     instance: normalizeRequiredText(options.instance, "Instance"),
     action,
-    intent: normalizeRequiredText(options.intent, "Intent"),
+    intent,
     timeout_seconds: parsePositiveInteger(options.timeoutSeconds, "timeoutSeconds"),
   };
   const email = normalizeOptionalText(options.email);
