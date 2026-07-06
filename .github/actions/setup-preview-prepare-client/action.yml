@@ -1,0 +1,17 @@
+---
+name: Setup preview prepare client
+description: Write Launchplane's same-repo preview prepare Node client.
+
+inputs:
+  output-path:
+    description: Path where the ESM client module should be written.
+    required: false
+    default: .launchplane/preview-prepare-client.mjs
+
+outputs:
+  client-path:
+    description: Path to the generated ESM client module.
+
+runs:
+  using: node24
+  main: dist/index.js

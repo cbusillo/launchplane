@@ -517,6 +517,15 @@ the product job so the browser script can keep its dynamic test email while
 Launchplane owns request shaping, driver intent derivation, and OIDC transport.
 The job using the generated client must include `permissions: id-token: write`.
 
+Same-repository preview jobs that need label normalization and preview image tag
+derivation should use `setup-preview-prepare-client@main` instead of carrying a
+product-local helper. The generated Node ESM client returns refresh/noop or
+unsupported mode, same-repo support flags, `pr-<number>` image tags, and full
+caller-supplied image references from primitive GitHub event facts. It is a
+read-only adapter for product-owned artifact publication; Launchplane records
+still own preview URL policy, provider targets, lifecycle records, comments, and
+cleanup truth.
+
 ## Reusable Launchplane Request Action
 
 Product workflows that only need to send JSON to an existing Launchplane route
