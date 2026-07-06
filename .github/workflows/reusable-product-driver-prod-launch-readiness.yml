@@ -14,6 +14,16 @@ name: Reusable Product Driver Prod Launch Readiness
         required: false
         default: ""
         type: string
+      expected_build_revision:
+        description: Expected production runtime build revision, when known.
+        required: false
+        default: ""
+        type: string
+      expected_build_tag:
+        description: Expected production runtime build tag, when known.
+        required: false
+        default: ""
+        type: string
       launchplane_url:
         description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
         required: false
@@ -89,6 +99,8 @@ jobs:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}
       instance: prod
+      expected_build_revision: ${{ inputs.expected_build_revision }}
+      expected_build_tag: ${{ inputs.expected_build_tag }}
       timeout-seconds: "300"
       interval-seconds: "5"
       launchplane_url: ${{ inputs.launchplane_url }}

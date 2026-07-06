@@ -461,6 +461,9 @@ pass only the primitive facts it owns, such as immutable artifact identity,
 tested source git ref, and operation-level maintenance intent.
 Product repos should pass an explicit `instance` only for a workflow whose
 operator input or job purpose genuinely selects a different lane.
+Production readiness wrappers may also accept expected runtime build identity
+from operator input or upstream workflow evidence and forward it to
+Launchplane-owned runtime verification.
 
 The product-driver reusable surface is:
 
