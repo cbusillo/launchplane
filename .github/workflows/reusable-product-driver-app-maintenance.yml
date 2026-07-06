@@ -15,8 +15,9 @@ name: Reusable Product Driver App Maintenance
         default: ""
         type: string
       instance:
-        description: Runtime instance for the maintenance action.
-        required: true
+        description: Runtime instance for the maintenance action. Defaults to testing.
+        required: false
+        default: testing
         type: string
       action:
         description: Product driver maintenance action.

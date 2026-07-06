@@ -455,10 +455,10 @@ record id, and product-owned verification statuses. The route ids are
 Launchplane-owned driver routes; product repos should not derive them from
 product keys or keep local copies of route construction logic.
 
-The product-driver stable deploy and stable environment workflow surface
-defaults to the `testing` lane so a testing publish workflow can pass only the
-primitive facts it owns, such as immutable artifact identity and tested source
-git ref.
+The product-driver workflow surface for stable deploy, stable environment, and
+app-maintenance defaults to the `testing` lane so a testing publish workflow can
+pass only the primitive facts it owns, such as immutable artifact identity,
+tested source git ref, and operation-level maintenance intent.
 Product repos should pass an explicit `instance` only for a workflow whose
 operator input or job purpose genuinely selects a different lane.
 
