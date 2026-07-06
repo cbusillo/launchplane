@@ -15,8 +15,9 @@ name: Reusable Product Driver Stable Environment
         default: ""
         type: string
       instance:
-        description: Stable lane instance to resolve.
-        required: true
+        description: Stable lane instance to resolve. Defaults to testing.
+        required: false
+        default: testing
         type: string
       timeout-ms:
         description: Launchplane request timeout in milliseconds.
