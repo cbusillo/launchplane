@@ -230,11 +230,6 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
     ".github/workflows/provider-target-operations.yml": {
         "path": frozenset(("provider-target-routes.json provider-target-operation-results/*.json",))
     },
-    ".github/workflows/reusable-odoo-prod-promotion.yml": {
-        "payload-fields.run.request_id": frozenset(
-            ("${{ github.run_id }}-${{ github.run_attempt }}",)
-        )
-    },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "GITHUB_TOKEN": frozenset(("${{ github.token }}",))
     },
@@ -310,9 +305,6 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "inputs.timeout-ms.default": frozenset(("600000",)),
     },
-    ".github/workflows/reusable-odoo-prod-promotion.yml": {
-        "inputs.timeout-ms.default": frozenset(("2700000",)),
-    },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "inputs.timeout-ms.default": frozenset(("2700000",)),
     },
@@ -368,11 +360,6 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
         "LAUNCHPLANE_URL": frozenset(("${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_URL }}",))
     },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
-        "launchplane-url": frozenset(
-            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
-        )
-    },
-    ".github/workflows/reusable-odoo-prod-promotion.yml": {
         "launchplane-url": frozenset(
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         )
@@ -594,10 +581,6 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "INPUT_PRODUCT": frozenset(("${{ inputs.product }}",)),
         "INSTANCE_NAME": frozenset(("${{ inputs.instance }}",)),
     },
-    ".github/workflows/reusable-odoo-prod-promotion.yml": {
-        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
-        "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
-    },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
         "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
@@ -727,9 +710,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         ),
         "token": frozenset(("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",)),
         "username": frozenset(("${{ github.repository_owner }}",)),
-    },
-    ".github/workflows/reusable-odoo-prod-promotion.yml": {
-        "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
     },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))

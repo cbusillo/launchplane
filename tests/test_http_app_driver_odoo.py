@@ -2429,7 +2429,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_call["request"].product, "odoo")
 
     async def test_odoo_prod_promotion_run_allows_reusable_launchplane_workflow(self) -> None:
-        reusable_ref = "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-promotion.yml@refs/heads/main"
+        reusable_ref = "cbusillo/launchplane/.github/workflows/reusable-product-driver-prod-promotion.yml@refs/heads/main"
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             app = create_launchplane_fastapi_app(

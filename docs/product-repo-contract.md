@@ -273,6 +273,7 @@ Launchplane connectors through either:
 
 - `cbusillo/launchplane/.github/actions/launchplane-request@main`
 - `cbusillo/launchplane/.github/workflows/reusable-odoo-*.yml@main`
+- `cbusillo/launchplane/.github/workflows/reusable-product-driver-*.yml@main`
 
 It blocks the patterns that previously caused ownership drift:
 

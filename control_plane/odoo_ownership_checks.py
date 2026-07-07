@@ -134,6 +134,7 @@ _GLOBALLY_ALLOWED_PATH_GLOBS = (
 _LAUNCHPLANE_ALLOWED_LINE_PATTERNS = (
     re.compile(r"uses:\s*cbusillo/launchplane/\.github/actions/launchplane-request@"),
     re.compile(r"uses:\s*cbusillo/launchplane/\.github/workflows/reusable-odoo-"),
+    re.compile(r"uses:\s*cbusillo/launchplane/\.github/workflows/reusable-product-driver-"),
     re.compile(r"LAUNCHPLANE_RUNTIME_IDENTITY_JSON"),
 )
 
@@ -185,7 +186,6 @@ _RULES: tuple[_Rule, ...] = (
             ".github/workflows/odoo-artifact-publish.yml",
             ".github/workflows/odoo-preview.yml",
             ".github/workflows/odoo-post-deploy.yml",
-            ".github/workflows/odoo-prod-promotion.yml",
             ".github/workflows/odoo-prod-rollback.yml",
             "tests/**",
             "docs/**",
