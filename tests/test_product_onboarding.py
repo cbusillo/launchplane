@@ -1,6 +1,6 @@
+import importlib.util
 import json
 import os
-import importlib.util
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
@@ -1098,6 +1098,22 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("authz-policy-grant-maintenance-run", script_text)
         self.assertIn("workflow_run", script_text)
 
+    def test_deploy_authz_grants_stage_runtime_key_safety_policy_authority(self) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("deploy-launchplane.yml", script_text)
+        self.assertIn("runtime_key_safety.write", script_text)
+        self.assertIn("deploy:runtime-key-safety-policy-grant", script_text)
+        self.assertIn("runtime-key-safety-policy", script_text)
+        self.assertIn("deploy:runtime-key-safety-policy-run-grant", script_text)
+        self.assertIn("workflow_run", script_text)
+
+    def test_deploy_workflow_exposes_runtime_key_safety_rule_config(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+
+        self.assertIn("LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON", workflow_text)
+        self.assertIn("vars.LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON", workflow_text)
+
     def test_product_onboarding_workflow_calls_service_route_with_apply_guard(self) -> None:
         workflow_text = Path(".github/workflows/product-onboarding.yml").read_text(encoding="utf-8")
 
@@ -1138,6 +1154,218 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("reon-prod", script_text)
         self.assertNotIn("live-target-runtime.yml", script_text)
         self.assertNotIn("product-environment-evidence.yml", script_text)
+
+    def test_deploy_authz_grants_accept_configured_runtime_key_safety_rules(
+        self,
+    ) -> None:
+        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
+        extractor = """
+set -euo pipefail
+PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
+"""
+        configured_rules = [
+            {
+                "binding_key": "EXAMPLE_API_TOKEN",
+                "secret_class": "testing",
+                "allowed_targets": [{"context": "example-testing", "instances": ["testing"]}],
+                "description": "Example testing token.",
+            }
+        ]
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'all_args="$*"\n'
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
+                "  *)\n"
+                "    output_file=''\n"
+                "    idempotency_header=''\n"
+                "    request_payload=''\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
+                '        -o) shift; output_file="$1" ;;\n'
+                '        -H) shift; case "$1" in Idempotency-Key:*) idempotency_header="$1" ;; esac ;;\n'
+                '        --data) shift; request_payload="$1" ;;\n'
+                "      esac\n"
+                "      shift || true\n"
+                "    done\n"
+                '    case "$all_args" in\n'
+                "      */v1/runtime-key-safety/policies/apply*)\n"
+                '      printf \'%s\\n\' "$request_payload" > "$CAPTURED_POLICY"\n'
+                '      printf \'%s\\n\' "$idempotency_header" > "$CAPTURED_POLICY_IDEMPOTENCY"\n'
+                "        ;;\n"
+                "    esac\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+            captured_policy = temporary_directory / "policy.json"
+            captured_policy_idempotency = temporary_directory / "policy-idempotency.txt"
+            captured_response_file = temporary_directory / "response.json"
+            env = {
+                **os.environ,
+                **OWNER_AUTHZ_ENV,
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "GITHUB_SHA": "test-sha",
+                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(configured_rules),
+                "CAPTURED_POLICY": str(captured_policy),
+                "CAPTURED_POLICY_IDEMPOTENCY": str(captured_policy_idempotency),
+                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
+                "CAPTURED_BIN_DIR": str(captured_bin_directory),
+            }
+
+            result = subprocess.run(
+                ["bash", "-c", extractor],
+                check=False,
+                cwd=script_path.parent.parent.parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            policy_payload = json.loads(captured_policy.read_text(encoding="utf-8"))
+            policy_idempotency = captured_policy_idempotency.read_text(encoding="utf-8")
+
+        self.assertEqual(policy_payload["product"], "launchplane")
+        self.assertEqual(policy_payload["source_label"], "deploy:runtime-key-safety-rules")
+        self.assertRegex(
+            policy_idempotency,
+            r"Idempotency-Key: launchplane-runtime-key-safety-rules:test-sha:[0-9a-f]{64}",
+        )
+        self.assertNotIn("EXAMPLE_API_TOKEN", policy_idempotency)
+        self.assertEqual(policy_payload["rules"][0]["binding_key"], "EXAMPLE_API_TOKEN")
+        self.assertEqual(policy_payload["rules"][0]["secret_class"], "testing")
+        self.assertEqual(
+            policy_payload["rules"][0]["allowed_targets"],
+            [{"context": "example-testing", "instances": ["testing"]}],
+        )
+        self.assertEqual(policy_payload["rules"][0]["description"], "Example testing token.")
+
+    def test_deploy_authz_grants_reject_incomplete_runtime_key_safety_rules(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
+                "  *)\n"
+                "    output_file=''\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      if [ "$1" = "-o" ]; then shift; output_file="$1"; fi\n'
+                "      shift || true\n"
+                "    done\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", "scripts/deploy/ensure-authz-grants.sh"],
+                check=False,
+                cwd=Path.cwd(),
+                env={
+                    **os.environ,
+                    **OWNER_AUTHZ_ENV,
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                    "GITHUB_SHA": "test-sha",
+                    "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                    "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                    "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(
+                        [{"binding_key": "EXAMPLE_API_TOKEN"}]
+                    ),
+                    "CAPTURED_RESPONSE_FILE": str(temporary_directory / "response.json"),
+                    "PATH": f"{captured_bin_directory}:{os.environ['PATH']}",
+                },
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("binding_key and secret_class", result.stderr)
+
+    def test_deploy_authz_grants_reject_unknown_runtime_key_safety_secret_class(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
+                "  *)\n"
+                "    output_file=''\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      if [ "$1" = "-o" ]; then shift; output_file="$1"; fi\n'
+                "      shift || true\n"
+                "    done\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", "scripts/deploy/ensure-authz-grants.sh"],
+                check=False,
+                cwd=Path.cwd(),
+                env={
+                    **os.environ,
+                    **OWNER_AUTHZ_ENV,
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                    "GITHUB_SHA": "test-sha",
+                    "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                    "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                    "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(
+                        [{"binding_key": "EXAMPLE_API_TOKEN", "secret_class": "production"}]
+                    ),
+                    "CAPTURED_RESPONSE_FILE": str(temporary_directory / "response.json"),
+                    "PATH": f"{captured_bin_directory}:{os.environ['PATH']}",
+                },
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("secret_class must be one of", result.stderr)
 
     def test_product_driver_prod_promotion_supports_odoo_run_contract(self) -> None:
         workflow_text = Path(
