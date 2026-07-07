@@ -197,7 +197,10 @@ instance, preview slug, and timeout. The client derives the Launchplane driver
 intent for supported smoke actions. The product script should not own
 Launchplane route paths, request envelopes, driver intent strings,
 idempotency-key recipes, GitHub OIDC token exchange, retry behavior, or
-driver-result failure rules.
+driver-result failure rules. Launchplane resolves the target app URL and
+maintenance secret, then calls the app-owned internal maintenance endpoint for
+generated-user setup and cleanup; product images must not remain the long-term
+home for generated-user admin helper scripts.
 
 ## What Launchplane Owns
 

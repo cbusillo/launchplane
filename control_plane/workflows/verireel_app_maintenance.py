@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import re
-import shlex
 import time
 from typing import Literal, cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.dokploy import JsonObject
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -49,6 +53,9 @@ DEFAULT_ATTEMPTS = 4
 DEFAULT_RETRY_DELAY_SECONDS = 5.0
 PREVIEW_APPLICATION_NAME_PATTERN = re.compile(r"^ver-preview-pr-[1-9][0-9]*-app$")
 PREVIEW_SLUG_PATTERN = re.compile(r"^pr-[1-9][0-9]*$")
+SMOKE_MAINTENANCE_SECRET_KEY = "VERIREEL_SMOKE_MAINTENANCE_SECRET"
+SMOKE_MAINTENANCE_PATH = "/api/internal/smoke-maintenance"
+SMOKE_MAINTENANCE_ACTIONS = frozenset({"grant-sponsored", "promote-owner", "delete-user"})
 
 
 class VeriReelAppMaintenanceRequest(BaseModel):
@@ -142,8 +149,8 @@ def _reset_testing_command() -> str:
     return "node prisma/reset-testing-job.mjs && npx prisma migrate deploy --schema prisma/schema.prisma && node prisma/seed.mjs"
 
 
-def _remote_owner_admin_command(*, action: str, email: str) -> str:
-    return f"node scripts/ops/remote-owner-admin.mjs --action {shlex.quote(action)} --email {shlex.quote(email)}"
+def _uses_internal_smoke_maintenance_api(request: VeriReelAppMaintenanceRequest) -> bool:
+    return request.action in SMOKE_MAINTENANCE_ACTIONS
 
 
 def _command_for_request(request: VeriReelAppMaintenanceRequest) -> tuple[str, str]:
@@ -151,27 +158,21 @@ def _command_for_request(request: VeriReelAppMaintenanceRequest) -> tuple[str, s
         return "ver-apply-prisma-migrations", _migration_command()
     if request.action == "reset-testing":
         return "ver-testing-reset", _reset_testing_command()
-    if request.action == "grant-sponsored":
-        return "ver-remote-e2e-grant-sponsored", _remote_owner_admin_command(
-            action=request.action,
-            email=request.email,
-        )
-    if request.action == "promote-owner":
-        return "ver-owner-route-promote-owner", _remote_owner_admin_command(
-            action=request.action,
-            email=request.email,
-        )
-    if request.action == "delete-user":
-        schedule_name = (
-            "ver-owner-route-delete-user"
-            if request.context == "verireel"
-            else "ver-remote-e2e-delete-user"
-        )
-        return schedule_name, _remote_owner_admin_command(
-            action=request.action,
-            email=request.email,
+    if _uses_internal_smoke_maintenance_api(request):
+        raise click.ClickException(
+            f"VeriReel app maintenance action '{request.action}' uses the internal smoke maintenance API."
         )
     raise click.ClickException(f"Unsupported VeriReel app maintenance action '{request.action}'.")
+
+
+def _smoke_maintenance_operation_name(request: VeriReelAppMaintenanceRequest) -> str:
+    if request.action == "grant-sponsored":
+        return "ver-internal-smoke-grant-sponsored"
+    if request.action == "promote-owner":
+        return "ver-internal-smoke-promote-owner"
+    if request.action == "delete-user":
+        return "ver-internal-smoke-delete-user"
+    raise click.ClickException(f"Unsupported VeriReel smoke maintenance action '{request.action}'.")
 
 
 def _resolve_stable_testing_application(
@@ -227,9 +228,108 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
     return None
 
 
-def _resolve_preview_application(
-    *, host: str, token: str, application_name: str
-) -> tuple[str, str]:
+def _preview_application_name(preview_slug: str) -> str:
+    return f"ver-preview-{preview_slug}-app"
+
+
+def _validate_base_url(raw_base_url: str, *, label: str) -> str:
+    base_url = raw_base_url.strip().rstrip("/")
+    if not base_url:
+        raise click.ClickException(f"{label} requires a base URL.")
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise click.ClickException(f"{label} requires an http or https base URL.")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise click.ClickException(
+            f"{label} requires a root base URL without path, query, or fragment."
+        )
+    return base_url
+
+
+def _first_application_base_url(application: JsonObject) -> str:
+    raw_domains = application.get("domains")
+    domains = raw_domains if isinstance(raw_domains, list) else []
+    for raw_domain in domains:
+        domain = control_plane_dokploy.as_json_object(raw_domain)
+        if domain is None:
+            continue
+        raw_host = str(domain.get("host") or "").strip()
+        if not raw_host:
+            continue
+        return _validate_base_url(
+            raw_host if urlparse(raw_host).scheme else f"https://{raw_host}",
+            label="VeriReel preview smoke maintenance",
+        )
+    raise click.ClickException("VeriReel preview smoke maintenance requires a Dokploy domain.")
+
+
+def _resolve_application_base_url(*, host: str, token: str, application_id: str) -> str:
+    raw_domains = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.byApplicationId",
+        query={"applicationId": application_id},
+    )
+    application: JsonObject = {"domains": raw_domains if isinstance(raw_domains, list) else []}
+    return _first_application_base_url(application)
+
+
+def _fetch_application_by_id(*, host: str, token: str, application_id: str) -> JsonObject:
+    return control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type="application",
+        target_id=application_id,
+    )
+
+
+def _resolve_stable_testing_base_url(*, control_plane_root: Path) -> str:
+    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root,
+    )
+    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+        source_of_truth,
+        context_name="verireel",
+        instance_name="testing",
+    )
+    if target_definition is None:
+        raise click.ClickException("No Dokploy target definition found for verireel/testing.")
+    base_urls = control_plane_dokploy.resolve_healthcheck_base_urls(
+        target_definition=target_definition,
+        environment_values={},
+    )
+    if not base_urls:
+        raise click.ClickException("No base URL configured for verireel/testing.")
+    return _validate_base_url(
+        base_urls[0],
+        label="VeriReel stable smoke maintenance",
+    )
+
+
+def _resolve_stable_testing_smoke_maintenance_secret(*, control_plane_root: Path) -> str:
+    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+        control_plane_root=control_plane_root,
+        context_name="verireel",
+        instance_name="testing",
+    )
+    secret = str(environment_values.get(SMOKE_MAINTENANCE_SECRET_KEY) or "").strip()
+    if not secret:
+        raise click.ClickException(
+            f"VeriReel stable smoke maintenance requires {SMOKE_MAINTENANCE_SECRET_KEY}."
+        )
+    return secret
+
+
+def _preview_application_environment_map(application: JsonObject) -> dict[str, str]:
+    return control_plane_dokploy.parse_dokploy_env_text(str(application.get("env") or ""))
+
+
+def _resolve_preview_smoke_maintenance_target(
+    *,
+    host: str,
+    token: str,
+    application_name: str,
+) -> tuple[str, str, str, str]:
     application = _find_application_by_name(
         host=host,
         token=token,
@@ -244,11 +344,59 @@ def _resolve_preview_application(
         raise click.ClickException(
             f"Preview app {application_name!r} did not expose an application id."
         )
-    return application_name, application_id
+    base_url = _resolve_application_base_url(
+        host=host,
+        token=token,
+        application_id=application_id,
+    )
+    resolved_application = _fetch_application_by_id(
+        host=host,
+        token=token,
+        application_id=application_id,
+    )
+    environment_map = _preview_application_environment_map(resolved_application)
+    secret = str(environment_map.get(SMOKE_MAINTENANCE_SECRET_KEY) or "").strip()
+    if not secret:
+        raise click.ClickException(
+            f"VeriReel preview smoke maintenance requires {SMOKE_MAINTENANCE_SECRET_KEY}."
+        )
+    return application_name, application_id, base_url, secret
 
 
-def _preview_application_name(preview_slug: str) -> str:
-    return f"ver-preview-{preview_slug}-app"
+def _request_internal_smoke_maintenance_api(
+    *,
+    base_url: str,
+    secret: str,
+    request: VeriReelAppMaintenanceRequest,
+) -> None:
+    endpoint = f"{_validate_base_url(base_url, label='VeriReel smoke maintenance')}{SMOKE_MAINTENANCE_PATH}"
+    body = json.dumps(
+        {
+            "action": request.action,
+            "email": request.email,
+        }
+    ).encode("utf-8")
+    http_request = Request(
+        endpoint,
+        data=body,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urlopen(http_request, timeout=request.timeout_seconds) as response:
+            response.read()
+    except HTTPError as error:
+        raise click.ClickException(
+            f"VeriReel smoke maintenance API returned HTTP {error.code}."
+        ) from error
+    except URLError as error:
+        raise click.ClickException(
+            f"VeriReel smoke maintenance API request failed: {error.reason}"
+        ) from error
 
 
 def _find_application_schedule(
@@ -392,35 +540,57 @@ def execute_verireel_app_maintenance(
     application_id = ""
     schedule_name = ""
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
-        if request.context == "verireel":
+        if _uses_internal_smoke_maintenance_api(request):
+            schedule_name = _smoke_maintenance_operation_name(request)
+            if request.context == "verireel":
+                application_name, application_id = _resolve_stable_testing_application(
+                    control_plane_root=control_plane_root,
+                )
+                base_url = _resolve_stable_testing_base_url(
+                    control_plane_root=control_plane_root,
+                )
+                secret = _resolve_stable_testing_smoke_maintenance_secret(
+                    control_plane_root=control_plane_root,
+                )
+            else:
+                host, token = control_plane_dokploy.read_dokploy_config(
+                    control_plane_root=control_plane_root
+                )
+                application_name, application_id, base_url, secret = (
+                    _resolve_preview_smoke_maintenance_target(
+                        host=host,
+                        token=token,
+                        application_name=request.application_name
+                        or _preview_application_name(request.preview_slug),
+                    )
+                )
+            _request_internal_smoke_maintenance_api(
+                base_url=base_url,
+                secret=secret,
+                request=request,
+            )
+        else:
+            host, token = control_plane_dokploy.read_dokploy_config(
+                control_plane_root=control_plane_root
+            )
             application_name, application_id = _resolve_stable_testing_application(
                 control_plane_root=control_plane_root,
             )
-        else:
-            application_name, application_id = _resolve_preview_application(
-                host=host,
-                token=token,
-                application_name=request.application_name
-                or _preview_application_name(request.preview_slug),
-            )
-        schedule_name, command = _command_for_request(request)
-        _run_application_command_with_retries(
-            host=host,
-            token=token,
-            application_id=application_id,
-            schedule_name=schedule_name,
-            command=command,
-            timeout_seconds=request.timeout_seconds,
-        )
-        if request.action == "reset-testing":
-            _trigger_application_deploy(
+            schedule_name, command = _command_for_request(request)
+            _run_application_command_with_retries(
                 host=host,
                 token=token,
                 application_id=application_id,
+                schedule_name=schedule_name,
+                command=command,
+                timeout_seconds=request.timeout_seconds,
             )
+            if request.action == "reset-testing":
+                _trigger_application_deploy(
+                    host=host,
+                    token=token,
+                    application_id=application_id,
+                )
         return VeriReelAppMaintenanceResult(
             maintenance_status="pass",
             action=request.action,
