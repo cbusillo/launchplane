@@ -28,7 +28,8 @@ from control_plane.workflows.launchplane import (
     update_github_issue_comment,
 )
 
-DEFAULT_PREVIEW_FEEDBACK_MARKER = "<!-- verireel-preview-control -->"
+DEFAULT_PREVIEW_FEEDBACK_MARKER = "<!-- launchplane-preview-control -->"
+LEGACY_PREVIEW_FEEDBACK_MARKERS = ("<!-- verireel-preview-control -->",)
 DEFAULT_EVERY_CODE_PREVIEW_READY_MARKER_PREFIX = "<!-- launchplane-every-code-preview-ready"
 DEFAULT_EVERY_CODE_READY_TO_MERGE_MARKER_PREFIX = "<!-- launchplane-every-code-ready-to-merge"
 EVERY_CODE_PREVIEW_READY_LABEL = "preview-ready"
@@ -851,6 +852,40 @@ def _render_preview_pr_feedback_markdown(
     return "\n".join(line for line in lines if line is not None)
 
 
+def _find_preview_pr_feedback_comment(
+    *,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    token: str,
+    marker: str,
+) -> dict[str, object] | None:
+    existing_comment = find_github_issue_comment_by_marker(
+        owner=owner,
+        repo=repo,
+        issue_number=issue_number,
+        token=token,
+        marker=marker,
+    )
+    if existing_comment is not None:
+        return existing_comment
+    if marker != DEFAULT_PREVIEW_FEEDBACK_MARKER:
+        return None
+    for legacy_marker in LEGACY_PREVIEW_FEEDBACK_MARKERS:
+        if legacy_marker == marker:
+            continue
+        existing_comment = find_github_issue_comment_by_marker(
+            owner=owner,
+            repo=repo,
+            issue_number=issue_number,
+            token=token,
+            marker=legacy_marker,
+        )
+        if existing_comment is not None:
+            return existing_comment
+    return None
+
+
 def build_preview_pr_feedback_record(
     *,
     control_plane_root: Path,
@@ -913,7 +948,7 @@ def build_preview_pr_feedback_record(
         error_message = "Launchplane runtime records do not expose GITHUB_TOKEN for this context"
     else:
         try:
-            existing_comment = find_github_issue_comment_by_marker(
+            existing_comment = _find_preview_pr_feedback_comment(
                 owner=github_reference["owner"],
                 repo=github_reference["repo"],
                 issue_number=github_reference["pr_number"],

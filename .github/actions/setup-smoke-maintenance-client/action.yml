@@ -1,6 +1,6 @@
 ---
 name: Setup smoke maintenance client
-description: Write Launchplane's VeriReel smoke-maintenance Node client.
+description: Write Launchplane's smoke-maintenance Node client.
 
 inputs:
   output-path:
