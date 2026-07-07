@@ -210,7 +210,7 @@ console.log(JSON.stringify({ inputs, apply }));
         self.assertEqual(
             payload["apply"]["payloadJsonFiles"], {"apply.dry_run_plan": "/tmp/dry-run.json"}
         )
-        self.assertFalse(payload["apply"]["payload"]["apply"]["smoke_check"])
+        self.assertNotIn("smoke_check", payload["apply"]["payload"]["apply"])
         self.assertEqual(
             payload["apply"]["idempotencyKey"],
             "odoo-preview-apply:odoo-tenant-cm-website:pr-42:destroy:run-456-attempt-2",
@@ -249,6 +249,40 @@ console.log(JSON.stringify(request.payload.apply));
                 "timeout_seconds": 600,
                 "wait_for_deploy": False,
                 "smoke_check": True,
+            },
+        )
+
+    def test_client_omits_refresh_smoke_check_without_override(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            client_path = Path(temporary_directory) / "odoo-preview-client.mjs"
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
+
+            result = self.run_client_script(
+                client_path,
+                """
+const request = client.buildOdooPreviewApplyRequest({
+  product: 'odoo-tenant-cm-website',
+  context: 'cm_website',
+  prNumber: 42,
+  sourceGitRef: 'abc123',
+  dryRunPlanFile: '/tmp/dry-run.json',
+  manifestFile: '/tmp/preview-artifact.json',
+  runId: '456',
+  runAttempt: '2',
+});
+console.log(JSON.stringify(request.payload.apply));
+""",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        apply = json.loads(result.stdout)
+        self.assertEqual(
+            apply,
+            {
+                "timeout_seconds": 600,
+                "wait_for_deploy": True,
             },
         )
 

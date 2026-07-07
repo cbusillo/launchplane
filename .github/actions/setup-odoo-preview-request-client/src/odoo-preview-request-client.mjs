@@ -206,21 +206,23 @@ export function buildOdooPreviewApplyRequest(options = {}) {
     true,
     "Odoo preview waitForDeploy",
   );
-  const smokeCheck = parseOptionalBoolean(
-    options.smokeCheck,
-    facts.operation === "refresh",
-    "Odoo preview smokeCheck",
-  );
+  const applyPayload = {
+    timeout_seconds: 600,
+    wait_for_deploy: waitForDeploy,
+  };
+  if (options.smokeCheck !== undefined && options.smokeCheck !== null && options.smokeCheck !== "") {
+    applyPayload.smoke_check = parseOptionalBoolean(
+      options.smokeCheck,
+      false,
+      "Odoo preview smokeCheck",
+    );
+  }
   return requestEnvelope({
     routePath: ODOO_PREVIEW_APPLY_ROUTE,
     payload: {
       schema_version: 1,
       product: facts.product,
-      apply: {
-        timeout_seconds: 600,
-        wait_for_deploy: waitForDeploy,
-        smoke_check: smokeCheck,
-      },
+      apply: applyPayload,
     },
     payloadJsonFiles,
     idempotencyKey:

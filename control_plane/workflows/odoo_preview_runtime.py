@@ -221,21 +221,27 @@ def build_odoo_preview_apply_workflow_request(
     wait_for_deploy: bool = True,
     smoke_check: bool | None = None,
 ) -> OdooPreviewWorkflowRequest:
+    dry_run_plan_file = _required_text(
+        dry_run_plan_file,
+        "Odoo preview apply request requires dry_run_plan_file.",
+    )
     if facts.operation == "refresh" and not manifest_file.strip():
         raise ValueError("Odoo preview refresh apply request requires manifest_file.")
     payload_json_files = {"apply.dry_run_plan": dry_run_plan_file}
     if manifest_file.strip():
         payload_json_files["apply.manifest"] = manifest_file.strip()
+    apply_payload: dict[str, object] = {
+        "timeout_seconds": 600,
+        "wait_for_deploy": wait_for_deploy,
+    }
+    if smoke_check is not None:
+        apply_payload["smoke_check"] = smoke_check
     return OdooPreviewWorkflowRequest(
         route_path=ODOO_PREVIEW_APPLY_ROUTE,
         payload={
             "schema_version": 1,
             "product": facts.product,
-            "apply": {
-                "timeout_seconds": 600,
-                "wait_for_deploy": wait_for_deploy,
-                "smoke_check": facts.operation == "refresh" if smoke_check is None else smoke_check,
-            },
+            "apply": apply_payload,
         },
         payload_json_files=payload_json_files,
         idempotency_key=(
@@ -860,6 +866,7 @@ class OdooPreviewDokployDryRunRequest(BaseModel):
     no_cache: bool = False
     delete_volumes: bool = True
     runtime_port: int = Field(default=8069, ge=1)
+    smoke_check: bool = True
     compose_name: str = ""
     environment_id: str = ""
     template_compose_id: str = ""
@@ -985,7 +992,7 @@ class OdooPreviewDokployApplyRequest(BaseModel):
     health_path: str = DEFAULT_ODOO_RUNTIME_HEALTH_PATH
     timeout_seconds: int = Field(default=300, ge=1)
     wait_for_deploy: bool = True
-    smoke_check: bool = True
+    smoke_check: bool | None = None
 
     @model_validator(mode="after")
     def _normalize_request(self) -> "OdooPreviewDokployApplyRequest":
@@ -1007,6 +1014,10 @@ class OdooPreviewDokployApplyRequest(BaseModel):
         self.environment_values = {
             key.strip(): value for key, value in self.environment_values.items() if key.strip()
         }
+        if self.smoke_check is None:
+            self.smoke_check = any(
+                operation.name == "smoke_check" for operation in self.dry_run_plan.operations
+            )
         return self
 
 
@@ -1467,21 +1478,27 @@ def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds
         smoke_url,
         headers={"Accept": "application/json, text/plain, */*", "Cache-Control": "no-store"},
     )
-    deadline = timeout_seconds
+    deadline = time.monotonic() + timeout_seconds
     last_http_status: int | None = None
-    while deadline > 0:
+    while True:
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            break
         try:
-            with urlopen(request, timeout=min(15, deadline)) as response:
+            with urlopen(request, timeout=min(15, remaining_seconds)) as response:
                 response.read()
-            if 200 <= response.status < 400:
+                status = response.status
+            if 200 <= status < 400:
                 return
         except HTTPError as exc:
             last_http_status = exc.code
         except (TimeoutError, URLError, ValueError):
             pass
-        sleep_seconds = min(5, deadline)
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            break
+        sleep_seconds = min(5, remaining_seconds)
         time.sleep(sleep_seconds)
-        deadline -= sleep_seconds
     if last_http_status is not None:
         raise click.ClickException(f"Odoo preview smoke check returned HTTP {last_http_status}.")
     raise click.ClickException(f"Timed out waiting for Odoo preview smoke check {smoke_url}.")
@@ -1610,13 +1627,16 @@ def _operations(
                 target=compose_ref,
                 payload_keys=("composeId",),
             ),
+        )
+    )
+    if request.smoke_check:
+        operations.append(
             OdooPreviewDokployOperation(
                 name="smoke_check",
                 method="LOCAL",
                 target=runtime_plan.preview_url,
-            ),
+            )
         )
-    )
     return tuple(operations)
 
 
