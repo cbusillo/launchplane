@@ -475,6 +475,9 @@ The product-driver workflow surface for stable deploy, stable environment, and
 app-maintenance defaults to the `testing` lane so a testing publish workflow can
 pass only the primitive facts it owns, such as immutable artifact identity,
 tested source git ref, and operation-level maintenance intent.
+The app-maintenance connector defaults to the VeriReel driver for compatibility,
+and callers can pass `driver: odoo` for the narrow Odoo post-deploy maintenance
+adapter backed by `/v1/drivers/odoo/app-maintenance`.
 Product repos should pass an explicit `instance` only for a workflow whose
 operator input or job purpose genuinely selects a different lane.
 Production readiness wrappers may also accept expected runtime build identity
