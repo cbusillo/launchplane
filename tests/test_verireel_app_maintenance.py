@@ -1,5 +1,6 @@
 import json
 import unittest
+from email.message import Message
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -258,7 +259,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
             "https://testing.verireel.example/api/internal/smoke-maintenance",
             403,
             "Forbidden",
-            hdrs={},
+            hdrs=Message(),
             fp=BytesIO(b"not allowed"),
         )
 
