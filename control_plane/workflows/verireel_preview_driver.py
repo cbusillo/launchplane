@@ -43,6 +43,7 @@ _PREVIEW_REFRESH_GENERATED_ENV_KEYS = frozenset(
         "DATABASE_URL",
         "VERIREEL_CRON_SECRET",
         "VERIREEL_SECRETS_MASTER_KEY",
+        "VERIREEL_SMOKE_MAINTENANCE_SECRET",
     }
 )
 
@@ -459,10 +460,15 @@ def _random_urlsafe_secret(byte_count: int = 32) -> str:
 
 
 def _resolve_preview_secret(
-    *, existing_env_map: dict[str, str], key: str, generate: Callable[[], str]
+    *,
+    existing_env_map: dict[str, str],
+    key: str,
+    generate: Callable[[], str],
+    template_env_map: dict[str, str] | None = None,
 ) -> str:
     existing_value = existing_env_map.get(key, "").strip()
-    if existing_value:
+    template_value = (template_env_map or {}).get(key, "").strip()
+    if existing_value and existing_value != template_value:
         return existing_value
     return generate()
 
@@ -1295,16 +1301,25 @@ def execute_verireel_preview_refresh(
                     existing_env_map=existing_env_map,
                     key="BETTER_AUTH_SECRET",
                     generate=_random_urlsafe_secret,
+                    template_env_map=template_env_map,
                 ),
                 "VERIREEL_SECRETS_MASTER_KEY": _resolve_preview_secret(
                     existing_env_map=existing_env_map,
                     key="VERIREEL_SECRETS_MASTER_KEY",
                     generate=_random_base64_secret,
+                    template_env_map=template_env_map,
                 ),
                 "VERIREEL_CRON_SECRET": _resolve_preview_secret(
                     existing_env_map=existing_env_map,
                     key="VERIREEL_CRON_SECRET",
                     generate=_random_urlsafe_secret,
+                    template_env_map=template_env_map,
+                ),
+                "VERIREEL_SMOKE_MAINTENANCE_SECRET": _resolve_preview_secret(
+                    existing_env_map=existing_env_map,
+                    key="VERIREEL_SMOKE_MAINTENANCE_SECRET",
+                    generate=_random_urlsafe_secret,
+                    template_env_map=template_env_map,
                 ),
                 **runtime_identity_env(_build_preview_runtime_identity(request=request)),
             },

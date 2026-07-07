@@ -196,8 +196,9 @@ decryption key state denies the reveal or resolution.
   managed template-lane bindings, and the active policy must allow those
   bindings for the preview target. Template values that the driver rewrites for
   each preview, such as VeriReel's generated `DATABASE_URL`,
-  `BETTER_AUTH_SECRET`, `VERIREEL_SECRETS_MASTER_KEY`, and
-  `VERIREEL_CRON_SECRET`, are not copied template secrets.
+  `BETTER_AUTH_SECRET`, `VERIREEL_SECRETS_MASTER_KEY`,
+  `VERIREEL_CRON_SECRET`, and `VERIREEL_SMOKE_MAINTENANCE_SECRET`, are not
+  copied template secrets.
 - Delegated worker workflows that overlay managed runtime secrets into
   subprocess environments, such as VeriReel prod backup and rollback workers,
   must evaluate the managed bindings for the worker target before the worker
