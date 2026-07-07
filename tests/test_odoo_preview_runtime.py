@@ -4,7 +4,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Iterator, Literal, cast
 from unittest.mock import ANY, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import click
 
@@ -433,7 +433,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 "apply": {
                     "timeout_seconds": 600,
                     "wait_for_deploy": True,
-                    "smoke_check": True,
                 },
             },
         )
@@ -463,6 +462,18 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             {"timeout_seconds": 600, "wait_for_deploy": False, "smoke_check": True},
         )
 
+    def test_preview_apply_workflow_request_accepts_refresh_smoke_disabled(self) -> None:
+        request = build_odoo_preview_apply_workflow_request(
+            facts=_workflow_facts(),
+            dry_run_plan_file="/tmp/dry-run.json",
+            manifest_file="/tmp/preview-artifact.json",
+            smoke_check=False,
+        )
+
+        apply = cast(dict[str, object], request.payload["apply"])
+        self.assertIsInstance(apply, dict)
+        self.assertEqual(apply["smoke_check"], False)
+
     def test_destroy_preview_apply_request_skips_manifest_and_smoke(self) -> None:
         request = build_odoo_preview_apply_workflow_request(
             facts=_workflow_facts(operation="destroy"),
@@ -474,7 +485,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         apply = cast(dict[str, object], request.payload["apply"])
         self.assertIsInstance(apply, dict)
-        self.assertEqual(apply["smoke_check"], False)
+        self.assertNotIn("smoke_check", apply)
         self.assertEqual(
             request.idempotency_key,
             "odoo-preview-apply:odoo-tenant-cm-website:pr-42:destroy:run-456-attempt-2",
@@ -485,6 +496,14 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             build_odoo_preview_apply_workflow_request(
                 facts=_workflow_facts(),
                 dry_run_plan_file="/tmp/dry-run.json",
+            )
+
+    def test_preview_apply_workflow_request_requires_dry_run_plan_file(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires dry_run_plan_file"):
+            build_odoo_preview_apply_workflow_request(
+                facts=_workflow_facts(),
+                dry_run_plan_file=" ",
+                manifest_file="/tmp/preview-artifact.json",
             )
 
     def test_builder_accepts_product_profile_preview_slug_token_without_payload_authority(
@@ -1060,6 +1079,59 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
         )
 
+    def test_refresh_dry_run_omits_smoke_check_when_disabled(self) -> None:
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=_endpoint_spec(),
+                environment_id="env-cm-preview",
+                template_compose_id="compose-template",
+                smoke_check=False,
+            )
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertNotIn("smoke_check", [operation.name for operation in plan.operations])
+
+    def test_apply_inherits_smoke_check_disabled_from_dry_run_plan(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=_endpoint_spec(),
+                environment_id="env-cm-preview",
+                template_compose_id="compose-template",
+                smoke_check=False,
+            )
+        )
+
+        request = OdooPreviewDokployApplyRequest(
+            dry_run_plan=dry_run,
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            environment_values=_environment_values(),
+        )
+
+        self.assertFalse(request.smoke_check)
+
+    def test_apply_allows_explicit_smoke_check_override(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=_endpoint_spec(),
+                environment_id="env-cm-preview",
+                template_compose_id="compose-template",
+                smoke_check=False,
+            )
+        )
+
+        request = OdooPreviewDokployApplyRequest(
+            dry_run_plan=dry_run,
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            environment_values=_environment_values(),
+            smoke_check=True,
+        )
+
+        self.assertTrue(request.smoke_check)
+
     def test_refresh_existing_runtime_does_not_plan_delete_rollback(self) -> None:
         plan = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
@@ -1358,6 +1430,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.compose_id, "compose-cm-pr-45")
         self.assertEqual(result.domain_id, "domain-cm-pr-45")
         self.assertFalse(result.created_compose)
+        self.assertNotIn("smoke_check", [step.name for step in result.steps])
         delete_domain.assert_not_called()
         delete_compose.assert_not_called()
 
@@ -1543,8 +1616,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ["/api/domain.byComposeId", "/api/domain.delete", "/api/compose.delete"],
         )
 
-    @staticmethod
-    def test_smoke_check_retries_transient_http_404() -> None:
+    def test_smoke_check_retries_transient_http_404(self) -> None:
+        clock = _FakeClock(start=0)
         responses: list[HTTPError | _SmokeResponse] = [
             HTTPError(
                 "https://pr-45.cm-preview.example.test/launchplane/health",
@@ -1566,8 +1639,13 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_preview_runtime.urlopen", side_effect=_fake_urlopen
             ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.time.monotonic",
+                side_effect=clock.monotonic,
+            ),
             patch("control_plane.workflows.odoo_preview_runtime.time.sleep") as sleep,
         ):
+            sleep.side_effect = clock.sleep
             _wait_for_smoke_check(
                 preview_url="https://pr-45.cm-preview.example.test/",
                 health_path="/launchplane/health",
@@ -1576,15 +1654,71 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         sleep.assert_called_once_with(5)
 
+    def test_smoke_check_uses_status_before_response_closes(self) -> None:
+        clock = _FakeClock(start=0)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.urlopen",
+                return_value=_SmokeResponse(status=204, clear_status_on_exit=True),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.time.monotonic",
+                side_effect=clock.monotonic,
+            ),
+            patch("control_plane.workflows.odoo_preview_runtime.time.sleep") as sleep,
+        ):
+            _wait_for_smoke_check(
+                preview_url="https://pr-45.cm-preview.example.test/",
+                health_path="/launchplane/health",
+                timeout_seconds=10,
+            )
+
+        sleep.assert_not_called()
+
+    def test_smoke_check_raises_timeout_when_attempts_are_exhausted(self) -> None:
+        clock = _FakeClock(start=0)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.urlopen",
+                side_effect=URLError("not ready"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.time.monotonic",
+                side_effect=clock.monotonic,
+            ),
+            patch("control_plane.workflows.odoo_preview_runtime.time.sleep") as sleep,
+            self.assertRaisesRegex(click.ClickException, "Timed out waiting"),
+        ):
+            sleep.side_effect = clock.sleep
+            _wait_for_smoke_check(
+                preview_url="https://pr-45.cm-preview.example.test/",
+                health_path="/launchplane/health",
+                timeout_seconds=2,
+            )
+
+
+class _FakeClock:
+    def __init__(self, *, start: float = 0) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
 
 class _SmokeResponse:
-    def __init__(self, *, status: int) -> None:
+    def __init__(self, *, status: int, clear_status_on_exit: bool = False) -> None:
         self.status = status
+        self._clear_status_on_exit = clear_status_on_exit
 
     def __enter__(self) -> "_SmokeResponse":
         return self
 
     def __exit__(self, *_args: object) -> None:
+        if self._clear_status_on_exit:
+            self.status = 0
         return None
 
     @staticmethod
