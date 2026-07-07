@@ -134,6 +134,8 @@ class OdooProdRollbackResult(BaseModel):
     release_tuple_id: str = ""
     rollback_status: Literal["pass", "fail"]
     rollback_health_status: Literal["pass", "fail", "skipped"] = "skipped"
+    rollback_started_at: str = ""
+    rollback_finished_at: str = ""
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     error_message: str = ""
 
@@ -395,6 +397,8 @@ def execute_odoo_prod_rollback(
             deployment_record_id=deployment_record_id,
             rollback_status="fail",
             rollback_health_status=health_status,
+            rollback_started_at=started_at,
+            rollback_finished_at=finished_at,
             post_deploy_status=post_deploy_status,
             error_message=str(error),
         )
@@ -428,5 +432,7 @@ def execute_odoo_prod_rollback(
         release_tuple_id=replacement_result.release_tuple_id,
         rollback_status="pass",
         rollback_health_status=health_status,
+        rollback_started_at=started_at,
+        rollback_finished_at=finished_at,
         post_deploy_status=replacement_result.post_deploy_status,
     )

@@ -331,6 +331,10 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/reusable-product-driver-post-deploy.yml": {
         "inputs.driver.default": frozenset(("odoo",)),
     },
+    ".github/workflows/reusable-product-driver-prod-rollback.yml": {
+        "inputs.driver.default": frozenset(("verireel",)),
+        "inputs.source_channel.default": frozenset(("testing",)),
+    },
     ".github/workflows/runner-host-hygiene.yml": {
         "inputs.action.default": frozenset(("prune_docker_cache",)),
         "inputs.minimum_free_disk_bytes.default": frozenset(("0",)),
@@ -450,10 +454,13 @@ PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS = frozenset(
         "promotion.to_instance",
         "rollback.backup_record_id",
         "rollback.context",
+        "rollback.artifact_id",
         "rollback.expected_build_revision",
         "rollback.expected_build_tag",
         "rollback.instance",
         "rollback.promotion_record_id",
+        "rollback.reason",
+        "rollback.source_channel",
         "rollback.snapshot_name",
         "verification.context",
         "verification.deployment_record_id",

@@ -516,6 +516,18 @@ operations; product repos should not use it as a generic phase-aware post-deploy
 substitute. The old Odoo-specific post-deploy reusable has been retired after
 tenant callers moved to the product-driver wrapper.
 
+`reusable-product-driver-prod-rollback.yml@main` keeps the existing VeriReel
+rollback surface as its compatibility default and also supports explicit
+`driver: odoo` callers. Odoo rollback callers pass the same primitive rollback
+facts as the older Odoo-specific reusable: explicit `product`, explicit
+`context`, `artifact_id`, optional `promotion_record_id`, and `reason`. The
+wrapper keeps Odoo's source channel fixed to `testing`; callers should omit
+`source_channel` unless they are intentionally relying on that compatibility
+default. The product-driver wrapper owns the `/v1/drivers/odoo/prod-rollback`
+route, payload envelope, output mapping, fail-result paths, and legacy
+`opr:<context>:<run>` idempotency key shape so tenant repos do not keep Odoo
+rollback request construction locally.
+
 When a workflow operation has implied lane or maintenance semantics, prefer an
 operation-level reusable workflow over passing checked-in lane, action, or
 intent strings from the product repository. For example, a product repo should

@@ -19,13 +19,35 @@ name: Reusable Product Driver Prod Rollback
         required: false
         default: prod
         type: string
+      driver:
+        description: Product driver id. Defaults to verireel for compatibility.
+        required: false
+        default: verireel
+        type: string
       promotion_record_id:
         description: Promotion record id for the failed prod-changing action.
-        required: true
+        required: false
+        default: ""
         type: string
       backup_record_id:
         description: Backup gate record id used to authorize rollback.
-        required: true
+        required: false
+        default: ""
+        type: string
+      artifact_id:
+        description: Explicit artifact ID for Odoo rollback.
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: Rollback reason for Odoo rollback evidence.
+        required: false
+        default: ""
+        type: string
+      source_channel:
+        description: Source channel for Odoo rollback. Defaults to testing.
+        required: false
+        default: testing
         type: string
       snapshot_name:
         description: Backup snapshot name, when available.
@@ -74,10 +96,10 @@ name: Reusable Product Driver Prod Rollback
         description: Rollback health verification status.
         value: ${{ jobs.prod-rollback.outputs.rollback_health_status }}
       rollback_started_at:
-        description: Rollback start timestamp.
+        description: Rollback start timestamp for drivers that return one.
         value: ${{ jobs.prod-rollback.outputs.rollback_started_at }}
       rollback_finished_at:
-        description: Rollback finish timestamp.
+        description: Rollback finish timestamp for drivers that return one.
         value: ${{ jobs.prod-rollback.outputs.rollback_finished_at }}
       error_message:
         description: Rollback error message, when present.
@@ -85,6 +107,15 @@ name: Reusable Product Driver Prod Rollback
       trace_id:
         description: Launchplane trace id for request debugging.
         value: ${{ jobs.prod-rollback.outputs.trace_id }}
+      deployment_record_id:
+        description: Deployment record ID for drivers that write one.
+        value: ${{ jobs.prod-rollback.outputs.deployment_record_id }}
+      release_tuple_id:
+        description: Release tuple ID for drivers that write one.
+        value: ${{ jobs.prod-rollback.outputs.release_tuple_id }}
+      post_deploy_status:
+        description: Post-deploy status for drivers that run post-deploy after rollback.
+        value: ${{ jobs.prod-rollback.outputs.post_deploy_status }}
 
 permissions:
   contents: read
@@ -93,61 +124,90 @@ permissions:
 jobs:
   prod-rollback:
     outputs:
-      promotion_record_id: ${{ steps.lp.outputs.promotion_record_id }}
-      backup_record_id: ${{ steps.lp.outputs.backup_record_id }}
-      snapshot_name: ${{ steps.lp.outputs.snapshot_name }}
-      rollback_status: ${{ steps.lp.outputs.rollback_status }}
-      rollback_health_status: ${{ steps.lp.outputs.rollback_health_status }}
-      rollback_started_at: ${{ steps.lp.outputs.rollback_started_at }}
-      rollback_finished_at: ${{ steps.lp.outputs.rollback_finished_at }}
-      error_message: ${{ steps.lp.outputs.error_message }}
-      trace_id: ${{ steps.lp.outputs.trace_id }}
+      promotion_record_id: ${{ steps.lp_verireel.outputs.promotion_record_id || steps.lp_odoo.outputs.promotion_record_id }}
+      backup_record_id: ${{ steps.lp_verireel.outputs.backup_record_id }}
+      snapshot_name: ${{ steps.lp_verireel.outputs.snapshot_name }}
+      rollback_status: ${{ steps.lp_verireel.outputs.rollback_status || steps.lp_odoo.outputs.rollback_status }}
+      rollback_health_status: ${{ steps.lp_verireel.outputs.rollback_health_status || steps.lp_odoo.outputs.rollback_health_status }}
+      rollback_started_at: ${{ steps.lp_verireel.outputs.rollback_started_at || steps.lp_odoo.outputs.rollback_started_at }}
+      rollback_finished_at: ${{ steps.lp_verireel.outputs.rollback_finished_at || steps.lp_odoo.outputs.rollback_finished_at }}
+      error_message: ${{ steps.lp_verireel.outputs.error_message || steps.lp_odoo.outputs.error_message }}
+      trace_id: ${{ steps.lp_verireel.outputs.trace_id || steps.lp_odoo.outputs.trace_id }}
+      deployment_record_id: ${{ steps.lp_odoo.outputs.deployment_record_id }}
+      release_tuple_id: ${{ steps.lp_odoo.outputs.release_tuple_id }}
+      post_deploy_status: ${{ steps.lp_odoo.outputs.post_deploy_status }}
     runs-on: ubuntu-latest
     steps:
       - name: Resolve Launchplane prod rollback request
         id: request
         env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
           BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
           CONTEXT: ${{ inputs.context }}
+          DRIVER: ${{ inputs.driver }}
           INSTANCE: ${{ inputs.instance }}
           PRODUCT: ${{ inputs.product }}
           PROMOTION_RECORD_ID: ${{ inputs.promotion_record_id }}
+          REASON: ${{ inputs.reason }}
+          SOURCE_CHANNEL: ${{ inputs.source_channel }}
         run: |
           set -euo pipefail
-          if [ -z "$PRODUCT" ]; then
-            PRODUCT="${GITHUB_REPOSITORY#*/}"
-          fi
-          if [ -z "$CONTEXT" ]; then
-            CONTEXT="$PRODUCT"
-          fi
+          DRIVER="${DRIVER,,}"
           if [ -z "$INSTANCE" ]; then
             INSTANCE="prod"
           fi
-          for required in PRODUCT CONTEXT INSTANCE PROMOTION_RECORD_ID BACKUP_RECORD_ID; do
+          if [ "$DRIVER" = "verireel" ]; then
+            if [ -z "$PRODUCT" ]; then
+              PRODUCT="${GITHUB_REPOSITORY#*/}"
+            fi
+            if [ -z "$CONTEXT" ]; then
+              CONTEXT="$PRODUCT"
+            fi
+            required_inputs="PRODUCT CONTEXT INSTANCE PROMOTION_RECORD_ID BACKUP_RECORD_ID"
+            route_path="/v1/drivers/verireel/prod-rollback"
+          elif [ "$DRIVER" = "odoo" ]; then
+            required_inputs="PRODUCT CONTEXT INSTANCE ARTIFACT_ID REASON"
+            route_path="/v1/drivers/odoo/prod-rollback"
+            if [ "$INSTANCE" != "prod" ]; then
+              echo "Odoo prod rollback requires instance 'prod'." >&2
+              exit 1
+            fi
+            if [ -z "$SOURCE_CHANNEL" ]; then
+              SOURCE_CHANNEL="testing"
+            fi
+            if [ "$SOURCE_CHANNEL" != "testing" ]; then
+              echo "Odoo prod rollback requires source_channel 'testing'." >&2
+              exit 1
+            fi
+          else
+            echo "Unsupported driver: $DRIVER" >&2
+            exit 1
+          fi
+          for required in $required_inputs; do
             if [ -z "${!required}" ]; then
               echo "${required} is required." >&2
               exit 1
             fi
           done
           run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          if [ "$DRIVER" = "odoo" ]; then
+            idempotency_key="opr:$CONTEXT:$run_scope"
+          else
+            idempotency_key="product-driver-prod-rollback:$PRODUCT:$CONTEXT:$INSTANCE:$PROMOTION_RECORD_ID:$BACKUP_RECORD_ID:$run_scope"
+          fi
           {
             echo "context=$CONTEXT"
-            printf '%s=%s:%s:%s:%s:%s:%s:%s\n' \
-              idempotency_key \
-              product-driver-prod-rollback \
-              "$PRODUCT" \
-              "$CONTEXT" \
-              "$INSTANCE" \
-              "$PROMOTION_RECORD_ID" \
-              "$BACKUP_RECORD_ID" \
-              "$run_scope"
+            echo "driver=$DRIVER"
+            echo "idempotency_key=$idempotency_key"
             echo "instance=$INSTANCE"
             echo "product=$PRODUCT"
-            echo "route_path=/v1/drivers/verireel/prod-rollback"
+            echo "route_path=$route_path"
+            echo "source_channel=$SOURCE_CHANNEL"
           } >>"$GITHUB_OUTPUT"
 
-      - name: Request Launchplane prod rollback
-        id: lp
+      - name: Request Launchplane VeriReel prod rollback
+        id: lp_verireel
+        if: ${{ steps.request.outputs.driver == 'verireel' }}
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
         with:
           launchplane-url: >-
@@ -182,4 +242,43 @@ jobs:
             rollback_health_status=result.rollback_health_status,
             rollback_started_at=result.rollback_started_at,
             rollback_finished_at=result.rollback_finished_at,
+            error_message=result.error_message
+
+      - name: Request Launchplane Odoo prod rollback
+        id: lp_odoo
+        if: ${{ steps.request.outputs.driver == 'odoo' }}
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.request.outputs.route_path }}
+          payload: |-
+            {
+              "schema_version": 1,
+              "rollback": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            rollback.context=${{ steps.request.outputs.context }}
+            rollback.instance=${{ steps.request.outputs.instance }}
+            rollback.source_channel=${{ steps.request.outputs.source_channel }}
+            rollback.promotion_record_id=${{ inputs.promotion_record_id }}
+            rollback.artifact_id=${{ inputs.artifact_id }}
+            rollback.reason=${{ inputs.reason }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.rollback_status,result.rollback_health_status,result.post_deploy_status
+          output-paths: >-
+            trace_id=trace_id,
+            promotion_record_id=result.promotion_record_id,
+            deployment_record_id=result.deployment_record_id,
+            release_tuple_id=result.release_tuple_id,
+            rollback_status=result.rollback_status,
+            rollback_health_status=result.rollback_health_status,
+            rollback_started_at=result.rollback_started_at,
+            rollback_finished_at=result.rollback_finished_at,
+            post_deploy_status=result.post_deploy_status,
             error_message=result.error_message

@@ -2299,6 +2299,50 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
 
+    def test_product_driver_prod_rollback_workflow_mechanics_are_thin_inputs(
+        self,
+    ) -> None:
+        path = ".github/workflows/reusable-product-driver-prod-rollback.yml"
+        for key, value in (
+            ("inputs.timeout-ms.default", "1800000"),
+            ("inputs.driver.default", "verireel"),
+            ("inputs.source_channel.default", "testing"),
+            ("route-path", "${{ steps.request.outputs.route_path }}"),
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("payload-fields.rollback.context", "${{ steps.request.outputs.context }}"),
+            ("payload-fields.rollback.instance", "${{ steps.request.outputs.instance }}"),
+            (
+                "payload-fields.rollback.source_channel",
+                "${{ steps.request.outputs.source_channel }}",
+            ),
+            ("payload-fields.rollback.backup_record_id", "${{ inputs.backup_record_id }}"),
+            ("payload-fields.rollback.artifact_id", "${{ inputs.artifact_id }}"),
+            (
+                "payload-fields.rollback.promotion_record_id",
+                "${{ inputs.promotion_record_id }}",
+            ),
+            ("payload-fields.rollback.reason", "${{ inputs.reason }}"),
+            ("payload-fields.rollback.snapshot_name", "${{ inputs.snapshot_name }}"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("inputs.driver.default", "odoo"),
+            ("inputs.source_channel.default", "staging"),
+            ("payload-fields.rollback.context", "prod"),
+            ("payload-fields.rollback.instance", "testing"),
+            ("payload-fields.rollback.source_channel", "testing"),
+            ("payload-fields.rollback.artifact_id", "artifact-hardcoded"),
+            ("payload-fields.rollback.reason", "manual rollback"),
+            ("inputs.timeout-ms.default", "42"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
+
     def test_product_driver_operation_wrapper_literals_are_exact_path_scoped(
         self,
     ) -> None:
