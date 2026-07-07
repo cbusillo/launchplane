@@ -90,7 +90,6 @@
     "Odoo Website Bootstrap Override",
     "Odoo Stable Bootstrap",
     "Reusable Odoo Artifact Publish",
-    "Reusable Odoo Post Deploy",
     "Reusable Odoo Prod Promotion",
     "Reusable Odoo Prod Rollback",
     "Reusable Generic Web Stable Deploy",
