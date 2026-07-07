@@ -37,6 +37,16 @@ slugify() {
 	printf '%s' "$1" | tr -c '[:alnum:]_.-' '-'
 }
 
+sha256_stdin() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | awk '{print $1}'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 | awk '{print $1}'
+	else
+		openssl dgst -sha256 -r | awk '{print $1}'
+	fi
+}
+
 post_payload() {
 	local route_path="$1"
 	local idempotency_key="$2"
@@ -481,6 +491,63 @@ post_launchplane_service_grant() {
 		"$event_name"
 }
 
+runtime_key_safety_rules_json() {
+	if [ -z "${LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON:-}" ]; then
+		printf '[]\n'
+		return 0
+	fi
+
+	jq -c \
+		'if type != "array" then error("LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON must be a JSON array") else . end
+     | if any(.[]; ((.binding_key // "") | length) == 0 or ((.secret_class // "") | length) == 0)
+       then error("Each runtime key-safety rule must include binding_key and secret_class")
+       else .
+       end
+     | if any(.[]; (.secret_class as $class | ["prod_only", "testing", "preview", "non_prod", "shared_safe"] | index($class) | not))
+       then error("Runtime key-safety secret_class must be one of prod_only, testing, preview, non_prod, shared_safe")
+       else .
+       end
+     | map({
+        binding_key: (.binding_key // ""),
+        secret_class: (.secret_class // ""),
+        allowed_contexts: (.allowed_contexts // []),
+        allowed_instances: (.allowed_instances // []),
+        allowed_instance_patterns: (.allowed_instance_patterns // []),
+        allowed_targets: (.allowed_targets // []),
+        description: (.description // "")
+      })' \
+		<<<"${LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON}" ||
+		return 1
+}
+
+post_runtime_key_safety_rules() {
+	local rules_json rule_count request_payload payload_sha256
+
+	rules_json="$(runtime_key_safety_rules_json)"
+	rule_count="$(jq 'length' <<<"$rules_json")"
+	if [ "$rule_count" = "0" ]; then
+		echo "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON is unset or empty; skipping runtime key-safety policy reconciliation."
+		return 0
+	fi
+
+	request_payload="$({
+		jq -n \
+			--argjson rules "$rules_json" \
+			'{
+        schema_version: 1,
+        product: "launchplane",
+        source_label: "deploy:runtime-key-safety-rules",
+        rules: $rules
+      }'
+	})"
+	payload_sha256="$(printf '%s' "$request_payload" | sha256_stdin)"
+	post_payload \
+		/v1/runtime-key-safety/policies/apply \
+		"launchplane-runtime-key-safety-rules:${GITHUB_SHA}:${payload_sha256}" \
+		"$request_payload" \
+		"Launchplane runtime key-safety policy request failed with"
+}
+
 preflight_owner_authz_env
 
 post_launchplane_service_grant \
@@ -560,6 +627,17 @@ post_launchplane_service_grant \
 	authz_policy_grant.write \
 	deploy:authz-policy-grant-maintenance-run \
 	authz-policy-grant-maintenance-run \
+	workflow_run
+post_launchplane_service_grant \
+	deploy-launchplane.yml \
+	runtime_key_safety.write \
+	deploy:runtime-key-safety-policy-grant \
+	runtime-key-safety-policy
+post_launchplane_service_grant \
+	deploy-launchplane.yml \
+	runtime_key_safety.write \
+	deploy:runtime-key-safety-policy-run-grant \
+	runtime-key-safety-policy-run \
 	workflow_run
 post_grant \
 	"$GITHUB_REPOSITORY" \
@@ -752,3 +830,4 @@ post_product_config_human_grant \
 	deploy:product-config-human-apply-grant \
 	product-config-human-apply
 post_configured_github_action_grants
+post_runtime_key_safety_rules
