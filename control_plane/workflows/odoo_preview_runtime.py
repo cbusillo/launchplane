@@ -72,6 +72,179 @@ ODOO_PREVIEW_REQUIRED_ENV_KEYS = (
     "ODOO_MASTER_PASSWORD",
     "ODOO_ADMIN_PASSWORD",
 )
+ODOO_PREVIEW_ARTIFACT_PUBLISH_INPUTS_ROUTE = "/v1/drivers/odoo/artifact-publish-inputs"
+ODOO_PREVIEW_APPLY_INPUTS_ROUTE = "/v1/drivers/odoo/preview-apply-inputs"
+ODOO_PREVIEW_APPLY_ROUTE = "/v1/drivers/odoo/preview-apply"
+
+
+class OdooPreviewWorkflowRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    route_path: str
+    payload: dict[str, object]
+    idempotency_key: str
+    payload_json_files: dict[str, str] = Field(default_factory=dict)
+    response_output_path: str = ""
+    fail_result_paths: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "OdooPreviewWorkflowRequest":
+        self.route_path = _required_text(
+            self.route_path, "Odoo preview workflow request requires route_path"
+        )
+        self.idempotency_key = _required_text(
+            self.idempotency_key,
+            "Odoo preview workflow request requires idempotency_key",
+        )
+        self.payload_json_files = {
+            _required_text(path, "Odoo preview payload file binding requires path"): _required_text(
+                file_path, "Odoo preview payload file binding requires file_path"
+            )
+            for path, file_path in self.payload_json_files.items()
+        }
+        self.response_output_path = self.response_output_path.strip()
+        self.fail_result_paths = tuple(
+            _required_text(path, "Odoo preview fail-result path cannot be blank")
+            for path in self.fail_result_paths
+        )
+        return self
+
+
+class OdooPreviewWorkflowRequestFacts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    context: str
+    instance: str = "testing"
+    operation: OdooPreviewRuntimeOperation = "refresh"
+    pr_number: int = Field(ge=1)
+    preview_slug: str = ""
+    source_git_ref: str = ""
+    run_id: str
+    run_attempt: str
+    source: str = ""
+
+    @model_validator(mode="after")
+    def _validate_facts(self) -> "OdooPreviewWorkflowRequestFacts":
+        self.product = _required_text(self.product, "Odoo preview request facts require product")
+        self.context = _required_text(self.context, "Odoo preview request facts require context")
+        self.instance = _required_text(self.instance, "Odoo preview request facts require instance")
+        self.preview_slug = self.preview_slug.strip()
+        self.source_git_ref = self.source_git_ref.strip()
+        if self.operation == "refresh":
+            self.source_git_ref = _required_text(
+                self.source_git_ref,
+                "Odoo preview refresh request facts require source_git_ref",
+            )
+        self.run_id = _required_text(self.run_id, "Odoo preview request facts require run_id")
+        self.run_attempt = _required_text(
+            self.run_attempt, "Odoo preview request facts require run_attempt"
+        )
+        if not self.source.strip():
+            self.source = f"{self.product}-preview-apply-inputs"
+        else:
+            self.source = self.source.strip()
+        return self
+
+
+def build_odoo_preview_artifact_publish_inputs_workflow_request(
+    *, facts: OdooPreviewWorkflowRequestFacts
+) -> OdooPreviewWorkflowRequest:
+    if facts.operation != "refresh":
+        raise ValueError("Odoo preview artifact publish inputs request requires refresh operation.")
+    source_git_ref = _required_text(
+        facts.source_git_ref,
+        "Odoo preview artifact publish inputs request requires source_git_ref",
+    )
+    return OdooPreviewWorkflowRequest(
+        route_path=ODOO_PREVIEW_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+        payload={
+            "schema_version": 1,
+            "product": facts.product,
+            "inputs": {
+                "schema_version": 1,
+                "context": facts.context,
+                "instance": facts.instance,
+                "pr_number": facts.pr_number,
+                "isolated": True,
+                "source_git_ref": source_git_ref,
+            },
+        },
+        idempotency_key=(
+            "odoo-artifact-publish-inputs:"
+            f"{facts.product}:{facts.context}:{facts.instance}:"
+            f"preview-{facts.pr_number}-run-{facts.run_id}-attempt-{facts.run_attempt}"
+        ),
+        fail_result_paths=("result.input_status",),
+        response_output_path="result",
+    )
+
+
+def build_odoo_preview_apply_inputs_workflow_request(
+    *, facts: OdooPreviewWorkflowRequestFacts, manifest_file: str = ""
+) -> OdooPreviewWorkflowRequest:
+    manifest_file = manifest_file.strip()
+    if facts.operation == "refresh" and not manifest_file:
+        raise ValueError("Odoo preview refresh apply-inputs request requires manifest_file.")
+    return OdooPreviewWorkflowRequest(
+        route_path=ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+        payload={
+            "schema_version": 1,
+            "product": facts.product,
+            "inputs": {
+                "schema_version": 1,
+                "product": facts.product,
+                "operation": facts.operation,
+                "pr_number": facts.pr_number,
+                "source_git_ref": facts.source_git_ref,
+                "source": facts.source,
+                "timeout_seconds": 300,
+                "no_cache": False,
+            },
+        },
+        payload_json_files={"inputs.manifest": manifest_file} if manifest_file else {},
+        idempotency_key=(
+            "odoo-preview-apply-inputs:"
+            f"{facts.product}:{_preview_request_token(facts)}:{_preview_source_token(facts)}:"
+            f"inputs-run-{facts.run_id}-attempt-{facts.run_attempt}"
+        ),
+        fail_result_paths=("result.status",),
+        response_output_path="result.dry_run_plan",
+    )
+
+
+def build_odoo_preview_apply_workflow_request(
+    *,
+    facts: OdooPreviewWorkflowRequestFacts,
+    dry_run_plan_file: str,
+    manifest_file: str = "",
+    wait_for_deploy: bool = True,
+    smoke_check: bool | None = None,
+) -> OdooPreviewWorkflowRequest:
+    if facts.operation == "refresh" and not manifest_file.strip():
+        raise ValueError("Odoo preview refresh apply request requires manifest_file.")
+    payload_json_files = {"apply.dry_run_plan": dry_run_plan_file}
+    if manifest_file.strip():
+        payload_json_files["apply.manifest"] = manifest_file.strip()
+    return OdooPreviewWorkflowRequest(
+        route_path=ODOO_PREVIEW_APPLY_ROUTE,
+        payload={
+            "schema_version": 1,
+            "product": facts.product,
+            "apply": {
+                "timeout_seconds": 600,
+                "wait_for_deploy": wait_for_deploy,
+                "smoke_check": facts.operation == "refresh" if smoke_check is None else smoke_check,
+            },
+        },
+        payload_json_files=payload_json_files,
+        idempotency_key=(
+            "odoo-preview-apply:"
+            f"{facts.product}:{_preview_request_token(facts)}:{facts.operation}:"
+            f"run-{facts.run_id}-attempt-{facts.run_attempt}"
+        ),
+        fail_result_paths=("result.status",),
+    )
 
 
 class OdooPreviewApplyInputsStore(Protocol):
@@ -305,6 +478,16 @@ def _preview_slug(
     if request.preview_slug.strip():
         return request.preview_slug.strip()
     return profile.preview.slug_template.strip().replace("{number}", str(request.pr_number))
+
+
+def _preview_request_token(facts: OdooPreviewWorkflowRequestFacts) -> str:
+    return facts.preview_slug or f"pr-{facts.pr_number}"
+
+
+def _preview_source_token(facts: OdooPreviewWorkflowRequestFacts) -> str:
+    if facts.operation == "destroy":
+        return "destroy"
+    return facts.source_git_ref
 
 
 def resolve_odoo_preview_url(
@@ -616,9 +799,7 @@ def _iter_dokploy_search_composes(raw_search_matches: object) -> tuple[JsonObjec
             if isinstance(value, list):
                 search_items.extend(value)
     else:
-        raise click.ClickException(
-            "Dokploy compose search returned an invalid response payload."
-        )
+        raise click.ClickException("Dokploy compose search returned an invalid response payload.")
 
     composes: list[JsonObject] = []
     for raw_compose in search_items:
@@ -643,61 +824,6 @@ def _blocked_inputs_message(
         *[blocker.message for blocker in dry_run_plan.blockers],
     ]
     return "; ".join(messages) or "Odoo preview apply inputs are blocked."
-
-
-def _blocked_apply_inputs_result(
-    *,
-    profile: LaunchplaneProductProfileRecord,
-    request: OdooPreviewApplyInputsRequest,
-    preview_slug: str,
-    preview_url: str,
-    runtime_plan: OdooPreviewRuntimePlan | None,
-    dry_run_plan: OdooPreviewDokployDryRunPlan | None,
-    message: str,
-) -> OdooPreviewApplyInputsResult:
-    resolved_runtime_plan = runtime_plan or OdooPreviewRuntimePlan(
-        status="blocked",
-        operation=request.operation,
-        product=profile.product,
-        repository=profile.repository,
-        pr_number=request.pr_number,
-        preview_slug=preview_slug,
-        preview_url=preview_url,
-        strategy="unknown",
-        blockers=(
-            OdooPreviewRuntimeBlocker(code="runtime_strategy_not_isolated", message=message),
-        ),
-        summary="Odoo preview runtime plan is blocked",
-    )
-    resolved_dry_run_plan = dry_run_plan or OdooPreviewDokployDryRunPlan(
-        status="blocked",
-        operation=request.operation,
-        product=profile.product,
-        repository=profile.repository,
-        preview_slug=preview_slug,
-        preview_url=preview_url,
-        compose_ref=f"{profile.product}-{preview_slug}",
-        compose_name=preview_application_name(
-            app_name_prefix=effective_preview_app_name_prefix(profile=profile),
-            preview_slug=preview_slug,
-        ),
-        blockers=(OdooPreviewDokployDryRunBlocker(code="runtime_plan_not_ready", message=message),),
-        summary="Odoo preview Dokploy dry-run plan is blocked",
-    )
-    return OdooPreviewApplyInputsResult(
-        status="blocked",
-        product=profile.product,
-        context=profile.preview.context,
-        template_instance=profile.preview.template_instance,
-        operation=request.operation,
-        preview_slug=preview_slug,
-        preview_url=preview_url,
-        repository=profile.repository,
-        runtime_plan=resolved_runtime_plan,
-        dry_run_plan=resolved_dry_run_plan,
-        source=request.source,
-        error_message=message,
-    )
 
 
 class OdooPreviewDokployEndpointSpec(BaseModel):
@@ -1310,11 +1436,6 @@ def _delete_compose(*, host: str, token: str, compose_id: str, delete_volumes: b
         method="POST",
         payload={"composeId": compose_id, "deleteVolumes": delete_volumes},
     )
-
-
-def _is_compose_delete_not_found(exc: click.ClickException) -> bool:
-    message = str(exc).lower()
-    return "/api/compose.delete" in message and "404" in message
 
 
 def _rollback_created_runtime(

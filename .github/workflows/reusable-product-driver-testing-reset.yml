@@ -1,0 +1,104 @@
+---
+name: Reusable Product Driver Testing Reset
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: Testing context. Defaults to the product key.
+        required: false
+        default: ""
+        type: string
+      launchplane_url:
+        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      pre_reset_status:
+        description: Runtime verification status before reset.
+        value: ${{ jobs.verify-before-reset.outputs.status }}
+      reset_status:
+        description: Product driver maintenance status.
+        value: ${{ jobs.reset-testing.outputs.maintenance_status }}
+      post_reset_status:
+        description: Runtime verification status after reset.
+        value: ${{ jobs.verify-after-reset.outputs.status }}
+      application_name:
+        description: Application name used by the reset action.
+        value: ${{ jobs.reset-testing.outputs.application_name }}
+      application_id:
+        description: Application id used by the reset action.
+        value: ${{ jobs.reset-testing.outputs.application_id }}
+      schedule_name:
+        description: Schedule name used by the reset action.
+        value: ${{ jobs.reset-testing.outputs.schedule_name }}
+      pre_reset_trace_id:
+        description: Launchplane trace id for pre-reset verification.
+        value: ${{ jobs.verify-before-reset.outputs.trace_id }}
+      reset_trace_id:
+        description: Launchplane trace id for the reset request.
+        value: ${{ jobs.reset-testing.outputs.trace_id }}
+      post_reset_trace_id:
+        description: Launchplane trace id for post-reset verification.
+        value: ${{ jobs.verify-after-reset.outputs.trace_id }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify-before-reset:
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-runtime-verification.yml@main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: testing
+      timeout-seconds: "120"
+      interval-seconds: "5"
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+    permissions:
+      contents: read
+      id-token: write
+
+  reset-testing:
+    needs: verify-before-reset
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-app-maintenance.yml@main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: testing
+      action: reset-testing
+      intent: stable-testing-reset
+      timeout-seconds: "300"
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+    permissions:
+      contents: read
+      id-token: write
+
+  verify-after-reset:
+    needs: reset-testing
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-runtime-verification.yml@main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: testing
+      timeout-seconds: "300"
+      interval-seconds: "5"
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+    permissions:
+      contents: read
+      id-token: write

@@ -584,6 +584,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service.OdooPostDeployEnvelope,
                     "post-deploy driver",
                 ),
+                "app_maintenance": (
+                    control_plane_service._ODOO_APP_MAINTENANCE_ROUTE,
+                    control_plane_service.OdooAppMaintenanceEnvelope,
+                    "app maintenance driver",
+                ),
                 "stable_bootstrap": (
                     control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE,
                     control_plane_service.OdooStableBootstrapEnvelope,

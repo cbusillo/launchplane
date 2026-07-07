@@ -1,0 +1,17 @@
+---
+name: Setup smoke maintenance client
+description: Write Launchplane's VeriReel smoke-maintenance Node client.
+
+inputs:
+  output-path:
+    description: Path where the ESM client module should be written.
+    required: false
+    default: .launchplane/smoke-maintenance-client.mjs
+
+outputs:
+  client-path:
+    description: Path to the generated ESM client module.
+
+runs:
+  using: node24
+  main: dist/index.js

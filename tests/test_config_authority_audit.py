@@ -471,6 +471,42 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(findings[0]["allow_reason"], "schema_only")
         self.assertEqual(findings[0]["classification"], "allowed")
 
+    def test_github_action_metadata_paths_are_action_mechanics(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            action = root / ".github" / "actions" / "setup-client" / "action.yml"
+            action.parent.mkdir(parents=True)
+            action.write_text(
+                "---\n"
+                "name: Setup client\n"
+                "inputs:\n"
+                "  output-path:\n"
+                "    default: .launchplane/client.mjs\n"
+                "  product-path:\n"
+                "    default: products/concrete-product.yml\n"
+                "runs:\n"
+                "  using: node24\n"
+                "  main: dist/index.js\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        default_findings = [
+            finding for finding in _findings(payload) if finding["key"] == "default"
+        ]
+        output_default = next(finding for finding in default_findings if finding["line"] == 5)
+        product_path_default = next(finding for finding in default_findings if finding["line"] == 7)
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        self.assertEqual(output_default["classification"], "allowed")
+        self.assertEqual(output_default["allow_reason"], "thin_connector_input")
+        self.assertEqual(findings_by_key["main"]["classification"], "allowed")
+        self.assertEqual(findings_by_key["main"]["allow_reason"], "thin_connector_input")
+        self.assertEqual(product_path_default["classification"], "needs_classification")
+        self.assertEqual(product_path_default["allow_reason"], "")
+
     def test_artifact_publish_schema_constants_are_schema_only(self) -> None:
         for key, value in (
             ("DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY", "ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON"),
@@ -2045,6 +2081,31 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "operator_supplied_runtime_input",
                 )
 
+    def test_preview_feedback_url_output_forward_is_narrow(self) -> None:
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/preview-control-plane.yml",
+                key="preview_url",
+                value="${{ needs.provision_preview.outputs.preview_url }}",
+            ),
+            "thin_connector_input",
+        )
+
+        for value in (
+            "https://pr-186.syo-preview.example.test",
+            "${{ needs.other_job.outputs.preview_url }}",
+            "${{ vars.PREVIEW_URL }}",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/preview-control-plane.yml",
+                        key="preview_url",
+                        value=value,
+                    ),
+                    "",
+                )
+
     def test_workflow_block_fields_are_classified_by_path_only(self) -> None:
         for path, key, value in (
             (".github/workflows/edge-endpoint-apply.yml", "endpoint_key", "$endpoint_key,"),
@@ -2163,6 +2224,180 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         value=value,
                     ),
                     "thin_connector_input",
+                )
+
+    def test_product_driver_reusable_workflow_mechanics_are_path_scoped(
+        self,
+    ) -> None:
+        path = ".github/workflows/reusable-product-driver-prod-promotion.yml"
+        path_scoped_cases = (
+            ("launchplane_url", "${{ inputs.launchplane_url }}"),
+            ("timeout-ms", "${{ inputs['timeout-ms'] }}"),
+            ("FROM_INSTANCE", "${{ inputs.from_instance }}"),
+            ("TO_INSTANCE", "${{ inputs.to_instance }}"),
+            ("inputs.from_instance.default", "testing"),
+            ("inputs.to_instance.default", "prod"),
+        )
+        for key, value in path_scoped_cases:
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/generic-workflow.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+        globally_thin_cases = (
+            ("route-path", "${{ steps.request.outputs.route_path }}"),
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("payload-fields.promotion.artifact_id", "${{ inputs.artifact_id }}"),
+            ("payload-fields.promotion.to_instance", "${{ steps.request.outputs.to_instance }}"),
+        )
+        for key, value in globally_thin_cases:
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("idempotency-key", "${{ inputs.idempotency_key }}"),
+            ("payload-fields.promotion.artifact_id", "ghcr.io/example/app:latest"),
+            ("payload-fields.promotion.provider_target", "${{ inputs.provider_target }}"),
+            ("payload-fields.promotion.artifact_id", "${{ github.token }}"),
+            ("action", "drop-prod"),
+            ("action", "reset-testing"),
+            ("instance", "testing"),
+            ("intent", "operator-local-reset"),
+            ("intent", "stable-testing-reset"),
+            ("launchplane_url", "https://example.test"),
+            ("TO_INSTANCE", "${{ github.token }}"),
+            ("inputs.to_instance.default", "production"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
+
+    def test_product_driver_post_deploy_workflow_mechanics_are_thin_inputs(
+        self,
+    ) -> None:
+        path = ".github/workflows/reusable-product-driver-post-deploy.yml"
+        for key, value in (
+            ("inputs.timeout-ms.default", "600000"),
+            ("inputs.driver.default", "odoo"),
+            ("route-path", "${{ steps.request.outputs.route_path }}"),
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("payload-fields.post_deploy.context", "${{ steps.request.outputs.context }}"),
+            ("payload-fields.post_deploy.instance", "${{ steps.request.outputs.instance }}"),
+            ("payload-fields.post_deploy.phase", "${{ steps.request.outputs.phase }}"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("payload-fields.post_deploy.context", "prod"),
+            ("payload-fields.post_deploy.instance", "testing"),
+            ("payload-fields.post_deploy.phase", "deploy"),
+            ("inputs.timeout-ms.default", "42"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
+
+    def test_product_driver_operation_wrapper_literals_are_exact_path_scoped(
+        self,
+    ) -> None:
+        allowed_cases = (
+            (
+                ".github/workflows/reusable-product-driver-prod-launch-readiness.yml",
+                "instance",
+                "prod",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-testing-reset.yml",
+                "instance",
+                "testing",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-testing-reset.yml",
+                "action",
+                "reset-testing",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-testing-reset.yml",
+                "intent",
+                "stable-testing-reset",
+            ),
+        )
+        for path, key, value in allowed_cases:
+            with self.subTest(path=path, key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        rejected_cases = (
+            (
+                ".github/workflows/reusable-product-driver-prod-promotion.yml",
+                "instance",
+                "testing",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-prod-launch-readiness.yml",
+                "instance",
+                "testing",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-testing-reset.yml",
+                "action",
+                "drop-prod",
+            ),
+            (
+                ".github/workflows/reusable-product-driver-testing-reset.yml",
+                "intent",
+                "operator-local-reset",
+            ),
+        )
+        for path, key, value in rejected_cases:
+            with self.subTest(path=path, key=key, value=value):
+                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
+
+    def test_workflow_output_references_are_thin_connector_inputs(self) -> None:
+        for key, value in (
+            ("PRIMARY_BASE_URL", "${{ needs.resolve.outputs.primary_base_url }}"),
+            ("healthcheck_path", "${{ needs.resolve.outputs.healthcheck_path }}"),
+            ("BASE_URL", "${{ needs.verify.outputs.base_url }}"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/prod-launch-readiness.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("PRIMARY_BASE_URL", "https://example.test"),
+            ("instance", "${{ needs.resolve.outputs.instance }}"),
+            ("instance", "prod"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/prod-launch-readiness.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
                 )
 
     def test_ingress_workflow_jq_forwards_and_route_options_are_narrow(self) -> None:
@@ -3088,6 +3323,74 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         }
         self.assertIn("uses", thin_connector_keys)
         self.assertNotIn("product", thin_connector_keys)
+        self.assertNotIn("instance", thin_connector_keys)
+
+    def test_cli_product_repo_gate_allows_product_driver_stable_deploy_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "publish-image.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Publish Image\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/product-driver-stable-deploy")
+            workflow.write_text(
+                "---\n"
+                "name: Publish Image\n\n"
+                '"on":\n'
+                "  push:\n"
+                "    branches: [main]\n\n"
+                "jobs:\n"
+                "  publish:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      artifact_id: ${{ steps.image.outputs.artifact_id }}\n"
+                "      source_git_ref: ${{ github.sha }}\n"
+                "    steps:\n"
+                "      - id: image\n"
+                "        run: echo 'artifact_id=ghcr.io/example/product:sha' >> \"$GITHUB_OUTPUT\"\n"
+                "  deploy:\n"
+                "    needs: publish\n"
+                "    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-stable-deploy.yml@main\n"
+                "    with:\n"
+                "      launchplane_url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}\n"
+                "      artifact_id: ${{ needs.publish.outputs.artifact_id }}\n"
+                "      source_git_ref: ${{ needs.publish.outputs.source_git_ref }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "pass")
+        thin_connector_keys = {
+            finding["key"]
+            for finding in _findings(payload)
+            if finding["allow_reason"] == "thin_connector_input"
+        }
+        self.assertIn("uses", thin_connector_keys)
+        self.assertNotIn("product", thin_connector_keys)
+        self.assertNotIn("context", thin_connector_keys)
         self.assertNotIn("instance", thin_connector_keys)
 
     def test_cli_product_repo_gate_allows_reusable_generic_web_preview_workflow(self) -> None:

@@ -125,6 +125,9 @@ class DocsContractsTests(TestCase):
             ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
         ).read_text(encoding="utf-8")
         repo_metadata = Path(".github/github.json").read_text(encoding="utf-8")
+        preview_prepare_action = Path(
+            ".github/actions/setup-preview-prepare-client/action.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("Reusable Generic-Web Lifecycle Workflows", product_repo_contract)
         self.assertIn("reusable-generic-web-stable-deploy.yml@main", product_repo_contract)
@@ -143,8 +146,11 @@ class DocsContractsTests(TestCase):
         self.assertIn("conflicts with the", preview_contract)
         self.assertIn("derived value", preview_contract)
         self.assertIn("reusable-generic-web-preview-lifecycle.yml@main", preview_contract)
+        self.assertIn("setup-preview-prepare-client@main", preview_contract)
+        self.assertIn("setup-preview-prepare-client@main", product_repo_contract)
         self.assertIn("does not accept", preview_contract)
         self.assertIn("idempotency keys as caller inputs", preview_contract)
+        self.assertIn("read-only adapter", product_repo_contract)
 
         self.assertIn("workflow_call:", deploy_workflow)
         self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', deploy_workflow)
@@ -190,3 +196,102 @@ class DocsContractsTests(TestCase):
         self.assertIn("Reusable Generic Web Stable Deploy", repo_metadata)
         self.assertIn("Reusable Generic Web Prod Promotion", repo_metadata)
         self.assertIn("Reusable Generic Web Preview Lifecycle", repo_metadata)
+        self.assertIn("using: node24", preview_prepare_action)
+        self.assertIn("preview-prepare-client.mjs", preview_prepare_action)
+
+    def test_product_driver_reusable_workflows_keep_route_shaping_in_launchplane(
+        self,
+    ) -> None:
+        product_repo_contract = Path("docs/product-repo-contract.md").read_text(encoding="utf-8")
+        stable_deploy_workflow = Path(
+            ".github/workflows/reusable-product-driver-stable-deploy.yml"
+        ).read_text(encoding="utf-8")
+        prod_promotion_workflow = Path(
+            ".github/workflows/reusable-product-driver-prod-promotion.yml"
+        ).read_text(encoding="utf-8")
+        app_maintenance_workflow = Path(
+            ".github/workflows/reusable-product-driver-app-maintenance.yml"
+        ).read_text(encoding="utf-8")
+        post_deploy_workflow = Path(
+            ".github/workflows/reusable-product-driver-post-deploy.yml"
+        ).read_text(encoding="utf-8")
+        prod_rollback_workflow = Path(
+            ".github/workflows/reusable-product-driver-prod-rollback.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Reusable Product-Driver Workflows", product_repo_contract)
+        self.assertIn(
+            "defaults to the `testing` lane",
+            product_repo_contract,
+        )
+        self.assertIn("reusable-product-driver-stable-deploy.yml@main", product_repo_contract)
+        self.assertIn("reusable-product-driver-prod-promotion.yml@main", product_repo_contract)
+        self.assertIn("reusable-product-driver-post-deploy.yml@main", product_repo_contract)
+        self.assertIn("reusable-product-driver-prod-rollback.yml@main", product_repo_contract)
+        self.assertIn("route path, envelope JSON, output mapping", product_repo_contract)
+        self.assertIn("transitional connectors", product_repo_contract)
+        self.assertIn("should not own Launchplane route construction", product_repo_contract)
+        self.assertIn("preserves explicit driver", product_repo_contract)
+        self.assertIn("post-deploy phases", product_repo_contract)
+        self.assertIn("defaults to `driver: odoo`", product_repo_contract)
+        self.assertIn(
+            "same explicit `product`, `context`, `instance`, and `phase`", product_repo_contract
+        )
+
+        self.assertIn("workflow_call:", stable_deploy_workflow)
+        self.assertIn(
+            "Stable lane instance to deploy. Defaults to testing.", stable_deploy_workflow
+        )
+        self.assertIn('default: "testing"', stable_deploy_workflow)
+        self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', stable_deploy_workflow)
+        self.assertIn("route_path=/v1/drivers/verireel/$INSTANCE-deploy", stable_deploy_workflow)
+        self.assertIn("deploy.artifact_id=${{ inputs.artifact_id }}", stable_deploy_workflow)
+        self.assertIn("deploy.source_git_ref=${{ inputs.source_git_ref }}", stable_deploy_workflow)
+        self.assertIn("target_category=result.target_category", stable_deploy_workflow)
+        self.assertNotIn("target_type=result.target_type", stable_deploy_workflow)
+        self.assertNotIn("provider_target", stable_deploy_workflow)
+
+        self.assertIn("workflow_call:", prod_promotion_workflow)
+        self.assertIn("route_path=/v1/drivers/verireel/prod-promotion", prod_promotion_workflow)
+        self.assertIn(
+            "promotion.backup_record_id=${{ inputs.backup_record_id }}", prod_promotion_workflow
+        )
+        self.assertIn(
+            "promotion.source_health_status=${{ inputs.source_health_status }}",
+            prod_promotion_workflow,
+        )
+        self.assertIn("target_category=result.target_category", prod_promotion_workflow)
+        self.assertNotIn("target_type=result.target_type", prod_promotion_workflow)
+
+        self.assertIn("workflow_call:", app_maintenance_workflow)
+        self.assertIn("driver:", app_maintenance_workflow)
+        self.assertIn('route_path="/v1/drivers/verireel/app-maintenance"', app_maintenance_workflow)
+        self.assertIn('route_path="/v1/drivers/odoo/app-maintenance"', app_maintenance_workflow)
+        self.assertIn("maintenance.intent=${{ inputs.intent }}", app_maintenance_workflow)
+        self.assertIn("post_deploy_status=result.post_deploy_status", app_maintenance_workflow)
+        self.assertIn("override_status=result.override_status", app_maintenance_workflow)
+        self.assertIn("applied_at=result.applied_at", app_maintenance_workflow)
+
+        self.assertIn("workflow_call:", post_deploy_workflow)
+        self.assertIn("driver:", post_deploy_workflow)
+        self.assertIn("default: odoo", post_deploy_workflow)
+        self.assertIn(
+            "product:\n        description: Launchplane product key.", post_deploy_workflow
+        )
+        self.assertIn("context:\n        description: Runtime context.", post_deploy_workflow)
+        self.assertIn('route_path="/v1/drivers/odoo/post-deploy"', post_deploy_workflow)
+        self.assertIn('idempotency_prefix="odp"', post_deploy_workflow)
+        self.assertIn(
+            "post_deploy.phase=${{ steps.request.outputs.phase }}",
+            post_deploy_workflow,
+        )
+        self.assertIn("post_deploy_status=result.post_deploy_status", post_deploy_workflow)
+        self.assertIn("override_status=result.override_status", post_deploy_workflow)
+        self.assertIn("applied_at=result.applied_at", post_deploy_workflow)
+
+        self.assertIn("workflow_call:", prod_rollback_workflow)
+        self.assertIn("route_path=/v1/drivers/verireel/prod-rollback", prod_rollback_workflow)
+        self.assertIn(
+            "rollback.backup_record_id=${{ inputs.backup_record_id }}", prod_rollback_workflow
+        )
+        self.assertIn("rollback.snapshot_name=${{ inputs.snapshot_name }}", prod_rollback_workflow)

@@ -1,0 +1,162 @@
+---
+name: Reusable Product Driver Post Deploy
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key.
+        required: true
+        type: string
+      driver:
+        description: Product driver id. Defaults to odoo for migration compatibility.
+        required: false
+        default: odoo
+        type: string
+      context:
+        description: Runtime context.
+        required: true
+        type: string
+      instance:
+        description: Runtime instance to run post-deploy against.
+        required: true
+        type: string
+      phase:
+        description: Driver post-deploy phase.
+        required: true
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "600000"
+        type: string
+      launchplane_url:
+        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      post_deploy_status:
+        description: Driver post-deploy status.
+        value: ${{ jobs.post-deploy.outputs.post_deploy_status }}
+      override_status:
+        description: Odoo override apply status, when returned by the selected driver.
+        value: ${{ jobs.post-deploy.outputs.override_status }}
+      override_record_found:
+        description: Whether an Odoo override record existed, when returned.
+        value: ${{ jobs.post-deploy.outputs.override_record_found }}
+      override_payload_rendered:
+        description: Whether an Odoo override payload was rendered, when returned.
+        value: ${{ jobs.post-deploy.outputs.override_payload_rendered }}
+      website_bootstrap_included:
+        description: Whether Odoo website bootstrap was included, when returned.
+        value: ${{ jobs.post-deploy.outputs.website_bootstrap_included }}
+      applied_at:
+        description: Driver apply timestamp, when returned.
+        value: ${{ jobs.post-deploy.outputs.applied_at }}
+      error_message:
+        description: Launchplane driver error message, when present.
+        value: ${{ jobs.post-deploy.outputs.error_message }}
+      trace_id:
+        description: Launchplane trace id for request debugging.
+        value: ${{ jobs.post-deploy.outputs.trace_id }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  post-deploy:
+    outputs:
+      post_deploy_status: ${{ steps.lp.outputs.post_deploy_status }}
+      override_status: ${{ steps.lp.outputs.override_status }}
+      override_record_found: ${{ steps.lp.outputs.override_record_found }}
+      override_payload_rendered: ${{ steps.lp.outputs.override_payload_rendered }}
+      website_bootstrap_included: ${{ steps.lp.outputs.website_bootstrap_included }}
+      applied_at: ${{ steps.lp.outputs.applied_at }}
+      error_message: ${{ steps.lp.outputs.error_message }}
+      trace_id: ${{ steps.lp.outputs.trace_id }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane post-deploy request
+        id: request
+        env:
+          CONTEXT: ${{ inputs.context }}
+          DRIVER: ${{ inputs.driver }}
+          INSTANCE: ${{ inputs.instance }}
+          PHASE: ${{ inputs.phase }}
+          PRODUCT: ${{ inputs.product }}
+        run: |
+          set -euo pipefail
+          case "$DRIVER" in
+            odoo)
+              route_path="/v1/drivers/odoo/post-deploy"
+              idempotency_prefix="odp"
+              ;;
+            *) echo "Unsupported product driver for post-deploy: $DRIVER" >&2; exit 1 ;;
+          esac
+          for required in DRIVER PRODUCT CONTEXT INSTANCE PHASE; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          {
+            echo "context=$CONTEXT"
+            printf '%s=%s:%s:%s\n' \
+              idempotency_key \
+              "$idempotency_prefix" \
+              "$CONTEXT" \
+              "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+            echo "instance=$INSTANCE"
+            echo "phase=$PHASE"
+            echo "product=$PRODUCT"
+            echo "route_path=$route_path"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane post-deploy driver
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.request.outputs.route_path }}
+          payload: >-
+            {"schema_version":1,"post_deploy":{"schema_version":1}}
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            post_deploy.context=${{ steps.request.outputs.context }}
+            post_deploy.instance=${{ steps.request.outputs.instance }}
+            post_deploy.phase=${{ steps.request.outputs.phase }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.post_deploy_status
+          output-paths: >-
+            trace_id=trace_id,
+            post_deploy_status=result.post_deploy_status,
+            override_status=result.override_status,
+            override_record_found=result.override_record_found,
+            override_payload_rendered=result.override_payload_rendered,
+            website_bootstrap_included=result.website_bootstrap_included,
+            applied_at=result.applied_at,
+            error_message=result.error_message
+
+      - name: Report result
+        env:
+          POST_DEPLOY_STATUS: ${{ steps.lp.outputs.post_deploy_status }}
+          OVERRIDE_STATUS: ${{ steps.lp.outputs.override_status }}
+          OVERRIDE_RECORD_FOUND: ${{ steps.lp.outputs.override_record_found }}
+          OVERRIDE_PAYLOAD_RENDERED: ${{ steps.lp.outputs.override_payload_rendered }}
+          WEBSITE_BOOTSTRAP_INCLUDED: ${{ steps.lp.outputs.website_bootstrap_included }}
+        run: |
+          echo "post_deploy_status=$POST_DEPLOY_STATUS"
+          echo "override_status=$OVERRIDE_STATUS"
+          echo "override_record_found=$OVERRIDE_RECORD_FOUND"
+          echo "override_payload_rendered=$OVERRIDE_PAYLOAD_RENDERED"
+          echo "website_bootstrap_included=$WEBSITE_BOOTSTRAP_INCLUDED"

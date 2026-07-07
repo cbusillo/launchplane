@@ -150,6 +150,10 @@ from control_plane.odoo_artifact_publish_http import (
     ODOO_ARTIFACT_PUBLISH_ROUTE,
     OdooArtifactPublishEnvelope as OdooArtifactPublishEnvelope,
 )
+from control_plane.odoo_app_maintenance_http import (
+    ODOO_APP_MAINTENANCE_ROUTE,
+    OdooAppMaintenanceEnvelope as OdooAppMaintenanceEnvelope,
+)
 from control_plane.odoo_post_deploy_http import (
     ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
     ODOO_POST_DEPLOY_ROUTE,
@@ -253,6 +257,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         _VERIREEL_PROD_ROLLBACK_ROUTE.route_path,
         "/v1/drivers/ingress/route-apply",
         ODOO_ARTIFACT_PUBLISH_ROUTE,
+        ODOO_APP_MAINTENANCE_ROUTE,
         "/v1/drivers/odoo/artifact-publish-inputs",
         ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
         ODOO_POST_DEPLOY_ROUTE,
@@ -347,6 +352,15 @@ _ODOO_POST_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=OdooPostDeployEnvelope,
     denial_message=(
         "Workflow cannot execute the Odoo post-deploy driver for the requested product/context."
+    ),
+)
+
+
+_ODOO_APP_MAINTENANCE_ROUTE = _DriverRouteExecutionMetadata(
+    route_path=ODOO_APP_MAINTENANCE_ROUTE,
+    envelope_model=OdooAppMaintenanceEnvelope,
+    denial_message=(
+        "Workflow cannot execute the Odoo app maintenance driver for the requested product/context."
     ),
 )
 

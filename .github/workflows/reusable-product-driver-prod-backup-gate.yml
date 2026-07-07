@@ -1,0 +1,162 @@
+---
+name: Reusable Product Driver Prod Backup Gate
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: Production context. Defaults to the product key.
+        required: false
+        default: ""
+        type: string
+      instance:
+        description: Production lane instance.
+        required: false
+        default: prod
+        type: string
+      backup_record_id:
+        description: Backup gate record id to create or poll.
+        required: true
+        type: string
+      poll-interval-ms:
+        description: Delay between polling requests in milliseconds.
+        required: false
+        default: "30000"
+        type: string
+      poll-timeout-ms:
+        description: Maximum polling duration in milliseconds.
+        required: false
+        default: "2400000"
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "2700000"
+        type: string
+      launchplane_url:
+        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      backup_gate_record_id:
+        description: Launchplane backup gate record ID.
+        value: ${{ jobs.prod-backup-gate.outputs.backup_gate_record_id }}
+      backup_status:
+        description: Backup gate status.
+        value: ${{ jobs.prod-backup-gate.outputs.backup_status }}
+      backup_started_at:
+        description: Backup gate start timestamp.
+        value: ${{ jobs.prod-backup-gate.outputs.backup_started_at }}
+      backup_finished_at:
+        description: Backup gate finish timestamp.
+        value: ${{ jobs.prod-backup-gate.outputs.backup_finished_at }}
+      snapshot_name:
+        description: Snapshot name captured by the backup gate.
+        value: ${{ jobs.prod-backup-gate.outputs.snapshot_name }}
+      error_message:
+        description: Backup gate error message, when present.
+        value: ${{ jobs.prod-backup-gate.outputs.error_message }}
+      trace_id:
+        description: Launchplane trace id for request debugging.
+        value: ${{ jobs.prod-backup-gate.outputs.trace_id }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prod-backup-gate:
+    outputs:
+      backup_gate_record_id: ${{ steps.lp.outputs.backup_gate_record_id }}
+      backup_status: ${{ steps.lp.outputs.backup_status }}
+      backup_started_at: ${{ steps.lp.outputs.backup_started_at }}
+      backup_finished_at: ${{ steps.lp.outputs.backup_finished_at }}
+      snapshot_name: ${{ steps.lp.outputs.snapshot_name }}
+      error_message: ${{ steps.lp.outputs.error_message }}
+      trace_id: ${{ steps.lp.outputs.trace_id }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane prod backup gate request
+        id: request
+        env:
+          BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
+          CONTEXT: ${{ inputs.context }}
+          INSTANCE: ${{ inputs.instance }}
+          PRODUCT: ${{ inputs.product }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "$CONTEXT" ]; then
+            CONTEXT="$PRODUCT"
+          fi
+          if [ -z "$INSTANCE" ]; then
+            INSTANCE="prod"
+          fi
+          for required in PRODUCT CONTEXT INSTANCE BACKUP_RECORD_ID; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          {
+            echo "context=$CONTEXT"
+            printf '%s=%s:%s:%s:%s:%s\n' \
+              idempotency_key \
+              product-driver-prod-backup-gate \
+              "$PRODUCT" \
+              "$CONTEXT" \
+              "$INSTANCE" \
+              "$BACKUP_RECORD_ID"
+            echo "instance=$INSTANCE"
+            echo "product=$PRODUCT"
+            echo "route_path=/v1/drivers/verireel/prod-backup-gate"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane prod backup gate
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.request.outputs.route_path }}
+          payload: |-
+            {
+              "schema_version": 1,
+              "backup_gate": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            backup_gate.context=${{ steps.request.outputs.context }}
+            backup_gate.instance=${{ steps.request.outputs.instance }}
+            backup_gate.backup_record_id=${{ inputs.backup_record_id }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          poll-result-path: result.backup_status
+          poll-result-statuses: pending
+          poll-interval-ms: ${{ inputs['poll-interval-ms'] }}
+          poll-timeout-ms: ${{ inputs['poll-timeout-ms'] }}
+          fail-result-paths: result.backup_status
+          output-paths: >-
+            trace_id=trace_id,
+            backup_gate_record_id=records.backup_gate_record_id,
+            backup_status=result.backup_status,
+            backup_started_at=result.backup_started_at,
+            backup_finished_at=result.backup_finished_at,
+            snapshot_name=result.snapshot_name,
+            error_message=result.error_message

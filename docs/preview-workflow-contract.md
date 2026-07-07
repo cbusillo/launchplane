@@ -75,6 +75,16 @@ event, decision, route path, feedback status, and run-scoped idempotency key as
 JSON so product workflows can branch on the shared contract instead of
 duplicating event semantics.
 
+Same-repository preview build jobs that need an importable helper for GitHub
+event labels and image tags should use
+`cbusillo/launchplane/.github/actions/setup-preview-prepare-client@main`. The
+generated client is read-only and product-agnostic: callers pass the current
+repository, head repository, PR author, PR number, source SHA, image name,
+labels, and run URL; the client returns refresh/unsupported/noop mode, same-repo
+support flags, `pr-<number>` image tags, and full image references. It does not
+call Launchplane, choose provider targets, render comments, derive preview URLs,
+or store lifecycle truth.
+
 Once the product workflow has decided to refresh, destroy, or send an
 unsupported notice, it should hand off to Launchplane's reusable workflow instead
 of constructing route payloads locally:
@@ -146,6 +156,13 @@ record for a later retry or GitHub rerun. Ignored decisions do not have
 idempotency keys. Launchplane-owned reusable workflows may use an equivalent
 route-specific key when the service derives context from product records.
 
+Preview refresh readiness should allow the serving runtime identity to converge
+after a provider deploy trigger. A health response that still reports the prior
+deployment/artifact/source identity for the same product, context, preview slug,
+and environment kind remains a polling signal until the route timeout; a
+different product, context, preview slug, or environment kind remains a hard
+mismatch.
+
 ## Route Handoff
 
 Preview refresh routes receive only product-local facts:
@@ -163,6 +180,21 @@ derives the live URL from the preview context's runtime environment records, and
 rejects a supplied slug when it conflicts with the derived value. `context`,
 `preview_slug`, and `preview_url` remain compatibility fields for older
 adapters, not product-repo authority.
+
+Launchplane also owns the reusable request-shape builders for Odoo tenant
+preview workflows. Tenant repos may keep thin adapter jobs for checkout, image
+publication, runner selection, and product smoke facts, but the route paths,
+payload skeletons, JSON-file bindings, fail-result paths, and run-scoped
+idempotency keys for `artifact-publish-inputs`, `preview-apply-inputs`, and
+`preview-apply` are Launchplane contract fixtures. New or migrated tenant
+preview workflows should install
+`cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main`
+and import the generated ESM client to render `launchplane-request` inputs
+instead of copying inline route paths, JSON request bodies, file bindings, fail
+paths, or idempotency key templates. The generated request object exposes
+`payloadInput`, `payloadJsonFilesInput`, `failResultPathsInput`,
+`responseOutputPath`, and `idempotencyKey` fields shaped for direct handoff to
+the existing `launchplane-request` action.
 
 Odoo CM is the exception where Launchplane now owns both the isolated provider
 apply planning inputs and the stage-preview smoke contract after refresh. Product

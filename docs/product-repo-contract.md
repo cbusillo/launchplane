@@ -183,6 +183,22 @@ Launchplane rather than defining product topology, target inventory, domains, or
 runtime authority. Generic runtime health and revision checks should move to
 Launchplane drivers once the driver has the necessary profile data.
 
+When product smoke checks need Launchplane-backed generated-user setup or
+cleanup during the same browser run, the workflow should install a
+Launchplane-owned smoke maintenance client with
+`cbusillo/launchplane/.github/actions/setup-smoke-maintenance-client@main` and
+pass the generated client path to the product script. The workflow job must
+grant `id-token: write` so the client can request a GitHub OIDC token for
+Launchplane. The initial client covers VeriReel generated-user smoke
+maintenance; add new Launchplane-owned clients for other products rather than
+copying or generalizing product-specific route logic in product repos. The
+product script may pass primitive smoke facts such as action, email, context,
+instance, preview slug, and timeout. The client derives the Launchplane driver
+intent for supported smoke actions. The product script should not own
+Launchplane route paths, request envelopes, driver intent strings,
+idempotency-key recipes, GitHub OIDC token exchange, retry behavior, or
+driver-result failure rules.
+
 ## What Launchplane Owns
 
 - Product profile records, lane profiles, preview policy, runtime port, health
@@ -441,6 +457,88 @@ runtime-environment records, managed secret bindings, GitHub OIDC claims, driver
 results, and durable evidence. The reusable deploy workflow is the first
 non-prod proof path for #1528; product-repo cleanup should wait for a live
 non-prod deploy proof before deleting older local request-shaping scripts.
+
+## Reusable Product-Driver Workflows
+
+Some products still need product-driver actions while their product-specific
+post-deploy, maintenance, backup, or rollback behavior is being generalized.
+Product repos should call Launchplane-owned product-driver reusable workflows
+instead of carrying local `request-launchplane-*` scripts. These workflows keep
+the driver route path, envelope JSON, output mapping, polling settings, and
+idempotency key in Launchplane while allowing the product repo to pass primitive
+facts such as product, context, instance, artifact id, source git ref, backup
+record id, and product-owned verification statuses. The route ids are
+Launchplane-owned driver routes; product repos should not derive them from
+product keys or keep local copies of route construction logic.
+
+The product-driver workflow surface for stable deploy, stable environment, and
+app-maintenance defaults to the `testing` lane so a testing publish workflow can
+pass only the primitive facts it owns, such as immutable artifact identity,
+tested source git ref, and operation-level maintenance intent.
+The app-maintenance connector defaults to the VeriReel driver for compatibility,
+and callers can pass `driver: odoo` for the narrow Odoo post-deploy maintenance
+adapter backed by `/v1/drivers/odoo/app-maintenance`.
+Product repos should pass an explicit `instance` only for a workflow whose
+operator input or job purpose genuinely selects a different lane.
+Production readiness wrappers may also accept expected runtime build identity
+from operator input or upstream workflow evidence and forward it to
+Launchplane-owned runtime verification.
+
+The product-driver reusable surface is:
+
+- `reusable-product-driver-stable-environment.yml@main`
+- `reusable-product-driver-runtime-verification.yml@main`
+- `reusable-product-driver-stable-deploy.yml@main`
+- `reusable-product-driver-app-maintenance.yml@main`
+- `reusable-product-driver-post-deploy.yml@main`
+- `reusable-product-driver-testing-verification.yml@main`
+- `reusable-product-driver-testing-reset.yml@main`
+- `reusable-product-driver-prod-backup-gate.yml@main`
+- `reusable-product-driver-prod-launch-readiness.yml@main`
+- `reusable-product-driver-prod-promotion.yml@main`
+- `reusable-product-driver-prod-rollback.yml@main`
+
+These workflows are transitional connectors, not permission to move product
+lifecycle authority back into product repos. A product repo may still own image
+build/publish, release tagging, and product-specific browser checks, but it
+should not own Launchplane route construction, request envelopes, idempotency
+recipes, polling behavior, or record-output extraction once a reusable workflow
+exists.
+
+`reusable-product-driver-post-deploy.yml@main` preserves explicit driver
+post-deploy phases for existing Odoo refresh, manual, promotion, and deploy
+callers while moving request shaping into Launchplane. Odoo callers can migrate
+from `reusable-odoo-post-deploy.yml@main` without adding a driver input because
+the product-driver wrapper defaults to `driver: odoo`; they must still pass the
+same explicit `product`, `context`, `instance`, and `phase` inputs. App
+maintenance remains the deploy-phase maintenance wrapper for stable lane
+operations; product repos should not use it as a generic phase-aware post-deploy
+substitute.
+
+When a workflow operation has implied lane or maintenance semantics, prefer an
+operation-level reusable workflow over passing checked-in lane, action, or
+intent strings from the product repository. For example, a product repo should
+call `reusable-product-driver-testing-reset.yml@main` rather than wiring
+`instance: testing`, `action: reset-testing`, and `intent:
+stable-testing-reset` itself. Product-owned smoke checks may still consume
+Launchplane reusable outputs, such as a resolved `primary_base_url`, as
+pass-through evidence for product behavior checks.
+
+Generated-user smoke setup that must happen inside a product browser flow should
+use `setup-smoke-maintenance-client@main` instead of a workflow-level
+app-maintenance call. The setup action writes an importable Node ESM client into
+the product job so the browser script can keep its dynamic test email while
+Launchplane owns request shaping, driver intent derivation, and OIDC transport.
+The job using the generated client must include `permissions: id-token: write`.
+
+Same-repository preview jobs that need label normalization and preview image tag
+derivation should use `setup-preview-prepare-client@main` instead of carrying a
+product-local helper. The generated Node ESM client returns refresh/noop or
+unsupported mode, same-repo support flags, `pr-<number>` image tags, and full
+caller-supplied image references from primitive GitHub event facts. It is a
+read-only adapter for product-owned artifact publication; Launchplane records
+still own preview URL policy, provider targets, lifecycle records, comments, and
+cleanup truth.
 
 ## Reusable Launchplane Request Action
 

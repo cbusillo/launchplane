@@ -500,7 +500,7 @@ ODOO_DRIVER = DriverDescriptor(
             capability_id="post_deploy_settings",
             label="Post-deploy settings",
             description="Apply typed Odoo instance settings and managed secret bindings after deploy.",
-            actions=("post_deploy", "stable_bootstrap"),
+            actions=("app_maintenance", "post_deploy", "stable_bootstrap"),
             panels=("settings", "secret_bindings", "audit"),
         ),
         DriverCapabilityDescriptor(
@@ -554,6 +554,16 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/artifact-publish",
             authz_action="odoo_artifact_publish.write",
             writes_records=("artifact_manifest",),
+        ),
+        _action(
+            "app_maintenance",
+            "Run app maintenance",
+            "Run narrow Odoo app maintenance through the product-driver reusable surface.",
+            safety="mutation",
+            scope="instance",
+            route_path="/v1/drivers/odoo/app-maintenance",
+            authz_action="odoo_app_maintenance.execute",
+            writes_records=("odoo_instance_override",),
         ),
         _action(
             "post_deploy",

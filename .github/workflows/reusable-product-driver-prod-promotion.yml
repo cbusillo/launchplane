@@ -1,0 +1,229 @@
+---
+name: Reusable Product Driver Prod Promotion
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      context:
+        description: Production context. Defaults to the product key.
+        required: false
+        default: ""
+        type: string
+      artifact_id:
+        description: Immutable image or Launchplane-resolvable artifact identity.
+        required: true
+        type: string
+      source_git_ref:
+        description: Source git ref attached to promotion evidence.
+        required: true
+        type: string
+      backup_record_id:
+        description: Backup gate record id required by the promotion.
+        required: true
+        type: string
+      promotion_record_id:
+        description: Promotion record id for this prod promotion.
+        required: true
+        type: string
+      source_health_status:
+        description: Source lane health status proven by product-owned checks.
+        required: false
+        default: skipped
+        type: string
+      expected_build_revision:
+        description: Expected runtime build revision, when known.
+        required: false
+        default: ""
+        type: string
+      expected_build_tag:
+        description: Expected runtime build tag, when known.
+        required: false
+        default: ""
+        type: string
+      from_instance:
+        description: Source stable lane instance.
+        required: false
+        default: testing
+        type: string
+      to_instance:
+        description: Destination stable lane instance.
+        required: false
+        default: prod
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "2700000"
+        type: string
+      launchplane_url:
+        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      promotion_record_id:
+        description: Launchplane promotion record ID.
+        value: ${{ jobs.prod-promotion.outputs.promotion_record_id }}
+      deployment_record_id:
+        description: Launchplane deployment record ID.
+        value: ${{ jobs.prod-promotion.outputs.deployment_record_id }}
+      backup_record_id:
+        description: Backup gate record ID used by the promotion.
+        value: ${{ jobs.prod-promotion.outputs.backup_record_id }}
+      deploy_status:
+        description: Production deploy status.
+        value: ${{ jobs.prod-promotion.outputs.deploy_status }}
+      rollout_status:
+        description: Production rollout status.
+        value: ${{ jobs.prod-promotion.outputs.rollout_status }}
+      migration_status:
+        description: Production migration status.
+        value: ${{ jobs.prod-promotion.outputs.migration_status }}
+      health_status:
+        description: Production health status.
+        value: ${{ jobs.prod-promotion.outputs.health_status }}
+      deploy_started_at:
+        description: Deployment start timestamp.
+        value: ${{ jobs.prod-promotion.outputs.deploy_started_at }}
+      deploy_finished_at:
+        description: Deployment finish timestamp.
+        value: ${{ jobs.prod-promotion.outputs.deploy_finished_at }}
+      target_name:
+        description: Resolved target name.
+        value: ${{ jobs.prod-promotion.outputs.target_name }}
+      target_category:
+        description: Resolved target category.
+        value: ${{ jobs.prod-promotion.outputs.target_category }}
+      target_id:
+        description: Resolved target id.
+        value: ${{ jobs.prod-promotion.outputs.target_id }}
+      error_message:
+        description: Promotion error message, when present.
+        value: ${{ jobs.prod-promotion.outputs.error_message }}
+      trace_id:
+        description: Launchplane trace id for request debugging.
+        value: ${{ jobs.prod-promotion.outputs.trace_id }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prod-promotion:
+    outputs:
+      promotion_record_id: ${{ steps.lp.outputs.promotion_record_id }}
+      deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
+      backup_record_id: ${{ steps.lp.outputs.backup_record_id }}
+      deploy_status: ${{ steps.lp.outputs.deploy_status }}
+      rollout_status: ${{ steps.lp.outputs.rollout_status }}
+      migration_status: ${{ steps.lp.outputs.migration_status }}
+      health_status: ${{ steps.lp.outputs.health_status }}
+      deploy_started_at: ${{ steps.lp.outputs.deploy_started_at }}
+      deploy_finished_at: ${{ steps.lp.outputs.deploy_finished_at }}
+      target_name: ${{ steps.lp.outputs.target_name }}
+      target_category: ${{ steps.lp.outputs.target_category }}
+      target_id: ${{ steps.lp.outputs.target_id }}
+      error_message: ${{ steps.lp.outputs.error_message }}
+      trace_id: ${{ steps.lp.outputs.trace_id }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane prod promotion request
+        id: request
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
+          CONTEXT: ${{ inputs.context }}
+          FROM_INSTANCE: ${{ inputs.from_instance }}
+          PRODUCT: ${{ inputs.product }}
+          PROMOTION_RECORD_ID: ${{ inputs.promotion_record_id }}
+          SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+          TO_INSTANCE: ${{ inputs.to_instance }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "$CONTEXT" ]; then
+            CONTEXT="$PRODUCT"
+          fi
+          for required in PRODUCT CONTEXT FROM_INSTANCE TO_INSTANCE ARTIFACT_ID SOURCE_GIT_REF BACKUP_RECORD_ID PROMOTION_RECORD_ID; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "context=$CONTEXT"
+            printf '%s=%s:%s:%s:%s:%s:%s:%s\n' \
+              idempotency_key \
+              product-driver-prod-promotion \
+              "$PRODUCT" \
+              "$CONTEXT" \
+              "$FROM_INSTANCE" \
+              "$TO_INSTANCE" \
+              "$PROMOTION_RECORD_ID" \
+              "$run_scope"
+            echo "from_instance=$FROM_INSTANCE"
+            echo "product=$PRODUCT"
+            echo "route_path=/v1/drivers/verireel/prod-promotion"
+            echo "to_instance=$TO_INSTANCE"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Request Launchplane prod promotion
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.request.outputs.route_path }}
+          payload: |-
+            {
+              "schema_version": 1,
+              "promotion": {
+                "schema_version": 1
+              }
+            }
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            promotion.context=${{ steps.request.outputs.context }}
+            promotion.from_instance=${{ steps.request.outputs.from_instance }}
+            promotion.to_instance=${{ steps.request.outputs.to_instance }}
+            promotion.artifact_id=${{ inputs.artifact_id }}
+            promotion.source_git_ref=${{ inputs.source_git_ref }}
+            promotion.backup_record_id=${{ inputs.backup_record_id }}
+            promotion.promotion_record_id=${{ inputs.promotion_record_id }}
+            promotion.source_health_status=${{ inputs.source_health_status }}
+            promotion.expected_build_revision=${{ inputs.expected_build_revision }}
+            promotion.expected_build_tag=${{ inputs.expected_build_tag }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: >-
+            result.deploy_status,result.rollout_status,
+            result.migration_status,result.health_status
+          output-paths: >-
+            trace_id=trace_id,
+            promotion_record_id=result.promotion_record_id,
+            deployment_record_id=result.deployment_record_id,
+            backup_record_id=result.backup_record_id,
+            deploy_status=result.deploy_status,
+            deploy_started_at=result.deploy_started_at,
+            deploy_finished_at=result.deploy_finished_at,
+            rollout_status=result.rollout_status,
+            migration_status=result.migration_status,
+            health_status=result.health_status,
+            target_name=result.target_name,
+            target_category=result.target_category,
+            target_id=result.target_id,
+            error_message=result.error_message
