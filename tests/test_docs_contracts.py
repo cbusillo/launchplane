@@ -258,6 +258,9 @@ class DocsContractsTests(TestCase):
         self.assertIn('route_path="/v1/drivers/verireel/app-maintenance"', app_maintenance_workflow)
         self.assertIn('route_path="/v1/drivers/odoo/app-maintenance"', app_maintenance_workflow)
         self.assertIn("maintenance.intent=${{ inputs.intent }}", app_maintenance_workflow)
+        self.assertIn("post_deploy_status=result.post_deploy_status", app_maintenance_workflow)
+        self.assertIn("override_status=result.override_status", app_maintenance_workflow)
+        self.assertIn("applied_at=result.applied_at", app_maintenance_workflow)
 
         self.assertIn("workflow_call:", prod_rollback_workflow)
         self.assertIn("route_path=/v1/drivers/verireel/prod-rollback", prod_rollback_workflow)

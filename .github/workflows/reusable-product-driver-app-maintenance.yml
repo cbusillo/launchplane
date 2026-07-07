@@ -80,6 +80,24 @@ name: Reusable Product Driver App Maintenance
       schedule_name:
         description: Schedule name used by the maintenance action.
         value: ${{ jobs.app-maintenance.outputs.schedule_name }}
+      post_deploy_status:
+        description: Odoo post-deploy status, when returned by the selected driver.
+        value: ${{ jobs.app-maintenance.outputs.post_deploy_status }}
+      override_status:
+        description: Odoo override apply status, when returned by the selected driver.
+        value: ${{ jobs.app-maintenance.outputs.override_status }}
+      override_record_found:
+        description: Whether an Odoo override record existed, when returned.
+        value: ${{ jobs.app-maintenance.outputs.override_record_found }}
+      override_payload_rendered:
+        description: Whether an Odoo override payload was rendered, when returned.
+        value: ${{ jobs.app-maintenance.outputs.override_payload_rendered }}
+      website_bootstrap_included:
+        description: Whether Odoo website bootstrap was included, when returned.
+        value: ${{ jobs.app-maintenance.outputs.website_bootstrap_included }}
+      applied_at:
+        description: Odoo override apply timestamp, when returned.
+        value: ${{ jobs.app-maintenance.outputs.applied_at }}
       error_message:
         description: Maintenance error message, when present.
         value: ${{ jobs.app-maintenance.outputs.error_message }}
@@ -98,6 +116,12 @@ jobs:
       application_name: ${{ steps.lp.outputs.application_name }}
       application_id: ${{ steps.lp.outputs.application_id }}
       schedule_name: ${{ steps.lp.outputs.schedule_name }}
+      post_deploy_status: ${{ steps.lp.outputs.post_deploy_status }}
+      override_status: ${{ steps.lp.outputs.override_status }}
+      override_record_found: ${{ steps.lp.outputs.override_record_found }}
+      override_payload_rendered: ${{ steps.lp.outputs.override_payload_rendered }}
+      website_bootstrap_included: ${{ steps.lp.outputs.website_bootstrap_included }}
+      applied_at: ${{ steps.lp.outputs.applied_at }}
       error_message: ${{ steps.lp.outputs.error_message }}
       trace_id: ${{ steps.lp.outputs.trace_id }}
     runs-on: ubuntu-latest
@@ -194,4 +218,10 @@ jobs:
             application_name=result.application_name,
             application_id=result.application_id,
             schedule_name=result.schedule_name,
+            post_deploy_status=result.post_deploy_status,
+            override_status=result.override_status,
+            override_record_found=result.override_record_found,
+            override_payload_rendered=result.override_payload_rendered,
+            website_bootstrap_included=result.website_bootstrap_included,
+            applied_at=result.applied_at,
             error_message=result.error_message
