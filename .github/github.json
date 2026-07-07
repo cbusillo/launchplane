@@ -91,7 +91,6 @@
     "Odoo Stable Bootstrap",
     "Reusable Odoo Artifact Publish",
     "Reusable Odoo Prod Promotion",
-    "Reusable Odoo Prod Rollback",
     "Reusable Generic Web Stable Deploy",
     "Reusable Generic Web Prod Promotion",
     "Reusable Generic Web Preview Lifecycle",

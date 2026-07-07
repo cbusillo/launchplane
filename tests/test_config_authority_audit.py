@@ -1425,7 +1425,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         for path, key in (
             (".github/workflows/odoo-driver-route-smoke.yml", "LAUNCHPLANE_URL"),
             (".github/workflows/reusable-odoo-prod-promotion.yml", "launchplane-url"),
-            (".github/workflows/reusable-odoo-prod-rollback.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-testing-deploy.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-testing-deploy.yml", "LAUNCHPLANE_URL"),
             (
@@ -1590,11 +1589,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 ".github/workflows/reusable-odoo-prod-promotion.yml",
-                "idempotency-key",
-                "${{ steps.product.outputs.idempotency_key }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-prod-rollback.yml",
                 "idempotency-key",
                 "${{ steps.product.outputs.idempotency_key }}",
             ),
@@ -1841,11 +1835,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ("PRODUCT_INPUT", "${{ inputs.product }}"),
             ),
             (
-                ".github/workflows/reusable-odoo-prod-rollback.yml",
-                ("CONTEXT_NAME", "${{ inputs.context }}"),
-                ("PRODUCT_INPUT", "${{ inputs.product }}"),
-            ),
-            (
                 ".github/workflows/reusable-odoo-testing-deploy.yml",
                 ("CONTEXT_NAME", "${{ inputs.context }}"),
                 ("PRODUCT_INPUT", "${{ inputs.product }}"),
@@ -1874,7 +1863,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
         for path in (
             ".github/workflows/reusable-odoo-prod-promotion.yml",
-            ".github/workflows/reusable-odoo-prod-rollback.yml",
             ".github/workflows/reusable-odoo-testing-deploy.yml",
         ):
             with self.subTest(path=path, key="idempotency-key"):
