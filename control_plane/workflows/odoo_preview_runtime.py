@@ -150,6 +150,12 @@ class OdooPreviewWorkflowRequestFacts(BaseModel):
 def build_odoo_preview_artifact_publish_inputs_workflow_request(
     *, facts: OdooPreviewWorkflowRequestFacts
 ) -> OdooPreviewWorkflowRequest:
+    if facts.operation != "refresh":
+        raise ValueError("Odoo preview artifact publish inputs request requires refresh operation.")
+    source_git_ref = _required_text(
+        facts.source_git_ref,
+        "Odoo preview artifact publish inputs request requires source_git_ref",
+    )
     return OdooPreviewWorkflowRequest(
         route_path=ODOO_PREVIEW_ARTIFACT_PUBLISH_INPUTS_ROUTE,
         payload={
@@ -161,7 +167,7 @@ def build_odoo_preview_artifact_publish_inputs_workflow_request(
                 "instance": facts.instance,
                 "pr_number": facts.pr_number,
                 "isolated": True,
-                "source_git_ref": facts.source_git_ref,
+                "source_git_ref": source_git_ref,
             },
         },
         idempotency_key=(
@@ -199,7 +205,7 @@ def build_odoo_preview_apply_inputs_workflow_request(
         payload_json_files={"inputs.manifest": manifest_file} if manifest_file else {},
         idempotency_key=(
             "odoo-preview-apply-inputs:"
-            f"{facts.product}:{_preview_request_token(facts)}:{facts.source_git_ref or 'destroy'}:"
+            f"{facts.product}:{_preview_request_token(facts)}:{_preview_source_token(facts)}:"
             f"inputs-run-{facts.run_id}-attempt-{facts.run_attempt}"
         ),
         fail_result_paths=("result.status",),
@@ -212,6 +218,8 @@ def build_odoo_preview_apply_workflow_request(
     facts: OdooPreviewWorkflowRequestFacts,
     dry_run_plan_file: str,
     manifest_file: str = "",
+    wait_for_deploy: bool = True,
+    smoke_check: bool | None = None,
 ) -> OdooPreviewWorkflowRequest:
     if facts.operation == "refresh" and not manifest_file.strip():
         raise ValueError("Odoo preview refresh apply request requires manifest_file.")
@@ -225,8 +233,8 @@ def build_odoo_preview_apply_workflow_request(
             "product": facts.product,
             "apply": {
                 "timeout_seconds": 600,
-                "wait_for_deploy": True,
-                "smoke_check": facts.operation == "refresh",
+                "wait_for_deploy": wait_for_deploy,
+                "smoke_check": facts.operation == "refresh" if smoke_check is None else smoke_check,
             },
         },
         payload_json_files=payload_json_files,
@@ -474,6 +482,12 @@ def _preview_slug(
 
 def _preview_request_token(facts: OdooPreviewWorkflowRequestFacts) -> str:
     return facts.preview_slug or f"pr-{facts.pr_number}"
+
+
+def _preview_source_token(facts: OdooPreviewWorkflowRequestFacts) -> str:
+    if facts.operation == "destroy":
+        return "destroy"
+    return facts.source_git_ref
 
 
 def resolve_odoo_preview_url(
@@ -1422,11 +1436,6 @@ def _delete_compose(*, host: str, token: str, compose_id: str, delete_volumes: b
         method="POST",
         payload={"composeId": compose_id, "deleteVolumes": delete_volumes},
     )
-
-
-def _is_compose_delete_not_found(exc: click.ClickException) -> bool:
-    message = str(exc).lower()
-    return "/api/compose.delete" in message and "404" in message
 
 
 def _rollback_created_runtime(

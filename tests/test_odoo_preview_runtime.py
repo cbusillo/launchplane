@@ -329,6 +329,12 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(request.fail_result_paths, ("result.input_status",))
         self.assertEqual(request.response_output_path, "result")
 
+    def test_artifact_publish_inputs_builder_requires_refresh_operation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires refresh operation"):
+            build_odoo_preview_artifact_publish_inputs_workflow_request(
+                facts=_workflow_facts(operation="destroy")
+            )
+
     def test_builds_preview_apply_inputs_workflow_request_shape(self) -> None:
         request = build_odoo_preview_apply_inputs_workflow_request(
             facts=_workflow_facts(),
@@ -375,14 +381,32 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertNotIn("preview_slug", inputs)
         self.assertEqual(
             request.idempotency_key,
-            "odoo-preview-apply-inputs:odoo-tenant-cm-website:pr-42:abc123:inputs-run-456-attempt-2",
+            "odoo-preview-apply-inputs:odoo-tenant-cm-website:pr-42:destroy:inputs-run-456-attempt-2",
         )
 
     def test_apply_inputs_destroy_without_source_ref_uses_destroy_idempotency_token(self) -> None:
-        facts = _workflow_facts(operation="destroy")
-        facts.source_git_ref = ""
+        facts = OdooPreviewWorkflowRequestFacts(
+            product="odoo-tenant-cm-website",
+            context="cm_website",
+            operation="destroy",
+            pr_number=42,
+            preview_slug="pr-42",
+            source_git_ref="",
+            run_id="456",
+            run_attempt="2",
+        )
 
         request = build_odoo_preview_apply_inputs_workflow_request(facts=facts)
+
+        self.assertEqual(
+            request.idempotency_key,
+            "odoo-preview-apply-inputs:odoo-tenant-cm-website:pr-42:destroy:inputs-run-456-attempt-2",
+        )
+
+    def test_apply_inputs_destroy_uses_stable_idempotency_token_with_source_ref(self) -> None:
+        request = build_odoo_preview_apply_inputs_workflow_request(
+            facts=_workflow_facts(operation="destroy")
+        )
 
         self.assertEqual(
             request.idempotency_key,
@@ -423,6 +447,20 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(
             request.idempotency_key,
             "odoo-preview-apply:odoo-tenant-cm-website:pr-42:refresh:run-456-attempt-2",
+        )
+
+    def test_preview_apply_workflow_request_accepts_manual_apply_overrides(self) -> None:
+        request = build_odoo_preview_apply_workflow_request(
+            facts=_workflow_facts(),
+            dry_run_plan_file="/tmp/dry-run.json",
+            manifest_file="/tmp/preview-artifact.json",
+            wait_for_deploy=False,
+            smoke_check=True,
+        )
+
+        self.assertEqual(
+            request.payload["apply"],
+            {"timeout_seconds": 600, "wait_for_deploy": False, "smoke_check": True},
         )
 
     def test_destroy_preview_apply_request_skips_manifest_and_smoke(self) -> None:
