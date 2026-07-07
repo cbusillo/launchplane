@@ -259,7 +259,15 @@ class DocsContractsTests(TestCase):
         self.assertNotIn("provider_target", stable_deploy_workflow)
 
         self.assertIn("workflow_call:", prod_promotion_workflow)
-        self.assertIn("route_path=/v1/drivers/verireel/prod-promotion", prod_promotion_workflow)
+        self.assertIn("driver:", prod_promotion_workflow)
+        self.assertIn('route_path="/v1/drivers/verireel/prod-promotion"', prod_promotion_workflow)
+        self.assertIn('route_path="/v1/drivers/odoo/prod-promotion-run"', prod_promotion_workflow)
+        self.assertIn("Odoo prod promotion requires testing -> prod.", prod_promotion_workflow)
+        self.assertIn('idempotency_key="opp:$CONTEXT:$run_scope"', prod_promotion_workflow)
+        self.assertIn("run.context=${{ steps.request.outputs.context }}", prod_promotion_workflow)
+        self.assertIn(
+            "run.request_id=${{ steps.request.outputs.request_id }}", prod_promotion_workflow
+        )
         self.assertIn(
             "promotion.backup_record_id=${{ inputs.backup_record_id }}", prod_promotion_workflow
         )
@@ -269,6 +277,9 @@ class DocsContractsTests(TestCase):
         )
         self.assertIn("target_category=result.target_category", prod_promotion_workflow)
         self.assertNotIn("target_type=result.target_type", prod_promotion_workflow)
+        self.assertIn("existing VeriReel", product_repo_contract)
+        self.assertIn("promotion surface", product_repo_contract)
+        self.assertIn("`opp:<context>:<run>`", product_repo_contract)
 
         self.assertIn("workflow_call:", app_maintenance_workflow)
         self.assertIn("driver:", app_maintenance_workflow)

@@ -14,21 +14,30 @@ name: Reusable Product Driver Prod Promotion
         required: false
         default: ""
         type: string
+      driver:
+        description: Product driver id. Defaults to verireel for compatibility.
+        required: false
+        default: verireel
+        type: string
       artifact_id:
         description: Immutable image or Launchplane-resolvable artifact identity.
-        required: true
+        required: false
+        default: ""
         type: string
       source_git_ref:
         description: Source git ref attached to promotion evidence.
-        required: true
+        required: false
+        default: ""
         type: string
       backup_record_id:
         description: Backup gate record id required by the promotion.
-        required: true
+        required: false
+        default: ""
         type: string
       promotion_record_id:
         description: Promotion record id for this prod promotion.
-        required: true
+        required: false
+        default: ""
         type: string
       source_health_status:
         description: Source lane health status proven by product-owned checks.
@@ -113,6 +122,24 @@ name: Reusable Product Driver Prod Promotion
       trace_id:
         description: Launchplane trace id for request debugging.
         value: ${{ jobs.prod-promotion.outputs.trace_id }}
+      release_tuple_id:
+        description: Release tuple ID for drivers that write one.
+        value: ${{ jobs.prod-promotion.outputs.release_tuple_id }}
+      backup_status:
+        description: Backup gate status for drivers that return one.
+        value: ${{ jobs.prod-promotion.outputs.backup_status }}
+      promotion_status:
+        description: Promotion status for drivers that return one.
+        value: ${{ jobs.prod-promotion.outputs.promotion_status }}
+      deployment_status:
+        description: Deployment status for drivers that return one.
+        value: ${{ jobs.prod-promotion.outputs.deployment_status }}
+      post_deploy_status:
+        description: Post-deploy status for drivers that run post-deploy after promotion.
+        value: ${{ jobs.prod-promotion.outputs.post_deploy_status }}
+      destination_health_status:
+        description: Destination health status for drivers that return one.
+        value: ${{ jobs.prod-promotion.outputs.destination_health_status }}
 
 permissions:
   contents: read
@@ -121,20 +148,26 @@ permissions:
 jobs:
   prod-promotion:
     outputs:
-      promotion_record_id: ${{ steps.lp.outputs.promotion_record_id }}
-      deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
-      backup_record_id: ${{ steps.lp.outputs.backup_record_id }}
-      deploy_status: ${{ steps.lp.outputs.deploy_status }}
-      rollout_status: ${{ steps.lp.outputs.rollout_status }}
-      migration_status: ${{ steps.lp.outputs.migration_status }}
-      health_status: ${{ steps.lp.outputs.health_status }}
-      deploy_started_at: ${{ steps.lp.outputs.deploy_started_at }}
-      deploy_finished_at: ${{ steps.lp.outputs.deploy_finished_at }}
-      target_name: ${{ steps.lp.outputs.target_name }}
-      target_category: ${{ steps.lp.outputs.target_category }}
-      target_id: ${{ steps.lp.outputs.target_id }}
-      error_message: ${{ steps.lp.outputs.error_message }}
-      trace_id: ${{ steps.lp.outputs.trace_id }}
+      promotion_record_id: ${{ steps.lp_verireel.outputs.promotion_record_id || steps.lp_odoo.outputs.promotion_record_id }}
+      deployment_record_id: ${{ steps.lp_verireel.outputs.deployment_record_id || steps.lp_odoo.outputs.deployment_record_id }}
+      backup_record_id: ${{ steps.lp_verireel.outputs.backup_record_id || steps.lp_odoo.outputs.backup_record_id }}
+      deploy_status: ${{ steps.lp_verireel.outputs.deploy_status }}
+      rollout_status: ${{ steps.lp_verireel.outputs.rollout_status }}
+      migration_status: ${{ steps.lp_verireel.outputs.migration_status }}
+      health_status: ${{ steps.lp_verireel.outputs.health_status }}
+      deploy_started_at: ${{ steps.lp_verireel.outputs.deploy_started_at }}
+      deploy_finished_at: ${{ steps.lp_verireel.outputs.deploy_finished_at }}
+      target_name: ${{ steps.lp_verireel.outputs.target_name }}
+      target_category: ${{ steps.lp_verireel.outputs.target_category }}
+      target_id: ${{ steps.lp_verireel.outputs.target_id }}
+      error_message: ${{ steps.lp_verireel.outputs.error_message || steps.lp_odoo.outputs.error_message }}
+      trace_id: ${{ steps.lp_verireel.outputs.trace_id || steps.lp_odoo.outputs.trace_id }}
+      release_tuple_id: ${{ steps.lp_odoo.outputs.release_tuple_id }}
+      backup_status: ${{ steps.lp_odoo.outputs.backup_status }}
+      promotion_status: ${{ steps.lp_odoo.outputs.promotion_status }}
+      deployment_status: ${{ steps.lp_odoo.outputs.deployment_status }}
+      post_deploy_status: ${{ steps.lp_odoo.outputs.post_deploy_status }}
+      destination_health_status: ${{ steps.lp_odoo.outputs.destination_health_status }}
     runs-on: ubuntu-latest
     steps:
       - name: Resolve Launchplane prod promotion request
@@ -143,6 +176,7 @@ jobs:
           ARTIFACT_ID: ${{ inputs.artifact_id }}
           BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
           CONTEXT: ${{ inputs.context }}
+          DRIVER: ${{ inputs.driver }}
           FROM_INSTANCE: ${{ inputs.from_instance }}
           PRODUCT: ${{ inputs.product }}
           PROMOTION_RECORD_ID: ${{ inputs.promotion_record_id }}
@@ -150,38 +184,53 @@ jobs:
           TO_INSTANCE: ${{ inputs.to_instance }}
         run: |
           set -euo pipefail
-          if [ -z "$PRODUCT" ]; then
-            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          DRIVER="${DRIVER,,}"
+          if [ "$DRIVER" = "verireel" ]; then
+            if [ -z "$PRODUCT" ]; then
+              PRODUCT="${GITHUB_REPOSITORY#*/}"
+            fi
+            if [ -z "$CONTEXT" ]; then
+              CONTEXT="$PRODUCT"
+            fi
+            required_inputs="PRODUCT CONTEXT FROM_INSTANCE TO_INSTANCE ARTIFACT_ID SOURCE_GIT_REF BACKUP_RECORD_ID PROMOTION_RECORD_ID"
+            route_path="/v1/drivers/verireel/prod-promotion"
+          elif [ "$DRIVER" = "odoo" ]; then
+            required_inputs="PRODUCT CONTEXT FROM_INSTANCE TO_INSTANCE"
+            route_path="/v1/drivers/odoo/prod-promotion-run"
+            if [ "$FROM_INSTANCE" != "testing" ] || [ "$TO_INSTANCE" != "prod" ]; then
+              echo "Odoo prod promotion requires testing -> prod." >&2
+              exit 1
+            fi
+          else
+            echo "Unsupported driver: $DRIVER" >&2
+            exit 1
           fi
-          if [ -z "$CONTEXT" ]; then
-            CONTEXT="$PRODUCT"
-          fi
-          for required in PRODUCT CONTEXT FROM_INSTANCE TO_INSTANCE ARTIFACT_ID SOURCE_GIT_REF BACKUP_RECORD_ID PROMOTION_RECORD_ID; do
+          for required in $required_inputs; do
             if [ -z "${!required}" ]; then
               echo "${required} is required." >&2
               exit 1
             fi
           done
           run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          if [ "$DRIVER" = "odoo" ]; then
+            idempotency_key="opp:$CONTEXT:$run_scope"
+          else
+            idempotency_key="product-driver-prod-promotion:$PRODUCT:$CONTEXT:$FROM_INSTANCE:$TO_INSTANCE:$PROMOTION_RECORD_ID:$run_scope"
+          fi
           {
             echo "context=$CONTEXT"
-            printf '%s=%s:%s:%s:%s:%s:%s:%s\n' \
-              idempotency_key \
-              product-driver-prod-promotion \
-              "$PRODUCT" \
-              "$CONTEXT" \
-              "$FROM_INSTANCE" \
-              "$TO_INSTANCE" \
-              "$PROMOTION_RECORD_ID" \
-              "$run_scope"
+            echo "driver=$DRIVER"
+            echo "idempotency_key=$idempotency_key"
             echo "from_instance=$FROM_INSTANCE"
             echo "product=$PRODUCT"
-            echo "route_path=/v1/drivers/verireel/prod-promotion"
+            echo "request_id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "route_path=$route_path"
             echo "to_instance=$TO_INSTANCE"
           } >>"$GITHUB_OUTPUT"
 
-      - name: Request Launchplane prod promotion
-        id: lp
+      - name: Request Launchplane VeriReel prod promotion
+        id: lp_verireel
+        if: ${{ steps.request.outputs.driver == 'verireel' }}
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
         with:
           launchplane-url: >-
@@ -226,4 +275,38 @@ jobs:
             target_name=result.target_name,
             target_category=result.target_category,
             target_id=result.target_id,
+            error_message=result.error_message
+
+      - name: Request Launchplane Odoo prod promotion
+        id: lp_odoo
+        if: ${{ steps.request.outputs.driver == 'odoo' }}
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.request.outputs.route_path }}
+          payload: >-
+            {"schema_version":1,"run":{"schema_version":1}}
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            run.context=${{ steps.request.outputs.context }}
+            run.request_id=${{ steps.request.outputs.request_id }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: >-
+            result.run_status,result.promotion_status,
+            result.deployment_status,result.post_deploy_status,
+            result.destination_health_status
+          output-paths: >-
+            trace_id=trace_id,
+            backup_record_id=result.backup_record_id,
+            backup_status=result.backup_status,
+            promotion_record_id=result.promotion_record_id,
+            deployment_record_id=result.deployment_record_id,
+            release_tuple_id=result.release_tuple_id,
+            promotion_status=result.promotion_status,
+            deployment_status=result.deployment_status,
+            post_deploy_status=result.post_deploy_status,
+            destination_health_status=result.destination_health_status,
             error_message=result.error_message

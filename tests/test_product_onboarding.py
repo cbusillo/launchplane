@@ -1170,6 +1170,26 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
 
         self.assertIn("fail-result-paths", workflow_text)
 
+    def test_product_driver_prod_promotion_supports_odoo_run_contract(self) -> None:
+        workflow_text = Path(
+            ".github/workflows/reusable-product-driver-prod-promotion.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("default: verireel", workflow_text)
+        self.assertIn("Unsupported driver: $DRIVER", workflow_text)
+        self.assertIn('required_inputs="PRODUCT CONTEXT FROM_INSTANCE TO_INSTANCE"', workflow_text)
+        self.assertIn("Odoo prod promotion requires testing -> prod.", workflow_text)
+        self.assertIn('route_path="/v1/drivers/odoo/prod-promotion-run"', workflow_text)
+        self.assertIn('idempotency_key="opp:$CONTEXT:$run_scope"', workflow_text)
+        self.assertIn("run.context=${{ steps.request.outputs.context }}", workflow_text)
+        self.assertIn("run.request_id=${{ steps.request.outputs.request_id }}", workflow_text)
+        self.assertIn("result.run_status", workflow_text)
+        self.assertIn("result.promotion_status", workflow_text)
+        self.assertIn("result.deployment_status", workflow_text)
+        self.assertIn("result.post_deploy_status", workflow_text)
+        self.assertIn("result.destination_health_status", workflow_text)
+        self.assertNotIn('PRODUCT="${GITHUB_REPOSITORY#*/}"\n            CONTEXT=', workflow_text)
+
     def test_deploy_authz_grants_scope_public_ingress_monitor_to_launchplane(
         self,
     ) -> None:
