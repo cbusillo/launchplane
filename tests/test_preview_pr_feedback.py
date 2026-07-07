@@ -6,7 +6,10 @@ from unittest.mock import patch
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.every_code_worker import every_code_worktree_branch
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.workflows.preview_pr_feedback import build_preview_pr_feedback_record
+from control_plane.workflows.preview_pr_feedback import (
+    DEFAULT_PREVIEW_FEEDBACK_MARKER,
+    build_preview_pr_feedback_record,
+)
 
 
 def _every_code_request(*, result_pr_url: str = "") -> EveryCodeWorkRequestRecord:
@@ -46,7 +49,7 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
-                    side_effect=[None, None],
+                    side_effect=[None, None, None],
                 ) as find_comment,
                 patch(
                     "control_plane.workflows.preview_pr_feedback.create_github_issue_comment",
@@ -90,7 +93,14 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
 
         self.assertEqual(record.delivery_status, "delivered")
         self.assertEqual(record.delivery_action, "created_comment")
-        self.assertEqual(find_comment.call_count, 2)
+        self.assertEqual(find_comment.call_count, 3)
+        self.assertEqual(
+            find_comment.call_args_list[0].kwargs["marker"], DEFAULT_PREVIEW_FEEDBACK_MARKER
+        )
+        self.assertEqual(
+            find_comment.call_args_list[1].kwargs["marker"],
+            "<!-- verireel-preview-control -->",
+        )
         create_comment.assert_any_call(
             owner="cbusillo",
             repo="sellyouroutboard",
@@ -128,13 +138,14 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
                 patch(
                     "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
                     side_effect=[
+                        None,
                         {"id": 123, "body": "<!-- verireel-preview-control -->\nold"},
                         {
                             "id": 456,
                             "body": "<!-- launchplane-every-code-preview-ready:cbusillo/sellyouroutboard#88 -->\nold",
                         },
                     ],
-                ),
+                ) as find_comment,
                 patch(
                     "control_plane.workflows.preview_pr_feedback.update_github_issue_comment",
                     return_value={
@@ -176,8 +187,18 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
                 )
 
         self.assertEqual(record.delivery_status, "delivered")
+        self.assertEqual(record.marker, DEFAULT_PREVIEW_FEEDBACK_MARKER)
+        self.assertIn(DEFAULT_PREVIEW_FEEDBACK_MARKER, record.comment_markdown)
         create_comment.assert_not_called()
         self.assertEqual(update_comment.call_count, 2)
+        self.assertEqual(
+            find_comment.call_args_list[0].kwargs["marker"], DEFAULT_PREVIEW_FEEDBACK_MARKER
+        )
+        self.assertEqual(
+            find_comment.call_args_list[1].kwargs["marker"],
+            "<!-- verireel-preview-control -->",
+        )
+        self.assertEqual(update_comment.call_args_list[0].kwargs["comment_id"], 123)
         self.assertEqual(update_comment.call_args_list[1].kwargs["comment_id"], 456)
         self.assertIn("comment `/preview ok`", update_comment.call_args_list[1].kwargs["body"])
         self.assertNotIn("reviewer", update_comment.call_args_list[1].kwargs["body"].lower())
@@ -219,6 +240,8 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
             )
 
         self.assertEqual(record.status, "pending")
+        self.assertEqual(record.marker, DEFAULT_PREVIEW_FEEDBACK_MARKER)
+        self.assertIn(DEFAULT_PREVIEW_FEEDBACK_MARKER, record.comment_markdown)
         self.assertEqual(record.delivery_status, "delivered")
         self.assertEqual(record.delivery_action, "created_comment")
         self.assertIn(
@@ -287,7 +310,7 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
         create_comment.assert_not_called()
         update_comment.assert_not_called()
 
-    def test_cleared_feedback_skips_when_comment_is_missing(self) -> None:
+    def test_custom_marker_does_not_fall_back_to_legacy_default_marker(self) -> None:
         with (
             patch(
                 "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
@@ -296,7 +319,7 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
                 return_value=None,
-            ),
+            ) as find_comment,
             patch(
                 "control_plane.workflows.preview_pr_feedback.delete_github_issue_comment"
             ) as delete_comment,
@@ -320,6 +343,13 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
 
         self.assertEqual(record.delivery_status, "skipped")
         self.assertEqual(record.delivery_action, "no_existing_comment")
+        find_comment.assert_called_once_with(
+            owner="every",
+            repo="verireel",
+            issue_number=43,
+            token="github-token",
+            marker="<!-- verireel-preview-unsupported -->",
+        )
         delete_comment.assert_not_called()
         create_comment.assert_not_called()
 
