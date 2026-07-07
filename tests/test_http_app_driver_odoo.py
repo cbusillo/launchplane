@@ -21,6 +21,7 @@ from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPo
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_artifact_publish import OdooArtifactPublishResult
+from control_plane.workflows.odoo_app_maintenance import OdooAppMaintenanceResult
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
@@ -34,6 +35,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 from tests.http_app_test_support import (
     _asgi_get,
     _MissingProductReadStore,
+    _post_odoo_app_maintenance,
     _post_odoo_artifact_publish,
     _post_odoo_artifact_publish_inputs,
     _post_odoo_config_parameter_override,
@@ -4872,6 +4874,186 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
+    async def test_odoo_app_maintenance_executes_authorized_post_deploy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity(workflow_name="deploy-odoo.yml")),
+                authz_policy=self._tenant_policy(
+                    action="odoo_app_maintenance.execute",
+                    workflow_name="deploy-odoo.yml",
+                ),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_app_maintenance_http.execute_odoo_app_maintenance",
+                return_value=OdooAppMaintenanceResult(
+                    maintenance_status="pass",
+                    action="post-deploy",
+                    intent="stable-post-deploy",
+                    context="cm",
+                    instance="testing",
+                    post_deploy_status="pass",
+                    override_status="pass",
+                    override_record_found=True,
+                    override_payload_rendered=True,
+                    applied_at="2026-04-26T12:05:00Z",
+                    started_at="2026-04-26T12:04:00Z",
+                    finished_at="2026-04-26T12:05:00Z",
+                ),
+            ):
+                response = await _post_odoo_app_maintenance(
+                    app,
+                    {
+                        "product": "odoo-tenant-cm",
+                        "maintenance": {
+                            "context": "cm",
+                            "instance": "testing",
+                            "action": "post-deploy",
+                            "intent": "stable-post-deploy",
+                        },
+                    },
+                    idempotency_key="odoo-app-maintenance:cm-testing-post-deploy",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["transition"],
+            "odoo-app-maintenance:cm:testing:deploy",
+        )
+        self.assertEqual(payload["result"]["maintenance_status"], "pass")
+        self.assertEqual(payload["result"]["post_deploy_status"], "pass")
+
+    async def test_odoo_app_maintenance_does_not_replay_failed_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity(workflow_name="deploy-odoo.yml")),
+                authz_policy=self._tenant_policy(
+                    action="odoo_app_maintenance.execute",
+                    workflow_name="deploy-odoo.yml",
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            request_payload: dict[str, object] = {
+                "product": "odoo-tenant-cm",
+                "maintenance": {
+                    "context": "cm",
+                    "instance": "testing",
+                    "action": "post-deploy",
+                    "intent": "stable-post-deploy",
+                },
+            }
+            with patch(
+                "control_plane.odoo_app_maintenance_http.execute_odoo_app_maintenance",
+                side_effect=(
+                    OdooAppMaintenanceResult(
+                        maintenance_status="fail",
+                        action="post-deploy",
+                        intent="stable-post-deploy",
+                        context="cm",
+                        instance="testing",
+                        post_deploy_status="fail",
+                        override_status="fail",
+                        error_message="temporary Odoo maintenance failure",
+                    ),
+                    OdooAppMaintenanceResult(
+                        maintenance_status="pass",
+                        action="post-deploy",
+                        intent="stable-post-deploy",
+                        context="cm",
+                        instance="testing",
+                        post_deploy_status="pass",
+                        override_status="pass",
+                    ),
+                ),
+            ) as execute_mock:
+                first_response = await _post_odoo_app_maintenance(
+                    app,
+                    request_payload,
+                    idempotency_key="odoo-app-maintenance:retry-after-failure",
+                )
+                retry_response = await _post_odoo_app_maintenance(
+                    app,
+                    request_payload,
+                    idempotency_key="odoo-app-maintenance:retry-after-failure",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(first_response.json()["result"]["maintenance_status"], "fail")
+        self.assertEqual(retry_response.status_code, 202)
+        self.assertFalse(retry_response.json().get("replayed", False))
+        self.assertEqual(retry_response.json()["result"]["maintenance_status"], "pass")
+        self.assertEqual(execute_mock.call_count, 2)
+
+    async def test_odoo_app_maintenance_rejects_non_deploy_phase(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity(workflow_name="deploy-odoo.yml")),
+                authz_policy=self._tenant_policy(
+                    action="odoo_app_maintenance.execute",
+                    workflow_name="deploy-odoo.yml",
+                ),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_app_maintenance(
+                app,
+                {
+                    "product": "odoo-tenant-cm",
+                    "maintenance": {
+                        "context": "cm",
+                        "instance": "testing",
+                        "action": "post-deploy",
+                        "intent": "stable-post-deploy",
+                        "phase": "promotion",
+                    },
+                },
+                idempotency_key="odoo-app-maintenance:unsupported-phase",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_odoo_app_maintenance_rejects_unsupported_action(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity(workflow_name="deploy-odoo.yml")),
+                authz_policy=self._tenant_policy(
+                    action="odoo_app_maintenance.execute",
+                    workflow_name="deploy-odoo.yml",
+                ),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_app_maintenance(
+                app,
+                {
+                    "product": "odoo-tenant-cm",
+                    "maintenance": {
+                        "context": "cm",
+                        "instance": "testing",
+                        "action": "reset-testing",
+                        "intent": "stable-post-deploy",
+                    },
+                },
+                idempotency_key="odoo-app-maintenance:unsupported-action",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
     async def test_odoo_post_deploy_executes_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -5351,6 +5533,10 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             "/v1/drivers/odoo/post-deploy": (
                 "write_odoo_post_deploy",
                 "OdooPostDeployEnvelope",
+            ),
+            "/v1/drivers/odoo/app-maintenance": (
+                "write_odoo_app_maintenance",
+                "OdooAppMaintenanceEnvelope",
             ),
             "/v1/drivers/odoo/config-parameter-override": (
                 "write_odoo_config_parameter_override",

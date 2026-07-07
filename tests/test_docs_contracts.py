@@ -209,6 +209,9 @@ class DocsContractsTests(TestCase):
         prod_promotion_workflow = Path(
             ".github/workflows/reusable-product-driver-prod-promotion.yml"
         ).read_text(encoding="utf-8")
+        app_maintenance_workflow = Path(
+            ".github/workflows/reusable-product-driver-app-maintenance.yml"
+        ).read_text(encoding="utf-8")
         prod_rollback_workflow = Path(
             ".github/workflows/reusable-product-driver-prod-rollback.yml"
         ).read_text(encoding="utf-8")
@@ -226,7 +229,9 @@ class DocsContractsTests(TestCase):
         self.assertIn("should not own Launchplane route construction", product_repo_contract)
 
         self.assertIn("workflow_call:", stable_deploy_workflow)
-        self.assertIn("Stable lane instance to deploy. Defaults to testing.", stable_deploy_workflow)
+        self.assertIn(
+            "Stable lane instance to deploy. Defaults to testing.", stable_deploy_workflow
+        )
         self.assertIn('default: "testing"', stable_deploy_workflow)
         self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', stable_deploy_workflow)
         self.assertIn("route_path=/v1/drivers/verireel/$INSTANCE-deploy", stable_deploy_workflow)
@@ -247,6 +252,12 @@ class DocsContractsTests(TestCase):
         )
         self.assertIn("target_category=result.target_category", prod_promotion_workflow)
         self.assertNotIn("target_type=result.target_type", prod_promotion_workflow)
+
+        self.assertIn("workflow_call:", app_maintenance_workflow)
+        self.assertIn("driver:", app_maintenance_workflow)
+        self.assertIn('route_path="/v1/drivers/verireel/app-maintenance"', app_maintenance_workflow)
+        self.assertIn('route_path="/v1/drivers/odoo/app-maintenance"', app_maintenance_workflow)
+        self.assertIn("maintenance.intent=${{ inputs.intent }}", app_maintenance_workflow)
 
         self.assertIn("workflow_call:", prod_rollback_workflow)
         self.assertIn("route_path=/v1/drivers/verireel/prod-rollback", prod_rollback_workflow)

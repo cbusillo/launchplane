@@ -302,6 +302,7 @@ VeriReel product paths:
   - `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}`
     (native FastAPI)
   - `POST /v1/drivers/odoo/post-deploy` (native FastAPI)
+  - `POST /v1/drivers/odoo/app-maintenance` (native FastAPI)
   - `POST /v1/drivers/odoo/config-parameter-override` (native FastAPI)
   - `POST /v1/drivers/odoo/website-bootstrap-override` (native FastAPI)
   - `POST /v1/drivers/odoo/target-replacement-plan` (native FastAPI)
