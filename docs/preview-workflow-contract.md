@@ -181,6 +181,15 @@ rejects a supplied slug when it conflicts with the derived value. `context`,
 `preview_slug`, and `preview_url` remain compatibility fields for older
 adapters, not product-repo authority.
 
+Launchplane also owns the reusable request-shape builders for Odoo tenant
+preview workflows. Tenant repos may keep thin adapter jobs for checkout, image
+publication, runner selection, and product smoke facts, but the route paths,
+payload skeletons, JSON-file bindings, fail-result paths, and run-scoped
+idempotency keys for `artifact-publish-inputs`, `preview-apply-inputs`, and
+`preview-apply` are Launchplane contract fixtures. New or migrated tenant
+preview workflows should consume those builders through a Launchplane-owned
+reusable workflow/action instead of copying inline JSON request bodies.
+
 Odoo CM is the exception where Launchplane now owns both the isolated provider
 apply planning inputs and the stage-preview smoke contract after refresh. Product
 workflows should call `POST /v1/drivers/odoo/preview-apply-inputs` with PR,
