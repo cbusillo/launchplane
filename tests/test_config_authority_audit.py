@@ -1424,7 +1424,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
         for path, key in (
             (".github/workflows/odoo-driver-route-smoke.yml", "LAUNCHPLANE_URL"),
-            (".github/workflows/reusable-odoo-post-deploy.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-prod-promotion.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-prod-rollback.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-testing-deploy.yml", "launchplane-url"),
@@ -1588,11 +1587,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
                 "username",
                 "${{ github.repository_owner }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-post-deploy.yml",
-                "idempotency-key",
-                "${{ steps.product.outputs.idempotency_key }}",
             ),
             (
                 ".github/workflows/reusable-odoo-prod-promotion.yml",
@@ -1842,11 +1836,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
     def test_reusable_odoo_workflow_aliases_are_path_scoped(self) -> None:
         reusable_workflow_cases = (
             (
-                ".github/workflows/reusable-odoo-post-deploy.yml",
-                ("CONTEXT_NAME", "${{ inputs.context }}"),
-                ("PRODUCT_INPUT", "${{ inputs.product }}"),
-            ),
-            (
                 ".github/workflows/reusable-odoo-prod-promotion.yml",
                 ("CONTEXT_NAME", "${{ inputs.context }}"),
                 ("PRODUCT_INPUT", "${{ inputs.product }}"),
@@ -1884,7 +1873,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     )
 
         for path in (
-            ".github/workflows/reusable-odoo-post-deploy.yml",
             ".github/workflows/reusable-odoo-prod-promotion.yml",
             ".github/workflows/reusable-odoo-prod-rollback.yml",
             ".github/workflows/reusable-odoo-testing-deploy.yml",
