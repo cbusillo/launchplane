@@ -1192,6 +1192,7 @@ refresh/destroy flow.
 - `GET /v1/product-profiles`
 - `GET /v1/product-profiles/{product}`
 - `POST /v1/product-profiles`
+- `POST /v1/product-profiles/expected-config/apply`
 
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through native FastAPI authenticated service ingress and stored in Launchplane
@@ -1199,6 +1200,18 @@ records; product repos do not carry repo-local Launchplane lifecycle manifests.
 Writes require `product_profile.write` for the profile product in the
 Launchplane service context, validate the profile write contract before storage,
 and preserve optional `Idempotency-Key` replay/conflict behavior.
+
+Expected-config apply is a narrower metadata mutation for runtime contract
+requirements already owned by product profiles. It requires
+`product_profile.expected_config.apply` for the target product in the
+Launchplane service context, loads the existing DB-backed product profile, and
+appends supplied runtime keys or managed secret binding requirements only when
+absent. Dry-run returns the same redacted added/unchanged summary without
+writing. Apply updates only the profile `expected_config`, `updated_at`, and
+`source` fields; callers must use the live-target-runtime workflow afterward to
+sync live provider environment. The route does not accept secret plaintext,
+runtime values, or checked-in product catalogs, and workflow authority for real
+products must be granted through operator-supplied authz input.
 
 Public ingress notification policy writes use
 `POST /v1/public-ingress/notification-policies/apply`. The request carries

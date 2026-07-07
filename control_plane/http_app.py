@@ -443,7 +443,12 @@ from control_plane.contracts.product_environment_read_model import (
     ProductSiteOverview,
 )
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductExpectedConfigProfile,
+    ProductRuntimeConfigRequirement,
+    ProductSecretConfigRequirement,
+)
 from control_plane.contracts.repo_product_mapping_read_model import RepoProductMapping
 from control_plane.contracts.preview_evidence import (
     PreviewDestroyedEvidenceEnvelope,
@@ -685,6 +690,7 @@ _INGRESS_ROUTE_APPLY_ROUTE = "/v1/drivers/ingress/route-apply"
 _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
+_PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
 _PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
@@ -1888,6 +1894,137 @@ class ProductOnboardingApplyEnvelope(BaseModel):
             raise ValueError("Product onboarding writes require product 'launchplane'.")
         self.product = "launchplane"
         return self
+
+
+class ProductExpectedConfigApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    reason: str
+    source_label: str = "product-expected-config"
+    runtime_environment_keys: tuple[ProductRuntimeConfigRequirement, ...] = ()
+    managed_secret_bindings: tuple[ProductSecretConfigRequirement, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "ProductExpectedConfigApplyEnvelope":
+        self.product = self.product.strip()
+        self.reason = self.reason.strip()
+        self.source_label = self.source_label.strip() or "product-expected-config"
+        if not self.product:
+            raise ValueError("Product expected config request requires product.")
+        if not self.reason:
+            raise ValueError("Product expected config request requires reason.")
+        if not self.runtime_environment_keys and not self.managed_secret_bindings:
+            raise ValueError(
+                "Product expected config request requires at least one runtime key "
+                "or managed secret binding."
+            )
+        return self
+
+
+def _runtime_config_requirement_key(
+    requirement: ProductRuntimeConfigRequirement,
+) -> tuple[str, str, str]:
+    return (requirement.context, requirement.instance, requirement.key)
+
+
+def _secret_config_requirement_key(
+    requirement: ProductSecretConfigRequirement,
+) -> tuple[str, str, str, str]:
+    return (
+        requirement.integration,
+        requirement.context,
+        requirement.instance,
+        requirement.binding_key,
+    )
+
+
+def _merge_product_expected_config(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    request: ProductExpectedConfigApplyEnvelope,
+    updated_at: str,
+) -> tuple[LaunchplaneProductProfileRecord, dict[str, object]]:
+    existing_runtime_keys = {
+        _runtime_config_requirement_key(requirement)
+        for requirement in profile.expected_config.runtime_environment_keys
+    }
+    existing_secret_keys = {
+        _secret_config_requirement_key(requirement)
+        for requirement in profile.expected_config.managed_secret_bindings
+    }
+
+    runtime_requirements = list(profile.expected_config.runtime_environment_keys)
+    secret_requirements = list(profile.expected_config.managed_secret_bindings)
+    added_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
+    unchanged_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
+    added_secret_requirements: list[ProductSecretConfigRequirement] = []
+    unchanged_secret_requirements: list[ProductSecretConfigRequirement] = []
+
+    for runtime_requirement in request.runtime_environment_keys:
+        runtime_key = _runtime_config_requirement_key(runtime_requirement)
+        if runtime_key in existing_runtime_keys:
+            unchanged_runtime_requirements.append(runtime_requirement)
+            continue
+        existing_runtime_keys.add(runtime_key)
+        runtime_requirements.append(runtime_requirement)
+        added_runtime_requirements.append(runtime_requirement)
+
+    for secret_requirement in request.managed_secret_bindings:
+        secret_key = _secret_config_requirement_key(secret_requirement)
+        if secret_key in existing_secret_keys:
+            unchanged_secret_requirements.append(secret_requirement)
+            continue
+        existing_secret_keys.add(secret_key)
+        secret_requirements.append(secret_requirement)
+        added_secret_requirements.append(secret_requirement)
+
+    changed = bool(added_runtime_requirements or added_secret_requirements)
+    merged_profile = profile
+    if changed:
+        merged_profile = profile.model_copy(
+            update={
+                "expected_config": ProductExpectedConfigProfile(
+                    runtime_environment_keys=tuple(runtime_requirements),
+                    managed_secret_bindings=tuple(secret_requirements),
+                ),
+                "updated_at": updated_at,
+                "source": request.source_label,
+            }
+        )
+
+    return merged_profile, {
+        "status": "ok",
+        "mode": request.mode,
+        "product": request.product,
+        "source_label": request.source_label,
+        "changed": changed,
+        "runtime_environment_keys": {
+            "added": [
+                requirement.model_dump(mode="json") for requirement in added_runtime_requirements
+            ],
+            "unchanged": [
+                requirement.model_dump(mode="json")
+                for requirement in unchanged_runtime_requirements
+            ],
+        },
+        "managed_secret_bindings": {
+            "added": [
+                requirement.model_dump(mode="json") for requirement in added_secret_requirements
+            ],
+            "unchanged": [
+                requirement.model_dump(mode="json") for requirement in unchanged_secret_requirements
+            ],
+        },
+        "summary": {
+            "runtime_environment_key_add_count": len(added_runtime_requirements),
+            "managed_secret_binding_add_count": len(added_secret_requirements),
+            "runtime_environment_key_unchanged_count": len(unchanged_runtime_requirements),
+            "managed_secret_binding_unchanged_count": len(unchanged_secret_requirements),
+        },
+    }
 
 
 class MergeTrainPolicyImportEnvelope(BaseModel):
@@ -11238,6 +11375,119 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_product_expected_config(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product expected config request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product expected config request failed validation.",
+            )
+        request_payload = cast(dict[str, object], raw_payload)
+        try:
+            expected_config_request = ProductExpectedConfigApplyEnvelope.model_validate(
+                request_payload
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product expected config request failed validation.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.expected_config.apply",
+            product=expected_config_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply product expected config metadata.",
+            )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+        try:
+            profile_read_store = require_product_profile_read_store(record_store)
+            profile = profile_read_store.read_product_profile_record(
+                expected_config_request.product
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        merged_profile, result = _merge_product_expected_config(
+            profile=profile,
+            request=expected_config_request,
+            updated_at=utc_now_timestamp(),
+        )
+        if expected_config_request.mode == "apply" and result["changed"]:
+            try:
+                profile_write_store = require_product_profile_write_store(record_store)
+            except TypeError as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message=str(error),
+                ) from error
+            profile_write_store.write_product_profile_record(merged_profile)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"product_profile": expected_config_request.product},
+            result=result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
     def read_product_context_cutover_audit(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
@@ -19796,6 +20046,35 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE,
+        apply_product_expected_config,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": ProductExpectedConfigApplyEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_product_expected_config",
+        summary="Add product expected config metadata",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },

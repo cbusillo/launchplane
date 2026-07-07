@@ -2424,6 +2424,25 @@ def _product_profile_write_policy(*, product: str) -> LaunchplaneAuthzPolicy:
     )
 
 
+def _product_expected_config_policy(*, product: str = "sellyouroutboard") -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/product-expected-config.yml@refs/heads/main"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": [product],
+                    "contexts": ["launchplane"],
+                    "actions": ["product_profile.expected_config.apply"],
+                }
+            ]
+        }
+    )
+
+
 def _product_config_policy(
     *,
     action: str,
@@ -4302,6 +4321,28 @@ async def _post_product_profile(
         app,
         "POST",
         "/v1/product-profiles",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+async def _post_product_expected_config(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/product-profiles/expected-config/apply",
         headers=request_headers,
         payload=payload,
     )

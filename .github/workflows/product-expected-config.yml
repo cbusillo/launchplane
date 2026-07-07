@@ -1,0 +1,179 @@
+---
+name: Product Expected Config
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Product profile key to update.
+        required: true
+        type: string
+      mode:
+        description: Plan or apply the expected config metadata change.
+        required: true
+        type: choice
+        options:
+          - dry-run
+          - apply
+      requirement_kind:
+        description: Expected config requirement type to add.
+        required: true
+        type: choice
+        options:
+          - managed_secret_binding
+          - runtime_environment_key
+      key:
+        description: Runtime env key or managed secret binding key.
+        required: true
+        type: string
+      integration:
+        description: Managed secret integration; ignored for runtime keys.
+        required: false
+        type: string
+        default: runtime_environment
+      context:
+        description: Optional requirement context.
+        required: true
+        type: string
+      instance:
+        description: Optional requirement instance; requires context.
+        required: false
+        type: string
+      source_label:
+        description: Source label recorded on apply.
+        required: false
+        type: string
+        default: product-expected-config-workflow
+      confirmation:
+        description: Type APPLY PRODUCT EXPECTED CONFIG for apply mode.
+        required: false
+        type: string
+      reason:
+        description: Operator reason for the metadata change.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: product-expected-config-${{ inputs.product }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      PRODUCT: ${{ inputs.product }}
+      MODE: ${{ inputs.mode }}
+      REQUIREMENT_KIND: ${{ inputs.requirement_kind }}
+      KEY: ${{ inputs.key }}
+      INTEGRATION: ${{ inputs.integration }}
+      CONTEXT_NAME: ${{ inputs.context }}
+      INSTANCE_NAME: ${{ inputs.instance }}
+      SOURCE_LABEL: ${{ inputs.source_label }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      REASON: ${{ inputs.reason }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate apply guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = "apply" ] && [ "$CONFIRMATION" != "APPLY PRODUCT EXPECTED CONFIG" ]; then
+            echo "Exact confirmation text is required for apply mode." >&2
+            exit 1
+          fi
+          if [ -z "$(printf '%s' "$REASON" | xargs)" ]; then
+            echo "reason is required." >&2
+            exit 1
+          fi
+          if [ -z "$(printf '%s' "$CONTEXT_NAME" | xargs)" ]; then
+            echo "context is required for this workflow." >&2
+            exit 1
+          fi
+
+      - name: Build expected config request
+        id: expected_config
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_file="${RUNNER_TEMP}/product-expected-config-request.json"
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg mode "$MODE" \
+            --arg requirement_kind "$REQUIREMENT_KIND" \
+            --arg key "$KEY" \
+            --arg integration "$INTEGRATION" \
+            --arg context "$CONTEXT_NAME" \
+            --arg instance "$INSTANCE_NAME" \
+            --arg source_label "$SOURCE_LABEL" \
+            --arg reason "$REASON" \
+            '{
+              schema_version: 1,
+              product: $product,
+              mode: $mode,
+              reason: $reason,
+              source_label: $source_label,
+              runtime_environment_keys: (
+                if $requirement_kind == "runtime_environment_key" then
+                  [{key: $key, context: $context, instance: $instance}]
+                else
+                  []
+                end
+              ),
+              managed_secret_bindings: (
+                if $requirement_kind == "managed_secret_binding" then
+                  [{binding_key: $key, integration: $integration, context: $context, instance: $instance}]
+                else
+                  []
+                end
+              )
+            }' > "$request_file"
+          jq -e '.product != "" and .reason != ""' "$request_file" >/dev/null
+          {
+            echo "request_file=$request_file"
+            echo "product=$PRODUCT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Request expected config apply
+        uses: ./.github/actions/launchplane-request
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          route-path: /v1/product-profiles/expected-config/apply
+          payload-file: ${{ steps.expected_config.outputs.request_file }}
+          idempotency-key: product-expected-config:${{ inputs.product }}:${{ inputs.mode }}:${{ github.run_id }}
+          fail-result-paths: result.status
+          response-output-file: product-expected-config.json
+
+      - name: Upload expected config evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: product-expected-config-result
+          path: product-expected-config.json
+          if-no-files-found: error
+
+      - name: Summarize expected config
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Product expected config"
+            echo
+            echo "- Product: $PRODUCT"
+            echo "- Mode: $MODE"
+            if [ -f product-expected-config.json ]; then
+              echo "- Status: $(jq -r '.status // "unknown"' product-expected-config.json)"
+              echo "- Trace: $(jq -r '.trace_id // ""' product-expected-config.json)"
+              echo "- Changed: $(jq -r '.result.changed // ""' product-expected-config.json)"
+              echo "- Runtime keys added: $(jq -r '.result.summary.runtime_environment_key_add_count // "0"' product-expected-config.json)"
+              echo "- Managed secret bindings added: $(jq -r '.result.summary.managed_secret_binding_add_count // "0"' product-expected-config.json)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

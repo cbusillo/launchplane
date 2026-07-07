@@ -1123,12 +1123,40 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("product-onboarding:${PRODUCT}:${GITHUB_RUN_ID}", workflow_text)
         self.assertIn("product-onboarding-result", workflow_text)
 
+    def test_product_expected_config_workflow_calls_service_route_with_apply_guard(
+        self,
+    ) -> None:
+        workflow_text = Path(".github/workflows/product-expected-config.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("/v1/product-profiles/expected-config/apply", workflow_text)
+        self.assertIn("APPLY PRODUCT EXPECTED CONFIG", workflow_text)
+        self.assertIn("context is required for this workflow", workflow_text)
+        self.assertIn("requirement_kind", workflow_text)
+        self.assertIn("managed_secret_binding", workflow_text)
+        self.assertIn("runtime_environment_key", workflow_text)
+        self.assertIn(
+            "product-expected-config:${{ inputs.product }}:${{ inputs.mode }}:${{ github.run_id }}",
+            workflow_text,
+        )
+        self.assertNotIn("github.run_attempt", workflow_text)
+        self.assertIn("product-expected-config-result", workflow_text)
+
     def test_deploy_authz_grants_include_product_onboarding_apply(self) -> None:
         script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
         self.assertIn("product-onboarding.yml", script_text)
         self.assertIn("product_onboarding.apply", script_text)
         self.assertIn("deploy:product-onboarding-grant", script_text)
+
+    def test_deploy_authz_grants_do_not_hard_code_product_expected_config_apply(
+        self,
+    ) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn("deploy:product-expected-config-grant", script_text)
+        self.assertIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", script_text)
 
     def test_deploy_authz_grants_do_not_restore_stale_import_self_deploy_rules(
         self,

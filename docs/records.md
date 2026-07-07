@@ -416,6 +416,19 @@ The service exposes product profile records through `GET /v1/product-profiles`,
 require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
 
+Additive expected-config metadata changes use
+`POST /v1/product-profiles/expected-config/apply`. The request carries
+`mode: "dry-run"` or `mode: "apply"`, a product key, a reason, and runtime key
+or managed secret binding requirements to append if absent. It does not accept
+secret plaintext, runtime values, repositories, lanes, domains, or promotion
+settings, and it never removes existing expected-config entries. The manual
+`Product Expected Config` workflow is the operator path for shared/runtime
+metadata changes; real product, context, instance, and binding values are
+workflow inputs, not checked-in defaults. Because the route authorizes against
+the target product in the Launchplane service context, product-specific workflow
+grants must come from explicit operator-supplied authz grant input such as
+`LAUNCHPLANE_AUTHZ_GRANTS_JSON`, not a checked-in product catalog.
+
 For initial seed or repair work, operators can write the same DB-backed record
 directly with
 `uv run launchplane product-profiles upsert --database-url ... --allow-direct-db-mutation`.
