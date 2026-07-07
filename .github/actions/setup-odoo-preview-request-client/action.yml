@@ -1,0 +1,17 @@
+---
+name: Setup Odoo preview request client
+description: Write Launchplane's Odoo preview request-shaping Node client.
+
+inputs:
+  output-path:
+    description: Path where the ESM client module should be written.
+    required: false
+    default: .launchplane/odoo-preview-request-client.mjs
+
+outputs:
+  client-path:
+    description: Path to the generated ESM client module.
+
+runs:
+  using: node24
+  main: dist/index.js
