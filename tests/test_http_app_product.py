@@ -11,6 +11,7 @@ from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssue
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
     BearerIdentityConfig,
+    GitHubActionsIdentity,
     LaunchplaneAuthzPolicy,
 )
 from control_plane.service_human_auth import (
@@ -49,10 +50,12 @@ from tests.http_app_test_support import (
     _local_operator_product_environment_read_policy,
     _local_operator_work_graph_rank_policy,
     _MissingProductReadStore,
+    _post_product_expected_config,
     _post_product_profile,
     _post_work_graph_issue_inbox_reconcile,
     _post_work_graph_rank,
     _product_environment_read_policy,
+    _product_expected_config_policy,
     _product_profile_read_policy,
     _product_profile_write_policy,
     _ProductProfileReplayOnlyStore,
@@ -74,6 +77,31 @@ from tests.test_service import (
     _StubVerifier,
     _work_graph_snapshot_payload,
 )
+
+
+def _product_expected_config_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "sellyouroutboard",
+        "mode": "dry-run",
+        "reason": "Test expected config metadata update.",
+        "source_label": "product-expected-config-test",
+        "managed_secret_bindings": [
+            {
+                "binding_key": "SMTP_PASSWORD",
+                "integration": "runtime_environment",
+                "context": "sellyouroutboard-prod",
+                "instance": "prod",
+            }
+        ],
+    }
+
+
+def _product_expected_config_identity() -> GitHubActionsIdentity:
+    return _identity(
+        workflow_ref="every/verireel/.github/workflows/product-expected-config.yml@refs/heads/main",
+        event_name="workflow_dispatch",
+    )
 
 
 class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCase):
@@ -1774,6 +1802,252 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "database_storage_required")
         self.assertIn("write_product_profile_record", payload["error"]["message"])
+
+    async def test_apply_product_expected_config_dry_run_reports_additions_without_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            profile = LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            record_store.write_product_profile_record(profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _post_product_expected_config(
+                app,
+                _product_expected_config_payload(),
+                idempotency_key="expected-config-dry-run",
+            )
+            stored_profile = record_store.read_product_profile_record("sellyouroutboard")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"], {"product_profile": "sellyouroutboard"})
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertTrue(payload["result"]["changed"])
+        self.assertEqual(
+            payload["result"]["managed_secret_bindings"]["added"],
+            [
+                {
+                    "binding_key": "SMTP_PASSWORD",
+                    "integration": "runtime_environment",
+                    "context": "sellyouroutboard-prod",
+                    "instance": "prod",
+                }
+            ],
+        )
+        self.assertEqual(stored_profile.expected_config.managed_secret_bindings, ())
+
+    async def test_apply_product_expected_config_persists_additive_binding(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _post_product_expected_config(
+                app,
+                {**_product_expected_config_payload(), "mode": "apply"},
+                idempotency_key="expected-config-apply",
+            )
+            stored_profile = record_store.read_product_profile_record("sellyouroutboard")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["result"]["summary"]["managed_secret_binding_add_count"], 1)
+        self.assertEqual(
+            [
+                requirement.binding_key
+                for requirement in stored_profile.expected_config.managed_secret_bindings
+            ],
+            ["SMTP_PASSWORD"],
+        )
+        self.assertEqual(stored_profile.source, "product-expected-config-test")
+
+    async def test_apply_product_expected_config_replays_idempotent_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+            payload = {**_product_expected_config_payload(), "mode": "apply"}
+
+            first_response = await _post_product_expected_config(
+                app,
+                payload,
+                idempotency_key="expected-config-replay",
+            )
+            second_response = await _post_product_expected_config(
+                app,
+                payload,
+                idempotency_key="expected-config-replay",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        self.assertTrue(second_response.json()["replayed"])
+        self.assertEqual(
+            second_response.json()["original_trace_id"], first_response.json()["trace_id"]
+        )
+
+    async def test_apply_product_expected_config_rejects_reused_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+
+            await _post_product_expected_config(
+                app,
+                _product_expected_config_payload(),
+                idempotency_key="expected-config-conflict",
+            )
+            response = await _post_product_expected_config(
+                app,
+                {
+                    **_product_expected_config_payload(),
+                    "managed_secret_bindings": [
+                        {
+                            "binding_key": "API_TOKEN",
+                            "integration": "runtime_environment",
+                            "context": "sellyouroutboard-prod",
+                            "instance": "prod",
+                        }
+                    ],
+                },
+                idempotency_key="expected-config-conflict",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_apply_product_expected_config_rejects_dry_run_key_for_apply(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+
+            await _post_product_expected_config(
+                app,
+                _product_expected_config_payload(),
+                idempotency_key="expected-config-cross-mode",
+            )
+            response = await _post_product_expected_config(
+                app,
+                {**_product_expected_config_payload(), "mode": "apply"},
+                idempotency_key="expected-config-cross-mode",
+            )
+            stored_profile = record_store.read_product_profile_record("sellyouroutboard")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(stored_profile.expected_config.managed_secret_bindings, ())
+
+    async def test_apply_product_expected_config_rejects_unauthorized_workflow(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_expected_config(
+            app,
+            _product_expected_config_payload(),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_apply_product_expected_config_reports_missing_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _post_product_expected_config(
+                app,
+                _product_expected_config_payload(),
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_apply_product_expected_config_rejects_empty_change(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_expected_config_identity()),
+            authz_policy=_product_expected_config_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_expected_config(
+            app,
+            {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "mode": "dry-run",
+                "reason": "Test empty request.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_apply_product_expected_config_rejects_instance_without_context(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_expected_config_identity()),
+            authz_policy=_product_expected_config_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_expected_config(
+            app,
+            {
+                **_product_expected_config_payload(),
+                "managed_secret_bindings": [
+                    {
+                        "binding_key": "SMTP_PASSWORD",
+                        "integration": "runtime_environment",
+                        "instance": "prod",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
 
     async def test_list_product_profiles_accepts_every_code_worker_token(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
