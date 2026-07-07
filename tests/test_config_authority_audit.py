@@ -2148,6 +2148,29 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "thin_connector_input",
                 )
 
+    def test_preview_feedback_status_workflow_mechanics_are_thin_connector_inputs(
+        self,
+    ) -> None:
+        path = ".github/workflows/reusable-preview-feedback-status.yml"
+        for key, value in (
+            ("inputs.timeout-ms.default", "300000"),
+            ("preview_url", "${{ inputs.preview_url }}"),
+            ("launchplane_url", "${{ inputs.launchplane_url }}"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("inputs.timeout-ms.default", "42"),
+            ("preview_url", "https://preview.example.test"),
+            ("launchplane_url", "https://launchplane.example.test"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
+
     def test_product_driver_reusable_workflow_mechanics_are_path_scoped(
         self,
     ) -> None:

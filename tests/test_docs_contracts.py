@@ -124,6 +124,9 @@ class DocsContractsTests(TestCase):
         preview_workflow = Path(
             ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
         ).read_text(encoding="utf-8")
+        preview_feedback_status_workflow = Path(
+            ".github/workflows/reusable-preview-feedback-status.yml"
+        ).read_text(encoding="utf-8")
         repo_metadata = Path(".github/github.json").read_text(encoding="utf-8")
         preview_prepare_action = Path(
             ".github/actions/setup-preview-prepare-client/action.yml"
@@ -146,6 +149,8 @@ class DocsContractsTests(TestCase):
         self.assertIn("conflicts with the", preview_contract)
         self.assertIn("derived value", preview_contract)
         self.assertIn("reusable-generic-web-preview-lifecycle.yml@main", preview_contract)
+        self.assertIn("reusable-preview-feedback-status.yml@main", preview_contract)
+        self.assertIn("reusable-preview-feedback-status.yml@main", product_repo_contract)
         self.assertIn("setup-preview-prepare-client@main", preview_contract)
         self.assertIn("setup-preview-prepare-client@main", product_repo_contract)
         self.assertIn("does not accept", preview_contract)
@@ -192,6 +197,22 @@ class DocsContractsTests(TestCase):
         self.assertNotIn("target_id", preview_workflow)
         self.assertNotIn("provider_target", preview_workflow)
         self.assertNotIn("feedback_markdown", preview_workflow)
+
+        self.assertIn("workflow_call:", preview_feedback_status_workflow)
+        self.assertIn("mode:", preview_feedback_status_workflow)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main",
+            preview_feedback_status_workflow,
+        )
+        self.assertIn(
+            "status: ${{ needs.resolve.outputs.status }}", preview_feedback_status_workflow
+        )
+        self.assertIn(
+            "failure_summary: ${{ needs.resolve.outputs.failure_summary }}",
+            preview_feedback_status_workflow,
+        )
+        self.assertNotIn("route-path", preview_feedback_status_workflow)
+        self.assertNotIn("idempotency-key", preview_feedback_status_workflow)
 
         self.assertIn("Reusable Generic Web Stable Deploy", repo_metadata)
         self.assertIn("Reusable Generic Web Prod Promotion", repo_metadata)

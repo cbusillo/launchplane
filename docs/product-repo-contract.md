@@ -450,6 +450,15 @@ names, feedback context, feedback markdown, route payloads, or idempotency keys;
 Launchplane derives those from product profiles, runtime records, GitHub OIDC
 claims, the PR event, and the run-scoped workflow context.
 
+Product workflows that still compose local publish, provision, verification, or
+cleanup job results into preview PR feedback status should call
+`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@main`.
+That wrapper accepts primitive GitHub Actions job results and optional failure
+summaries, derives the canonical `ready`, `failed`, `destroyed`, or
+`cleanup_failed` status, and delegates delivery to the reusable Launchplane PR
+feedback workflow. Product repos should not copy status selection, feedback
+route payloads, feedback markers, or idempotency-key logic.
+
 These reusable workflows intentionally do not accept provider targets, target
 ids, health URLs, preview URLs, feedback markdown, record ids, managed secrets,
 runtime environment values, or idempotency keys. Launchplane derives or records

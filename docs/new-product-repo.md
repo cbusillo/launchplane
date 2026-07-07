@@ -166,6 +166,15 @@ The Launchplane trigger steps should use GitHub Actions OIDC and pass minimal
 facts only: product key, source ref or SHA, PR number when relevant, immutable
 artifact reference, and optional run URL.
 
+When a product workflow needs to turn local publish/provision/verification or
+cleanup job results into preview feedback status, call
+`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@main`.
+Keep product-owned smoke facts local, pass primitive job results and failure
+summaries to the reusable workflow, and let Launchplane derive the final
+`status` and `failure_summary` before it calls `reusable-preview-pr-feedback`.
+Do not copy Launchplane feedback route, payload, idempotency, marker, or delivery
+logic into the product repo.
+
 For direct JSON calls to Launchplane service routes, use the reusable
 `cbusillo/launchplane/.github/actions/launchplane-request` action rather than
 copying an OIDC/fetch helper into the product repo. Product repos can still keep
