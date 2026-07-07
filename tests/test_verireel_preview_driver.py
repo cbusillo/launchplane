@@ -24,6 +24,7 @@ from control_plane.workflows.verireel_preview_driver import (
     _enforce_verireel_preview_runtime_key_safety,
 )
 from control_plane.workflows.verireel_preview_driver import _preview_database_admin_module_source
+from control_plane.workflows.verireel_preview_driver import _resolve_preview_secret
 from control_plane.workflows.verireel_preview_driver import _resolve_preview_url
 from control_plane.workflows.verireel_preview_driver import _run_application_command_with_retries
 from control_plane.workflows.verireel_preview_driver import _verireel_template_runtime_secret_keys
@@ -279,6 +280,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     "BETTER_AUTH_SECRET": "auth-secret",
                     "VERIREEL_SECRETS_MASTER_KEY": "master-key",
                     "VERIREEL_CRON_SECRET": "cron-secret",
+                    "VERIREEL_SMOKE_MAINTENANCE_SECRET": "smoke-secret",
                     "NEXT_PUBLIC_SITE_URL": "https://testing.example",
                 }
             ),
@@ -296,8 +298,29 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 "BETTER_AUTH_SECRET": "auth-secret",
                 "VERIREEL_SECRETS_MASTER_KEY": "master-key",
                 "VERIREEL_CRON_SECRET": "cron-secret",
+                "VERIREEL_SMOKE_MAINTENANCE_SECRET": "smoke-secret",
             },
             request=_refresh_request(),
+        )
+
+    def test_resolve_preview_secret_rotates_copied_template_values(self) -> None:
+        self.assertEqual(
+            _resolve_preview_secret(
+                existing_env_map={"VERIREEL_SMOKE_MAINTENANCE_SECRET": "template"},
+                key="VERIREEL_SMOKE_MAINTENANCE_SECRET",
+                generate=lambda: "generated",
+                template_env_map={"VERIREEL_SMOKE_MAINTENANCE_SECRET": "template"},
+            ),
+            "generated",
+        )
+        self.assertEqual(
+            _resolve_preview_secret(
+                existing_env_map={"VERIREEL_SMOKE_MAINTENANCE_SECRET": "preview"},
+                key="VERIREEL_SMOKE_MAINTENANCE_SECRET",
+                generate=lambda: "generated",
+                template_env_map={"VERIREEL_SMOKE_MAINTENANCE_SECRET": "template"},
+            ),
+            "preview",
         )
 
     def test_verireel_preview_runtime_key_safety_requires_bindings_for_other_copied_secrets(
@@ -373,6 +396,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 _runtime_binding("BETTER_AUTH_SECRET"),
                 _runtime_binding("VERIREEL_SECRETS_MASTER_KEY"),
                 _runtime_binding("VERIREEL_CRON_SECRET"),
+                _runtime_binding("VERIREEL_SMOKE_MAINTENANCE_SECRET"),
             ),
         )
 
@@ -384,6 +408,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 "BETTER_AUTH_SECRET": "auth-secret",
                 "VERIREEL_SECRETS_MASTER_KEY": "master-key",
                 "VERIREEL_CRON_SECRET": "cron-secret",
+                "VERIREEL_SMOKE_MAINTENANCE_SECRET": "smoke-maintenance-secret",
             },
             request=_refresh_request(),
         )
@@ -544,6 +569,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                             "BETTER_AUTH_SECRET=template-auth-secret\n"
                             f"VERIREEL_SECRETS_MASTER_KEY={template_master_key}\n"
                             "VERIREEL_CRON_SECRET=template-cron-secret\n"
+                            "VERIREEL_SMOKE_MAINTENANCE_SECRET=template-smoke-secret\n"
                         ),
                     },
                 ),
@@ -590,6 +616,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.assertNotEqual(captured_env["BETTER_AUTH_SECRET"], "template-auth-secret")
         self.assertNotEqual(captured_env["VERIREEL_CRON_SECRET"], "template-cron-secret")
         self.assertNotEqual(
+            captured_env["VERIREEL_SMOKE_MAINTENANCE_SECRET"],
+            "template-smoke-secret",
+        )
+        self.assertNotEqual(
             captured_env["VERIREEL_SECRETS_MASTER_KEY"],
             template_master_key,
         )
@@ -611,6 +641,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             + base64.b64encode(bytes(range(32))).decode("ascii")
             + "\n"
             "VERIREEL_CRON_SECRET=existing-cron-secret\n"
+            "VERIREEL_SMOKE_MAINTENANCE_SECRET=existing-smoke-secret\n"
         )
 
         with (
@@ -674,6 +705,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.assertEqual(result.refresh_status, "pass")
         self.assertEqual(captured_env["BETTER_AUTH_SECRET"], "existing-auth-secret")
         self.assertEqual(captured_env["VERIREEL_CRON_SECRET"], "existing-cron-secret")
+        self.assertEqual(
+            captured_env["VERIREEL_SMOKE_MAINTENANCE_SECRET"],
+            "existing-smoke-secret",
+        )
         self.assertEqual(
             captured_env["VERIREEL_SECRETS_MASTER_KEY"],
             base64.b64encode(bytes(range(32))).decode("ascii"),

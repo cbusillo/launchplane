@@ -2672,6 +2672,51 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
         self.assertEqual(product_repo_gate["status"], "pass")
 
+    def test_product_repo_gate_allows_verireel_dokploy_managed_secret_bindings(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            compose = root / "compose.dokploy.yaml"
+            compose.write_text(
+                "services:\n"
+                "  app:\n"
+                "    environment:\n"
+                "      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?required}\n"
+                "      VERIREEL_CRON_SECRET: ${VERIREEL_CRON_SECRET:?required}\n"
+                "      VERIREEL_SECRETS_MASTER_KEY: ${VERIREEL_SECRETS_MASTER_KEY:?required}\n"
+                "      VERIREEL_SMOKE_MAINTENANCE_SECRET: ${VERIREEL_SMOKE_MAINTENANCE_SECRET:?required}\n"
+                "      UNCLASSIFIED_API_SECRET: ${UNCLASSIFIED_API_SECRET:?required}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            product_repo_gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        for key in (
+            "BETTER_AUTH_SECRET",
+            "VERIREEL_CRON_SECRET",
+            "VERIREEL_SECRETS_MASTER_KEY",
+            "VERIREEL_SMOKE_MAINTENANCE_SECRET",
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    findings_by_key[key]["allow_reason"],
+                    "operator_supplied_runtime_input",
+                )
+        self.assertEqual(
+            findings_by_key["UNCLASSIFIED_API_SECRET"]["classification"],
+            "needs_classification",
+        )
+        self.assertEqual(product_repo_gate["status"], "fail")
+        self.assertEqual(
+            cast("list[dict[str, object]]", product_repo_gate["rejected_findings"])[0]["key"],
+            "UNCLASSIFIED_API_SECRET",
+        )
+
     def test_product_repo_gate_rejects_managed_secret_binding_fixtures(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
