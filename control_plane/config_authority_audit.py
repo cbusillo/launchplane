@@ -317,6 +317,9 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
         "inputs.timeout-ms.default": frozenset(("300000",)),
         "inputs.timeout-seconds.default": frozenset(("null",)),
     },
+    ".github/workflows/reusable-preview-feedback-status.yml": {
+        "inputs.timeout-ms.default": frozenset(("300000",)),
+    },
     ".github/workflows/reusable-product-driver-post-deploy.yml": {
         "inputs.driver.default": frozenset(("odoo",)),
     },
@@ -713,6 +716,10 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
+    },
+    ".github/workflows/reusable-preview-feedback-status.yml": {
+        "launchplane_url": frozenset(("${{ inputs.launchplane_url }}",)),
+        "preview_url": frozenset(("${{ inputs.preview_url }}",)),
     },
     ".github/workflows/reusable-generic-web-preview-lifecycle.yml": {
         "anchor_pr_number": frozenset(

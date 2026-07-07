@@ -118,6 +118,15 @@ shape, delivery behavior, and run-scoped idempotency key. Callers may omit
 preview context; Launchplane derives it from the product profile before
 authorization and recording.
 
+Product workflows that still need to translate local job results into a preview
+feedback `status` and `failure_summary` should call
+`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@main`.
+The reusable workflow maps refresh publish, provision, and product verification
+results to `ready` or `failed`, and maps cleanup results to `destroyed` or
+`cleanup_failed`, before delegating to the reusable preview feedback workflow. It
+does not accept route paths, payloads, markers, idempotency keys, feedback
+markdown, provider targets, or runtime facts from callers.
+
 ## Required Workflow Shape
 
 Same-repository PRs use `pull_request` because the workflow may check out and

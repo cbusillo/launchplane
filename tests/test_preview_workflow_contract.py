@@ -202,6 +202,42 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         ):
             self.assertIn(status, workflow)
 
+    def test_reusable_preview_feedback_status_workflow_owns_status_selection(self) -> None:
+        workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-feedback-status.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        workflow_inputs = _workflow_call_inputs(workflow)
+
+        self.assertIn("mode", workflow_inputs)
+        self.assertIn("publish_result", workflow_inputs)
+        self.assertIn("provision_result", workflow_inputs)
+        self.assertIn("verification_result", workflow_inputs)
+        self.assertIn("cleanup_result", workflow_inputs)
+        self.assertIn("status='ready'", workflow)
+        self.assertIn("status='failed'", workflow)
+        self.assertIn("status='destroyed'", workflow)
+        self.assertIn("status='cleanup_failed'", workflow)
+        self.assertIn("mode must be refresh or cleanup", workflow)
+        self.assertIn("result must be a GitHub Actions terminal result", workflow)
+        self.assertIn("success|failure|cancelled|skipped)", workflow)
+        self.assertIn("single_line_output", workflow)
+        self.assertIn("value=\"${value//$'\\n'/ }\"", workflow)
+        self.assertNotIn("LAUNCHPLANE_FAILURE_SUMMARY", workflow)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main",
+            workflow,
+        )
+        self.assertIn("status: ${{ needs.resolve.outputs.status }}", workflow)
+        self.assertIn("failure_summary: ${{ needs.resolve.outputs.failure_summary }}", workflow)
+        self.assertIn("timeout-ms: ${{ inputs['timeout-ms'] }}", workflow)
+        self.assertNotIn("timeout-ms: ${{ inputs.timeout-ms }}", workflow)
+
+        self.assertNotIn("marker", workflow_inputs)
+        self.assertNotIn("idempotency-key", workflow_inputs)
+        self.assertNotIn("payload", workflow_inputs)
+        self.assertNotIn("route-path", workflow_inputs)
+        self.assertNotIn("feedback_markdown", workflow_inputs)
+        self.assertNotIn("provider_target", workflow_inputs)
+
     def test_reusable_preview_request_notice_owns_notice_decision(self) -> None:
         workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-request-notice.yml"
         workflow = workflow_path.read_text(encoding="utf-8")
