@@ -554,20 +554,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("replacement.artifact_id=${{ inputs.artifact_id }}", workflow_text)
         self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
 
-    def test_reusable_odoo_post_deploy_requires_explicit_product_scope(self) -> None:
-        workflow_text = Path(".github/workflows/reusable-odoo-post-deploy.yml").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("/v1/drivers/odoo/post-deploy", workflow_text)
-        self.assertIn("product is required.", workflow_text)
-        self.assertNotIn('product="odoo-tenant-${context_slug}"', workflow_text)
-        self.assertNotIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
-        self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
-        self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
-        self.assertIn("website_bootstrap_included=result.website_bootstrap_included", workflow_text)
-        self.assertNotIn('"product":"odoo"', workflow_text)
-
     def test_reusable_odoo_prod_workflows_require_explicit_product_scope(self) -> None:
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
@@ -588,7 +574,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
             Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
-            Path(".github/workflows/reusable-odoo-post-deploy.yml"),
             Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
             Path(".github/workflows/reusable-odoo-prod-rollback.yml"),
         )
@@ -680,7 +665,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
             Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
-            Path(".github/workflows/reusable-odoo-post-deploy.yml"),
             Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
             Path(".github/workflows/reusable-odoo-prod-rollback.yml"),
         )

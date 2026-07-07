@@ -506,14 +506,15 @@ recipes, polling behavior, or record-output extraction once a reusable workflow
 exists.
 
 `reusable-product-driver-post-deploy.yml@main` preserves explicit driver
-post-deploy phases for existing Odoo refresh, manual, promotion, and deploy
-callers while moving request shaping into Launchplane. Odoo callers can migrate
-from `reusable-odoo-post-deploy.yml@main` without adding a driver input because
-the product-driver wrapper defaults to `driver: odoo`; they must still pass the
-same explicit `product`, `context`, `instance`, and `phase` inputs. App
+post-deploy phases for Odoo refresh, manual, promotion, and deploy callers
+while moving request shaping into Launchplane. Odoo callers do not need a driver
+input because the product-driver wrapper defaults to `driver: odoo`; they must
+still pass the same explicit `product`, `context`, `instance`, and `phase`
+inputs. App
 maintenance remains the deploy-phase maintenance wrapper for stable lane
 operations; product repos should not use it as a generic phase-aware post-deploy
-substitute.
+substitute. The old Odoo-specific post-deploy reusable has been retired after
+tenant callers moved to the product-driver wrapper.
 
 When a workflow operation has implied lane or maintenance semantics, prefer an
 operation-level reusable workflow over passing checked-in lane, action, or
