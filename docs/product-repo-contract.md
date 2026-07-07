@@ -528,6 +528,15 @@ route, payload envelope, output mapping, fail-result paths, and legacy
 `opr:<context>:<run>` idempotency key shape so tenant repos do not keep Odoo
 rollback request construction locally.
 
+`reusable-product-driver-prod-promotion.yml@main` keeps the existing VeriReel
+promotion surface as its compatibility default and also supports explicit
+`driver: odoo` callers. Odoo promotion callers pass the same primitive facts as
+the older Odoo-specific reusable: explicit `product` and explicit `context`.
+The wrapper owns the `/v1/drivers/odoo/prod-promotion-run` route, request ID,
+payload envelope, output mapping, fail-result paths, and legacy
+`opp:<context>:<run>` idempotency key shape so tenant repos do not keep Odoo
+promotion request construction locally.
+
 When a workflow operation has implied lane or maintenance semantics, prefer an
 operation-level reusable workflow over passing checked-in lane, action, or
 intent strings from the product repository. For example, a product repo should

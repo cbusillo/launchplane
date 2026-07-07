@@ -328,6 +328,9 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/reusable-product-driver-post-deploy.yml": {
         "inputs.driver.default": frozenset(("odoo",)),
     },
+    ".github/workflows/reusable-product-driver-prod-promotion.yml": {
+        "inputs.driver.default": frozenset(("verireel",)),
+    },
     ".github/workflows/reusable-product-driver-prod-rollback.yml": {
         "inputs.driver.default": frozenset(("verireel",)),
         "inputs.source_channel.default": frozenset(("testing",)),
@@ -454,6 +457,8 @@ PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS = frozenset(
         "rollback.reason",
         "rollback.source_channel",
         "rollback.snapshot_name",
+        "run.context",
+        "run.request_id",
         "verification.context",
         "verification.deployment_record_id",
         "verification.expected_build_revision",

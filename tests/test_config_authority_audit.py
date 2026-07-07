@@ -2211,6 +2211,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("timeout-ms", "${{ inputs['timeout-ms'] }}"),
             ("FROM_INSTANCE", "${{ inputs.from_instance }}"),
             ("TO_INSTANCE", "${{ inputs.to_instance }}"),
+            ("inputs.driver.default", "verireel"),
             ("inputs.from_instance.default", "testing"),
             ("inputs.to_instance.default", "prod"),
         )
@@ -2234,6 +2235,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
             ("payload-fields.promotion.artifact_id", "${{ inputs.artifact_id }}"),
             ("payload-fields.promotion.to_instance", "${{ steps.request.outputs.to_instance }}"),
+            ("payload-fields.run.context", "${{ steps.request.outputs.context }}"),
+            ("payload-fields.run.request_id", "${{ steps.request.outputs.request_id }}"),
         )
         for key, value in globally_thin_cases:
             with self.subTest(key=key, value=value):
@@ -2254,7 +2257,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("intent", "stable-testing-reset"),
             ("launchplane_url", "https://example.test"),
             ("TO_INSTANCE", "${{ github.token }}"),
+            ("inputs.driver.default", "odoo"),
             ("inputs.to_instance.default", "production"),
+            ("payload-fields.run.context", "prod"),
+            ("payload-fields.run.request_id", "manual-request"),
         ):
             with self.subTest(key=key, value=value):
                 self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
