@@ -83,6 +83,8 @@ def execute_odoo_prod_rollback_result(
         "release_tuple_id": driver_result.release_tuple_id,
         "rollback_status": driver_result.rollback_status,
         "rollback_health_status": driver_result.rollback_health_status,
+        "rollback_started_at": driver_result.rollback_started_at,
+        "rollback_finished_at": driver_result.rollback_finished_at,
         "post_deploy_status": driver_result.post_deploy_status,
     }
     return records, result

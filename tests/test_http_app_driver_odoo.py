@@ -4482,6 +4482,8 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
             release_tuple_id=release_tuple_id,
             rollback_status=rollback_status,
             rollback_health_status="pass" if rollback_status == "pass" else "fail",
+            rollback_started_at="2026-04-26T12:04:00Z",
+            rollback_finished_at="2026-04-26T12:05:00Z",
             post_deploy_status="pass" if rollback_status == "pass" else "skipped",
             error_message="rollback failed" if rollback_status == "fail" else "",
         )
@@ -4525,11 +4527,15 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
                 "release_tuple_id",
                 "rollback_status",
                 "rollback_health_status",
+                "rollback_started_at",
+                "rollback_finished_at",
                 "post_deploy_status",
             },
         )
         self.assertEqual(payload["result"]["rollback_status"], "pass")
         self.assertEqual(payload["result"]["rollback_health_status"], "pass")
+        self.assertEqual(payload["result"]["rollback_started_at"], "2026-04-26T12:04:00Z")
+        self.assertEqual(payload["result"]["rollback_finished_at"], "2026-04-26T12:05:00Z")
         self.assertEqual(payload["result"]["post_deploy_status"], "pass")
         execute_mock.assert_called_once()
 

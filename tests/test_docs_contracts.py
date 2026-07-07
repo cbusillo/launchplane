@@ -237,6 +237,13 @@ class DocsContractsTests(TestCase):
         self.assertIn(
             "same explicit `product`, `context`, `instance`, and `phase`", product_repo_contract
         )
+        self.assertIn("keeps the existing VeriReel", product_repo_contract)
+        self.assertIn("also supports explicit", product_repo_contract)
+        self.assertIn("`driver: odoo` callers", product_repo_contract)
+        self.assertIn("explicit `product`, explicit", product_repo_contract)
+        self.assertIn("source channel fixed to `testing`", product_repo_contract)
+        self.assertIn("legacy", product_repo_contract)
+        self.assertIn("`opr:<context>:<run>`", product_repo_contract)
 
         self.assertIn("workflow_call:", stable_deploy_workflow)
         self.assertIn(
@@ -290,8 +297,40 @@ class DocsContractsTests(TestCase):
         self.assertIn("applied_at=result.applied_at", post_deploy_workflow)
 
         self.assertIn("workflow_call:", prod_rollback_workflow)
-        self.assertIn("route_path=/v1/drivers/verireel/prod-rollback", prod_rollback_workflow)
+        self.assertIn("driver:", prod_rollback_workflow)
+        self.assertIn("default: verireel", prod_rollback_workflow)
+        self.assertIn(
+            'route_path="/v1/drivers/verireel/prod-rollback"',
+            prod_rollback_workflow,
+        )
+        self.assertIn('route_path="/v1/drivers/odoo/prod-rollback"', prod_rollback_workflow)
+        self.assertIn(
+            "Odoo prod rollback requires source_channel 'testing'.",
+            prod_rollback_workflow,
+        )
+        self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', prod_rollback_workflow)
+        self.assertIn('CONTEXT="$PRODUCT"', prod_rollback_workflow)
+        self.assertIn(
+            'required_inputs="PRODUCT CONTEXT INSTANCE ARTIFACT_ID REASON"',
+            prod_rollback_workflow,
+        )
+        self.assertIn('echo "${required} is required."', prod_rollback_workflow)
+        self.assertIn('idempotency_key="opr:$CONTEXT:$run_scope"', prod_rollback_workflow)
         self.assertIn(
             "rollback.backup_record_id=${{ inputs.backup_record_id }}", prod_rollback_workflow
         )
+        self.assertIn("rollback.artifact_id=${{ inputs.artifact_id }}", prod_rollback_workflow)
+        self.assertIn("rollback.reason=${{ inputs.reason }}", prod_rollback_workflow)
+        self.assertIn(
+            "rollback_health_status=result.rollback_health_status", prod_rollback_workflow
+        )
+        self.assertIn("rollback_started_at=result.rollback_started_at", prod_rollback_workflow)
+        self.assertIn("rollback_finished_at=result.rollback_finished_at", prod_rollback_workflow)
+        self.assertIn(
+            "rollback.source_channel=${{ steps.request.outputs.source_channel }}",
+            prod_rollback_workflow,
+        )
         self.assertIn("rollback.snapshot_name=${{ inputs.snapshot_name }}", prod_rollback_workflow)
+        self.assertIn("deployment_record_id=result.deployment_record_id", prod_rollback_workflow)
+        self.assertIn("release_tuple_id=result.release_tuple_id", prod_rollback_workflow)
+        self.assertIn("post_deploy_status=result.post_deploy_status", prod_rollback_workflow)
