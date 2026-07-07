@@ -494,7 +494,9 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
             payload = build_config_authority_audit(control_plane_root=root)
 
-        default_findings = [finding for finding in _findings(payload) if finding["key"] == "default"]
+        default_findings = [
+            finding for finding in _findings(payload) if finding["key"] == "default"
+        ]
         output_default = next(finding for finding in default_findings if finding["line"] == 5)
         product_path_default = next(finding for finding in default_findings if finding["line"] == 7)
         findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
@@ -2277,6 +2279,34 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("launchplane_url", "https://example.test"),
             ("TO_INSTANCE", "${{ github.token }}"),
             ("inputs.to_instance.default", "production"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
+
+    def test_product_driver_post_deploy_workflow_mechanics_are_thin_inputs(
+        self,
+    ) -> None:
+        path = ".github/workflows/reusable-product-driver-post-deploy.yml"
+        for key, value in (
+            ("inputs.timeout-ms.default", "600000"),
+            ("inputs.driver.default", "odoo"),
+            ("route-path", "${{ steps.request.outputs.route_path }}"),
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("payload-fields.post_deploy.context", "${{ steps.request.outputs.context }}"),
+            ("payload-fields.post_deploy.instance", "${{ steps.request.outputs.instance }}"),
+            ("payload-fields.post_deploy.phase", "${{ steps.request.outputs.phase }}"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("payload-fields.post_deploy.context", "prod"),
+            ("payload-fields.post_deploy.instance", "testing"),
+            ("payload-fields.post_deploy.phase", "deploy"),
+            ("inputs.timeout-ms.default", "42"),
         ):
             with self.subTest(key=key, value=value):
                 self.assertEqual(_allow_reason(path=path, key=key, value=value), "")

@@ -331,6 +331,9 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
         "inputs.timeout-ms.default": frozenset(("300000",)),
         "inputs.timeout-seconds.default": frozenset(("null",)),
     },
+    ".github/workflows/reusable-product-driver-post-deploy.yml": {
+        "inputs.driver.default": frozenset(("odoo",)),
+    },
     ".github/workflows/runner-host-hygiene.yml": {
         "inputs.action.default": frozenset(("prune_docker_cache",)),
         "inputs.minimum_free_disk_bytes.default": frozenset(("0",)),
@@ -411,6 +414,7 @@ PRODUCT_DRIVER_REUSABLE_INPUT_DEFAULT_VALUES = frozenset(
         "300",
         "30000",
         "300000",
+        "600000",
         "1800000",
         "2400000",
         "2700000",
@@ -438,6 +442,9 @@ PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS = frozenset(
         "maintenance.intent",
         "maintenance.preview_slug",
         "maintenance.timeout_seconds",
+        "post_deploy.context",
+        "post_deploy.instance",
+        "post_deploy.phase",
         "product",
         "promotion.artifact_id",
         "promotion.backup_record_id",
@@ -2530,10 +2537,13 @@ def _is_github_action_metadata_mechanic(*, path: str, key: str, value: object) -
     if key_text == "MAIN":
         return re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.js", value_text) is not None
     if key_text == "DEFAULT":
-        return re.fullmatch(
-            r"\.[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.mjs",
-            value_text,
-        ) is not None
+        return (
+            re.fullmatch(
+                r"\.[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.mjs",
+                value_text,
+            )
+            is not None
+        )
     return False
 
 

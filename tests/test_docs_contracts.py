@@ -212,6 +212,9 @@ class DocsContractsTests(TestCase):
         app_maintenance_workflow = Path(
             ".github/workflows/reusable-product-driver-app-maintenance.yml"
         ).read_text(encoding="utf-8")
+        post_deploy_workflow = Path(
+            ".github/workflows/reusable-product-driver-post-deploy.yml"
+        ).read_text(encoding="utf-8")
         prod_rollback_workflow = Path(
             ".github/workflows/reusable-product-driver-prod-rollback.yml"
         ).read_text(encoding="utf-8")
@@ -223,10 +226,17 @@ class DocsContractsTests(TestCase):
         )
         self.assertIn("reusable-product-driver-stable-deploy.yml@main", product_repo_contract)
         self.assertIn("reusable-product-driver-prod-promotion.yml@main", product_repo_contract)
+        self.assertIn("reusable-product-driver-post-deploy.yml@main", product_repo_contract)
         self.assertIn("reusable-product-driver-prod-rollback.yml@main", product_repo_contract)
         self.assertIn("route path, envelope JSON, output mapping", product_repo_contract)
         self.assertIn("transitional connectors", product_repo_contract)
         self.assertIn("should not own Launchplane route construction", product_repo_contract)
+        self.assertIn("preserves explicit driver", product_repo_contract)
+        self.assertIn("post-deploy phases", product_repo_contract)
+        self.assertIn("defaults to `driver: odoo`", product_repo_contract)
+        self.assertIn(
+            "same explicit `product`, `context`, `instance`, and `phase`", product_repo_contract
+        )
 
         self.assertIn("workflow_call:", stable_deploy_workflow)
         self.assertIn(
@@ -261,6 +271,23 @@ class DocsContractsTests(TestCase):
         self.assertIn("post_deploy_status=result.post_deploy_status", app_maintenance_workflow)
         self.assertIn("override_status=result.override_status", app_maintenance_workflow)
         self.assertIn("applied_at=result.applied_at", app_maintenance_workflow)
+
+        self.assertIn("workflow_call:", post_deploy_workflow)
+        self.assertIn("driver:", post_deploy_workflow)
+        self.assertIn("default: odoo", post_deploy_workflow)
+        self.assertIn(
+            "product:\n        description: Launchplane product key.", post_deploy_workflow
+        )
+        self.assertIn("context:\n        description: Runtime context.", post_deploy_workflow)
+        self.assertIn('route_path="/v1/drivers/odoo/post-deploy"', post_deploy_workflow)
+        self.assertIn('idempotency_prefix="odp"', post_deploy_workflow)
+        self.assertIn(
+            "post_deploy.phase=${{ steps.request.outputs.phase }}",
+            post_deploy_workflow,
+        )
+        self.assertIn("post_deploy_status=result.post_deploy_status", post_deploy_workflow)
+        self.assertIn("override_status=result.override_status", post_deploy_workflow)
+        self.assertIn("applied_at=result.applied_at", post_deploy_workflow)
 
         self.assertIn("workflow_call:", prod_rollback_workflow)
         self.assertIn("route_path=/v1/drivers/verireel/prod-rollback", prod_rollback_workflow)
