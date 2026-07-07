@@ -554,24 +554,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("replacement.artifact_id=${{ inputs.artifact_id }}", workflow_text)
         self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
 
-    def test_reusable_odoo_prod_workflows_require_explicit_product_scope(self) -> None:
-        workflow_paths = (Path(".github/workflows/reusable-odoo-prod-promotion.yml"),)
-
-        for workflow_path in workflow_paths:
-            with self.subTest(workflow=workflow_path.name):
-                workflow_text = workflow_path.read_text(encoding="utf-8")
-                self.assertIn("product is required.", workflow_text)
-                self.assertNotIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
-                self.assertNotIn('product="odoo-tenant-${context_slug}"', workflow_text)
-                self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
-                self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
-                self.assertNotIn('"product":"odoo"', workflow_text)
-
     def test_reusable_odoo_workflows_use_caller_visible_runner(self) -> None:
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
             Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
-            Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
         )
 
         for workflow_path in workflow_paths:
@@ -661,7 +647,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
             Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
-            Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
         )
 
         for workflow_path in workflow_paths:
@@ -1153,22 +1138,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("reon-prod", script_text)
         self.assertNotIn("live-target-runtime.yml", script_text)
         self.assertNotIn("product-environment-evidence.yml", script_text)
-
-    def test_reusable_odoo_prod_promotion_fails_on_each_result_status(self) -> None:
-        workflow_text = Path(".github/workflows/reusable-odoo-prod-promotion.yml").read_text(
-            encoding="utf-8"
-        )
-
-        for result_path in (
-            "result.run_status",
-            "result.promotion_status",
-            "result.deployment_status",
-            "result.post_deploy_status",
-            "result.destination_health_status",
-        ):
-            self.assertIn(result_path, workflow_text)
-
-        self.assertIn("fail-result-paths", workflow_text)
 
     def test_product_driver_prod_promotion_supports_odoo_run_contract(self) -> None:
         workflow_text = Path(

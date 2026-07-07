@@ -39,7 +39,7 @@ jobs:
   stable:
     permissions:
       id-token: write
-    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-prod-promotion.yml@main
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-prod-promotion.yml@main
 """.lstrip(),
                 encoding="utf-8",
             )
@@ -153,3 +153,4 @@ class OdooOwnershipDocsTests(TestCase):
             "cbusillo/launchplane/.github/actions/launchplane-request@main", product_repo_contract
         )
         self.assertIn("reusable-odoo-*.yml@main", product_repo_contract)
+        self.assertIn("reusable-product-driver-*.yml@main", product_repo_contract)

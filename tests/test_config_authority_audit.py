@@ -1067,38 +1067,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "test_fixture",
         )
 
-    def test_workflow_payload_field_allowlist_matches_scanned_key_prefix(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            _init_repo(root)
-            workflow = root / ".github" / "workflows" / "reusable-odoo-prod-promotion.yml"
-            workflow.parent.mkdir(parents=True)
-            workflow.write_text(
-                "name: Reusable prod promotion\n"
-                "on:\n"
-                "  workflow_call:\n"
-                "jobs:\n"
-                "  promote:\n"
-                "    steps:\n"
-                "      - uses: cbusillo/launchplane/.github/actions/launchplane-request@main\n"
-                "        with:\n"
-                "          payload-fields: |-\n"
-                "            run.request_id=${{ github.run_id }}-${{ github.run_attempt }}\n",
-                encoding="utf-8",
-            )
-            _commit_all(root)
-
-            payload = build_config_authority_audit(control_plane_root=root)
-
-        findings = [
-            finding
-            for finding in _findings(payload)
-            if finding["key"] == "payload-fields.run.request_id"
-        ]
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0]["classification"], "allowed")
-        self.assertEqual(findings[0]["allow_reason"], "thin_connector_input")
-
     def test_workflow_path_key_values_bridges_payload_field_prefix(self) -> None:
         path_values = {
             ".github/workflows/example.yml": {
@@ -1362,14 +1330,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
         self.assertEqual(
             _allow_reason(
-                path=".github/workflows/reusable-odoo-prod-promotion.yml",
-                key="payload-fields.run.request_id",
-                value="${{ github.run_id }}-${{ github.run_attempt }}",
-            ),
-            "thin_connector_input",
-        )
-        self.assertEqual(
-            _allow_reason(
                 path=".github/workflows/generic-workflow.yml",
                 key="payload-fields.run.request_id",
                 value="${{ github.run_id }}-${{ github.run_attempt }}",
@@ -1424,7 +1384,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
         for path, key in (
             (".github/workflows/odoo-driver-route-smoke.yml", "LAUNCHPLANE_URL"),
-            (".github/workflows/reusable-odoo-prod-promotion.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-testing-deploy.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-testing-deploy.yml", "LAUNCHPLANE_URL"),
             (
@@ -1586,11 +1545,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
                 "username",
                 "${{ github.repository_owner }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-prod-promotion.yml",
-                "idempotency-key",
-                "${{ steps.product.outputs.idempotency_key }}",
             ),
             (
                 ".github/workflows/reusable-odoo-testing-deploy.yml",
@@ -1830,11 +1784,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
     def test_reusable_odoo_workflow_aliases_are_path_scoped(self) -> None:
         reusable_workflow_cases = (
             (
-                ".github/workflows/reusable-odoo-prod-promotion.yml",
-                ("CONTEXT_NAME", "${{ inputs.context }}"),
-                ("PRODUCT_INPUT", "${{ inputs.product }}"),
-            ),
-            (
                 ".github/workflows/reusable-odoo-testing-deploy.yml",
                 ("CONTEXT_NAME", "${{ inputs.context }}"),
                 ("PRODUCT_INPUT", "${{ inputs.product }}"),
@@ -1861,10 +1810,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         "",
                     )
 
-        for path in (
-            ".github/workflows/reusable-odoo-prod-promotion.yml",
-            ".github/workflows/reusable-odoo-testing-deploy.yml",
-        ):
+        for path in (".github/workflows/reusable-odoo-testing-deploy.yml",):
             with self.subTest(path=path, key="idempotency-key"):
                 self.assertEqual(
                     _allow_reason(
