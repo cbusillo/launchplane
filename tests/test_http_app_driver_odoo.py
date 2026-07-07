@@ -4928,6 +4928,71 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["result"]["maintenance_status"], "pass")
         self.assertEqual(payload["result"]["post_deploy_status"], "pass")
 
+    async def test_odoo_app_maintenance_does_not_replay_failed_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity(workflow_name="deploy-odoo.yml")),
+                authz_policy=self._tenant_policy(
+                    action="odoo_app_maintenance.execute",
+                    workflow_name="deploy-odoo.yml",
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            request_payload: dict[str, object] = {
+                "product": "odoo-tenant-cm",
+                "maintenance": {
+                    "context": "cm",
+                    "instance": "testing",
+                    "action": "post-deploy",
+                    "intent": "stable-post-deploy",
+                },
+            }
+            with patch(
+                "control_plane.odoo_app_maintenance_http.execute_odoo_app_maintenance",
+                side_effect=(
+                    OdooAppMaintenanceResult(
+                        maintenance_status="fail",
+                        action="post-deploy",
+                        intent="stable-post-deploy",
+                        context="cm",
+                        instance="testing",
+                        post_deploy_status="fail",
+                        override_status="fail",
+                        error_message="temporary Odoo maintenance failure",
+                    ),
+                    OdooAppMaintenanceResult(
+                        maintenance_status="pass",
+                        action="post-deploy",
+                        intent="stable-post-deploy",
+                        context="cm",
+                        instance="testing",
+                        post_deploy_status="pass",
+                        override_status="pass",
+                    ),
+                ),
+            ) as execute_mock:
+                first_response = await _post_odoo_app_maintenance(
+                    app,
+                    request_payload,
+                    idempotency_key="odoo-app-maintenance:retry-after-failure",
+                )
+                retry_response = await _post_odoo_app_maintenance(
+                    app,
+                    request_payload,
+                    idempotency_key="odoo-app-maintenance:retry-after-failure",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(first_response.json()["result"]["maintenance_status"], "fail")
+        self.assertEqual(retry_response.status_code, 202)
+        self.assertFalse(retry_response.json().get("replayed", False))
+        self.assertEqual(retry_response.json()["result"]["maintenance_status"], "pass")
+        self.assertEqual(execute_mock.call_count, 2)
+
     async def test_odoo_app_maintenance_rejects_non_deploy_phase(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

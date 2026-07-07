@@ -44,10 +44,6 @@ class OdooAppMaintenanceRequest(BaseModel):
             raise ValueError("Odoo app maintenance requires instance.")
         if self.email or self.application_name or self.preview_slug:
             raise ValueError("Odoo app maintenance does not accept user or preview-scoped fields.")
-        if self.action != "post-deploy" or self.intent != "stable-post-deploy":
-            raise ValueError(
-                "Odoo app maintenance currently supports only post-deploy / stable-post-deploy."
-            )
         if self.phase != "deploy":
             raise ValueError("Odoo app maintenance currently supports only the deploy phase.")
         return self

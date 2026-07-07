@@ -357,6 +357,7 @@ from control_plane.odoo_app_maintenance_http import (
     OdooAppMaintenanceRouteDependencyError,
     execute_odoo_app_maintenance_result,
     resolve_odoo_app_maintenance_product_route,
+    should_store_odoo_app_maintenance_idempotency,
 )
 from control_plane.odoo_prod_backup_gate_http import (
     ODOO_PROD_BACKUP_GATE_ACTION,
@@ -6624,15 +6625,16 @@ def create_launchplane_fastapi_app(
             records={key: str(value) for key, value in records.items()},
             result=driver_result,
         )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_ODOO_APP_MAINTENANCE_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
+        if should_store_odoo_app_maintenance_idempotency(driver_result):
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
         return response
 
     async def write_odoo_config_parameter_override(

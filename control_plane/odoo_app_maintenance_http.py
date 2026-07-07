@@ -79,3 +79,9 @@ def execute_odoo_app_maintenance_result(
         )
     }
     return records, driver_result.model_dump(mode="json")
+
+
+def should_store_odoo_app_maintenance_idempotency(
+    driver_result: dict[str, object],
+) -> bool:
+    return driver_result.get("maintenance_status") == "pass"
