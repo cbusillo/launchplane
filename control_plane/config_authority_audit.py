@@ -313,9 +313,6 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/reusable-odoo-prod-promotion.yml": {
         "inputs.timeout-ms.default": frozenset(("2700000",)),
     },
-    ".github/workflows/reusable-odoo-prod-rollback.yml": {
-        "inputs.timeout-ms.default": frozenset(("1800000",)),
-    },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "inputs.timeout-ms.default": frozenset(("2700000",)),
     },
@@ -373,11 +370,6 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
         )
     },
     ".github/workflows/reusable-odoo-prod-promotion.yml": {
-        "launchplane-url": frozenset(
-            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
-        )
-    },
-    ".github/workflows/reusable-odoo-prod-rollback.yml": {
         "launchplane-url": frozenset(
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         )
@@ -601,10 +593,6 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
         "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
     },
-    ".github/workflows/reusable-odoo-prod-rollback.yml": {
-        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
-        "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
-    },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
         "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
@@ -736,9 +724,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "username": frozenset(("${{ github.repository_owner }}",)),
     },
     ".github/workflows/reusable-odoo-prod-promotion.yml": {
-        "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
-    },
-    ".github/workflows/reusable-odoo-prod-rollback.yml": {
         "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
     },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {

@@ -555,10 +555,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
 
     def test_reusable_odoo_prod_workflows_require_explicit_product_scope(self) -> None:
-        workflow_paths = (
-            Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
-            Path(".github/workflows/reusable-odoo-prod-rollback.yml"),
-        )
+        workflow_paths = (Path(".github/workflows/reusable-odoo-prod-promotion.yml"),)
 
         for workflow_path in workflow_paths:
             with self.subTest(workflow=workflow_path.name):
@@ -575,7 +572,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
             Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
             Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
-            Path(".github/workflows/reusable-odoo-prod-rollback.yml"),
         )
 
         for workflow_path in workflow_paths:
@@ -666,7 +662,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
             Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
             Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
-            Path(".github/workflows/reusable-odoo-prod-rollback.yml"),
         )
 
         for workflow_path in workflow_paths:
