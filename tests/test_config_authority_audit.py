@@ -959,6 +959,75 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(route_path["classification"], "allowed")
         self.assertEqual(route_path["allow_reason"], "thin_connector_input")
 
+    def test_cleanup_ghcr_protected_artifacts_product_match_is_thin_connector_input(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "cleanup-ghcr.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Cleanup GHCR Images\n"
+                "jobs:\n"
+                "  cleanup:\n"
+                "    steps:\n"
+                "      - name: Render Launchplane protected artifact request\n"
+                "        uses: cbusillo/launchplane/.github/actions/"
+                "setup-protected-artifacts-request-client@main\n"
+                "        with:\n"
+                "          product: verireel\n"
+                "      - name: Run GHCR cleanup\n"
+                "        env:\n"
+                "          LAUNCHPLANE_PRODUCT: verireel\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        product = next(finding for finding in _findings(payload) if finding["key"] == "product")
+        self.assertEqual(product["classification"], "allowed")
+        self.assertEqual(product["allow_reason"], "thin_connector_input")
+
+    def test_cleanup_ghcr_protected_artifacts_product_forward_is_thin_connector_input(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "cleanup-ghcr.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Cleanup GHCR Images\n"
+                "jobs:\n"
+                "  cleanup:\n"
+                "    steps:\n"
+                "      - name: Render Launchplane protected artifact request\n"
+                "        uses: cbusillo/launchplane/.github/actions/"
+                "setup-protected-artifacts-request-client@main\n"
+                "        with:\n"
+                "          product: ${{ env.LAUNCHPLANE_PRODUCT }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        product = next(finding for finding in _findings(payload) if finding["key"] == "product")
+        self.assertEqual(product["classification"], "allowed")
+        self.assertEqual(product["allow_reason"], "thin_connector_input")
+
+    def test_cleanup_ghcr_literal_product_still_needs_classification(self) -> None:
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/cleanup-ghcr.yml",
+                key="product",
+                value="verireel",
+            ),
+            "",
+        )
+
     def test_workflow_block_scalar_runtime_values_are_scanned(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
