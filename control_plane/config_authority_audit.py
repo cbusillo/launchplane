@@ -188,6 +188,8 @@ WORKFLOW_OPERATOR_INPUT_VALUE_KEYS = frozenset(
         "REASON",
         "REPOSITORY",
         "RUNTIME_PORT",
+        "ROUTE_CONTEXT",
+        "ROUTE_INSTANCE",
         "SERVER_ID",
         "SOURCE_GIT_REF",
         "SOURCE_TYPE",
@@ -238,7 +240,12 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
         "key": frozenset(('claims.get(key, "")',))
     },
     ".github/workflows/provider-target-operations.yml": {
-        "path": frozenset(("provider-target-routes.json provider-target-operation-results/*.json",))
+        "path": frozenset(
+            (
+                "provider-target-operation-results/*.json",
+                "provider-target-routes.json",
+            )
+        )
     },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "GITHUB_TOKEN": frozenset(("${{ github.token }}",))
@@ -638,6 +645,8 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
     },
     ".github/workflows/provider-target-operations.yml": {
         "PROVIDER_ID": frozenset(("${{ inputs.provider_id }}",)),
+        "ROUTE_CONTEXT": frozenset(("${{ matrix.route.context }}",)),
+        "ROUTE_INSTANCE": frozenset(("${{ matrix.route.instance }}",)),
         "TARGET_SET": frozenset(("${{ inputs.target_set }}",)),
     },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
@@ -751,6 +760,13 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
         "payload-file": frozenset(("dokploy-target-setup-payload.json",)),
         "response-output-file": frozenset(("dokploy-target-setup.json",)),
+    },
+    ".github/workflows/provider-target-operations.yml": {
+        "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
+        "fail-result-paths": frozenset(("result.operation_status",)),
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "payload-file": frozenset(("${{ steps.request.outputs.payload_file }}",)),
+        "response-output-file": frozenset(("${{ steps.request.outputs.response_file }}",)),
     },
     ".github/workflows/odoo-config-parameter-override.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),

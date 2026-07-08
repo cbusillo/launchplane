@@ -101,7 +101,10 @@ launched by the manual `Provider Target Operations` workflow:
 ```bash
 gh workflow run provider-target-operations.yml \
   -f mode=backfill-apply \
-  -f target_set=all \
+  -f target_set=configured-json \
+  -f routes_json='[{"context":"<context>","instance":"<instance>"}]' \
+  -f provider_id='<provider-id>' \
+  -f confirmation='APPLY PROVIDER TARGET BACKFILL' \
   -f reason="issue-backed provider-target backfill"
 ```
 
