@@ -554,6 +554,38 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("replacement.artifact_id=${{ inputs.artifact_id }}", workflow_text)
         self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
 
+    def test_product_driver_testing_deploy_requires_explicit_driver(self) -> None:
+        workflow_text = Path(
+            ".github/workflows/reusable-product-driver-testing-deploy.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("name: Reusable Product Driver Testing Deploy", workflow_text)
+        self.assertIn(
+            "driver:\n        description: Product driver id.\n        required: true",
+            workflow_text,
+        )
+        self.assertIn("Unsupported product driver for testing deploy", workflow_text)
+        self.assertIn(
+            "if: ${{ needs.resolve.outputs.driver == 'odoo' }}", workflow_text
+        )
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/workflows/"
+            "reusable-odoo-testing-deploy.yml@main",
+            workflow_text,
+        )
+        self.assertIn("product: ${{ needs.resolve.outputs.product }}", workflow_text)
+        self.assertIn("context: ${{ needs.resolve.outputs.context }}", workflow_text)
+        self.assertIn("artifact_id: ${{ needs.resolve.outputs.artifact_id }}", workflow_text)
+        self.assertIn(
+            "source_git_ref: ${{ needs.resolve.outputs.source_git_ref }}",
+            workflow_text,
+        )
+        self.assertIn("write_output()", workflow_text)
+        self.assertIn("printf '%s<<%s\\n'", workflow_text)
+        self.assertNotIn('echo "driver=$DRIVER"', workflow_text)
+        self.assertNotIn("default: odoo", workflow_text)
+        self.assertNotIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', workflow_text)
+
     def test_reusable_odoo_workflows_use_caller_visible_runner(self) -> None:
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),

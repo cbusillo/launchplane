@@ -230,6 +230,9 @@ class DocsContractsTests(TestCase):
         testing_verification_workflow = Path(
             ".github/workflows/reusable-product-driver-testing-verification.yml"
         ).read_text(encoding="utf-8")
+        testing_deploy_workflow = Path(
+            ".github/workflows/reusable-product-driver-testing-deploy.yml"
+        ).read_text(encoding="utf-8")
         prod_promotion_workflow = Path(
             ".github/workflows/reusable-product-driver-prod-promotion.yml"
         ).read_text(encoding="utf-8")
@@ -249,6 +252,7 @@ class DocsContractsTests(TestCase):
             product_repo_contract,
         )
         self.assertIn("reusable-product-driver-stable-deploy.yml@main", product_repo_contract)
+        self.assertIn("reusable-product-driver-testing-deploy.yml@main", product_repo_contract)
         self.assertIn("reusable-product-driver-prod-promotion.yml@main", product_repo_contract)
         self.assertIn("reusable-product-driver-post-deploy.yml@main", product_repo_contract)
         self.assertIn("reusable-product-driver-prod-rollback.yml@main", product_repo_contract)
@@ -266,6 +270,10 @@ class DocsContractsTests(TestCase):
         self.assertIn("also supports explicit", product_repo_contract)
         self.assertIn("`driver: odoo` callers", product_repo_contract)
         self.assertIn("explicit `product`, explicit", product_repo_contract)
+        self.assertIn(
+            "pass explicit `product`, `context`,\n`driver`, stored `artifact_id`, and `source_git_ref`",
+            product_repo_contract,
+        )
         self.assertIn("source channel fixed to `testing`", product_repo_contract)
         self.assertIn("legacy", product_repo_contract)
         self.assertIn("`opr:<context>:<run>`", product_repo_contract)
@@ -295,6 +303,24 @@ class DocsContractsTests(TestCase):
             "deployment_health_status=result.deployment_health_status",
             testing_verification_workflow,
         )
+
+        self.assertIn("workflow_call:", testing_deploy_workflow)
+        self.assertIn(
+            "driver:\n        description: Product driver id.\n        required: true",
+            testing_deploy_workflow,
+        )
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/workflows/"
+            "reusable-odoo-testing-deploy.yml@main",
+            testing_deploy_workflow,
+        )
+        self.assertIn(
+            "if: ${{ needs.resolve.outputs.driver == 'odoo' }}",
+            testing_deploy_workflow,
+        )
+        self.assertIn("Unsupported product driver for testing deploy", testing_deploy_workflow)
+        self.assertIn("artifact_id: ${{ needs.resolve.outputs.artifact_id }}", testing_deploy_workflow)
+        self.assertNotIn("default: odoo", testing_deploy_workflow)
 
         self.assertIn("workflow_call:", prod_promotion_workflow)
         self.assertIn("driver:", prod_promotion_workflow)

@@ -340,13 +340,16 @@ because they call the deployed Launchplane service over HTTPS; product repos do
 not need direct access to Launchplane self-hosted runners, and privileged
 provider mutations still run inside the Launchplane service boundary.
 
-Odoo testing deploys follow the same ownership shape. Tenant repos own the
-manual dispatch confirmation and pass an explicit stored `artifact_id` plus
-`source_git_ref` into `reusable-odoo-testing-deploy.yml`; the reusable workflow
-calls `/v1/drivers/odoo/target-replacement-apply` with the explicit product key
-provided by the caller. The Launchplane service owns the provider mutation,
+Product-driver testing deploys follow the same ownership shape. Tenant repos own
+the manual dispatch confirmation and pass explicit `product`, `context`,
+`driver`, stored `artifact_id`, and `source_git_ref` into
+`reusable-product-driver-testing-deploy.yml@main`; Odoo callers must pass
+`driver: odoo`. The reusable workflow preserves the explicit product and context
+from the caller, dispatches Odoo requests to
+`/v1/drivers/odoo/target-replacement-apply`, and leaves the provider mutation,
 runtime identity injection, Odoo post-deploy extension, stable readiness checks,
-deployment and inventory records, and the testing release tuple.
+deployment and inventory records, and the testing release tuple inside the
+Launchplane service boundary.
 
 Start with low-risk deletions and documentation, then replace active workflow
 behavior in small slices. Do not remove active backup, promotion, rollback,
@@ -519,6 +522,7 @@ The product-driver reusable surface is:
 - `reusable-product-driver-stable-deploy.yml@main`
 - `reusable-product-driver-app-maintenance.yml@main`
 - `reusable-product-driver-post-deploy.yml@main`
+- `reusable-product-driver-testing-deploy.yml@main`
 - `reusable-product-driver-testing-verification.yml@main`
 - `reusable-product-driver-testing-reset.yml@main`
 - `reusable-product-driver-prod-backup-gate.yml@main`

@@ -1840,6 +1840,11 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@feature",
             ),
             (
+                ".github/workflows/launchplane-deploy.yml",
+                "uses",
+                "someone/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@main",
+            ),
+            (
                 ".github/workflows/preview.yml",
                 "uses",
                 "cbusillo/not-launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@main",
