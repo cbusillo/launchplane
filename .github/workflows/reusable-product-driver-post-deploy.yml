@@ -9,9 +9,8 @@ name: Reusable Product Driver Post Deploy
         required: true
         type: string
       driver:
-        description: Product driver id. Defaults to odoo for migration compatibility.
-        required: false
-        default: odoo
+        description: Product driver id.
+        required: true
         type: string
       context:
         description: Runtime context.
@@ -100,7 +99,7 @@ jobs:
               ;;
             *) echo "Unsupported product driver for post-deploy: $DRIVER" >&2; exit 1 ;;
           esac
-          for required in DRIVER PRODUCT CONTEXT INSTANCE PHASE; do
+          for required in PRODUCT CONTEXT INSTANCE PHASE; do
             if [ -z "${!required}" ]; then
               echo "${required} is required." >&2
               exit 1
