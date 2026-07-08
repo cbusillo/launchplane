@@ -2416,8 +2416,26 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         for key, value in (
+            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
+            ("fail-result-paths", '""'),
+            ("idempotency-key", "${{ steps.onboarding.outputs.idempotency_key }}"),
+            ("payload-file", "${{ steps.onboarding.outputs.request_file }}"),
+            ("response-output-file", "product-onboarding.json"),
+        ):
+            with self.subTest(product_onboarding_mechanic=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/product-onboarding.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
             ("fail-result-paths", "result.operation_status"),
             ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("idempotency-key", "${{ steps.onboarding.outputs.idempotency_key }}"),
         ):
             with self.subTest(path_scoped_provider_target_mechanic=key):
                 self.assertEqual(
