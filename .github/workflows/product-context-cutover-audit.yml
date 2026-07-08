@@ -32,11 +32,8 @@ concurrency:
 
 jobs:
   audit:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     env:
-      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       PRODUCT: ${{ inputs.product }}
       SOURCE_CONTEXT: ${{ inputs.source_context }}
       TARGET_CONTEXT: ${{ inputs.target_context }}
@@ -46,7 +43,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
           : "${PRODUCT:?Missing product input}"
           : "${SOURCE_CONTEXT:?Missing source_context input}"
           : "${TARGET_CONTEXT:?Missing target_context input}"
@@ -55,76 +51,16 @@ jobs:
             exit 1
           fi
 
-      - name: Request redacted cutover audit
-        id: audit
+      - name: Build cutover audit request
+        id: request
         shell: bash
         run: |
           set -euo pipefail
-
-          service_origin="$({
+          route_path="$({
             python3 - <<'PY'
           import os
-          from urllib.parse import urlsplit
+          from urllib.parse import quote, urlencode
 
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
-          print(f"{parsed.scheme}://{parsed.netloc}")
-          PY
-          })"
-          service_audience="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-          })"
-
-          oidc_response="$(curl -fsS \
-            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}")"
-          oidc_token="$(jq -r '.value // empty' <<< "$oidc_response")"
-          if [ -z "$oidc_token" ]; then
-            echo 'GitHub OIDC token response did not include a token value.' >&2
-            exit 1
-          fi
-          python3 - "$oidc_token" <<'PY'
-          import base64
-          import json
-          import sys
-
-          token = sys.argv[1]
-          payload = token.split(".")[1]
-          payload += "=" * (-len(payload) % 4)
-          claims = json.loads(base64.urlsafe_b64decode(payload))
-          safe_claims = {
-              key: claims.get(key, "")
-              for key in (
-                  "repository",
-                  "repository_owner",
-                  "workflow_ref",
-                  "job_workflow_ref",
-                  "event_name",
-                  "ref",
-                  "ref_type",
-                  "environment",
-                  "aud",
-                  "sub",
-              )
-          }
-          print(json.dumps({"oidc_claims": safe_claims}, sort_keys=True))
-          PY
-
-          audit_url="$({
-            SERVICE_ORIGIN="$service_origin" python3 - <<'PY'
-          import os
-          from urllib.parse import urlencode
-
-          origin = os.environ["SERVICE_ORIGIN"].rstrip("/")
           product = os.environ["PRODUCT"].strip()
           query = {
               "source_context": os.environ["SOURCE_CONTEXT"].strip(),
@@ -134,23 +70,36 @@ jobs:
           if preview_context:
               query["preview_context"] = preview_context
           print(
-              f"{origin}/v1/product-profiles/{product}"
+              f"/v1/product-profiles/{quote(product, safe='')}"
               f"/context-cutover-audit?{urlencode(query)}"
           )
           PY
           })"
+          echo "route_path=${route_path}" >> "$GITHUB_OUTPUT"
 
+      - name: Request redacted cutover audit
+        id: audit_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.request.outputs.route_path }}
+          fail-result-paths: ""
+          response-output-file: launchplane-context-cutover-audit.json
+
+      - name: Check cutover audit response
+        id: audit
+        shell: bash
+        env:
+          STATUS_CODE: ${{ steps.audit_request.outputs.status-code }}
+        run: |
+          set -euo pipefail
           response_file="launchplane-context-cutover-audit.json"
-          status_code="$(curl -sS \
-            -o "$response_file" \
-            -w '%{http_code}' \
-            -H "Authorization: Bearer ${oidc_token}" \
-            -H 'Accept: application/json' \
-            "$audit_url")"
-          if [ "$status_code" != '200' ]; then
-            cat "$response_file" >&2
+          if [ "$STATUS_CODE" != '200' ]; then
+            jq '{status, trace_id, error}' "$response_file" >&2 || true
             echo 'Launchplane context cutover audit failed' \
-              "with HTTP ${status_code}." >&2
+              "with HTTP ${STATUS_CODE}." >&2
             exit 1
           fi
 

@@ -1461,6 +1461,39 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("Authorization: Bearer", workflow_text)
         self.assertNotIn("curl ", workflow_text)
 
+    def test_product_context_cutover_audit_uses_launchplane_request(self) -> None:
+        workflow_text = Path(".github/workflows/product-context-cutover-audit.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}", workflow_text)
+        self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
+        self.assertIn("method: GET", workflow_text)
+        self.assertIn("route-path: ${{ steps.request.outputs.route_path }}", workflow_text)
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn("response-output-file: launchplane-context-cutover-audit.json", workflow_text)
+        self.assertIn("/v1/product-profiles/{quote(product, safe='')}", workflow_text)
+        self.assertIn("/context-cutover-audit?", workflow_text)
+        self.assertIn('echo "route_path=${route_path}"', workflow_text)
+        self.assertIn(
+            "STATUS_CODE: ${{ steps.audit_request.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn("if [ \"$STATUS_CODE\" != '200' ]; then", workflow_text)
+        self.assertIn('jq "{status, trace_id, error}"', workflow_text.replace("'", '"'))
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+        self.assertNotIn("oidc_claims", workflow_text)
+        self.assertNotIn("claims.get", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
+
     def test_preview_lifecycle_uses_launchplane_request(self) -> None:
         workflow_text = Path(".github/workflows/preview-lifecycle.yml").read_text(encoding="utf-8")
 
