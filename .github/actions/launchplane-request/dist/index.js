@@ -31,6 +31,17 @@ function parseNonNegativeInteger(value, label) {
   return parsed;
 }
 
+function parseBooleanInput(value, label) {
+  const normalizedValue = String(value ?? "").trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalizedValue)) {
+    return true;
+  }
+  if (["false", "0", "no", "off"].includes(normalizedValue)) {
+    return false;
+  }
+  throw new Error(`${label} must be true or false.`);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -385,6 +396,10 @@ async function main() {
   const requestUrl = new URL(routePath, launchplaneUrl).toString();
   const audience = getInput("audience") || launchplaneUrl.host;
   const idempotencyKey = getInput("idempotency-key");
+  const logResponseBody = parseBooleanInput(
+    getInput("log-response-body", { defaultValue: "true" }),
+    "log-response-body",
+  );
   const payload = applyPayloadJsonFiles(applyPayloadFields(readPayload()));
   const options = getActionOptions();
   async function requestInit() {
@@ -422,10 +437,13 @@ async function main() {
   writeMappedOutputs(responseBody);
   writeResponseOutputFile(responseBody);
 
-  process.stdout.write(`${JSON.stringify(responseBody, null, 2)}\n`);
+  if (logResponseBody) {
+    process.stdout.write(`${JSON.stringify(responseBody, null, 2)}\n`);
+  }
   if (!response.ok) {
+    const responseDetail = logResponseBody ? `: ${responseText || "empty response"}` : "";
     throw new Error(
-      `Launchplane request failed with ${response.status}: ${responseText || "empty response"}`,
+      `Launchplane request failed with ${response.status}${responseDetail}`,
     );
   }
   assertResultStatuses(responseBody);

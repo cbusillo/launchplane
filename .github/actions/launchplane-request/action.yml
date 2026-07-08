@@ -112,6 +112,10 @@ inputs:
       JSON path to write to response-output-file. Defaults to the full response.
     required: false
     default: ""
+  log-response-body:
+    description: Write the Launchplane response body to stdout.
+    required: false
+    default: "true"
 
 outputs:
   launchplane-url:
