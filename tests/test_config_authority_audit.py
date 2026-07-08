@@ -1451,11 +1451,22 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             "launchplane_self_bootstrap",
         )
+        for key in ("launchplane-url", "LAUNCHPLANE_URL"):
+            with self.subTest(
+                path=".github/workflows/reusable-product-driver-testing-deploy.yml",
+                key=key,
+            ):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/reusable-product-driver-testing-deploy.yml",
+                        key=key,
+                        value="${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",
+                    ),
+                    "launchplane_self_bootstrap",
+                )
         for path, key in (
             (".github/workflows/odoo-driver-route-smoke.yml", "LAUNCHPLANE_URL"),
             (".github/workflows/reusable-odoo-preview.yml", "launchplane-url"),
-            (".github/workflows/reusable-odoo-testing-deploy.yml", "launchplane-url"),
-            (".github/workflows/reusable-odoo-testing-deploy.yml", "LAUNCHPLANE_URL"),
             (
                 ".github/workflows/reusable-generic-web-preview-lifecycle.yml",
                 "launchplane-url",
@@ -1741,11 +1752,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "username",
                 "${{ github.repository_owner }}",
             ),
-            (
-                ".github/workflows/reusable-odoo-testing-deploy.yml",
-                "idempotency-key",
-                "${{ steps.product.outputs.idempotency_key }}",
-            ),
             (".github/workflows/ci.yml", "context", "."),
             (
                 ".github/workflows/launchplane-deploy.yml",
@@ -1994,11 +2000,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "${{ inputs.source_access_probe_repository }}",
                 ),
             ),
-            (
-                ".github/workflows/reusable-odoo-testing-deploy.yml",
-                ("CONTEXT_NAME", "${{ inputs.context }}"),
-                ("PRODUCT_INPUT", "${{ inputs.product }}"),
-            ),
         )
 
         for path, *aliases in reusable_workflow_cases:
@@ -2020,17 +2021,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         _allow_reason(path=path, key=key, value="hard-coded-product"),
                         "",
                     )
-
-        for path in (".github/workflows/reusable-odoo-testing-deploy.yml",):
-            with self.subTest(path=path, key="idempotency-key"):
-                self.assertEqual(
-                    _allow_reason(
-                        path=path,
-                        key="idempotency-key",
-                        value="${{ inputs.idempotency_key }}",
-                    ),
-                    "",
-                )
 
     def test_reusable_odoo_preview_workflow_mechanics_are_path_scoped(self) -> None:
         path = ".github/workflows/reusable-odoo-preview.yml"
@@ -2457,6 +2447,26 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     _allow_reason(path=path, key=key, value=value),
                     "thin_connector_input",
                 )
+
+        testing_deploy_path = ".github/workflows/reusable-product-driver-testing-deploy.yml"
+        for key, value in (
+            ("payload-fields.replacement.product", "${{ steps.request.outputs.product }}"),
+            (
+                "payload-fields.replacement.artifact_id",
+                "${{ needs.resolve.outputs.artifact_id }}",
+            ),
+            (
+                "payload-fields.replacement.source_git_ref",
+                "${{ needs.resolve.outputs.source_git_ref }}",
+            ),
+        ):
+            with self.subTest(path=testing_deploy_path, key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=testing_deploy_path, key=key, value=value),
+                    "thin_connector_input",
+                )
+            with self.subTest(path=path, key=key, value=value):
+                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
 
         for key, value in (
             ("idempotency-key", "${{ inputs.idempotency_key }}"),

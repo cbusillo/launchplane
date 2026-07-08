@@ -540,19 +540,31 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("repository: cbusillo/odoo-devkit", workflow_text)
         self.assertNotIn("repository: cbusillo/odoo-shared-addons", workflow_text)
 
-    def test_reusable_odoo_testing_deploy_requires_explicit_product_scope(self) -> None:
-        workflow_text = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
-            encoding="utf-8"
-        )
+    def test_product_driver_testing_deploy_requires_explicit_product_scope(self) -> None:
+        workflow_text = Path(
+            ".github/workflows/reusable-product-driver-testing-deploy.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("/v1/drivers/odoo/target-replacement-apply", workflow_text)
-        self.assertIn("product is required.", workflow_text)
+        self.assertIn(
+            "/v1/drivers/odoo/target-replacement/operations/*) ;;",
+            workflow_text,
+        )
+        self.assertIn(
+            "Target replacement poll URL is not an Odoo operation path",
+            workflow_text,
+        )
+        self.assertIn("for required in PRODUCT ARTIFACT_ID; do", workflow_text)
+        self.assertIn('echo "${required} is required."', workflow_text)
         self.assertNotIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
         self.assertNotIn('product="odoo-tenant-${context_slug}"', workflow_text)
-        self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
+        self.assertIn("product=${{ steps.request.outputs.product }}", workflow_text)
         self.assertIn('"instance": "testing"', workflow_text)
-        self.assertIn("replacement.artifact_id=${{ inputs.artifact_id }}", workflow_text)
-        self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
+        self.assertIn(
+            "replacement.artifact_id=${{ needs.resolve.outputs.artifact_id }}",
+            workflow_text,
+        )
+        self.assertIn("${{ steps.request.outputs.idempotency_key }}", workflow_text)
 
     def test_product_driver_testing_deploy_requires_explicit_driver(self) -> None:
         workflow_text = Path(
@@ -568,16 +580,12 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn(
             "if: ${{ needs.resolve.outputs.driver == 'odoo' }}", workflow_text
         )
+        self.assertIn("route-path: /v1/drivers/odoo/target-replacement-apply", workflow_text)
+        self.assertNotIn("reusable-odoo-testing-deploy.yml", workflow_text)
+        self.assertIn("PRODUCT: ${{ needs.resolve.outputs.product }}", workflow_text)
+        self.assertIn("ARTIFACT_ID: ${{ needs.resolve.outputs.artifact_id }}", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/workflows/"
-            "reusable-odoo-testing-deploy.yml@main",
-            workflow_text,
-        )
-        self.assertIn("product: ${{ needs.resolve.outputs.product }}", workflow_text)
-        self.assertIn("context: ${{ needs.resolve.outputs.context }}", workflow_text)
-        self.assertIn("artifact_id: ${{ needs.resolve.outputs.artifact_id }}", workflow_text)
-        self.assertIn(
-            "source_git_ref: ${{ needs.resolve.outputs.source_git_ref }}",
+            "replacement.source_git_ref=${{ needs.resolve.outputs.source_git_ref }}",
             workflow_text,
         )
         self.assertIn("write_output()", workflow_text)
@@ -585,11 +593,13 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn('echo "driver=$DRIVER"', workflow_text)
         self.assertNotIn("default: odoo", workflow_text)
         self.assertNotIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', workflow_text)
+        self.assertNotIn("permissions:\n  contents: read\n  id-token: write", workflow_text)
+        self.assertIn("permissions:\n      contents: read\n      id-token: write", workflow_text)
 
     def test_reusable_odoo_workflows_use_caller_visible_runner(self) -> None:
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
-            Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
+            Path(".github/workflows/reusable-product-driver-testing-deploy.yml"),
         )
 
         for workflow_path in workflow_paths:
@@ -697,7 +707,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_reusable_odoo_workflows_accept_configured_service_identity(self) -> None:
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
-            Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
+            Path(".github/workflows/reusable-product-driver-testing-deploy.yml"),
             Path(".github/workflows/reusable-odoo-preview.yml"),
         )
 
@@ -1053,15 +1063,19 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("Ingress Route Apply", metadata["importantWorkflows"])
         self.assertNotIn("healthUrls", metadata)
 
-    def test_reusable_odoo_testing_deploy_exposes_result_outputs(self) -> None:
-        workflow_text = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
-            encoding="utf-8"
-        )
+    def test_product_driver_testing_deploy_exposes_result_outputs(self) -> None:
+        workflow_text = Path(
+            ".github/workflows/reusable-product-driver-testing-deploy.yml"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("replacement.source_git_ref=${{ inputs.source_git_ref }}", workflow_text)
+        self.assertIn(
+            "replacement.source_git_ref=${{ needs.resolve.outputs.source_git_ref }}",
+            workflow_text,
+        )
         self.assertIn("outputs:", workflow_text)
         self.assertIn(
-            "value: ${{ jobs.testing-deploy.outputs.deployment_record_id }}", workflow_text
+            "value: ${{ jobs.odoo_testing_deploy.outputs.deployment_record_id }}",
+            workflow_text,
         )
         self.assertIn(
             "deployment_record_id: ${{ steps.poll.outputs.deployment_record_id }}", workflow_text

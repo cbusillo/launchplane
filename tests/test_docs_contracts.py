@@ -309,9 +309,9 @@ class DocsContractsTests(TestCase):
             "driver:\n        description: Product driver id.\n        required: true",
             testing_deploy_workflow,
         )
+        self.assertNotIn("reusable-odoo-testing-deploy.yml", testing_deploy_workflow)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/workflows/"
-            "reusable-odoo-testing-deploy.yml@main",
+            "route-path: /v1/drivers/odoo/target-replacement-apply",
             testing_deploy_workflow,
         )
         self.assertIn(
@@ -319,7 +319,10 @@ class DocsContractsTests(TestCase):
             testing_deploy_workflow,
         )
         self.assertIn("Unsupported product driver for testing deploy", testing_deploy_workflow)
-        self.assertIn("artifact_id: ${{ needs.resolve.outputs.artifact_id }}", testing_deploy_workflow)
+        self.assertIn(
+            "replacement.artifact_id=${{ needs.resolve.outputs.artifact_id }}",
+            testing_deploy_workflow,
+        )
         self.assertNotIn("default: odoo", testing_deploy_workflow)
 
         self.assertIn("workflow_call:", prod_promotion_workflow)

@@ -40,9 +40,9 @@ class OdooStableAuthorityTests(TestCase):
         self.assertEqual(offenders, [])
 
     def test_reusable_testing_deploy_uses_target_replacement_apply(self) -> None:
-        workflow = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = Path(
+            ".github/workflows/reusable-product-driver-testing-deploy.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("route-path: /v1/drivers/odoo/target-replacement-apply", workflow)
         self.assertIn("poll_url=result.poll_url", workflow)
