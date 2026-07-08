@@ -207,6 +207,15 @@ Render mode accepts primitive workflow facts and emits `route-path`, `payload`,
 `launchplane-request` action. The generated request object exposes the same
 contract as `routePath`, `payloadInput`, `payloadJsonFilesInput`,
 `failResultPathsInput`, `responseOutputPath`, and `idempotencyKey` fields.
+`reusable-odoo-preview.yml` is the Launchplane-owned next step above those
+rendered requests: it keeps tenant repos responsible for event triggers,
+runner selection, and source facts, while Launchplane owns the refresh/destroy
+publish-inputs, preview-apply-inputs, preview-apply, and feedback-result
+handoff chain. Tenant workflows migrating to it should pass only the product,
+context, operation, PR number, source ref, optional runner selector, and the
+existing Odoo publish secrets; they should not copy Odoo preview route paths,
+JSON request bodies, JSON-file binding paths, fail paths, or idempotency key
+templates back into the tenant repo.
 
 Odoo CM is the exception where Launchplane now owns both the isolated provider
 apply planning inputs and the stage-preview smoke contract after refresh. Product
