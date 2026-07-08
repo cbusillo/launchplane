@@ -22,6 +22,9 @@ from control_plane.contracts.odoo_instance_override_record import OdooInstanceOv
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 from control_plane.contracts.odoo_instance_override_record import OdooWebsiteBootstrapPayload
+from control_plane.contracts.odoo_instance_override_record import (
+    validate_odoo_website_bootstrap_contract,
+)
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementRequest,
 )
@@ -828,10 +831,12 @@ def odoo_overrides_put_website_bootstrap(
     _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     try:
         raw_payload = json.loads(payload_file.read_text(encoding="utf-8"))
-        website_bootstrap = OdooWebsiteBootstrapPayload.model_validate(raw_payload)
+        website_bootstrap = validate_odoo_website_bootstrap_contract(
+            OdooWebsiteBootstrapPayload.model_validate(raw_payload)
+        )
     except JSONDecodeError as error:
         raise click.ClickException("Odoo website bootstrap payload must be valid JSON.") from error
-    except ValidationError as error:
+    except (ValidationError, ValueError) as error:
         raise click.ClickException(f"Invalid Odoo website bootstrap payload: {error}") from error
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()

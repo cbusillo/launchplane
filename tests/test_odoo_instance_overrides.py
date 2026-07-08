@@ -11,6 +11,7 @@ from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.odoo_instance_overrides import render_post_deploy_payload
+from control_plane.odoo_post_deploy_http import OdooWebsiteBootstrapOverrideRequest
 from click.testing import CliRunner, Result
 from pydantic import ValidationError
 
@@ -28,6 +29,8 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyResult,
     OdooOverrideValue,
     OdooWebsiteBootstrapPayload,
+    OdooWebsiteBootstrapRoute,
+    validate_odoo_website_bootstrap_contract,
 )
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.contracts.ship_request import ShipRequest
@@ -64,6 +67,165 @@ def _assert_direct_db_mutation_rejected(test_case: unittest.TestCase, result: Re
 
 
 class OdooInstanceOverrideTests(unittest.TestCase):
+    def test_website_bootstrap_payload_accepts_devkit_route_shape(self) -> None:
+        payload = validate_odoo_website_bootstrap_contract(
+            OdooWebsiteBootstrapPayload(
+                tenant=" opw ",
+                name=" OPW ",
+                canonical_url=" https://opw-testing.example.com/ ",
+                homepage_url=" /shop ",
+                primary_page_xmlid="website_sale.shop",
+                routes=(
+                    OdooWebsiteBootstrapRoute(
+                        name=" Shop ",
+                        url=" /shop ",
+                        module=" website_sale ",
+                        published=True,
+                        homepage=True,
+                    ),
+                ),
+            )
+        )
+
+        self.assertEqual(payload.tenant, "opw")
+        self.assertEqual(payload.name, "OPW")
+        self.assertEqual(payload.homepage_url, "/shop")
+        self.assertEqual(payload.primary_page_xmlid, "website_sale.shop")
+        self.assertEqual(payload.routes[0].url, "/shop")
+        self.assertEqual(payload.routes[0].module, "website_sale")
+
+    def test_website_bootstrap_payload_load_remains_tolerant_for_stored_records(self) -> None:
+        payload = OdooWebsiteBootstrapPayload(
+            name="OPW",
+            homepage_url="https://opw-testing.example.com/shop",
+            primary_page_xmlid="legacy_page",
+            routes=(
+                OdooWebsiteBootstrapRoute(name="Shop", url="shop", homepage=True),
+                OdooWebsiteBootstrapRoute(name="Home", url="/", homepage=True),
+                OdooWebsiteBootstrapRoute(name="Shop", url="shop"),
+            ),
+        )
+
+        self.assertEqual(payload.homepage_url, "https://opw-testing.example.com/shop")
+        self.assertEqual(payload.primary_page_xmlid, "legacy_page")
+        self.assertEqual(payload.routes[0].url, "shop")
+        self.assertEqual(payload.routes[2].name, "Shop")
+
+    def test_website_bootstrap_contract_rejects_non_local_homepage_url(self) -> None:
+        with self.assertRaisesRegex(ValueError, "homepage_url.*local route path"):
+            validate_odoo_website_bootstrap_contract(
+                OdooWebsiteBootstrapPayload(
+                    name="OPW",
+                    homepage_url="https://opw-testing.example.com/shop",
+                )
+            )
+
+    def test_website_bootstrap_contract_rejects_protocol_relative_homepage_url(self) -> None:
+        with self.assertRaisesRegex(ValueError, "homepage_url.*local route path"):
+            validate_odoo_website_bootstrap_contract(
+                OdooWebsiteBootstrapPayload(
+                    name="OPW",
+                    homepage_url="//example.com/shop",
+                )
+            )
+
+    def test_website_bootstrap_contract_rejects_non_local_route_url(self) -> None:
+        with self.assertRaisesRegex(ValueError, "route url.*local route path"):
+            validate_odoo_website_bootstrap_contract(
+                OdooWebsiteBootstrapPayload(
+                    name="OPW",
+                    routes=(OdooWebsiteBootstrapRoute(name="Shop", url="shop"),),
+                )
+            )
+
+    def test_website_bootstrap_contract_rejects_protocol_relative_route_url(self) -> None:
+        with self.assertRaisesRegex(ValueError, "route url.*local route path"):
+            validate_odoo_website_bootstrap_contract(
+                OdooWebsiteBootstrapPayload(
+                    name="OPW",
+                    routes=(OdooWebsiteBootstrapRoute(name="Shop", url="//example.com/shop"),),
+                )
+            )
+
+    def test_website_bootstrap_contract_accepts_root_route(self) -> None:
+        payload = validate_odoo_website_bootstrap_contract(
+            OdooWebsiteBootstrapPayload(
+                name="OPW",
+                homepage_url="/",
+                routes=(OdooWebsiteBootstrapRoute(name="Home", url="/", homepage=True),),
+            )
+        )
+
+        self.assertEqual(payload.homepage_url, "/")
+        self.assertEqual(payload.routes[0].url, "/")
+
+    def test_website_bootstrap_contract_rejects_bad_primary_page_xmlid(self) -> None:
+        with self.assertRaisesRegex(ValueError, "primary_page_xmlid.*dotted XML ID"):
+            validate_odoo_website_bootstrap_contract(
+                OdooWebsiteBootstrapPayload(
+                    name="Cell Mechanic",
+                    primary_page_xmlid="bad xml id",
+                )
+            )
+
+    def test_website_bootstrap_contract_accepts_hyphenated_record_xmlid(self) -> None:
+        payload = validate_odoo_website_bootstrap_contract(
+            OdooWebsiteBootstrapPayload(
+                name="Cell Mechanic",
+                primary_page_xmlid="cm_website.website-page-cell-mechanic",
+            )
+        )
+
+        self.assertEqual(payload.primary_page_xmlid, "cm_website.website-page-cell-mechanic")
+
+    def test_website_bootstrap_contract_rejects_multiple_homepage_routes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "multiple homepage routes"):
+            validate_odoo_website_bootstrap_contract(
+                OdooWebsiteBootstrapPayload(
+                    name="OPW",
+                    routes=(
+                        OdooWebsiteBootstrapRoute(name="Shop", url="/shop", homepage=True),
+                        OdooWebsiteBootstrapRoute(name="Home", url="/", homepage=True),
+                    ),
+                )
+            )
+
+    def test_website_bootstrap_contract_rejects_duplicate_route_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate route names"):
+            validate_odoo_website_bootstrap_contract(
+                OdooWebsiteBootstrapPayload(
+                    name="OPW",
+                    routes=(
+                        OdooWebsiteBootstrapRoute(name="Shop", url="/shop"),
+                        OdooWebsiteBootstrapRoute(name="Shop", url="/store"),
+                    ),
+                )
+            )
+
+    def test_website_bootstrap_contract_rejects_duplicate_route_urls(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate route urls"):
+            validate_odoo_website_bootstrap_contract(
+                OdooWebsiteBootstrapPayload(
+                    name="OPW",
+                    routes=(
+                        OdooWebsiteBootstrapRoute(name="Shop", url="/shop"),
+                        OdooWebsiteBootstrapRoute(name="Store", url="/shop"),
+                    ),
+                )
+            )
+
+    def test_website_bootstrap_override_request_enforces_write_contract(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "homepage_url.*local route path"):
+            OdooWebsiteBootstrapOverrideRequest(
+                product="odoo",
+                context="opw",
+                instance="testing",
+                website_bootstrap=OdooWebsiteBootstrapPayload(
+                    name="OPW",
+                    homepage_url="//example.com/shop",
+                ),
+            )
+
     def test_record_rejects_duplicate_config_parameter_keys(self) -> None:
         with self.assertRaisesRegex(ValidationError, "duplicate config parameter keys"):
             OdooInstanceOverrideRecord(
@@ -633,9 +795,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             temp_dir = Path(temporary_directory_name)
             database_url = _sqlite_database_url(temp_dir / "launchplane.sqlite3")
             payload_file = temp_dir / "website-bootstrap.json"
-            payload_file.write_text(
-                json.dumps({"tenant": "opw", "name": "OPW"}), encoding="utf-8"
-            )
+            payload_file.write_text(json.dumps({"tenant": "opw", "name": "OPW"}), encoding="utf-8")
             result = CliRunner().invoke(
                 main,
                 [
@@ -681,6 +841,37 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertNotEqual(put_bootstrap_result.exit_code, 0)
         self.assertIn("Invalid Odoo website bootstrap payload", put_bootstrap_result.output)
         self.assertIn("name", put_bootstrap_result.output)
+
+    def test_cli_put_website_bootstrap_reports_contract_errors(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temp_dir = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temp_dir / "launchplane.sqlite3")
+            payload_file = temp_dir / "website-bootstrap.json"
+            payload_file.write_text(
+                json.dumps({"tenant": "opw", "name": "OPW", "homepage_url": "//example.com"}),
+                encoding="utf-8",
+            )
+            runner = CliRunner()
+            put_bootstrap_result = runner.invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-website-bootstrap",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--payload-file",
+                    str(payload_file),
+                    *_allow_direct_db_mutation_argument(),
+                ],
+            )
+
+        self.assertNotEqual(put_bootstrap_result.exit_code, 0)
+        self.assertIn("Invalid Odoo website bootstrap payload", put_bootstrap_result.output)
+        self.assertIn("homepage_url", put_bootstrap_result.output)
 
     def test_cli_mark_apply_updates_result_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

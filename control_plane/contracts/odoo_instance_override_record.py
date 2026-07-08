@@ -1,5 +1,6 @@
 from typing import Literal
 import json
+import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -8,6 +9,40 @@ from control_plane.contracts.runtime_environment_record import ScalarValue
 OdooOverrideApplyPhase = Literal["restore", "deploy", "promotion", "preview", "manual"]
 OdooOverrideApplyStatus = Literal["skipped", "pending", "pass", "fail"]
 OdooOverrideValueSource = Literal["literal", "secret_binding"]
+_ODOO_XMLID_RE = re.compile(r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_-]+)+$")
+
+
+def _validate_local_route_path(value: str, *, label: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        return ""
+    if not normalized.startswith("/") or normalized.startswith("//"):
+        raise ValueError(f"Odoo website bootstrap {label} must be a local route path")
+    if any(character in normalized for character in "\r\n\t"):
+        raise ValueError(f"Odoo website bootstrap {label} must be a single-line route path")
+    return normalized
+
+
+def validate_odoo_website_bootstrap_contract(
+    payload: "OdooWebsiteBootstrapPayload",
+) -> "OdooWebsiteBootstrapPayload":
+    # Payload model construction strips text; this helper only enforces
+    # write-path shape so persisted record reads remain repairable.
+    _validate_local_route_path(payload.homepage_url, label="homepage_url")
+    if payload.primary_page_xmlid and _ODOO_XMLID_RE.fullmatch(payload.primary_page_xmlid) is None:
+        raise ValueError("Odoo website bootstrap primary_page_xmlid must be a dotted XML ID")
+    route_urls = [route.url for route in payload.routes]
+    if len(route_urls) != len(set(route_urls)):
+        raise ValueError("Odoo website bootstrap has duplicate route urls")
+    route_names = [route.name for route in payload.routes]
+    if len(route_names) != len(set(route_names)):
+        raise ValueError("Odoo website bootstrap has duplicate route names")
+    homepage_routes = [route for route in payload.routes if route.homepage]
+    if len(homepage_routes) > 1:
+        raise ValueError("Odoo website bootstrap must not define multiple homepage routes")
+    for route in payload.routes:
+        _validate_local_route_path(route.url, label="route url")
+    return payload
 
 
 class OdooOverrideValue(BaseModel):
@@ -142,12 +177,6 @@ class OdooWebsiteBootstrapPayload(BaseModel):
     def _validate_payload(self) -> "OdooWebsiteBootstrapPayload":
         if not self.name:
             raise ValueError("Odoo website bootstrap requires name")
-        route_urls = [route.url for route in self.routes]
-        if len(route_urls) != len(set(route_urls)):
-            raise ValueError("Odoo website bootstrap has duplicate route urls")
-        route_names = [route.name for route in self.routes]
-        if len(route_names) != len(set(route_names)):
-            raise ValueError("Odoo website bootstrap has duplicate route names")
         return self
 
 
@@ -200,7 +229,11 @@ class OdooInstanceOverrideRecord(BaseModel):
             raise ValueError("Odoo instance override record requires instance")
         if not self.updated_at:
             raise ValueError("Odoo instance override record requires updated_at")
-        if not self.config_parameters and not self.addon_settings and self.website_bootstrap is None:
+        if (
+            not self.config_parameters
+            and not self.addon_settings
+            and self.website_bootstrap is None
+        ):
             raise ValueError("Odoo instance override record requires at least one override")
         if not self.apply_on:
             raise ValueError("Odoo instance override record requires at least one apply phase")

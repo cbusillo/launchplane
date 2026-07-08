@@ -9,6 +9,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
     OdooWebsiteBootstrapPayload,
+    validate_odoo_website_bootstrap_contract,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.drivers.dispatch import (
@@ -104,6 +105,7 @@ class OdooWebsiteBootstrapOverrideRequest(BaseModel):
             raise ValueError("Odoo website-bootstrap override requires context.")
         if not self.instance:
             raise ValueError("Odoo website-bootstrap override requires instance.")
+        self.website_bootstrap = validate_odoo_website_bootstrap_contract(self.website_bootstrap)
         return self
 
 
