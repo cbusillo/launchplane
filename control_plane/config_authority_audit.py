@@ -1833,17 +1833,21 @@ def _yaml_block_scalar_assignment_candidates(
 def _allow_context_for_candidates(
     *, path: str, candidates: Sequence[tuple[int, str, object]]
 ) -> Mapping[str, object]:
-    if path != ".github/workflows/launchplane-config-authority.yml":
-        return {}
-    pinned_checkout_blocks = {
-        _checkout_candidate_block(key)
-        for _, key, value in candidates
-        if key.startswith("checkout.ref[")
-        and GIT_COMMIT_SHA_PATTERN.fullmatch(_string_value(value).strip()) is not None
-    }
-    return {
-        "launchplane_tool_checkout_pinned_blocks": pinned_checkout_blocks,
-    }
+    allow_context: dict[str, object] = {}
+    if path == ".github/workflows/launchplane-config-authority.yml":
+        allow_context["launchplane_tool_checkout_pinned_blocks"] = {
+            _checkout_candidate_block(key)
+            for _, key, value in candidates
+            if key.startswith("checkout.ref[")
+            and GIT_COMMIT_SHA_PATTERN.fullmatch(_string_value(value).strip()) is not None
+        }
+    if path == ".github/workflows/cleanup-ghcr.yml":
+        allow_context["cleanup_ghcr_launchplane_products"] = {
+            _string_value(value).strip().rstrip(",")
+            for _, key, value in candidates
+            if key == "LAUNCHPLANE_PRODUCT"
+        }
+    return allow_context
 
 
 def _checkout_candidate_block(key: str) -> str:
@@ -2193,6 +2197,13 @@ def _allow_reason(
         path=normalized,
         key=key,
         value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_cleanup_ghcr_product_forward(
+        path=normalized,
+        key=key,
+        value=value,
+        allow_context=allow_context,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_read_model_output_forward(
@@ -2731,6 +2742,18 @@ def _is_workflow_thin_connector_key_value(*, path: str, key: str, value: object)
         return False
     value_text = _string_value(value).strip().rstrip(",")
     return value_text in allowed_values
+
+
+def _is_cleanup_ghcr_product_forward(
+    *, path: str, key: str, value: object, allow_context: Mapping[str, object]
+) -> bool:
+    if path != ".github/workflows/cleanup-ghcr.yml" or key != "product":
+        return False
+    value_text = _string_value(value).strip().rstrip(",")
+    if value_text == "${{ env.LAUNCHPLANE_PRODUCT }}":
+        return True
+    existing_products = allow_context.get("cleanup_ghcr_launchplane_products")
+    return isinstance(existing_products, set) and value_text in existing_products
 
 
 def _is_launchplane_reusable_workflow(*, key: str, value: object) -> bool:

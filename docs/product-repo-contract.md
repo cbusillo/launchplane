@@ -370,12 +370,13 @@ product cleanup callers should use
 `cbusillo/launchplane/.github/actions/setup-protected-artifacts-request-client@main`
 with `render-request: true` to render the
 `GET /v1/artifacts/protected?product=...` route, `GET` method, and
-`protected_artifacts` response extraction for `launchplane-request`; the caller
-must use an `artifact_protection.read` grant that allows wildcard context for
-that product. Context-specific cleanup may pass `context=` and use a matching
-scoped grant. Product repos may still own provider-specific deletion and package
-tokens, but not the protected-inventory route shape or response extraction
-contract.
+`protected_artifacts` response extraction for `launchplane-request`. Product
+repos should forward the workflow's existing product value into that action
+instead of introducing a second product literal. The caller must use an
+`artifact_protection.read` grant that allows wildcard context for that product.
+Context-specific cleanup may pass `context=` and use a matching scoped grant.
+Product repos may still own provider-specific deletion and package tokens, but
+not the protected-inventory route shape or response extraction contract.
 
 ## Canonical Image Deploy Connector
 
