@@ -159,7 +159,7 @@ GITHUB_INPUT_REFERENCE_PATTERN = re.compile(
     r"^(?:inputs|github\.event\.inputs)\.(?P<input_name>[A-Za-z0-9_.-]+)$"
 )
 LAUNCHPLANE_REUSABLE_WORKFLOW_PATTERN = re.compile(
-    r"^[A-Za-z0-9_.-]+/launchplane/\.github/workflows/[A-Za-z0-9_.-]+\.yml@main$"
+    r"^cbusillo/launchplane/\.github/workflows/[A-Za-z0-9_.-]+\.yml@main$"
 )
 WORKFLOW_RUNTIME_AUTHORITY_KEYS = frozenset(
     ("GITHUB_TOKEN", "ID_TOKEN", "LAUNCHPLANE_PRODUCT", "LAUNCHPLANE_URL")
@@ -323,6 +323,9 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "inputs.timeout-ms.default": frozenset(("2700000",)),
     },
+    ".github/workflows/reusable-product-driver-testing-deploy.yml": {
+        "inputs.timeout-ms.default": frozenset(("2700000",)),
+    },
     ".github/workflows/reusable-generic-web-preview-lifecycle.yml": {
         "inputs.feedback_status.default": frozenset(("unsupported",)),
         "inputs.timeout-ms.default": frozenset(("1800000",)),
@@ -478,6 +481,16 @@ PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS = frozenset(
         "verification.verification_status",
     )
 )
+PRODUCT_DRIVER_REUSABLE_WITH_INPUT_KEYS = frozenset(
+    (
+        "artifact_id",
+        "context",
+        "launchplane_audience",
+        "launchplane_url",
+        "product",
+        "source_git_ref",
+    )
+)
 PRODUCT_DRIVER_REUSABLE_WRAPPER_LITERAL_VALUES = {
     ".github/workflows/reusable-product-driver-prod-launch-readiness.yml": {
         "INSTANCE": frozenset(("prod",)),
@@ -486,6 +499,14 @@ PRODUCT_DRIVER_REUSABLE_WRAPPER_LITERAL_VALUES = {
         "ACTION": frozenset(("reset-testing",)),
         "INSTANCE": frozenset(("testing",)),
         "INTENT": frozenset(("stable-testing-reset",)),
+    },
+    ".github/workflows/reusable-product-driver-testing-deploy.yml": {
+        "uses": frozenset(
+            (
+                "cbusillo/launchplane/.github/workflows/"
+                "reusable-odoo-testing-deploy.yml@main",
+            )
+        ),
     },
 }
 WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
@@ -2650,7 +2671,11 @@ def _is_github_step_output_reference(value_text: str) -> bool:
     match = GITHUB_EXPRESSION_PATTERN.match(value_text)
     if match is None:
         return False
-    return bool(GITHUB_STEP_OUTPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
+    body = match.group("body").strip()
+    return bool(
+        GITHUB_STEP_OUTPUT_REFERENCE_PATTERN.match(body)
+        or GITHUB_NEEDS_OUTPUT_REFERENCE_PATTERN.match(body)
+    )
 
 
 def _is_workflow_read_model_output_forward(*, key: str, value: object) -> bool:
@@ -2722,6 +2747,12 @@ def _is_product_driver_reusable_workflow_mechanic(*, path: str, key: str, value:
         key_text, frozenset()
     ):
         return True
+    if key in PRODUCT_DRIVER_REUSABLE_WITH_INPUT_KEYS:
+        return (
+            _is_github_step_output_reference(value_text)
+            or _is_github_direct_input_reference(value)
+            or _is_github_bracket_input_reference(value_text)
+        )
     if key.startswith("payload-fields."):
         if key.removeprefix("payload-fields.") not in PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS:
             return False

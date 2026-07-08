@@ -1,0 +1,146 @@
+---
+name: Reusable Product Driver Testing Deploy
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product key.
+        required: true
+        type: string
+      driver:
+        description: Product driver id.
+        required: true
+        type: string
+      context:
+        description: Runtime context.
+        required: true
+        type: string
+      artifact_id:
+        description: Stored Launchplane artifact ID to deploy to testing.
+        required: true
+        type: string
+      source_git_ref:
+        description: Source git ref attached to deployment evidence.
+        required: true
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "2700000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      operation_id:
+        description: Launchplane target replacement operation ID.
+        value: ${{ jobs.odoo_testing_deploy.outputs.operation_id }}
+      deployment_record_id:
+        description: Launchplane deployment record ID.
+        value: ${{ jobs.odoo_testing_deploy.outputs.deployment_record_id }}
+      release_tuple_id:
+        description: Minted testing release tuple ID.
+        value: ${{ jobs.odoo_testing_deploy.outputs.release_tuple_id }}
+      deployment_status:
+        description: Target replacement deploy status.
+        value: ${{ jobs.odoo_testing_deploy.outputs.deployment_status }}
+      post_deploy_status:
+        description: Driver post-deploy status.
+        value: ${{ jobs.odoo_testing_deploy.outputs.post_deploy_status }}
+      destination_health_status:
+        description: Stable destination health status.
+        value: ${{ jobs.odoo_testing_deploy.outputs.destination_health_status }}
+      canonical_status:
+        description: Stable canonical URL verification status.
+        value: ${{ jobs.odoo_testing_deploy.outputs.canonical_status }}
+      logo_status:
+        description: Stable logo verification status.
+        value: ${{ jobs.odoo_testing_deploy.outputs.logo_status }}
+      error_message:
+        description: Launchplane driver error message, when present.
+        value: ${{ jobs.odoo_testing_deploy.outputs.error_message }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  resolve:
+    outputs:
+      artifact_id: ${{ steps.request.outputs.artifact_id }}
+      context: ${{ steps.request.outputs.context }}
+      driver: ${{ steps.request.outputs.driver }}
+      product: ${{ steps.request.outputs.product }}
+      source_git_ref: ${{ steps.request.outputs.source_git_ref }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve product-driver testing deploy request
+        id: request
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          CONTEXT: ${{ inputs.context }}
+          DRIVER: ${{ inputs.driver }}
+          PRODUCT: ${{ inputs.product }}
+          SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+        run: |
+          set -euo pipefail
+          for required in PRODUCT DRIVER CONTEXT ARTIFACT_ID SOURCE_GIT_REF; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          write_output() {
+            name="$1"
+            value="$2"
+            delimiter="launchplane_output_$(uuidgen | tr '[:upper:]' '[:lower:]')"
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >>"$GITHUB_OUTPUT"
+          }
+          write_output artifact_id "$ARTIFACT_ID"
+          write_output context "$CONTEXT"
+          write_output driver "$DRIVER"
+          write_output product "$PRODUCT"
+          write_output source_git_ref "$SOURCE_GIT_REF"
+
+  unsupported_driver:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.driver != 'odoo' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject unsupported product driver
+        env:
+          DRIVER: ${{ needs.resolve.outputs.driver }}
+        run: |
+          set -euo pipefail
+          echo "Unsupported product driver for testing deploy: ${DRIVER}" >&2
+          exit 1
+
+  odoo_testing_deploy:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.driver == 'odoo' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-testing-deploy.yml@main
+    with:
+      product: ${{ needs.resolve.outputs.product }}
+      context: ${{ needs.resolve.outputs.context }}
+      artifact_id: ${{ needs.resolve.outputs.artifact_id }}
+      source_git_ref: ${{ needs.resolve.outputs.source_git_ref }}
+      timeout-ms: ${{ inputs['timeout-ms'] }}
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
