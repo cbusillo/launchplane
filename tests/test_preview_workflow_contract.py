@@ -304,17 +304,22 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         workflow_inputs = _workflow_call_inputs(workflow)
 
         self.assertIn("route-path: /v1/drivers/generic-web/preview-verification", workflow)
-        self.assertIn("verification.context=${{ inputs.context }}", workflow)
         self.assertIn(
-            "verification.anchor_pr_number=${{ steps.request.outputs.anchor_pr_number }}",
+            "payload-file: .launchplane/generic-web-preview-verification-payload.json",
+            workflow,
+        )
+        self.assertIn("context: process.env.CONTEXT ?? ''", workflow)
+        self.assertIn(
+            "anchor_pr_number: anchorPrNumber",
             workflow,
         )
         self.assertIn(
-            "verification.verification_status=${{ steps.request.outputs.verification_status }}",
+            "verification_status: process.env.VERIFICATION_STATUS",
             workflow,
         )
         self.assertIn("verification_status=result.verification_status", workflow)
         self.assertIn("generic-web-preview-verification", workflow)
+        self.assertNotIn("payload-fields:", workflow)
 
         self.assertNotIn("idempotency-key", workflow_inputs)
         self.assertNotIn("payload", workflow_inputs)
