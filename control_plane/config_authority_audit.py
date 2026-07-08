@@ -314,6 +314,12 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "inputs.timeout-ms.default": frozenset(("600000",)),
     },
+    ".github/workflows/reusable-odoo-preview.yml": {
+        "inputs.runs_on.default": frozenset(('"ubuntu-latest"',)),
+        "inputs.tenant_path.default": frozenset(("tenant",)),
+        "inputs.timeout-ms.default": frozenset(("660000",)),
+        "inputs.wait_for_deploy.default": frozenset(("true",)),
+    },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "inputs.timeout-ms.default": frozenset(("2700000",)),
     },
@@ -372,6 +378,11 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
         "LAUNCHPLANE_URL": frozenset(("${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_URL }}",))
     },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
+    },
+    ".github/workflows/reusable-odoo-preview.yml": {
         "launchplane-url": frozenset(
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         )
@@ -593,6 +604,15 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "INPUT_PRODUCT": frozenset(("${{ inputs.product }}",)),
         "INSTANCE_NAME": frozenset(("${{ inputs.instance }}",)),
     },
+    ".github/workflows/reusable-odoo-preview.yml": {
+        "INPUT_CONTEXT": frozenset(("${{ inputs.context }}",)),
+        "INPUT_PRODUCT": frozenset(("${{ inputs.product }}",)),
+        "INPUT_TENANT_PATH": frozenset(("${{ inputs.tenant_path }}",)),
+        "INPUT_TENANT_REPOSITORY": frozenset(("${{ inputs.tenant_repository }}",)),
+        "SOURCE_ACCESS_PROBE_REPOSITORY": frozenset(
+            ("${{ inputs.source_access_probe_repository }}",)
+        ),
+    },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
         "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
@@ -721,6 +741,57 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
             )
         ),
         "token": frozenset(("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",)),
+        "username": frozenset(("${{ github.repository_owner }}",)),
+    },
+    ".github/workflows/reusable-odoo-preview.yml": {
+        "DEFAULT_REPOSITORY": frozenset(("${{ github.repository }}",)),
+        "GHCR_TOKEN": frozenset(("${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",)),
+        "GHCR_USERNAME": frozenset(("${{ github.repository_owner }}",)),
+        "GITHUB_TOKEN": frozenset(("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}",)),
+        "IMAGE_REPOSITORY": frozenset(("${{ steps.publish_inputs.outputs.image_repository }}",)),
+        "ODOO_GHCR_PUBLISH_TOKEN": frozenset(("${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",)),
+        "ODOO_SOURCE_GITHUB_TOKEN": frozenset(("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}",)),
+        "RESOLVED_DEVKIT_REPOSITORY": frozenset(
+            ("${{ steps.publish_inputs.outputs.devkit_repository }}",)
+        ),
+        "RESOLVED_IMAGE_REPOSITORY": frozenset(
+            ("${{ steps.publish_inputs.outputs.image_repository }}",)
+        ),
+        "RESOLVED_SHARED_ADDONS_REPOSITORY": frozenset(
+            ("${{ steps.publish_inputs.outputs.shared_addons_repository }}",)
+        ),
+        "checkout.repository[1]": frozenset(("${{ steps.facts.outputs.tenant_repository }}",)),
+        "checkout.repository[2]": frozenset(
+            ("${{ steps.publish_inputs.outputs.devkit_repository }}",)
+        ),
+        "checkout.repository[3]": frozenset(
+            ("${{ steps.publish_inputs.outputs.shared_addons_repository }}",)
+        ),
+        "idempotency-key": frozenset(
+            (
+                "${{ steps.dry_run_request.outputs.idempotency-key }}",
+                "${{ steps.launchplane_request.outputs.idempotency-key }}",
+                "${{ steps.publish_inputs_request.outputs.idempotency-key }}",
+            )
+        ),
+        "launchplane_url": frozenset(
+            (
+                "${{ inputs.launchplane_url }}",
+                "${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",
+            )
+        ),
+        "password": frozenset(("${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",)),
+        "preview_url": frozenset(
+            (
+                "${{ needs.preview-refresh.outputs.preview_url }}",
+                "${{ steps.launchplane.outputs.preview_url }}",
+            )
+        ),
+        "run_url": frozenset(
+            ("${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",)
+        ),
+        "runs-on": frozenset(("${{ fromJSON(inputs.runs_on) }}",)),
+        "token": frozenset(("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}",)),
         "username": frozenset(("${{ github.repository_owner }}",)),
     },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {

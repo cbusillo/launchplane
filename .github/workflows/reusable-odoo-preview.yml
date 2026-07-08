@@ -1,0 +1,781 @@
+---
+name: Reusable Odoo Preview
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product profile key.
+        required: true
+        type: string
+      context:
+        description: Launchplane Odoo preview context.
+        required: true
+        type: string
+      operation:
+        description: Preview operation to run, refresh or destroy.
+        required: true
+        type: string
+      pr_number:
+        description: Pull request number that owns the preview.
+        required: true
+        type: string
+      pr_url:
+        description: Pull request URL attached to feedback evidence.
+        required: false
+        default: ""
+        type: string
+      source_git_ref:
+        description: Source ref or SHA for refresh requests.
+        required: false
+        default: ""
+        type: string
+      tenant_repository:
+        description: Product source repository. Defaults to caller repository.
+        required: false
+        default: ""
+        type: string
+      tenant_path:
+        description: Checkout path for the tenant repository.
+        required: false
+        default: tenant
+        type: string
+      source_access_probe_repository:
+        description: Repository probed with ODOO_SOURCE_GITHUB_TOKEN.
+        required: false
+        default: ""
+        type: string
+      runs_on:
+        description: JSON encoded GitHub Actions runner selector.
+        required: false
+        default: '"ubuntu-latest"'
+        type: string
+      wait_for_deploy:
+        description: Whether preview apply should wait for deploy completion.
+        required: false
+        default: "true"
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "660000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    secrets:
+      ODOO_GHCR_PUBLISH_TOKEN:
+        description: Token allowed to publish the tenant image to GHCR.
+        required: false
+      ODOO_SOURCE_GITHUB_TOKEN:
+        description: Token allowed to fetch private Odoo source inputs.
+        required: false
+    outputs:
+      cleanup_failure_summary:
+        description: Cleanup failure summary for feedback-status workflows.
+        value: ${{ jobs.preview-destroy.outputs.cleanup_failure_summary }}
+      cleanup_result:
+        description: GitHub Actions-style cleanup result.
+        value: ${{ jobs.preview-destroy.outputs.cleanup_result }}
+      failure_summary:
+        description: Refresh failure summary for feedback-status workflows.
+        value: ${{ jobs.preview-refresh.outputs.failure_summary }}
+      preview_url:
+        description: Preview URL returned by Launchplane.
+        value: ${{ jobs.preview-refresh.outputs.preview_url || jobs.preview-destroy.outputs.preview_url }}
+      provision_result:
+        description: GitHub Actions-style Launchplane provision result.
+        value: ${{ jobs.preview-refresh.outputs.provision_result }}
+      publish_result:
+        description: GitHub Actions-style artifact publish result.
+        value: ${{ jobs.preview-refresh.outputs.publish_result }}
+      refresh_image_reference:
+        description: Floating image reference used for refresh feedback.
+        value: ${{ jobs.preview-refresh.outputs.refresh_image_reference }}
+      refresh_feedback_status:
+        description: Preview refresh feedback status returned by Launchplane.
+        value: ${{ jobs.preview-refresh-feedback.outputs.feedback_status }}
+      destroy_feedback_status:
+        description: Preview destroy feedback status returned by Launchplane.
+        value: ${{ jobs.preview-destroy-feedback.outputs.feedback_status }}
+      verification_result:
+        description: GitHub Actions-style verification result.
+        value: ${{ jobs.preview-refresh.outputs.verification_result }}
+
+jobs:
+  validate:
+    outputs:
+      operation: ${{ steps.inputs.outputs.operation }}
+      pr_url: ${{ steps.inputs.outputs.pr_url }}
+      source_git_ref: ${{ steps.inputs.outputs.source_git_ref }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Validate reusable Odoo preview inputs
+        id: inputs
+        env:
+          INPUT_CONTEXT: ${{ inputs.context }}
+          OPERATION: ${{ inputs.operation }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_PR_URL: ${{ inputs.pr_url }}
+          INPUT_PRODUCT: ${{ inputs.product }}
+          INPUT_SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+          DEFAULT_PR_URL: >-
+            ${{ github.server_url }}/${{ github.repository }}/pull/${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$INPUT_PRODUCT" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "product must be a single slug value." >&2
+            exit 1
+          fi
+          if ! [[ "$INPUT_CONTEXT" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "context must be a single slug value." >&2
+            exit 1
+          fi
+          operation="$(printf '%s' "$OPERATION" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
+          case "$operation" in
+            refresh|destroy)
+              ;;
+            *)
+              echo "operation must be refresh or destroy." >&2
+              exit 1
+              ;;
+          esac
+          case "$INPUT_PR_NUMBER" in
+            ''|*[!0-9]*)
+              echo "pr_number must be a positive integer." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$INPUT_PR_NUMBER" -lt 1 ]; then
+            echo "pr_number must be a positive integer." >&2
+            exit 1
+          fi
+          pr_url="$INPUT_PR_URL"
+          if [ -z "$pr_url" ]; then
+            pr_url="$DEFAULT_PR_URL"
+          fi
+          case "$pr_url" in
+            *$'\n'*|*$'\r'*)
+              echo "pr_url must be a single-line value." >&2
+              exit 1
+              ;;
+          esac
+          if [ -z "${INPUT_SOURCE_GIT_REF// }" ]; then
+            echo "source_git_ref is required for Odoo preview." >&2
+            exit 1
+          fi
+          case "$INPUT_SOURCE_GIT_REF" in
+            *$'\n'*|*$'\r'*)
+              echo "source_git_ref must be a single-line ref." >&2
+              exit 1
+              ;;
+          esac
+          if ! [[ "$INPUT_SOURCE_GIT_REF" =~ ^[A-Za-z0-9._/@+-]+$ ]] || [[ "$INPUT_SOURCE_GIT_REF" == *..* ]]; then
+            echo "source_git_ref contains unsupported characters." >&2
+            exit 1
+          fi
+          {
+            echo "operation=$operation"
+            echo "pr_url=$pr_url"
+            echo "source_git_ref=$INPUT_SOURCE_GIT_REF"
+          } >>"$GITHUB_OUTPUT"
+
+  preview-refresh:
+    if: ${{ needs.validate.outputs.operation == 'refresh' }}
+    needs:
+      - validate
+    outputs:
+      failure_summary: ${{ steps.refresh_feedback.outputs.failure_summary }}
+      preview_url: ${{ steps.launchplane.outputs.preview_url }}
+      provision_result: ${{ steps.refresh_feedback.outputs.provision_result }}
+      publish_result: ${{ steps.refresh_feedback.outputs.publish_result }}
+      refresh_image_reference: ${{ steps.refresh_feedback.outputs.refresh_image_reference }}
+      verification_result: ${{ steps.refresh_feedback.outputs.verification_result }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - name: Resolve refresh facts
+        id: facts
+        shell: bash
+        env:
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+          INPUT_TENANT_REPOSITORY: ${{ inputs.tenant_repository }}
+          INPUT_TENANT_PATH: ${{ inputs.tenant_path }}
+          DEFAULT_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          case "$INPUT_PR_NUMBER" in
+            ''|*[!0-9]*)
+              echo "pr_number must be a positive integer." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$INPUT_PR_NUMBER" -lt 1 ]; then
+            echo "pr_number must be a positive integer." >&2
+            exit 1
+          fi
+          if [ -z "${INPUT_SOURCE_GIT_REF// }" ]; then
+            echo "source_git_ref is required for Odoo preview refresh." >&2
+            exit 1
+          fi
+          case "$INPUT_SOURCE_GIT_REF" in
+            *$'\n'*|*$'\r'*)
+              echo "source_git_ref must be a single-line ref." >&2
+              exit 1
+              ;;
+          esac
+          if ! [[ "$INPUT_SOURCE_GIT_REF" =~ ^[A-Za-z0-9._/@+-]+$ ]] || [[ "$INPUT_SOURCE_GIT_REF" == *..* ]]; then
+            echo "source_git_ref contains unsupported characters." >&2
+            exit 1
+          fi
+          repository="$INPUT_TENANT_REPOSITORY"
+          if [ -z "$repository" ]; then
+            repository="$DEFAULT_REPOSITORY"
+          fi
+          if [ "$repository" != "$DEFAULT_REPOSITORY" ]; then
+            echo "tenant_repository must match the caller repository." >&2
+            exit 1
+          fi
+          if ! [[ "$repository" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+            echo "tenant_repository must be formatted as owner/name." >&2
+            exit 1
+          fi
+          if ! [[ "$INPUT_TENANT_PATH" =~ ^[A-Za-z0-9_-]+$ ]] || [[ "$INPUT_TENANT_PATH" == odoo-devkit ]] || [[ "$INPUT_TENANT_PATH" == odoo-shared-addons ]]; then
+            echo "tenant_path must be a single relative directory name." >&2
+            exit 1
+          fi
+          {
+            echo "pr_number=$INPUT_PR_NUMBER"
+            echo "source_git_ref=$INPUT_SOURCE_GIT_REF"
+            echo "tenant_repository=$repository"
+            echo "tenant_path=$INPUT_TENANT_PATH"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Preflight publish secrets
+        env:
+          ODOO_GHCR_PUBLISH_TOKEN: ${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}
+          ODOO_SOURCE_GITHUB_TOKEN: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ODOO_GHCR_PUBLISH_TOKEN" ]; then
+            echo "ODOO_GHCR_PUBLISH_TOKEN is required for Odoo preview artifact publish." >&2
+            exit 1
+          fi
+          if [ -z "$ODOO_SOURCE_GITHUB_TOKEN" ]; then
+            echo "ODOO_SOURCE_GITHUB_TOKEN is required for Odoo preview artifact publish." >&2
+            exit 1
+          fi
+
+      - name: Checkout tenant repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.facts.outputs.tenant_repository }}
+          ref: ${{ steps.facts.outputs.source_git_ref }}
+          path: ${{ steps.facts.outputs.tenant_path }}
+          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Preflight source repository access
+        env:
+          ODOO_SOURCE_GITHUB_TOKEN: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          SOURCE_ACCESS_PROBE_REPOSITORY: ${{ inputs.source_access_probe_repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SOURCE_ACCESS_PROBE_REPOSITORY" ]; then
+            echo "No source access probe repository configured; skipping probe."
+            exit 0
+          fi
+          if ! [[ "$SOURCE_ACCESS_PROBE_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+            echo "source_access_probe_repository must be formatted as owner/name." >&2
+            exit 1
+          fi
+          # shellcheck disable=SC2016
+          GIT_CONFIG_COUNT=2 \
+          GIT_CONFIG_KEY_0=credential.https://github.com.helper \
+          GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo password=$ODOO_SOURCE_GITHUB_TOKEN; }; f' \
+          GIT_CONFIG_KEY_1=credential.useHttpPath \
+          GIT_CONFIG_VALUE_1=true \
+          git ls-remote --refs "https://github.com/${SOURCE_ACCESS_PROBE_REPOSITORY}.git" main >/dev/null
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}
+
+      - name: Render Launchplane publish inputs request
+        id: publish_inputs_request
+        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main
+        with:
+          request-kind: artifact-publish-inputs
+          product: ${{ inputs.product }}
+          context: ${{ inputs.context }}
+          pr-number: ${{ steps.facts.outputs.pr_number }}
+          source-git-ref: ${{ steps.facts.outputs.source_git_ref }}
+
+      - name: Resolve Launchplane publish inputs
+        id: publish_inputs
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.publish_inputs_request.outputs.route-path }}
+          payload: ${{ steps.publish_inputs_request.outputs.payload }}
+          idempotency-key: ${{ steps.publish_inputs_request.outputs.idempotency-key }}
+          timeout-ms: "600000"
+          fail-result-paths: ${{ steps.publish_inputs_request.outputs.fail-result-paths }}
+          response-output-file: ${{ runner.temp }}/odoo-preview-publish-inputs.json
+          response-output-path: ${{ steps.publish_inputs_request.outputs.response-output-path }}
+          output-paths: >-
+            image_repository=result.image_repository,
+            image_tag=result.image_tag,
+            preview_slug=result.preview_slug,
+            devkit_repository=result.devkit_repository,
+            shared_addons_repository=result.shared_addons_repository
+
+      - name: Validate Launchplane publish inputs
+        env:
+          RESOLVED_DEVKIT_REPOSITORY: >-
+            ${{ steps.publish_inputs.outputs.devkit_repository }}
+          RESOLVED_IMAGE_REPOSITORY: >-
+            ${{ steps.publish_inputs.outputs.image_repository }}
+          RESOLVED_IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}
+          RESOLVED_SHARED_ADDONS_REPOSITORY: >-
+            ${{ steps.publish_inputs.outputs.shared_addons_repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RESOLVED_IMAGE_REPOSITORY" ]; then
+            echo "Launchplane publish inputs missing image_repository." >&2
+            exit 1
+          fi
+          if [ -z "$RESOLVED_IMAGE_TAG" ]; then
+            echo "Launchplane publish inputs missing image_tag." >&2
+            exit 1
+          fi
+          if ! [[ "$RESOLVED_DEVKIT_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+            echo "Launchplane publish inputs missing valid devkit_repository." >&2
+            exit 1
+          fi
+          if ! [[ "$RESOLVED_SHARED_ADDONS_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+            echo "Launchplane publish inputs missing valid shared_addons_repository." >&2
+            exit 1
+          fi
+
+      - name: Checkout devkit repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.publish_inputs.outputs.devkit_repository }}
+          path: odoo-devkit
+          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout shared addons repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.publish_inputs.outputs.shared_addons_repository }}
+          path: odoo-shared-addons
+          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - name: Locate publish inputs file
+        id: publish_inputs_file
+        run: |
+          echo "inputs_file=$RUNNER_TEMP/odoo-preview-publish-inputs.json" >>"$GITHUB_OUTPUT"
+
+      - name: Publish preview artifact image
+        id: publish
+        working-directory: ${{ steps.facts.outputs.tenant_path }}
+        env:
+          GHCR_USERNAME: ${{ github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          ODOO_SOURCE_GITHUB_TOKEN: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          IMAGE_REPOSITORY: ${{ steps.publish_inputs.outputs.image_repository }}
+          IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}
+          PUBLISH_INPUTS_FILE: ${{ steps.publish_inputs_file.outputs.inputs_file }}
+        run: |
+          set -euo pipefail
+          trap 'rm -f "$PUBLISH_INPUTS_FILE"' EXIT
+          # shellcheck disable=SC2016
+          node -e '
+            const fs = require("node:fs");
+            const path = process.env.PUBLISH_INPUTS_FILE;
+            const payload = JSON.parse(fs.readFileSync(path, "utf8"));
+            payload.environment = payload.environment || {};
+            payload.environment.GITHUB_TOKEN =
+              process.env.ODOO_SOURCE_GITHUB_TOKEN;
+            fs.writeFileSync(path, `${JSON.stringify(payload)}\n`, "utf8");
+          '
+          export ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON
+          ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON="$(cat "$PUBLISH_INPUTS_FILE")"
+          output_file="$RUNNER_TEMP/odoo-preview-artifact.json"
+          manifest_path="$PWD/workspace.toml"
+          uv --directory ../odoo-devkit run platform runtime publish \
+            --manifest "$manifest_path" \
+            --instance testing \
+            --image-repository "$IMAGE_REPOSITORY" \
+            --image-tag "$IMAGE_TAG" \
+            --platform linux/amd64 \
+            --output-file "$output_file"
+          echo "manifest_file=$output_file" >>"$GITHUB_OUTPUT"
+
+      - name: Prepare Launchplane isolated preview dry-run file
+        id: dry_run_payload
+        run: |
+          dry_run_plan_file="$RUNNER_TEMP/odoo-preview-dry-run.json"
+          echo "dry_run_plan_file=$dry_run_plan_file" >>"$GITHUB_OUTPUT"
+
+      - name: Render Launchplane isolated preview apply inputs request
+        id: dry_run_request
+        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main
+        with:
+          request-kind: preview-apply-inputs
+          product: ${{ inputs.product }}
+          context: ${{ inputs.context }}
+          pr-number: ${{ steps.facts.outputs.pr_number }}
+          preview-slug: ${{ steps.publish_inputs.outputs.preview_slug }}
+          source-git-ref: ${{ steps.facts.outputs.source_git_ref }}
+          manifest-file: ${{ steps.publish.outputs.manifest_file }}
+
+      - name: Request Launchplane isolated preview apply inputs
+        id: dry_run
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.dry_run_request.outputs.route-path }}
+          payload: ${{ steps.dry_run_request.outputs.payload }}
+          payload-json-files: ${{ steps.dry_run_request.outputs.payload-json-files }}
+          idempotency-key: ${{ steps.dry_run_request.outputs.idempotency-key }}
+          timeout-ms: "360000"
+          fail-result-paths: ${{ steps.dry_run_request.outputs.fail-result-paths }}
+          response-output-file: ${{ steps.dry_run_payload.outputs.dry_run_plan_file }}
+          response-output-path: ${{ steps.dry_run_request.outputs.response-output-path }}
+          output-paths: >-
+            trace_id=trace_id,
+            inputs_status=result.status,
+            preview_slug=result.preview_slug,
+            preview_url=result.preview_url,
+            error_message=result.error_message
+
+      - name: Render Launchplane isolated preview apply request
+        id: launchplane_request
+        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main
+        with:
+          request-kind: preview-apply
+          product: ${{ inputs.product }}
+          context: ${{ inputs.context }}
+          pr-number: ${{ steps.facts.outputs.pr_number }}
+          preview-slug: ${{ steps.dry_run.outputs.preview_slug }}
+          source-git-ref: ${{ steps.facts.outputs.source_git_ref }}
+          dry-run-plan-file: ${{ steps.dry_run_payload.outputs.dry_run_plan_file }}
+          manifest-file: ${{ steps.publish.outputs.manifest_file }}
+          wait-for-deploy: ${{ inputs.wait_for_deploy }}
+
+      - name: Request Launchplane isolated preview apply
+        id: launchplane
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.launchplane_request.outputs.route-path }}
+          payload: ${{ steps.launchplane_request.outputs.payload }}
+          payload-json-files: ${{ steps.launchplane_request.outputs.payload-json-files }}
+          idempotency-key: ${{ steps.launchplane_request.outputs.idempotency-key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: ${{ steps.launchplane_request.outputs.fail-result-paths }}
+          output-paths: >-
+            trace_id=trace_id,
+            refresh_status=result.status,
+            preview_slug=result.preview_slug,
+            preview_url=result.preview_url,
+            compose_id=result.compose_id,
+            compose_name=result.compose_name,
+            domain_id=result.domain_id,
+            domain_host=result.domain_host,
+            created_compose=result.created_compose,
+            error_message=result.error_message
+
+      - name: Resolve preview refresh feedback facts
+        id: refresh_feedback
+        if: ${{ always() }}
+        env:
+          ERROR_MESSAGE: ${{ steps.launchplane.outputs.error_message }}
+          LAUNCHPLANE_OUTCOME: ${{ steps.launchplane.outcome }}
+          IMAGE_REPOSITORY: ${{ steps.publish_inputs.outputs.image_repository }}
+          IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          REFRESH_STATUS: ${{ steps.launchplane.outputs.refresh_status }}
+        run: |
+          set -euo pipefail
+          publish_result="${PUBLISH_OUTCOME:-skipped}"
+          provision_result="${LAUNCHPLANE_OUTCOME:-skipped}"
+          verification_result="failure"
+          if [ "$PUBLISH_OUTCOME" = "success" ] && [ "$LAUNCHPLANE_OUTCOME" = "success" ] && [ "$REFRESH_STATUS" = "pass" ]; then
+            verification_result="success"
+          fi
+          failure_summary=""
+          if [ "$verification_result" != "success" ]; then
+            failure_summary="Publish=${PUBLISH_OUTCOME:-skipped}; Launchplane=${LAUNCHPLANE_OUTCOME:-skipped}; Refresh=${REFRESH_STATUS:-not reported}"
+            if [ -n "$ERROR_MESSAGE" ]; then
+              failure_summary="$failure_summary; Error=$ERROR_MESSAGE"
+            fi
+          fi
+          failure_summary="${failure_summary//$'\r'/ }"
+          failure_summary="${failure_summary//$'\n'/ }"
+          refresh_image_reference=""
+          if [ -n "$IMAGE_REPOSITORY" ] && [ -n "$IMAGE_TAG" ]; then
+            refresh_image_reference="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+          fi
+          {
+            echo "publish_result=$publish_result"
+            echo "provision_result=$provision_result"
+            echo "verification_result=$verification_result"
+            echo "refresh_image_reference=$refresh_image_reference"
+            echo "failure_summary=$failure_summary"
+          } >>"$GITHUB_OUTPUT"
+
+  preview-refresh-feedback:
+    if: >-
+      ${{
+        always() &&
+        needs.validate.outputs.operation == 'refresh' &&
+        needs.preview-refresh.result != 'skipped' &&
+        (needs.preview-refresh.result == 'success' || needs.preview-refresh.result == 'failure')
+      }}
+    needs:
+      - validate
+      - preview-refresh
+    permissions:
+      contents: read
+      id-token: write
+    uses: cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      mode: refresh
+      anchor_pr_number: ${{ inputs.pr_number }}
+      anchor_pr_url: ${{ needs.validate.outputs.pr_url }}
+      publish_result: ${{ needs.preview-refresh.outputs.publish_result || needs.preview-refresh.result }}
+      provision_result: ${{ needs.preview-refresh.outputs.provision_result || needs.preview-refresh.result }}
+      verification_result: ${{ needs.preview-refresh.outputs.verification_result || needs.preview-refresh.result }}
+      publish_failure_summary: ${{ needs.preview-refresh.outputs.failure_summary }}
+      provision_failure_summary: ${{ needs.preview-refresh.outputs.failure_summary }}
+      verification_failure_summary: ${{ needs.preview-refresh.outputs.failure_summary }}
+      preview_url: ${{ needs.preview-refresh.outputs.preview_url }}
+      refresh_image_reference: ${{ needs.preview-refresh.outputs.refresh_image_reference }}
+      revision: ${{ needs.validate.outputs.source_git_ref }}
+      run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      launchplane_url: ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+
+  preview-destroy:
+    if: ${{ needs.validate.outputs.operation == 'destroy' }}
+    needs:
+      - validate
+    outputs:
+      cleanup_failure_summary: ${{ steps.destroy_feedback.outputs.cleanup_failure_summary }}
+      cleanup_result: ${{ steps.destroy_feedback.outputs.cleanup_result }}
+      preview_url: ${{ steps.launchplane.outputs.preview_url }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Resolve destroy facts
+        id: facts
+        shell: bash
+        env:
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+        run: |
+          set -euo pipefail
+          case "$INPUT_PR_NUMBER" in
+            ''|*[!0-9]*)
+              echo "pr_number must be a positive integer." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$INPUT_PR_NUMBER" -lt 1 ]; then
+            echo "pr_number must be a positive integer." >&2
+            exit 1
+          fi
+          if [ -z "${INPUT_SOURCE_GIT_REF// }" ]; then
+            echo "source_git_ref is required for Odoo preview destroy." >&2
+            exit 1
+          fi
+          case "$INPUT_SOURCE_GIT_REF" in
+            *$'\n'*|*$'\r'*)
+              echo "source_git_ref must be a single-line ref." >&2
+              exit 1
+              ;;
+          esac
+          if ! [[ "$INPUT_SOURCE_GIT_REF" =~ ^[A-Za-z0-9._/@+-]+$ ]] || [[ "$INPUT_SOURCE_GIT_REF" == *..* ]]; then
+            echo "source_git_ref contains unsupported characters." >&2
+            exit 1
+          fi
+          {
+            echo "pr_number=$INPUT_PR_NUMBER"
+            echo "source_git_ref=$INPUT_SOURCE_GIT_REF"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Prepare Launchplane isolated preview destroy dry-run file
+        id: dry_run_payload
+        run: |
+          dry_run_plan_file="$RUNNER_TEMP/odoo-preview-destroy-dry-run.json"
+          echo "dry_run_plan_file=$dry_run_plan_file" >>"$GITHUB_OUTPUT"
+
+      - name: Render Launchplane isolated preview destroy inputs request
+        id: dry_run_request
+        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main
+        with:
+          request-kind: preview-apply-inputs
+          product: ${{ inputs.product }}
+          context: ${{ inputs.context }}
+          operation: destroy
+          pr-number: ${{ steps.facts.outputs.pr_number }}
+          source: ${{ inputs.product }}-isolated-preview-destroy-inputs
+          source-git-ref: ${{ steps.facts.outputs.source_git_ref }}
+
+      - name: Request Launchplane isolated preview destroy inputs
+        id: dry_run
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.dry_run_request.outputs.route-path }}
+          payload: ${{ steps.dry_run_request.outputs.payload }}
+          idempotency-key: ${{ steps.dry_run_request.outputs.idempotency-key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: ${{ steps.dry_run_request.outputs.fail-result-paths }}
+          response-output-file: ${{ steps.dry_run_payload.outputs.dry_run_plan_file }}
+          response-output-path: ${{ steps.dry_run_request.outputs.response-output-path }}
+          output-paths: >-
+            trace_id=trace_id,
+            inputs_status=result.status,
+            preview_slug=result.preview_slug,
+            preview_url=result.preview_url,
+            error_message=result.error_message
+
+      - name: Render Launchplane isolated preview destroy request
+        id: launchplane_request
+        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main
+        with:
+          request-kind: preview-apply
+          product: ${{ inputs.product }}
+          context: ${{ inputs.context }}
+          operation: destroy
+          pr-number: ${{ steps.facts.outputs.pr_number }}
+          preview-slug: ${{ steps.dry_run.outputs.preview_slug }}
+          source-git-ref: ${{ steps.facts.outputs.source_git_ref }}
+          dry-run-plan-file: ${{ steps.dry_run_payload.outputs.dry_run_plan_file }}
+          wait-for-deploy: false
+
+      - name: Request Launchplane isolated preview destroy
+        id: launchplane
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: ${{ steps.launchplane_request.outputs.route-path }}
+          payload: ${{ steps.launchplane_request.outputs.payload }}
+          payload-json-files: ${{ steps.launchplane_request.outputs.payload-json-files }}
+          idempotency-key: ${{ steps.launchplane_request.outputs.idempotency-key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: ${{ steps.launchplane_request.outputs.fail-result-paths }}
+          output-paths: >-
+            trace_id=trace_id,
+            destroy_status=result.status,
+            operation=result.operation,
+            preview_slug=result.preview_slug,
+            preview_url=result.preview_url,
+            compose_id=result.compose_id,
+            compose_name=result.compose_name,
+            domain_id=result.domain_id,
+            domain_host=result.domain_host,
+            error_message=result.error_message
+
+      - name: Resolve preview destroy feedback facts
+        id: destroy_feedback
+        if: ${{ always() }}
+        env:
+          DESTROY_STATUS: ${{ steps.launchplane.outputs.destroy_status }}
+          ERROR_MESSAGE: ${{ steps.launchplane.outputs.error_message }}
+          LAUNCHPLANE_OUTCOME: ${{ steps.launchplane.outcome }}
+        run: |
+          set -euo pipefail
+          cleanup_result="failure"
+          if [ "$LAUNCHPLANE_OUTCOME" = "success" ] && [ "$DESTROY_STATUS" = "pass" ]; then
+            cleanup_result="success"
+          fi
+          cleanup_failure_summary=""
+          if [ "$cleanup_result" != "success" ]; then
+            cleanup_failure_summary="Launchplane=${LAUNCHPLANE_OUTCOME:-skipped}; Destroy=${DESTROY_STATUS:-not reported}"
+            if [ -n "$ERROR_MESSAGE" ]; then
+              cleanup_failure_summary="$cleanup_failure_summary; Error=$ERROR_MESSAGE"
+            fi
+          fi
+          cleanup_failure_summary="${cleanup_failure_summary//$'\r'/ }"
+          cleanup_failure_summary="${cleanup_failure_summary//$'\n'/ }"
+          {
+            echo "cleanup_result=$cleanup_result"
+            echo "cleanup_failure_summary=$cleanup_failure_summary"
+          } >>"$GITHUB_OUTPUT"
+
+  preview-destroy-feedback:
+    if: >-
+      ${{
+        always() &&
+        needs.validate.outputs.operation == 'destroy' &&
+        needs.preview-destroy.result != 'skipped' &&
+        (needs.preview-destroy.result == 'success' || needs.preview-destroy.result == 'failure')
+      }}
+    needs:
+      - validate
+      - preview-destroy
+    permissions:
+      contents: read
+      id-token: write
+    uses: cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      mode: cleanup
+      anchor_pr_number: ${{ inputs.pr_number }}
+      anchor_pr_url: ${{ needs.validate.outputs.pr_url }}
+      cleanup_result: ${{ needs.preview-destroy.outputs.cleanup_result || needs.preview-destroy.result }}
+      cleanup_failure_summary: ${{ needs.preview-destroy.outputs.cleanup_failure_summary }}
+      launchplane_url: ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}

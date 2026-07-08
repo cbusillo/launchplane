@@ -567,6 +567,14 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
                 self.assertNotIn("runs-on:\n      - self-hosted", workflow_text)
 
+        preview_workflow = Path(".github/workflows/reusable-odoo-preview.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("runs_on:", preview_workflow)
+        self.assertIn("runs-on: ${{ fromJSON(inputs.runs_on) }}", preview_workflow)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", preview_workflow)
+        self.assertNotIn("runs-on:\n      - self-hosted", preview_workflow)
+
     def test_odoo_website_bootstrap_override_requires_explicit_target_inputs(self) -> None:
         workflow_text = Path(".github/workflows/odoo-website-bootstrap-override.yml").read_text(
             encoding="utf-8"
@@ -647,6 +655,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
             Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
+            Path(".github/workflows/reusable-odoo-preview.yml"),
         )
 
         for workflow_path in workflow_paths:
@@ -658,6 +667,97 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                     "inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL", workflow_text
                 )
                 self.assertIn("audience: ${{ inputs.launchplane_audience }}", workflow_text)
+
+    def test_reusable_odoo_preview_owns_preview_request_chain(self) -> None:
+        workflow_path = Path(".github/workflows/reusable-odoo-preview.yml")
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+
+        self.assertIn("name: Reusable Odoo Preview", workflow_text)
+        self.assertIn("workflow_call:", workflow_text)
+        self.assertIn("product:", workflow_text)
+        self.assertIn("context:", workflow_text)
+        self.assertIn("operation:", workflow_text)
+        self.assertIn("pr_number:", workflow_text)
+        self.assertIn("runs_on:", workflow_text)
+        self.assertIn("runs-on: ${{ fromJSON(inputs.runs_on) }}", workflow_text)
+        self.assertIn("operation must be refresh or destroy.", workflow_text)
+        self.assertIn("product must be a single slug value.", workflow_text)
+        self.assertIn("context must be a single slug value.", workflow_text)
+        self.assertIn("pr_url must be a single-line value.", workflow_text)
+        self.assertIn("source_git_ref is required for Odoo preview.", workflow_text)
+        self.assertIn("needs.validate.outputs.operation == 'refresh'", workflow_text)
+        self.assertIn("needs.validate.outputs.operation == 'destroy'", workflow_text)
+        self.assertIn("needs.validate.outputs.pr_url", workflow_text)
+        self.assertIn("needs.validate.outputs.source_git_ref", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main",
+            workflow_text,
+        )
+        self.assertEqual(workflow_text.count("          request-kind: artifact-publish-inputs"), 1)
+        self.assertEqual(workflow_text.count("          request-kind: preview-apply-inputs"), 2)
+        self.assertEqual(workflow_text.count("          request-kind: preview-apply\n"), 2)
+        self.assertIn("steps.publish_inputs_request.outputs.route-path", workflow_text)
+        self.assertIn("steps.dry_run_request.outputs.payload-json-files", workflow_text)
+        self.assertIn("steps.launchplane_request.outputs.idempotency-key", workflow_text)
+        self.assertIn("image_repository=result.image_repository", workflow_text)
+        self.assertIn("preview_slug=result.preview_slug", workflow_text)
+        self.assertIn("refresh_image_reference", workflow_text)
+        self.assertIn("cleanup_failure_summary", workflow_text)
+        self.assertIn("preview-refresh-feedback:", workflow_text)
+        self.assertIn("preview-destroy-feedback:", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@main",
+            workflow_text,
+        )
+        self.assertIn("source_access_probe_repository", workflow_text)
+        self.assertIn('default: ""', workflow_text)
+        self.assertIn(
+            "No source access probe repository configured; skipping probe.", workflow_text
+        )
+        self.assertIn("tenant_repository must match the caller repository.", workflow_text)
+        self.assertIn("tenant_path must be a single relative directory name.", workflow_text)
+        self.assertIn("source_git_ref must be a single-line ref.", workflow_text)
+        self.assertIn("source_git_ref contains unsupported characters.", workflow_text)
+        self.assertIn("odoo-devkit", workflow_text)
+        self.assertIn("odoo-shared-addons", workflow_text)
+        self.assertIn("odoo-preview-publish-inputs.json", workflow_text)
+        self.assertIn("odoo-preview-artifact.json", workflow_text)
+        self.assertIn("odoo-preview-dry-run.json", workflow_text)
+        self.assertIn("odoo-preview-destroy-dry-run.json", workflow_text)
+        self.assertIn("trap 'rm -f", workflow_text)
+        self.assertIn(
+            "(needs.preview-refresh.result == 'success' || needs.preview-refresh.result == 'failure')",
+            workflow_text,
+        )
+        self.assertIn(
+            "(needs.preview-destroy.result == 'success' || needs.preview-destroy.result == 'failure')",
+            workflow_text,
+        )
+        self.assertIn("uses: actions/checkout@v6", workflow_text)
+        self.assertIn("source_git_ref is required for Odoo preview destroy.", workflow_text)
+        self.assertIn("timeout-ms: ${{ inputs['timeout-ms'] }}", workflow_text)
+        self.assertIn("failure_summary=\"${failure_summary//$'\\r'/ }\"", workflow_text)
+        self.assertIn(
+            "cleanup_failure_summary=\"${cleanup_failure_summary//$'\\n'/ }\"",
+            workflow_text,
+        )
+        self.assertNotIn("node --input-type=module", workflow_text)
+        self.assertNotIn("route-path: /v1/drivers/odoo/preview-apply", workflow_text)
+        self.assertNotIn("route-path: /v1/drivers/odoo/artifact-publish-inputs", workflow_text)
+        self.assertNotIn("odoo-preview-apply:", workflow_text)
+        self.assertNotIn("odoo-preview-apply-inputs:", workflow_text)
+        self.assertNotIn("odoo-artifact-publish-inputs:", workflow_text)
+        self.assertNotIn("disable_odoo_online", workflow_text)
+        self.assertNotIn("devkit_repository:", workflow_text)
+        self.assertNotIn("shared_addons_repository:", workflow_text)
+        self.assertNotIn("repository: cbusillo/odoo-devkit", workflow_text)
+        self.assertNotIn("repository: cbusillo/odoo-shared-addons", workflow_text)
+        self.assertNotIn("preview-slug: pr-", workflow_text)
+        self.assertNotIn("${{ runner.temp }}/${{ inputs.context }}", workflow_text)
+        self.assertNotIn("${CONTEXT_NAME}-isolated-preview", workflow_text)
+        self.assertNotIn(
+            "INPUT_SOURCE_GIT_REF: ${{ inputs.source_git_ref || github.sha }}", workflow_text
+        )
 
     def test_odoo_driver_route_smoke_proves_public_and_oidc_paths(self) -> None:
         workflow_text = Path(".github/workflows/odoo-driver-route-smoke.yml").read_text(
