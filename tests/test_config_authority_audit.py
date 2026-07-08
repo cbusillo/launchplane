@@ -2523,6 +2523,28 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
 
+    def test_product_legacy_context_cleanup_request_mechanics_are_path_scoped(
+        self,
+    ) -> None:
+        path = ".github/workflows/product-legacy-context-cleanup.yml"
+        for key, value in (
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("payload-file", "launchplane-product-legacy-context-cleanup-payload.json"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/generic-workflow.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
     def test_product_driver_reusable_workflow_mechanics_are_path_scoped(
         self,
     ) -> None:
