@@ -142,9 +142,7 @@ concurrency:
 
 jobs:
   setup:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       MODE: ${{ inputs.mode }}
@@ -173,27 +171,6 @@ jobs:
       CONFIRMATION: ${{ inputs.confirmation }}
       REASON: ${{ inputs.reason }}
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Resolve service endpoint
-        id: service
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
-          origin="${LAUNCHPLANE_URL%/}"
-          without_scheme="${origin#*://}"
-          audience="${without_scheme%%/*}"
-          audience="${audience%%:*}"
-          if [ -z "$audience" ] || [ "$audience" = "$origin" ]; then
-            echo "LAUNCHPLANE_URL must be an absolute URL." >&2
-            exit 1
-          fi
-          {
-            echo "origin=$origin"
-            echo "audience=$audience"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Validate apply guard
         if: env.MODE == 'apply'
         shell: bash
@@ -241,24 +218,11 @@ jobs:
             exit 1
           fi
 
-      - name: Request target setup
-        env:
-          SERVICE_ORIGIN: ${{ steps.service.outputs.origin }}
-          SERVICE_AUDIENCE: ${{ steps.service.outputs.audience }}
+      - name: Prepare target setup request
+        id: request
         shell: bash
         run: |
           set -euo pipefail
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
-            | jq -r '.value'
-          })"
-          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
-            echo "GitHub OIDC token response did not include a token value." >&2
-            exit 1
-          fi
-
           domains_json="$({
             jq -Rsc '
               split(",")
@@ -320,8 +284,13 @@ jobs:
             )"
           fi
           if [ -n "$(printf '%s' "$DEPLOY_TIMEOUT_SECONDS" | xargs)" ]; then
+            deploy_timeout_seconds="$(printf '%s' "$DEPLOY_TIMEOUT_SECONDS" | xargs)"
+            if ! [[ "$deploy_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+              echo "deploy_timeout_seconds must be a positive integer." >&2
+              exit 1
+            fi
             payload="$(
-              jq --argjson timeout "$DEPLOY_TIMEOUT_SECONDS" \
+              jq --argjson timeout "$deploy_timeout_seconds" \
                 '.deploy_timeout_seconds = $timeout' <<< "$payload"
             )"
           fi
@@ -341,20 +310,30 @@ jobs:
           idempotency_key="dokploy-target-setup:${OPERATION}:"
           idempotency_key+="${CONTEXT}:${INSTANCE}:"
           idempotency_key+="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
-          status_code="$({
-            curl -sS \
-              -o dokploy-target-setup.json \
-              -w '%{http_code}' \
-              -X POST \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H 'Content-Type: application/json' \
-              -H "Idempotency-Key: ${idempotency_key}" \
-              --data "$payload" \
-              "${SERVICE_ORIGIN%/}/v1/dokploy-targets/setup"
-          })"
+          printf '%s\n' "$payload" > dokploy-target-setup-payload.json
+          printf 'idempotency_key=%s\n' "$idempotency_key" >> "$GITHUB_OUTPUT"
+
+      - name: Request Launchplane target setup
+        id: target_setup_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/dokploy-targets/setup
+          payload-file: dokploy-target-setup-payload.json
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          fail-result-paths: ""
+          response-output-file: dokploy-target-setup.json
+
+      - name: Check target setup response
+        shell: bash
+        env:
+          SETUP_STATUS_CODE: ${{ steps.target_setup_request.outputs.status-code }}
+        run: |
+          set -euo pipefail
           jq . dokploy-target-setup.json
-          if [ "$status_code" != "202" ]; then
-            echo "Dokploy target setup failed with HTTP ${status_code}." >&2
+          if [ "$SETUP_STATUS_CODE" != "202" ]; then
+            echo "Dokploy target setup failed with HTTP ${SETUP_STATUS_CODE}." >&2
             exit 1
           fi
 
@@ -364,7 +343,7 @@ jobs:
         with:
           name: dokploy-target-setup-result
           path: dokploy-target-setup.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Summarize setup
         if: always()

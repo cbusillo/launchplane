@@ -177,6 +177,7 @@ WORKFLOW_OPERATOR_INPUT_VALUE_KEYS = frozenset(
         "EDGE_ENDPOINT_KEY",
         "ENVIRONMENT_ID",
         "ENVIRONMENT_NAME",
+        "EXPECTED_CURRENT_PROVIDER_TARGET_JSON",
         "HEALTHCHECK_PATH",
         "INSTANCE",
         "MODE",
@@ -743,6 +744,13 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "${{ env.PRODUCT }}:${{ env.CONTEXT_NAME }}",
             )
         ),
+    },
+    ".github/workflows/dokploy-target-setup.yml": {
+        "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
+        "fail-result-paths": frozenset(('""',)),
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "payload-file": frozenset(("dokploy-target-setup-payload.json",)),
+        "response-output-file": frozenset(("dokploy-target-setup.json",)),
     },
     ".github/workflows/odoo-config-parameter-override.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
