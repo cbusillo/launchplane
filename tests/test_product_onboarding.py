@@ -589,6 +589,17 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("odoo-tenant-opw:opw:prod", workflow_text)
         self.assertNotIn("writes only cm/testing", workflow_text)
 
+    def test_odoo_website_bootstrap_override_prevalidates_route_paths(self) -> None:
+        workflow_text = Path(".github/workflows/odoo-website-bootstrap-override.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("website_bootstrap_payload must be a JSON object", workflow_text)
+        self.assertIn("homepage_url must be empty or a local Odoo route path", workflow_text)
+        self.assertIn("routes[].url values must be empty or local Odoo route paths", workflow_text)
+        self.assertIn('startswith("/")', workflow_text)
+        self.assertIn('startswith("//") | not', workflow_text)
+
     def test_launchplane_workflows_do_not_hardcode_public_service_defaults(self) -> None:
         workflow_dir = Path(".github/workflows")
         forbidden_literals = (
