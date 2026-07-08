@@ -462,6 +462,14 @@ summaries, derives the canonical `ready`, `failed`, `destroyed`, or
 feedback workflow. Product repos should not copy status selection, feedback
 route payloads, feedback markers, or idempotency-key logic.
 
+Odoo tenant preview workflows that still call Odoo driver routes directly should
+use `setup-odoo-preview-request-client@main` with `request-kind` set to
+`artifact-publish-inputs`, `preview-apply-inputs`, or `preview-apply` before
+calling `launchplane-request`. The action owns the route path, JSON payload
+shape, JSON-file binding list, fail-result paths, response output path, and
+run-scoped idempotency key. Tenant workflows supply only primitive product,
+context, PR, source, manifest, dry-run plan, and smoke/wait facts.
+
 These reusable workflows intentionally do not accept provider targets, target
 ids, health URLs, preview URLs, feedback markdown, record ids, managed secrets,
 runtime environment values, or idempotency keys. Launchplane derives or records
