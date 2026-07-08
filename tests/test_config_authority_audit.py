@@ -1472,7 +1472,15 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "launchplane-url",
             ),
             (
+                ".github/workflows/reusable-generic-web-prod-rollback.yml",
+                "launchplane-url",
+            ),
+            (
                 ".github/workflows/reusable-generic-web-preview-verification.yml",
+                "launchplane-url",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-stable-verification.yml",
                 "launchplane-url",
             ),
         ):
@@ -1805,14 +1813,24 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@main",
             ),
             (
-                ".github/workflows/reusable-generic-web-preview-verification.yml",
-                "verification.timeout_seconds",
-                "${{ inputs['timeout-seconds'] }}",
+                ".github/workflows/preview.yml",
+                "uses",
+                "cbusillo/launchplane/.github/workflows/reusable-generic-web-prod-rollback.yml@main",
             ),
             (
-                ".github/workflows/reusable-generic-web-preview-verification.yml",
-                "verification.checked_urls",
-                "${{ inputs.checked_urls }}",
+                ".github/workflows/preview.yml",
+                "uses",
+                "cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-verification.yml@main",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-prod-rollback.yml",
+                "generic_web_rollback_plan_id",
+                "${{ steps.lp.outputs.generic_web_rollback_plan_id }}",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-stable-verification.yml",
+                "deployment_health_status",
+                "${{ steps.lp.outputs.deployment_health_status }}",
             ),
             (
                 ".github/workflows/reusable-generic-web-preview-verification.yml",
@@ -2380,6 +2398,81 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         value=value,
                     ),
                     "thin_connector_input",
+                )
+
+    def test_generic_web_rollback_and_stable_verification_defaults_are_thin_connector_inputs(
+        self,
+    ) -> None:
+        cases = (
+            (
+                ".github/workflows/reusable-generic-web-prod-rollback.yml",
+                "inputs.backup_required.default",
+                "false",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-prod-rollback.yml",
+                "inputs.instance.default",
+                "prod",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-prod-rollback.yml",
+                "inputs.no_cache.default",
+                "false",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-prod-rollback.yml",
+                "inputs.timeout-ms.default",
+                "1800000",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-prod-rollback.yml",
+                "inputs.timeout-seconds.default",
+                "null",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-prod-rollback.yml",
+                "inputs.verify_health.default",
+                "true",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-stable-verification.yml",
+                "inputs.checked_urls.default",
+                "[]",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-stable-verification.yml",
+                "inputs.health_payload.default",
+                "null",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-stable-verification.yml",
+                "inputs.instance.default",
+                "testing",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-stable-verification.yml",
+                "inputs.timeout-ms.default",
+                "300000",
+            ),
+            (
+                ".github/workflows/reusable-generic-web-stable-verification.yml",
+                "inputs.timeout-seconds.default",
+                "null",
+            ),
+        )
+        for path, key, value in cases:
+            with self.subTest(path=path, key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/generic-workflow.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
                 )
 
     def test_preview_feedback_status_workflow_mechanics_are_thin_connector_inputs(

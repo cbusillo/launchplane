@@ -134,7 +134,11 @@ outputs:
     description: Dynamic output exposed by output-paths.
   deployment_record_id:
     description: Dynamic output exposed by output-paths.
+  deployment_health_status:
+    description: Dynamic output exposed by output-paths.
   deployment_status:
+    description: Dynamic output exposed by output-paths.
+  deploy_status:
     description: Dynamic output exposed by output-paths.
   destination_health_status:
     description: Dynamic output exposed by output-paths.
@@ -145,6 +149,10 @@ outputs:
   image_repository:
     description: Dynamic output exposed by output-paths.
   image_tag:
+    description: Dynamic output exposed by output-paths.
+  inventory_record_id:
+    description: Dynamic output exposed by output-paths.
+  generic_web_rollback_plan_id:
     description: Dynamic output exposed by output-paths.
   operation_id:
     description: Dynamic output exposed by output-paths.
@@ -161,6 +169,8 @@ outputs:
   preview_slug:
     description: Dynamic output exposed by output-paths.
   promotion_record_id:
+    description: Dynamic output exposed by output-paths.
+  promotion_health_status:
     description: Dynamic output exposed by output-paths.
   promotion_status:
     description: Dynamic output exposed by output-paths.

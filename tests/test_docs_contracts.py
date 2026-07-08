@@ -121,8 +121,17 @@ class DocsContractsTests(TestCase):
         promotion_workflow = Path(
             ".github/workflows/reusable-generic-web-prod-promotion.yml"
         ).read_text(encoding="utf-8")
+        rollback_workflow = Path(
+            ".github/workflows/reusable-generic-web-prod-rollback.yml"
+        ).read_text(encoding="utf-8")
         preview_workflow = Path(
             ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
+        ).read_text(encoding="utf-8")
+        preview_verification_workflow = Path(
+            ".github/workflows/reusable-generic-web-preview-verification.yml"
+        ).read_text(encoding="utf-8")
+        stable_verification_workflow = Path(
+            ".github/workflows/reusable-generic-web-stable-verification.yml"
         ).read_text(encoding="utf-8")
         preview_feedback_status_workflow = Path(
             ".github/workflows/reusable-preview-feedback-status.yml"
@@ -135,10 +144,17 @@ class DocsContractsTests(TestCase):
         self.assertIn("Reusable Generic-Web Lifecycle Workflows", product_repo_contract)
         self.assertIn("reusable-generic-web-stable-deploy.yml@main", product_repo_contract)
         self.assertIn("reusable-generic-web-prod-promotion.yml@main", product_repo_contract)
+        self.assertIn("reusable-generic-web-prod-rollback.yml@main", product_repo_contract)
+        self.assertIn(
+            "reusable-generic-web-stable-verification.yml@main", product_repo_contract
+        )
         self.assertIn("reusable-generic-web-preview-lifecycle.yml@main", product_repo_contract)
+        self.assertIn("reusable-generic-web-preview-verification.yml@main", product_repo_contract)
         self.assertIn("route path, request JSON shape", product_repo_contract)
         self.assertIn("product key from the caller repository name", product_repo_contract)
         self.assertIn("`testing` stable lane", product_repo_contract)
+        self.assertIn("Production rollback uses stored Launchplane", product_repo_contract)
+        self.assertIn("Stable verification uses product-owned smoke evidence", product_repo_contract)
         self.assertIn("idempotency key", product_repo_contract)
         self.assertIn("Destroy calls set `operation: destroy`", product_repo_contract)
         self.assertIn("unsupported_notice", product_repo_contract)
@@ -175,6 +191,25 @@ class DocsContractsTests(TestCase):
         self.assertNotIn("health_url", promotion_workflow)
         self.assertNotIn("preview_url", promotion_workflow)
 
+        self.assertIn("workflow_call:", rollback_workflow)
+        self.assertIn("route-path: /v1/drivers/generic-web/prod-rollback", rollback_workflow)
+        self.assertIn("generic-web-prod-rollback", rollback_workflow)
+        self.assertIn(
+            "payload-file: .launchplane/generic-web-prod-rollback-payload.json",
+            rollback_workflow,
+        )
+        self.assertIn(
+            "ROLLBACK_DEPLOYMENT_RECORD_ID: ${{ steps.request.outputs.rollback_deployment_record_id }}",
+            rollback_workflow,
+        )
+        self.assertIn("backup_required: booleanInput('BACKUP_REQUIRED')", rollback_workflow)
+        self.assertIn("verify_health: booleanInput('VERIFY_HEALTH')", rollback_workflow)
+        self.assertIn("generic_web_rollback_plan_id", rollback_workflow)
+        self.assertNotIn("target_id", rollback_workflow)
+        self.assertNotIn("provider_target", rollback_workflow)
+        self.assertNotIn("health_url", rollback_workflow)
+        self.assertNotIn("preview_url", rollback_workflow)
+
         self.assertIn("workflow_call:", preview_workflow)
         self.assertIn("operation:", preview_workflow)
         self.assertIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', preview_workflow)
@@ -198,6 +233,76 @@ class DocsContractsTests(TestCase):
         self.assertNotIn("provider_target", preview_workflow)
         self.assertNotIn("feedback_markdown", preview_workflow)
 
+        self.assertIn("workflow_call:", preview_verification_workflow)
+        self.assertIn(
+            "route-path: /v1/drivers/generic-web/preview-verification",
+            preview_verification_workflow,
+        )
+        self.assertIn("generic-web-preview-verification", preview_verification_workflow)
+        self.assertIn('ANCHOR_REPO="$GITHUB_REPOSITORY"', preview_verification_workflow)
+        self.assertIn("skipped|neutral", preview_verification_workflow)
+        self.assertIn(
+            "payload-file: .launchplane/generic-web-preview-verification-payload.json",
+            preview_verification_workflow,
+        )
+        self.assertIn(
+            "anchor_repo: process.env.ANCHOR_REPO",
+            preview_verification_workflow,
+        )
+        self.assertIn(
+            "checked_urls: jsonInput('CHECKED_URLS', [])",
+            preview_verification_workflow,
+        )
+        self.assertIn(
+            "failure_summary: process.env.FAILURE_SUMMARY ?? ''",
+            preview_verification_workflow,
+        )
+        self.assertIn(
+            "error_message=result.error_message",
+            preview_verification_workflow,
+        )
+        self.assertNotIn("payload-fields:", preview_verification_workflow)
+        self.assertNotIn("target_id", preview_verification_workflow)
+        self.assertNotIn("provider_target", preview_verification_workflow)
+        self.assertNotIn("health_url", preview_verification_workflow)
+        self.assertNotIn("preview_url", preview_verification_workflow)
+
+        self.assertIn("workflow_call:", stable_verification_workflow)
+        self.assertIn(
+            "route-path: /v1/drivers/generic-web/stable-verification",
+            stable_verification_workflow,
+        )
+        self.assertIn("generic-web-stable-verification", stable_verification_workflow)
+        self.assertIn(
+            "payload-file: .launchplane/generic-web-stable-verification-payload.json",
+            stable_verification_workflow,
+        )
+        self.assertIn(
+            "DEPLOYMENT_RECORD_ID: ${{ steps.request.outputs.deployment_record_id }}",
+            stable_verification_workflow,
+        )
+        self.assertIn(
+            "checked_urls: jsonInput('CHECKED_URLS', [])",
+            stable_verification_workflow,
+        )
+        self.assertIn(
+            "health_payload: jsonInput('HEALTH_PAYLOAD', null)",
+            stable_verification_workflow,
+        )
+        self.assertIn(
+            "failure_summary: process.env.FAILURE_SUMMARY ?? ''",
+            stable_verification_workflow,
+        )
+        self.assertIn("skipped|neutral", stable_verification_workflow)
+        self.assertIn(
+            "deployment_health_status=result.deployment_health_status",
+            stable_verification_workflow,
+        )
+        self.assertNotIn("target_id", stable_verification_workflow)
+        self.assertNotIn("provider_target", stable_verification_workflow)
+        self.assertNotIn("health_url", stable_verification_workflow)
+        self.assertNotIn("preview_url", stable_verification_workflow)
+
         self.assertIn("workflow_call:", preview_feedback_status_workflow)
         self.assertIn("mode:", preview_feedback_status_workflow)
         self.assertIn(
@@ -216,7 +321,10 @@ class DocsContractsTests(TestCase):
 
         self.assertIn("Reusable Generic Web Stable Deploy", repo_metadata)
         self.assertIn("Reusable Generic Web Prod Promotion", repo_metadata)
+        self.assertIn("Reusable Generic Web Prod Rollback", repo_metadata)
+        self.assertIn("Reusable Generic Web Stable Verification", repo_metadata)
         self.assertIn("Reusable Generic Web Preview Lifecycle", repo_metadata)
+        self.assertIn("Reusable Generic Web Preview Verification", repo_metadata)
         self.assertIn("using: node24", preview_prepare_action)
         self.assertIn("preview-prepare-client.mjs", preview_prepare_action)
 

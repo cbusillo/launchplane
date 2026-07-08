@@ -440,6 +440,45 @@ jobs:
       source_git_ref: ${{ github.sha }}
 ```
 
+Production rollback uses stored Launchplane deployment evidence rather than
+product-provided provider targets:
+
+```yaml
+jobs:
+  launchplane-prod-rollback:
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-prod-rollback.yml@main
+    with:
+      rollback_deployment_record_id: ${{ inputs.rollback_deployment_record_id }}
+      backup_record_id: ${{ inputs.backup_record_id }}
+```
+
+The rollback workflow calls `/v1/drivers/generic-web/prod-rollback`, derives the
+product key from the caller repository name by default, and owns the backup gate,
+health-verification, deploy-timeout, no-cache, idempotency, result-status, and
+output mapping mechanics. Product repos pass only the rollback deployment record
+ID, optional backup record ID, and primitive policy toggles.
+
+Stable verification uses product-owned smoke evidence to update Launchplane
+health records without mutating provider state:
+
+```yaml
+jobs:
+  launchplane-stable-verification:
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-verification.yml@main
+    with:
+      context: ${{ vars.LAUNCHPLANE_CONTEXT }}
+      deployment_record_id: ${{ needs.deploy.outputs.deployment_record_id }}
+      verification_status: ${{ needs.smoke.result }}
+      verified_at: ${{ steps.clock.outputs.verified_at }}
+```
+
+The stable verification workflow calls
+`/v1/drivers/generic-web/stable-verification`, normalizes common success/failure
+status words, accepts optional checked URL and health payload JSON, and exposes
+deployment, inventory, promotion, and health-status record outputs. Product repos
+do not submit provider targets, health URLs, deployment health record IDs,
+promotion health record IDs, or idempotency keys.
+
 Preview refresh, destroy, and unsupported-notice handoff use:
 
 ```yaml
@@ -471,6 +510,14 @@ summaries, derives the canonical `ready`, `failed`, `destroyed`, or
 `cleanup_failed` status, and delegates delivery to the reusable Launchplane PR
 feedback workflow. Product repos should not copy status selection, feedback
 route payloads, feedback markers, or idempotency-key logic.
+
+Product workflows that smoke a generic-web preview after refresh should call
+`cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@main`.
+That wrapper submits product-owned smoke evidence to
+`/v1/drivers/generic-web/preview-verification`, defaults the anchor repository
+to the full caller `owner/repo` slug, normalizes skipped or neutral smoke jobs to
+failure evidence, and maps service errors through the shared request-action
+`error_message` output.
 
 Odoo tenant preview workflows that still call Odoo driver routes directly should
 use `setup-odoo-preview-request-client@main` with `request-kind` set to

@@ -1,5 +1,5 @@
 ---
-name: Reusable Generic Web Preview Verification
+name: Reusable Generic Web Stable Verification
 
 "on":
   workflow_call:
@@ -11,22 +11,22 @@ name: Reusable Generic Web Preview Verification
         default: ""
         type: string
       context:
-        description: >-
-          Optional preview context compatibility override. Omit to let Launchplane
-          derive the preview context from the product profile.
-        required: false
-        default: ""
-        type: string
-      anchor_repo:
-        description: >-
-          Owner/repository slug used by Launchplane preview records. Defaults
-          to the caller repository.
-        required: false
-        default: ""
-        type: string
-      anchor_pr_number:
-        description: Pull request number that owns the preview.
+        description: Stable Launchplane lane context.
         required: true
+        type: string
+      instance:
+        description: Stable Launchplane lane instance. Defaults to testing.
+        required: false
+        default: testing
+        type: string
+      deployment_record_id:
+        description: Launchplane deployment record ID to update.
+        required: true
+        type: string
+      promotion_record_id:
+        description: Optional Launchplane promotion record ID to update.
+        required: false
+        default: ""
         type: string
       verification_status:
         description: Product smoke verification status.
@@ -43,6 +43,11 @@ name: Reusable Generic Web Preview Verification
         type: string
       timeout-seconds:
         description: Timeout used for checked URLs, when supplied.
+        required: false
+        default: "null"
+        type: string
+      health_payload:
+        description: Optional JSON health payload captured by product smoke.
         required: false
         default: "null"
         type: string
@@ -69,30 +74,48 @@ name: Reusable Generic Web Preview Verification
         default: ""
         type: string
     outputs:
+      deployment_record_id:
+        description: Launchplane deployment record ID.
+        value: ${{ jobs.stable-verification.outputs.deployment_record_id }}
+      inventory_record_id:
+        description: Launchplane inventory record ID, when updated.
+        value: ${{ jobs.stable-verification.outputs.inventory_record_id }}
+      promotion_record_id:
+        description: Launchplane promotion record ID, when updated.
+        value: ${{ jobs.stable-verification.outputs.promotion_record_id }}
+      deployment_health_status:
+        description: Deployment health evidence status.
+        value: ${{ jobs.stable-verification.outputs.deployment_health_status }}
+      promotion_health_status:
+        description: Promotion health evidence status, when updated.
+        value: ${{ jobs.stable-verification.outputs.promotion_health_status }}
       error_message:
         description: Launchplane verification error message, when present.
-        value: ${{ jobs.verification.outputs.error_message }}
-      verification_status:
-        description: Generic-web preview verification status.
-        value: ${{ jobs.verification.outputs.verification_status }}
+        value: ${{ jobs.stable-verification.outputs.error_message }}
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
-  verification:
+  stable-verification:
     outputs:
+      deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
+      inventory_record_id: ${{ steps.lp.outputs.inventory_record_id }}
+      promotion_record_id: ${{ steps.lp.outputs.promotion_record_id }}
+      deployment_health_status: ${{ steps.lp.outputs.deployment_health_status }}
+      promotion_health_status: ${{ steps.lp.outputs.promotion_health_status }}
       error_message: ${{ steps.lp.outputs.error_message }}
-      verification_status: ${{ steps.lp.outputs.verification_status }}
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve Launchplane preview verification request
+      - name: Resolve Launchplane stable verification request
         id: request
         env:
-          ANCHOR_PR_NUMBER: ${{ inputs.anchor_pr_number }}
-          ANCHOR_REPO: ${{ inputs.anchor_repo }}
+          CONTEXT: ${{ inputs.context }}
+          DEPLOYMENT_RECORD_ID: ${{ inputs.deployment_record_id }}
+          INSTANCE: ${{ inputs.instance }}
           PRODUCT: ${{ inputs.product }}
+          PROMOTION_RECORD_ID: ${{ inputs.promotion_record_id }}
           VERIFICATION_STATUS: ${{ inputs.verification_status }}
           VERIFIED_AT: ${{ inputs.verified_at }}
         run: |
@@ -100,8 +123,8 @@ jobs:
           if [ -z "$PRODUCT" ]; then
             PRODUCT="${GITHUB_REPOSITORY#*/}"
           fi
-          if [ -z "$ANCHOR_REPO" ]; then
-            ANCHOR_REPO="$GITHUB_REPOSITORY"
+          if [ -z "$INSTANCE" ]; then
+            INSTANCE="testing"
           fi
           VERIFICATION_STATUS="$(printf '%s' "$VERIFICATION_STATUS" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
           case "$VERIFICATION_STATUS" in
@@ -116,46 +139,41 @@ jobs:
               exit 1
               ;;
           esac
-          for required in PRODUCT ANCHOR_REPO ANCHOR_PR_NUMBER VERIFIED_AT; do
+          for required in PRODUCT CONTEXT INSTANCE DEPLOYMENT_RECORD_ID VERIFIED_AT; do
             if [ -z "${!required}" ]; then
               echo "${required} is required." >&2
               exit 1
             fi
           done
-          case "$ANCHOR_PR_NUMBER" in
-            ''|*[!0-9]*)
-              echo "ANCHOR_PR_NUMBER must be a positive integer." >&2
-              exit 1
-              ;;
-          esac
-          if [ "$ANCHOR_PR_NUMBER" -lt 1 ]; then
-            echo "ANCHOR_PR_NUMBER must be a positive integer." >&2
-            exit 1
-          fi
           run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
           {
-            echo "anchor_pr_number=$ANCHOR_PR_NUMBER"
-            echo "anchor_repo=$ANCHOR_REPO"
-            printf '%s=%s:%s:pr-%s:%s:%s\n' \
-              idempotency_key \
-              generic-web-preview-verification \
-              "$PRODUCT" \
-              "$ANCHOR_PR_NUMBER" \
-              "$VERIFICATION_STATUS" \
-              "$run_scope"
+            echo "context=$CONTEXT"
+            echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
+            echo "instance=$INSTANCE"
             echo "product=$PRODUCT"
+            echo "promotion_record_id=$PROMOTION_RECORD_ID"
             echo "verification_status=$VERIFICATION_STATUS"
             echo "verified_at=$VERIFIED_AT"
+            printf '%s=%s:%s:%s:%s:%s:%s\n' \
+              idempotency_key \
+              generic-web-stable-verification \
+              "$PRODUCT" \
+              "$CONTEXT" \
+              "$INSTANCE" \
+              "$DEPLOYMENT_RECORD_ID" \
+              "$run_scope"
           } >>"$GITHUB_OUTPUT"
 
-      - name: Write Launchplane generic-web preview verification payload
+      - name: Write Launchplane generic-web stable verification payload
         env:
-          ANCHOR_PR_NUMBER: ${{ steps.request.outputs.anchor_pr_number }}
-          ANCHOR_REPO: ${{ steps.request.outputs.anchor_repo }}
           CHECKED_URLS: ${{ inputs.checked_urls }}
-          CONTEXT: ${{ inputs.context }}
+          CONTEXT: ${{ steps.request.outputs.context }}
+          DEPLOYMENT_RECORD_ID: ${{ steps.request.outputs.deployment_record_id }}
           FAILURE_SUMMARY: ${{ inputs.failure_summary }}
+          HEALTH_PAYLOAD: ${{ inputs.health_payload }}
+          INSTANCE: ${{ steps.request.outputs.instance }}
           PRODUCT: ${{ steps.request.outputs.product }}
+          PROMOTION_RECORD_ID: ${{ steps.request.outputs.promotion_record_id }}
           TIMEOUT_SECONDS: ${{ inputs['timeout-seconds'] }}
           VERIFICATION_STATUS: ${{ steps.request.outputs.verification_status }}
           VERIFIED_AT: ${{ steps.request.outputs.verified_at }}
@@ -185,50 +203,62 @@ jobs:
             }
           }
 
-          const anchorPrNumber = Number(process.env.ANCHOR_PR_NUMBER);
-          if (!Number.isInteger(anchorPrNumber) || anchorPrNumber < 1) {
-            throw new Error('ANCHOR_PR_NUMBER must be a positive integer.');
-          }
-
           const payload = {
             schema_version: 1,
             product: process.env.PRODUCT,
             verification: {
               schema_version: 1,
-              context: process.env.CONTEXT ?? '',
-              anchor_repo: process.env.ANCHOR_REPO,
-              anchor_pr_number: anchorPrNumber,
+              context: process.env.CONTEXT,
+              instance: process.env.INSTANCE,
+              deployment_record_id: process.env.DEPLOYMENT_RECORD_ID,
+              promotion_record_id: process.env.PROMOTION_RECORD_ID ?? '',
               verification_status: process.env.VERIFICATION_STATUS,
               verified_at: process.env.VERIFIED_AT,
               checked_urls: jsonInput('CHECKED_URLS', []),
               timeout_seconds: optionalIntegerInput('TIMEOUT_SECONDS'),
+              health_payload: jsonInput('HEALTH_PAYLOAD', null),
               failure_summary: process.env.FAILURE_SUMMARY ?? '',
             },
           };
           fs.writeFileSync(
-            '.launchplane/generic-web-preview-verification-payload.json',
+            '.launchplane/generic-web-stable-verification-payload.json',
             `${JSON.stringify(payload)}\n`,
             'utf8',
           );
           NODE
 
-      - name: Request Launchplane generic-web preview verification
+      - name: Request Launchplane generic-web stable verification
         id: lp
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
           audience: ${{ inputs.launchplane_audience }}
-          route-path: /v1/drivers/generic-web/preview-verification
-          payload-file: .launchplane/generic-web-preview-verification-payload.json
+          route-path: /v1/drivers/generic-web/stable-verification
+          payload-file: .launchplane/generic-web-stable-verification-payload.json
           idempotency-key: ${{ steps.request.outputs.idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
-          fail-result-paths: result.verification_status
+          fail-result-paths: >-
+            result.deployment_health_status,result.promotion_health_status
           output-paths: >-
             trace_id=trace_id,
-            verification_status=result.verification_status,
+            deployment_record_id=records.deployment_record_id,
+            inventory_record_id=records.inventory_record_id,
+            promotion_record_id=records.promotion_record_id,
+            deployment_health_status=result.deployment_health_status,
+            promotion_health_status=result.promotion_health_status,
             error_message=result.error_message
 
       - name: Report verification result
+        env:
+          DEPLOYMENT_HEALTH_STATUS: ${{ steps.lp.outputs.deployment_health_status }}
+          DEPLOYMENT_RECORD_ID: ${{ steps.lp.outputs.deployment_record_id }}
+          INVENTORY_RECORD_ID: ${{ steps.lp.outputs.inventory_record_id }}
+          PROMOTION_HEALTH_STATUS: ${{ steps.lp.outputs.promotion_health_status }}
+          PROMOTION_RECORD_ID: ${{ steps.lp.outputs.promotion_record_id }}
         run: |
-          echo "verification_status=${{ steps.lp.outputs.verification_status }}"
+          echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
+          echo "inventory_record_id=$INVENTORY_RECORD_ID"
+          echo "promotion_record_id=$PROMOTION_RECORD_ID"
+          echo "deployment_health_status=$DEPLOYMENT_HEALTH_STATUS"
+          echo "promotion_health_status=$PROMOTION_HEALTH_STATUS"
