@@ -139,6 +139,7 @@ jobs:
           fi
 
       - name: Upload override result
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: odoo-website-bootstrap-override-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}

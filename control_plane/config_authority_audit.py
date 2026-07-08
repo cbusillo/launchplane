@@ -746,6 +746,12 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
             )
         ),
     },
+    ".github/workflows/odoo-config-parameter-override.yml": {
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "payload-file": frozenset(
+            (".launchplane/odoo-config-parameter-override-payload.json",)
+        ),
+    },
     ".github/workflows/odoo-target-replacement-plan.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
         "payload-file": frozenset(

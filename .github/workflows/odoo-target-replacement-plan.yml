@@ -137,6 +137,7 @@ jobs:
           fi
 
       - name: Upload replacement plan
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: odoo-target-replacement-plan
