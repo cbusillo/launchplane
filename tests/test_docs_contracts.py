@@ -257,9 +257,10 @@ class DocsContractsTests(TestCase):
         self.assertIn("should not own Launchplane route construction", product_repo_contract)
         self.assertIn("preserves explicit driver", product_repo_contract)
         self.assertIn("post-deploy phases", product_repo_contract)
-        self.assertIn("defaults to `driver: odoo`", product_repo_contract)
+        self.assertIn("must pass\n`driver: odoo`", product_repo_contract)
         self.assertIn(
-            "same explicit `product`, `context`, `instance`, and `phase`", product_repo_contract
+            "same explicit `product`, `context`, `instance`, and\n`phase`",
+            product_repo_contract,
         )
         self.assertIn("keeps the existing VeriReel", product_repo_contract)
         self.assertIn("also supports explicit", product_repo_contract)
@@ -328,8 +329,11 @@ class DocsContractsTests(TestCase):
         self.assertIn("applied_at=result.applied_at", app_maintenance_workflow)
 
         self.assertIn("workflow_call:", post_deploy_workflow)
-        self.assertIn("driver:", post_deploy_workflow)
-        self.assertIn("default: odoo", post_deploy_workflow)
+        self.assertIn(
+            "driver:\n        description: Product driver id.\n        required: true",
+            post_deploy_workflow,
+        )
+        self.assertNotIn("default: odoo", post_deploy_workflow)
         self.assertIn(
             "product:\n        description: Launchplane product key.", post_deploy_workflow
         )

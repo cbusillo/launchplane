@@ -335,9 +335,6 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/reusable-preview-feedback-status.yml": {
         "inputs.timeout-ms.default": frozenset(("300000",)),
     },
-    ".github/workflows/reusable-product-driver-post-deploy.yml": {
-        "inputs.driver.default": frozenset(("odoo",)),
-    },
     ".github/workflows/reusable-product-driver-prod-promotion.yml": {
         "inputs.driver.default": frozenset(("verireel",)),
     },

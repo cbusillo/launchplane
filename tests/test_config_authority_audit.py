@@ -2479,7 +2479,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         path = ".github/workflows/reusable-product-driver-post-deploy.yml"
         for key, value in (
             ("inputs.timeout-ms.default", "600000"),
-            ("inputs.driver.default", "odoo"),
             ("route-path", "${{ steps.request.outputs.route_path }}"),
             ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
             ("payload-fields.post_deploy.context", "${{ steps.request.outputs.context }}"),
@@ -2496,6 +2495,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("payload-fields.post_deploy.context", "prod"),
             ("payload-fields.post_deploy.instance", "testing"),
             ("payload-fields.post_deploy.phase", "deploy"),
+            ("inputs.driver.default", "odoo"),
             ("inputs.timeout-ms.default", "42"),
         ):
             with self.subTest(key=key, value=value):
