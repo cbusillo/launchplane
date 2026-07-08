@@ -227,6 +227,9 @@ class DocsContractsTests(TestCase):
         stable_deploy_workflow = Path(
             ".github/workflows/reusable-product-driver-stable-deploy.yml"
         ).read_text(encoding="utf-8")
+        testing_verification_workflow = Path(
+            ".github/workflows/reusable-product-driver-testing-verification.yml"
+        ).read_text(encoding="utf-8")
         prod_promotion_workflow = Path(
             ".github/workflows/reusable-product-driver-prod-promotion.yml"
         ).read_text(encoding="utf-8")
@@ -278,6 +281,19 @@ class DocsContractsTests(TestCase):
         self.assertIn("target_category=result.target_category", stable_deploy_workflow)
         self.assertNotIn("target_type=result.target_type", stable_deploy_workflow)
         self.assertNotIn("provider_target", stable_deploy_workflow)
+
+        self.assertIn("workflow_call:", testing_verification_workflow)
+        self.assertIn("product-driver-testing-verification \\", testing_verification_workflow)
+        self.assertIn("RUN_ATTEMPT: ${{ github.run_attempt }}", testing_verification_workflow)
+        self.assertIn('"attempt-${RUN_ATTEMPT}"', testing_verification_workflow)
+        self.assertIn(
+            "route_path=/v1/drivers/verireel/testing-verification",
+            testing_verification_workflow,
+        )
+        self.assertIn(
+            "deployment_health_status=result.deployment_health_status",
+            testing_verification_workflow,
+        )
 
         self.assertIn("workflow_call:", prod_promotion_workflow)
         self.assertIn("driver:", prod_promotion_workflow)

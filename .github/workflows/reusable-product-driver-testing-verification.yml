@@ -87,6 +87,7 @@ jobs:
           DEPLOYMENT_RECORD_ID: ${{ inputs.deployment_record_id }}
           INSTANCE: ${{ inputs.instance }}
           MIGRATION_STATUS: ${{ inputs.migration_status }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
           OWNER_ROUTES_STATUS: ${{ inputs.owner_routes_status }}
           PRODUCT: ${{ inputs.product }}
           VERIFICATION_STATUS: ${{ inputs.verification_status }}
@@ -109,7 +110,7 @@ jobs:
           done
           {
             echo "context=$CONTEXT"
-            printf '%s=%s:%s:%s:%s:%s:%s:%s:%s\n' \
+            printf '%s=%s:%s:%s:%s:%s:%s:%s:%s:%s\n' \
               idempotency_key \
               product-driver-testing-verification \
               "$PRODUCT" \
@@ -118,7 +119,8 @@ jobs:
               "$DEPLOYMENT_RECORD_ID" \
               "$MIGRATION_STATUS" \
               "$VERIFICATION_STATUS" \
-              "$OWNER_ROUTES_STATUS"
+              "$OWNER_ROUTES_STATUS" \
+              "attempt-${RUN_ATTEMPT}"
             echo "instance=$INSTANCE"
             echo "product=$PRODUCT"
             echo "route_path=/v1/drivers/verireel/testing-verification"
