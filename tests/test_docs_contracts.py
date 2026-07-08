@@ -239,7 +239,7 @@ class DocsContractsTests(TestCase):
             preview_verification_workflow,
         )
         self.assertIn("generic-web-preview-verification", preview_verification_workflow)
-        self.assertIn('ANCHOR_REPO="$GITHUB_REPOSITORY"', preview_verification_workflow)
+        self.assertIn('ANCHOR_REPO="${GITHUB_REPOSITORY#*/}"', preview_verification_workflow)
         self.assertIn("skipped|neutral", preview_verification_workflow)
         self.assertIn(
             "payload-file: .launchplane/generic-web-preview-verification-payload.json",

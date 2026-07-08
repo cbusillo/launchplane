@@ -101,7 +101,7 @@ jobs:
             PRODUCT="${GITHUB_REPOSITORY#*/}"
           fi
           if [ -z "$ANCHOR_REPO" ]; then
-            ANCHOR_REPO="$GITHUB_REPOSITORY"
+            ANCHOR_REPO="${GITHUB_REPOSITORY#*/}"
           fi
           VERIFICATION_STATUS="$(printf '%s' "$VERIFICATION_STATUS" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
           case "$VERIFICATION_STATUS" in
