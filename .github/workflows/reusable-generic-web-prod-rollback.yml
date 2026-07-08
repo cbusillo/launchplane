@@ -1,0 +1,226 @@
+---
+name: Reusable Generic Web Prod Rollback
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: >-
+          Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
+        type: string
+      instance:
+        description: Stable Launchplane lane instance. Defaults to prod.
+        required: false
+        default: prod
+        type: string
+      rollback_deployment_record_id:
+        description: Previous passing deployment record ID to roll prod back to.
+        required: true
+        type: string
+      backup_record_id:
+        description: Optional backup gate record ID required by policy.
+        required: false
+        default: ""
+        type: string
+      backup_required:
+        description: Whether rollback must prove a passing backup gate.
+        required: false
+        default: "false"
+        type: string
+      verify_health:
+        description: Whether the rollback planner requires stored health evidence.
+        required: false
+        default: "true"
+        type: string
+      timeout-seconds:
+        description: Deploy timeout in seconds, when supplied to Launchplane.
+        required: false
+        default: "null"
+        type: string
+      no_cache:
+        description: Whether the provider deploy should bypass cache.
+        required: false
+        default: "false"
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "1800000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      generic_web_rollback_plan_id:
+        description: Launchplane generic-web rollback plan ID.
+        value: ${{ jobs.prod-rollback.outputs.generic_web_rollback_plan_id }}
+      deployment_record_id:
+        description: Launchplane deployment record ID written by rollback apply.
+        value: ${{ jobs.prod-rollback.outputs.deployment_record_id }}
+      rollback_status:
+        description: Generic-web rollback status.
+        value: ${{ jobs.prod-rollback.outputs.rollback_status }}
+      deploy_status:
+        description: Underlying generic-web deploy status.
+        value: ${{ jobs.prod-rollback.outputs.deploy_status }}
+      post_deploy_status:
+        description: Product post-deploy extension status.
+        value: ${{ jobs.prod-rollback.outputs.post_deploy_status }}
+      error_message:
+        description: Launchplane driver error message, when present.
+        value: ${{ jobs.prod-rollback.outputs.error_message }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prod-rollback:
+    outputs:
+      generic_web_rollback_plan_id: ${{ steps.lp.outputs.generic_web_rollback_plan_id }}
+      deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
+      rollback_status: ${{ steps.lp.outputs.rollback_status }}
+      deploy_status: ${{ steps.lp.outputs.deploy_status }}
+      post_deploy_status: ${{ steps.lp.outputs.post_deploy_status }}
+      error_message: ${{ steps.lp.outputs.error_message }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Launchplane generic-web rollback request
+        id: request
+        env:
+          BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
+          INSTANCE: ${{ inputs.instance }}
+          PRODUCT: ${{ inputs.product }}
+          ROLLBACK_DEPLOYMENT_RECORD_ID: ${{ inputs.rollback_deployment_record_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "$INSTANCE" ]; then
+            INSTANCE="prod"
+          fi
+          for required in PRODUCT INSTANCE ROLLBACK_DEPLOYMENT_RECORD_ID; do
+            if [ -z "${!required}" ]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+          done
+          run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "backup_record_id=$BACKUP_RECORD_ID"
+            echo "instance=$INSTANCE"
+            echo "product=$PRODUCT"
+            echo "rollback_deployment_record_id=$ROLLBACK_DEPLOYMENT_RECORD_ID"
+            printf '%s=%s:%s:%s:%s:%s\n' \
+              idempotency_key \
+              generic-web-prod-rollback \
+              "$PRODUCT" \
+              "$INSTANCE" \
+              "$ROLLBACK_DEPLOYMENT_RECORD_ID" \
+              "$run_scope"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Write Launchplane generic-web rollback payload
+        env:
+          BACKUP_RECORD_ID: ${{ steps.request.outputs.backup_record_id }}
+          BACKUP_REQUIRED: ${{ inputs.backup_required }}
+          INSTANCE: ${{ steps.request.outputs.instance }}
+          NO_CACHE: ${{ inputs.no_cache }}
+          PRODUCT: ${{ steps.request.outputs.product }}
+          ROLLBACK_DEPLOYMENT_RECORD_ID: ${{ steps.request.outputs.rollback_deployment_record_id }}
+          TIMEOUT_SECONDS: ${{ inputs['timeout-seconds'] }}
+          VERIFY_HEALTH: ${{ inputs.verify_health }}
+        run: |
+          set -euo pipefail
+          mkdir -p .launchplane
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          function booleanInput(name) {
+            const value = String(process.env[name] ?? '').trim().toLowerCase();
+            if (value === 'true') return true;
+            if (value === 'false') return false;
+            throw new Error(`${name} must be true or false.`);
+          }
+
+          function optionalIntegerInput(name) {
+            const value = String(process.env[name] ?? '').trim();
+            if (!value || value.toLowerCase() === 'null') return null;
+            const parsed = Number(value);
+            if (!Number.isInteger(parsed) || parsed < 1) {
+              throw new Error(`${name} must be a positive integer or null.`);
+            }
+            return parsed;
+          }
+
+          const payload = {
+            schema_version: 1,
+            product: process.env.PRODUCT,
+            rollback: {
+              schema_version: 1,
+              product: process.env.PRODUCT,
+              instance: process.env.INSTANCE,
+              rollback_deployment_record_id: process.env.ROLLBACK_DEPLOYMENT_RECORD_ID,
+              backup_record_id: process.env.BACKUP_RECORD_ID ?? '',
+              backup_required: booleanInput('BACKUP_REQUIRED'),
+              verify_health: booleanInput('VERIFY_HEALTH'),
+              timeout_seconds: optionalIntegerInput('TIMEOUT_SECONDS'),
+              no_cache: booleanInput('NO_CACHE'),
+            },
+          };
+          fs.writeFileSync(
+            '.launchplane/generic-web-prod-rollback-payload.json',
+            `${JSON.stringify(payload)}\n`,
+            'utf8',
+          );
+          NODE
+
+      - name: Request Launchplane generic-web prod rollback
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/drivers/generic-web/prod-rollback
+          payload-file: .launchplane/generic-web-prod-rollback-payload.json
+          idempotency-key: >-
+            ${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: >-
+            result.rollback_status,result.deploy_status,
+            result.post_deploy_status
+          output-paths: >-
+            trace_id=trace_id,
+            generic_web_rollback_plan_id=records.generic_web_rollback_plan_id,
+            deployment_record_id=records.deployment_record_id,
+            rollback_status=result.rollback_status,
+            deploy_status=result.deploy_status,
+            post_deploy_status=result.post_deploy_status,
+            error_message=result.error_message
+
+      - name: Report result
+        env:
+          DEPLOYMENT_RECORD_ID: ${{ steps.lp.outputs.deployment_record_id }}
+          DEPLOY_STATUS: ${{ steps.lp.outputs.deploy_status }}
+          PLAN_ID: ${{ steps.lp.outputs.generic_web_rollback_plan_id }}
+          POST_DEPLOY_STATUS: ${{ steps.lp.outputs.post_deploy_status }}
+          ROLLBACK_STATUS: ${{ steps.lp.outputs.rollback_status }}
+        run: |
+          echo "generic_web_rollback_plan_id=$PLAN_ID"
+          echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
+          echo "rollback_status=$ROLLBACK_STATUS"
+          echo "deploy_status=$DEPLOY_STATUS"
+          echo "post_deploy_status=$POST_DEPLOY_STATUS"

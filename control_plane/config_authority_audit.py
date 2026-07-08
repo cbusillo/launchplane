@@ -328,7 +328,22 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
         "inputs.timeout-ms.default": frozenset(("1800000",)),
         "inputs.timeout-seconds.default": frozenset(("300",)),
     },
+    ".github/workflows/reusable-generic-web-prod-rollback.yml": {
+        "inputs.backup_required.default": frozenset(("false",)),
+        "inputs.instance.default": frozenset(("prod",)),
+        "inputs.no_cache.default": frozenset(("false",)),
+        "inputs.timeout-ms.default": frozenset(("1800000",)),
+        "inputs.timeout-seconds.default": frozenset(("null",)),
+        "inputs.verify_health.default": frozenset(("true",)),
+    },
     ".github/workflows/reusable-generic-web-preview-verification.yml": {
+        "inputs.timeout-ms.default": frozenset(("300000",)),
+        "inputs.timeout-seconds.default": frozenset(("null",)),
+    },
+    ".github/workflows/reusable-generic-web-stable-verification.yml": {
+        "inputs.checked_urls.default": frozenset(("[]",)),
+        "inputs.health_payload.default": frozenset(("null",)),
+        "inputs.instance.default": frozenset(("testing",)),
         "inputs.timeout-ms.default": frozenset(("300000",)),
         "inputs.timeout-seconds.default": frozenset(("null",)),
     },
@@ -397,7 +412,17 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         )
     },
+    ".github/workflows/reusable-generic-web-prod-rollback.yml": {
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
+    },
     ".github/workflows/reusable-generic-web-preview-verification.yml": {
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
+    },
+    ".github/workflows/reusable-generic-web-stable-verification.yml": {
         "launchplane-url": frozenset(
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         )
@@ -853,26 +878,60 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         ),
         "source": frozenset(("${{ needs.resolve.outputs.run_url }}",)),
     },
+    ".github/workflows/reusable-generic-web-prod-rollback.yml": {
+        "backup_record_id": frozenset(("${{ steps.request.outputs.backup_record_id }}",)),
+        "deployment_record_id": frozenset(("${{ steps.lp.outputs.deployment_record_id }}",)),
+        "deploy_status": frozenset(("${{ steps.lp.outputs.deploy_status }}",)),
+        "generic_web_rollback_plan_id": frozenset(
+            ("${{ steps.lp.outputs.generic_web_rollback_plan_id }}",)
+        ),
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "idempotency_key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "instance": frozenset(("${{ steps.request.outputs.instance }}",)),
+        "post_deploy_status": frozenset(("${{ steps.lp.outputs.post_deploy_status }}",)),
+        "product": frozenset(("${{ steps.request.outputs.product }}",)),
+        "rollback_deployment_record_id": frozenset(
+            ("${{ steps.request.outputs.rollback_deployment_record_id }}",)
+        ),
+        "rollback_status": frozenset(("${{ steps.lp.outputs.rollback_status }}",)),
+    },
     ".github/workflows/reusable-generic-web-preview-verification.yml": {
         "anchor_pr_number": frozenset(("${{ steps.request.outputs.anchor_pr_number }}",)),
         "anchor_repo": frozenset(("${{ steps.request.outputs.anchor_repo }}",)),
         "context": frozenset(("${{ inputs.context }}",)),
+        "error_message": frozenset(("${{ steps.lp.outputs.error_message }}",)),
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
         "idempotency_key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
         "product": frozenset(("${{ steps.request.outputs.product }}",)),
-        "verification.anchor_pr_number": frozenset(
-            ("${{ steps.request.outputs.anchor_pr_number }}",)
-        ),
-        "verification.anchor_repo": frozenset(("${{ steps.request.outputs.anchor_repo }}",)),
-        "verification.checked_urls": frozenset(("${{ inputs.checked_urls }}",)),
-        "verification.context": frozenset(("${{ inputs.context }}",)),
-        "verification.failure_summary": frozenset(("${{ inputs.failure_summary }}",)),
-        "verification.timeout_seconds": frozenset(("${{ inputs['timeout-seconds'] }}",)),
-        "verification.verification_status": frozenset(
-            ("${{ steps.request.outputs.verification_status }}",)
-        ),
-        "verification.verified_at": frozenset(("${{ steps.request.outputs.verified_at }}",)),
         "verification_status": frozenset(("${{ steps.lp.outputs.verification_status }}",)),
+        "verified_at": frozenset(("${{ steps.request.outputs.verified_at }}",)),
+    },
+    ".github/workflows/reusable-generic-web-stable-verification.yml": {
+        "context": frozenset(("${{ steps.request.outputs.context }}",)),
+        "deployment_health_status": frozenset(
+            ("${{ steps.lp.outputs.deployment_health_status }}",)
+        ),
+        "deployment_record_id": frozenset(
+            (
+                "${{ steps.lp.outputs.deployment_record_id }}",
+                "${{ steps.request.outputs.deployment_record_id }}",
+            )
+        ),
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "idempotency_key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "instance": frozenset(("${{ steps.request.outputs.instance }}",)),
+        "inventory_record_id": frozenset(("${{ steps.lp.outputs.inventory_record_id }}",)),
+        "product": frozenset(("${{ steps.request.outputs.product }}",)),
+        "promotion_health_status": frozenset(
+            ("${{ steps.lp.outputs.promotion_health_status }}",)
+        ),
+        "promotion_record_id": frozenset(
+            (
+                "${{ steps.lp.outputs.promotion_record_id }}",
+                "${{ steps.request.outputs.promotion_record_id }}",
+            )
+        ),
+        "verification_status": frozenset(("${{ steps.request.outputs.verification_status }}",)),
         "verified_at": frozenset(("${{ steps.request.outputs.verified_at }}",)),
     },
     ".github/workflows/public-ingress-monitor.yml": {

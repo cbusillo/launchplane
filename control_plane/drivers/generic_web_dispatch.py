@@ -327,18 +327,8 @@ def _apply_generic_web_stable_verification_records(
         request=request,
         deployment_record=deployment_record,
     )
-    updated_deployment = deployment_record.model_copy(
-        update={"destination_health": health_evidence}
-    )
-    result: dict[str, object] = dict(
-        apply_deployment_evidence(
-            record_store=evidence_store,
-            deployment_record=updated_deployment,
-        )
-    )
-    result["deployment_health_status"] = health_evidence.status
-
     promotion_record_id = request.promotion_record_id.strip()
+    promotion_record = None
     if promotion_record_id:
         try:
             promotion_record = evidence_store.read_promotion_record(promotion_record_id)
@@ -352,13 +342,23 @@ def _apply_generic_web_stable_verification_records(
             raise click.ClickException(
                 f"{label} instance does not match promotion destination instance."
             )
-        if promotion_record.deployment_record_id.strip() not in {
-            "",
-            request.deployment_record_id,
-        }:
+        if promotion_record.deployment_record_id.strip() != request.deployment_record_id:
             raise click.ClickException(
                 f"{label} deployment_record_id does not match linked promotion record."
             )
+
+    updated_deployment = deployment_record.model_copy(
+        update={"destination_health": health_evidence}
+    )
+    result: dict[str, object] = dict(
+        apply_deployment_evidence(
+            record_store=evidence_store,
+            deployment_record=updated_deployment,
+        )
+    )
+    result["deployment_health_status"] = health_evidence.status
+
+    if promotion_record is not None:
         updated_promotion = promotion_record.model_copy(
             update={"destination_health": health_evidence}
         )
