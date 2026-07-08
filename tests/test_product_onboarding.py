@@ -938,6 +938,61 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 for literal in forbidden_literals:
                     self.assertNotIn(literal, workflow_text)
 
+        provider_target_workflow = Path(
+            ".github/workflows/provider-target-operations.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("runs-on: ubuntu-latest", provider_target_workflow)
+        self.assertIn(
+            "route_matrix: ${{ steps.routes.outputs.route_matrix }}",
+            provider_target_workflow,
+        )
+        self.assertIn(
+            "route: ${{ fromJson(needs.resolve.outputs.route_matrix) }}",
+            provider_target_workflow,
+        )
+        self.assertIn("inputs.provider_id", provider_target_workflow)
+        self.assertIn("github.run_id", provider_target_workflow)
+        self.assertIn(
+            "routes_json must be a non-empty array of context/instance objects.",
+            provider_target_workflow,
+        )
+        self.assertIn("fail-fast: false", provider_target_workflow)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            provider_target_workflow,
+        )
+        self.assertIn(
+            "audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",
+            provider_target_workflow,
+        )
+        self.assertIn("route-path: /v1/provider-targets/operations", provider_target_workflow)
+        self.assertIn(
+            "payload-file: ${{ steps.request.outputs.payload_file }}",
+            provider_target_workflow,
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.request.outputs.idempotency_key }}",
+            provider_target_workflow,
+        )
+        self.assertIn("fail-result-paths: result.operation_status", provider_target_workflow)
+        self.assertIn(
+            "response-output-file: ${{ steps.request.outputs.response_file }}",
+            provider_target_workflow,
+        )
+        self.assertIn(
+            "STATUS_CODE: ${{ steps.provider_target_request.outputs.status-code }}",
+            provider_target_workflow,
+        )
+        self.assertIn('if [ "$STATUS_CODE" != "202" ]; then', provider_target_workflow)
+        self.assertIn('if [ "$operation_status" != "ok" ]; then', provider_target_workflow)
+        self.assertIn("if-no-files-found: warn", provider_target_workflow)
+        self.assertNotIn("actions/checkout", provider_target_workflow)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", provider_target_workflow)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", provider_target_workflow)
+        self.assertNotIn("Authorization: Bearer", provider_target_workflow)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", provider_target_workflow)
+        self.assertNotIn("curl ", provider_target_workflow)
+
     def test_dokploy_target_setup_workflow_supports_compose_domain_reconcile(self) -> None:
         workflow_text = Path(".github/workflows/dokploy-target-setup.yml").read_text(
             encoding="utf-8"

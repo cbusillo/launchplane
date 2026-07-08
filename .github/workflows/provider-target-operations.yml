@@ -60,47 +60,24 @@ permissions:
 concurrency:
   group: >-
     launchplane-provider-target-operations-${{ inputs.target_set }}-${{
-    inputs.context }}-${{ inputs.instance }}
+    inputs.provider_id }}-${{ inputs.target_set == 'configured-json'
+    && github.run_id || format('{0}-{1}', inputs.context, inputs.instance) }}
   cancel-in-progress: false
 
 jobs:
-  operate:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      route_matrix: ${{ steps.routes.outputs.route_matrix }}
     env:
-      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       MODE: ${{ inputs.mode }}
       TARGET_SET: ${{ inputs.target_set }}
       CONTEXT: ${{ inputs.context }}
       INSTANCE: ${{ inputs.instance }}
       ROUTES_JSON: ${{ inputs.routes_json }}
-      PROVIDER_ID: ${{ inputs.provider_id }}
       CONFIRMATION: ${{ inputs.confirmation }}
       REASON: ${{ inputs.reason }}
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Resolve service endpoint
-        id: service
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
-
-          python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
-          output_path = os.environ["GITHUB_OUTPUT"]
-          with open(output_path, "a", encoding="utf-8") as handle:
-              handle.write(f"origin={parsed.scheme}://{parsed.netloc}\n")
-              handle.write(f"audience={parsed.hostname}\n")
-          PY
-
       - name: Validate apply guard
         if: env.MODE == 'backfill-apply'
         shell: bash
@@ -116,6 +93,7 @@ jobs:
           fi
 
       - name: Resolve target routes
+        id: routes
         shell: bash
         run: |
           set -euo pipefail
@@ -141,7 +119,10 @@ jobs:
                   (.context | type == "string" and length > 0)
                   and (.instance | type == "string" and length > 0)
                 )
-              ' <<< "$ROUTES_JSON" >/dev/null
+              ' <<< "$ROUTES_JSON" >/dev/null || {
+                echo "routes_json must be a non-empty array of context/instance objects." >&2
+                exit 1
+              }
               jq '[.[] | {context, instance}]' <<< "$ROUTES_JSON" \
                 > "$routes_file"
               ;;
@@ -151,86 +132,115 @@ jobs:
               ;;
           esac
           jq . "$routes_file"
+          {
+            echo "route_matrix<<JSON"
+            jq -c '[to_entries[] | {
+              route_index:(.key | tostring),
+              context:.value.context,
+              instance:.value.instance
+            }]' "$routes_file"
+            echo "JSON"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Run provider-target operation
-        env:
-          SERVICE_ORIGIN: ${{ steps.service.outputs.origin }}
-          SERVICE_AUDIENCE: ${{ steps.service.outputs.audience }}
+      - name: Upload route evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: >-
+            provider-target-ops-${{ inputs.mode }}-${{ inputs.target_set }}-routes
+          path: provider-target-routes.json
+          if-no-files-found: warn
+
+  operate:
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        route: ${{ fromJson(needs.resolve.outputs.route_matrix) }}
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      MODE: ${{ inputs.mode }}
+      TARGET_SET: ${{ inputs.target_set }}
+      PROVIDER_ID: ${{ inputs.provider_id }}
+      REASON: ${{ inputs.reason }}
+      ROUTE_INDEX: ${{ matrix.route.route_index }}
+      ROUTE_CONTEXT: ${{ matrix.route.context }}
+      ROUTE_INSTANCE: ${{ matrix.route.instance }}
+    steps:
+      - name: Prepare provider-target request
+        id: request
         shell: bash
         run: |
           set -euo pipefail
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
-            | jq -r '.value'
-          })"
-          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
-            echo "GitHub OIDC token response did not include a token value." >&2
+          mkdir -p provider-target-operation-results
+          payload_file="provider-target-operation-results/${ROUTE_INDEX}-payload.json"
+          response_file="provider-target-operation-results/${ROUTE_INDEX}-response.json"
+          idempotency_key="provider-target:${MODE}:${PROVIDER_ID}:"
+          idempotency_key+="${ROUTE_CONTEXT}:${ROUTE_INSTANCE}"
+          idempotency_key+=":${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          jq -n \
+            --arg mode "$MODE" \
+            --arg provider_id "$PROVIDER_ID" \
+            --arg context "$ROUTE_CONTEXT" \
+            --arg instance "$ROUTE_INSTANCE" \
+            --arg reason "$REASON" \
+            '{schema_version:1,
+              mode:$mode,
+              product:"launchplane",
+              provider_id:$provider_id,
+              context:$context,
+              instance:$instance,
+              reason:$reason}' > "$payload_file"
+          {
+            printf 'idempotency_key=%s\n' "$idempotency_key"
+            printf 'payload_file=%s\n' "$payload_file"
+            printf 'response_file=%s\n' "$response_file"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Request provider-target operation
+        id: provider_target_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/provider-targets/operations
+          payload-file: ${{ steps.request.outputs.payload_file }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          fail-result-paths: result.operation_status
+          response-output-file: ${{ steps.request.outputs.response_file }}
+
+      - name: Check provider-target response
+        shell: bash
+        env:
+          RESPONSE_FILE: ${{ steps.request.outputs.response_file }}
+          STATUS_CODE: ${{ steps.provider_target_request.outputs.status-code }}
+        run: |
+          set -euo pipefail
+          jq . "$RESPONSE_FILE"
+          if [ "$STATUS_CODE" != "202" ]; then
+            printf 'Provider-target operation failed for %s/%s.\n' \
+              "$ROUTE_CONTEXT" "$ROUTE_INSTANCE" >&2
+            echo "HTTP status: ${STATUS_CODE}." >&2
             exit 1
           fi
-
-          mkdir -p provider-target-operation-results
-          jq -c '.[]' provider-target-routes.json | while read -r route; do
-            context="$(jq -r '.context' <<< "$route")"
-            instance="$(jq -r '.instance' <<< "$route")"
-            response_file="provider-target-operation-results/${context}-${instance}.json"
-            idempotency_key="provider-target:${MODE}:${PROVIDER_ID}:"
-            idempotency_key+="${context}:${instance}"
-            idempotency_key+=":${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
-            body="$({
-              jq -n \
-                --arg mode "$MODE" \
-                --arg provider_id "$PROVIDER_ID" \
-                --arg context "$context" \
-                --arg instance "$instance" \
-                --arg reason "$REASON" \
-                '{schema_version:1,
-                  mode:$mode,
-                  product:"launchplane",
-                  provider_id:$provider_id,
-                  context:$context,
-                  instance:$instance,
-                  reason:$reason}'
-            })"
-            status_code="$(curl -sS \
-              -o "$response_file" \
-              -w '%{http_code}' \
-              -X POST \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H 'Accept: application/json' \
-              -H 'Content-Type: application/json' \
-              -H "Idempotency-Key: ${idempotency_key}" \
-              --data "$body" \
-              "${SERVICE_ORIGIN%/}/v1/provider-targets/operations")"
-            jq . "$response_file"
-            if [ "$status_code" != "202" ]; then
-              printf 'Provider-target operation failed for %s/%s.\n' \
-                "$context" "$instance" >&2
-              echo "HTTP status: ${status_code}." >&2
-              exit 1
-            fi
-            operation_status="$({
-              jq -r '.result.operation_status // empty' "$response_file"
-            })"
-            if [ "$operation_status" != "ok" ]; then
-              printf 'Provider-target operation was not ok for %s/%s.\n' \
-                "$context" "$instance" >&2
-              echo "Status: ${operation_status}" >&2
-              exit 1
-            fi
-          done
+          operation_status="$(jq -r '.result.operation_status // empty' "$RESPONSE_FILE")"
+          if [ "$operation_status" != "ok" ]; then
+            printf 'Provider-target operation was not ok for %s/%s.\n' \
+              "$ROUTE_CONTEXT" "$ROUTE_INSTANCE" >&2
+            echo "Status: ${operation_status}" >&2
+            exit 1
+          fi
 
       - name: Upload operation evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: >-
-            provider-target-ops-${{ inputs.mode }}-${{ inputs.target_set }}
-          path: |
-            provider-target-routes.json
-            provider-target-operation-results/*.json
-          if-no-files-found: error
+            provider-target-ops-${{ inputs.mode }}-${{ inputs.target_set }}-${{
+            matrix.route.route_index }}
+          path: provider-target-operation-results/*.json
+          if-no-files-found: warn
 
       - name: Summarize operation
         if: always()
@@ -243,11 +253,12 @@ jobs:
             echo "- Mode: $MODE"
             echo "- Target set: $TARGET_SET"
             echo "- Provider: $PROVIDER_ID"
-            echo "- Results: provider-target-ops-${MODE}-${TARGET_SET}"
+            echo "- Route: $ROUTE_CONTEXT/$ROUTE_INSTANCE"
+            echo "- Results: provider-target-ops-${MODE}-${TARGET_SET}-${ROUTE_INDEX}"
             echo
             if compgen -G 'provider-target-operation-results/*.json' \
               > /dev/null; then
-              jq -s '[.[] | {
+              jq -s '[.[] | select(.result) | {
                 context:.result.context,
                 instance:.result.instance,
                 status:.result.operation_status,

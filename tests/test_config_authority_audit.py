@@ -2206,6 +2206,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/provider-target-operations.yml",
                 ("TARGET_SET", "${{ inputs.target_set }}"),
                 ("PROVIDER_ID", "${{ inputs.provider_id }}"),
+                ("ROUTE_CONTEXT", "${{ matrix.route.context }}"),
+                ("ROUTE_INSTANCE", "${{ matrix.route.instance }}"),
             ),
             (
                 ".github/workflows/runner-lane-registration.yml",
@@ -2365,7 +2367,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             (
                 ".github/workflows/provider-target-operations.yml",
                 "path",
-                "provider-target-routes.json provider-target-operation-results/*.json",
+                "provider-target-routes.json",
+            ),
+            (
+                ".github/workflows/provider-target-operations.yml",
+                "path",
+                "provider-target-operation-results/*.json",
             ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
@@ -2391,6 +2398,36 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             "thin_connector_input",
         )
+        for key, value in (
+            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
+            ("fail-result-paths", "result.operation_status"),
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("payload-file", "${{ steps.request.outputs.payload_file }}"),
+            ("response-output-file", "${{ steps.request.outputs.response_file }}"),
+        ):
+            with self.subTest(provider_target_mechanic=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/provider-target-operations.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("fail-result-paths", "result.operation_status"),
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+        ):
+            with self.subTest(path_scoped_provider_target_mechanic=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/generic-workflow.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
         self.assertEqual(
             _allow_reason(
                 path=".github/workflows/other.yml",
