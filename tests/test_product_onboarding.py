@@ -577,9 +577,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             workflow_text,
         )
         self.assertIn("Unsupported product driver for testing deploy", workflow_text)
-        self.assertIn(
-            "if: ${{ needs.resolve.outputs.driver == 'odoo' }}", workflow_text
-        )
+        self.assertIn("if: ${{ needs.resolve.outputs.driver == 'odoo' }}", workflow_text)
         self.assertIn("route-path: /v1/drivers/odoo/target-replacement-apply", workflow_text)
         self.assertNotIn("reusable-odoo-testing-deploy.yml", workflow_text)
         self.assertIn("PRODUCT: ${{ needs.resolve.outputs.product }}", workflow_text)
@@ -661,7 +659,11 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             ),
         }
 
-        for workflow_name, (route_path, payload_file, response_file) in workflow_expectations.items():
+        for workflow_name, (
+            route_path,
+            payload_file,
+            response_file,
+        ) in workflow_expectations.items():
             with self.subTest(workflow=workflow_name):
                 workflow_text = Path(f".github/workflows/{workflow_name}").read_text(
                     encoding="utf-8"
@@ -675,7 +677,9 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 self.assertIn(f"route-path: {route_path}", workflow_text)
                 self.assertIn(f"payload-file: {payload_file}", workflow_text)
                 self.assertIn(f"response-output-file: {response_file}", workflow_text)
-                self.assertIn("idempotency-key: ${{ steps.request.outputs.idempotency_key }}", workflow_text)
+                self.assertIn(
+                    "idempotency-key: ${{ steps.request.outputs.idempotency_key }}", workflow_text
+                )
                 self.assertIn('steps.launchplane.outputs.status-code }}" != "202"', workflow_text)
                 self.assertIn('!= "accepted"', workflow_text)
                 self.assertIn("if: always()", workflow_text)
@@ -694,6 +698,78 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             'source_label: "github-actions:odoo-config-parameter-override"',
             config_parameter_workflow,
         )
+
+        stable_bootstrap_workflow = Path(".github/workflows/odoo-stable-bootstrap.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("runs-on: ubuntu-latest", stable_bootstrap_workflow)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            stable_bootstrap_workflow,
+        )
+        self.assertIn(
+            "route-path: /v1/drivers/odoo/stable-bootstrap",
+            stable_bootstrap_workflow,
+        )
+        self.assertIn(
+            "payload-file: .launchplane/odoo-stable-bootstrap-payload.json",
+            stable_bootstrap_workflow,
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.request.outputs.idempotency_key }}",
+            stable_bootstrap_workflow,
+        )
+        self.assertIn(
+            "response-output-file: odoo-stable-bootstrap-create.json",
+            stable_bootstrap_workflow,
+        )
+        self.assertIn("poll_url=result.poll_url", stable_bootstrap_workflow)
+        self.assertIn("operation_id=result.operation_id", stable_bootstrap_workflow)
+        self.assertIn(
+            'steps.create_bootstrap.outputs.status-code }}" != "202"',
+            stable_bootstrap_workflow,
+        )
+        self.assertIn('!= "accepted"', stable_bootstrap_workflow)
+        self.assertIn(
+            "for numeric in TIMEOUT_SECONDS HEALTH_TIMEOUT_SECONDS", stable_bootstrap_workflow
+        )
+        self.assertIn("${numeric} must be a positive integer.", stable_bootstrap_workflow)
+        self.assertIn("BOOTSTRAP_POLL_URL", stable_bootstrap_workflow)
+        self.assertIn("*://* | //* | *'//'*)", stable_bootstrap_workflow)
+        self.assertIn(
+            "Odoo bootstrap poll URL must be a local Launchplane route path.",
+            stable_bootstrap_workflow,
+        )
+        self.assertIn(
+            "/v1/drivers/odoo/stable-bootstrap/operations/*)",
+            stable_bootstrap_workflow,
+        )
+        self.assertIn("method: GET", stable_bootstrap_workflow)
+        self.assertIn(
+            "route-path: ${{ steps.create_bootstrap.outputs.poll_url }}",
+            stable_bootstrap_workflow,
+        )
+        self.assertIn("poll-result-path: operation.status", stable_bootstrap_workflow)
+        self.assertIn("poll-result-statuses: pending,running", stable_bootstrap_workflow)
+        self.assertIn('fail-result-paths: ""', stable_bootstrap_workflow)
+        self.assertIn(
+            "response-output-file: odoo-stable-bootstrap.json",
+            stable_bootstrap_workflow,
+        )
+        self.assertIn(
+            'steps.poll_bootstrap.outputs.status-code }}" != "200"',
+            stable_bootstrap_workflow,
+        )
+        self.assertIn('operation_status" != "pass"', stable_bootstrap_workflow)
+        self.assertIn('bootstrap_status" != "pass"', stable_bootstrap_workflow)
+        self.assertIn('post_deploy_status" != "pass"', stable_bootstrap_workflow)
+        self.assertIn("odoo-stable-bootstrap-create.json", stable_bootstrap_workflow)
+        self.assertIn("if: always()", stable_bootstrap_workflow)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", stable_bootstrap_workflow)
+        self.assertNotIn("Authorization: Bearer", stable_bootstrap_workflow)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", stable_bootstrap_workflow)
+        self.assertNotIn("LAUNCHPLANE_SERVICE_URL", stable_bootstrap_workflow)
+        self.assertNotIn("curl ", stable_bootstrap_workflow)
 
     def test_launchplane_workflows_do_not_hardcode_public_service_defaults(self) -> None:
         workflow_dir = Path(".github/workflows")
