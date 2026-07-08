@@ -75,6 +75,12 @@ ODOO_PREVIEW_REQUIRED_ENV_KEYS = (
 ODOO_PREVIEW_ARTIFACT_PUBLISH_INPUTS_ROUTE = "/v1/drivers/odoo/artifact-publish-inputs"
 ODOO_PREVIEW_APPLY_INPUTS_ROUTE = "/v1/drivers/odoo/preview-apply-inputs"
 ODOO_PREVIEW_APPLY_ROUTE = "/v1/drivers/odoo/preview-apply"
+ODOO_PREVIEW_GENERATED_ENV_KEYS = (
+    "ODOO_DB_NAME",
+    "ODOO_DATA_VOLUME",
+    "ODOO_LOG_VOLUME",
+    "ODOO_DB_VOLUME",
+)
 
 
 class OdooPreviewTargetDiscoveryAmbiguousError(click.ClickException):
@@ -562,12 +568,7 @@ def _preview_runtime_bindings(
     )
     bindings.extend(
         OdooPreviewRuntimeBindingEvidence(key=key, source="generated")
-        for key in (
-            "ODOO_DB_NAME",
-            "ODOO_DATA_VOLUME",
-            "ODOO_LOG_VOLUME",
-            "ODOO_DB_VOLUME",
-        )
+        for key in ODOO_PREVIEW_GENERATED_ENV_KEYS
     )
     return tuple({binding.key: binding for binding in bindings}.values())
 

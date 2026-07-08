@@ -38,6 +38,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     build_odoo_preview_apply_workflow_request,
     build_odoo_preview_artifact_publish_inputs_workflow_request,
     execute_odoo_preview_dokploy_apply,
+    _preview_runtime_bindings,
     _wait_for_smoke_check,
 )
 
@@ -185,6 +186,38 @@ class _OdooApplyInputsStore:
         if limit is not None:
             return filtered[:limit]
         return filtered
+
+
+class _OdooApplyInputsStoreWithConfiguredGeneratedKey(_OdooApplyInputsStore):
+    @staticmethod
+    def list_secret_bindings(
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        bindings = (
+            *_OdooApplyInputsStore.list_secret_bindings(
+                integration=integration,
+                context_name=context_name,
+                instance_name=instance_name,
+                limit=None,
+            ),
+            SecretBinding(
+                binding_id="secret-odoo-db-name-binding",
+                secret_id="secret-odoo-db-name",
+                integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                context="cm-preview",
+                instance="testing",
+                binding_key="ODOO_DB_NAME",
+                created_at="2026-05-10T05:32:00Z",
+                updated_at="2026-05-10T05:32:00Z",
+            ),
+        )
+        if limit is not None:
+            return bindings[:limit]
+        return bindings
 
 
 def _workflow_facts(
@@ -528,6 +561,19 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertIsInstance(inputs, dict)
         self.assertNotIn("preview_slug", inputs)
         self.assertIn(":preview-42:", request.idempotency_key)
+
+    def test_runtime_binding_evidence_keeps_preview_identity_keys_generated(self) -> None:
+        bindings = _preview_runtime_bindings(
+            record_store=_OdooApplyInputsStoreWithConfiguredGeneratedKey(),
+            context_name="cm-preview",
+            instance_name="testing",
+        )
+
+        binding_sources = {binding.key: binding.source for binding in bindings}
+        self.assertEqual(binding_sources["ODOO_DB_NAME"], "generated")
+        self.assertEqual(binding_sources["ODOO_DATA_VOLUME"], "generated")
+        self.assertEqual(binding_sources["ODOO_LOG_VOLUME"], "generated")
+        self.assertEqual(binding_sources["ODOO_DB_VOLUME"], "generated")
 
     def test_apply_inputs_reuses_discovered_preview_compose_for_refresh(self) -> None:
         requests: list[dict[str, object]] = []
