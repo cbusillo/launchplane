@@ -7,10 +7,85 @@ inputs:
     description: Path where the ESM client module should be written.
     required: false
     default: .launchplane/odoo-preview-request-client.mjs
+  request-kind:
+    description: >-
+      Optional request to render: artifact-publish-inputs,
+      preview-apply-inputs, or preview-apply. When omitted, the action only
+      writes the importable client module.
+    required: false
+    default: ""
+  product:
+    description: Launchplane product key for rendered requests.
+    required: false
+    default: ""
+  context:
+    description: Launchplane Odoo preview context for rendered requests.
+    required: false
+    default: ""
+  instance:
+    description: Launchplane runtime instance for artifact publish inputs.
+    required: false
+    default: testing
+  operation:
+    description: Odoo preview operation, refresh or destroy.
+    required: false
+    default: refresh
+  pr-number:
+    description: Pull request number for rendered requests.
+    required: false
+    default: ""
+  preview-slug:
+    description: Optional preview slug token for idempotency only.
+    required: false
+    default: ""
+  source-git-ref:
+    description: Source git ref or SHA for rendered requests.
+    required: false
+    default: ""
+  source:
+    description: Optional request source for preview apply inputs.
+    required: false
+    default: ""
+  manifest-file:
+    description: Artifact manifest file path for refresh requests.
+    required: false
+    default: ""
+  dry-run-plan-file:
+    description: Dry-run plan file path for preview apply requests.
+    required: false
+    default: ""
+  wait-for-deploy:
+    description: Whether preview apply should wait for deploy completion.
+    required: false
+    default: ""
+  smoke-check:
+    description: Optional preview apply smoke-check override.
+    required: false
+    default: ""
+  run-id:
+    description: GitHub run ID for rendered request idempotency.
+    required: false
+    default: ${{ github.run_id }}
+  run-attempt:
+    description: GitHub run attempt for rendered request idempotency.
+    required: false
+    default: ${{ github.run_attempt }}
 
 outputs:
   client-path:
     description: Path to the generated ESM client module.
+  route-path:
+    description: Launchplane route path for the rendered request.
+  payload:
+    description: JSON payload for the rendered request.
+  payload-json-files:
+    description: Newline-separated payload path to JSON file bindings.
+  idempotency-key:
+    description: Idempotency key for the rendered request.
+  fail-result-paths:
+    description: Comma-separated fail-result paths for launchplane-request.
+  response-output-path:
+    description: Response output path for launchplane-request.
 
 runs:
   using: node24

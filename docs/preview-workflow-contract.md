@@ -198,12 +198,15 @@ idempotency keys for `artifact-publish-inputs`, `preview-apply-inputs`, and
 `preview-apply` are Launchplane contract fixtures. New or migrated tenant
 preview workflows should install
 `cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main`
-and import the generated ESM client to render `launchplane-request` inputs
-instead of copying inline route paths, JSON request bodies, file bindings, fail
-paths, or idempotency key templates. The generated request object exposes
-`payloadInput`, `payloadJsonFilesInput`, `failResultPathsInput`,
-`responseOutputPath`, and `idempotencyKey` fields shaped for direct handoff to
-the existing `launchplane-request` action.
+and either use its `request-kind` render mode or import the generated ESM client
+to render `launchplane-request` inputs instead of copying inline route paths,
+JSON request bodies, file bindings, fail paths, or idempotency key templates.
+Render mode accepts primitive workflow facts and emits `route-path`, `payload`,
+`payload-json-files`, `fail-result-paths`, `response-output-path`, and
+`idempotency-key` outputs shaped for direct handoff to the existing
+`launchplane-request` action. The generated request object exposes the same
+contract as `routePath`, `payloadInput`, `payloadJsonFilesInput`,
+`failResultPathsInput`, `responseOutputPath`, and `idempotencyKey` fields.
 
 Odoo CM is the exception where Launchplane now owns both the isolated provider
 apply planning inputs and the stage-preview smoke contract after refresh. Product

@@ -19,7 +19,11 @@ class OdooPreviewRequestClientActionTests(unittest.TestCase):
         )
 
     def run_setup_action(
-        self, *, output_path: Path, github_output: Path
+        self,
+        *,
+        output_path: Path,
+        github_output: Path,
+        inputs: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if shutil.which("node") is None:
             self.skipTest("node is required to test the Odoo preview request action")
@@ -27,6 +31,8 @@ class OdooPreviewRequestClientActionTests(unittest.TestCase):
         env = os.environ.copy()
         env["INPUT_OUTPUT-PATH"] = str(output_path)
         env["GITHUB_OUTPUT"] = str(github_output)
+        for name, value in (inputs or {}).items():
+            env[f"INPUT_{name.replace(' ', '_').upper()}"] = value
         return subprocess.run(
             ["node", ACTION_ENTRYPOINT.as_posix()],
             check=False,
@@ -34,6 +40,26 @@ class OdooPreviewRequestClientActionTests(unittest.TestCase):
             env=env,
             text=True,
         )
+
+    def read_outputs(self, github_output: Path) -> dict[str, str]:
+        outputs: dict[str, str] = {}
+        lines = github_output.read_text(encoding="utf-8").splitlines()
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            if "<<" in line:
+                name, delimiter = line.split("<<", 1)
+                index += 1
+                values: list[str] = []
+                while index < len(lines) and lines[index] != delimiter:
+                    values.append(lines[index])
+                    index += 1
+                outputs[name] = "\n".join(values)
+            elif "=" in line:
+                name, value = line.split("=", 1)
+                outputs[name] = value
+            index += 1
+        return outputs
 
     def run_client_script(
         self, client_path: Path, script_body: str
@@ -77,6 +103,202 @@ console.log(Object.keys(client).sort().join(','));
             self.assertIn("buildOdooPreviewArtifactPublishInputsRequest", import_result.stdout)
             self.assertIn("buildOdooPreviewApplyInputsRequest", import_result.stdout)
             self.assertIn("buildOdooPreviewApplyRequest", import_result.stdout)
+
+    def test_setup_action_renders_artifact_publish_request_outputs(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            client_path = temporary_root / "odoo-preview-client.mjs"
+            github_output = temporary_root / "github-output.txt"
+
+            result = self.run_setup_action(
+                output_path=client_path,
+                github_output=github_output,
+                inputs={
+                    "REQUEST-KIND": "artifact-publish-inputs",
+                    "PRODUCT": "odoo-tenant-cm-website",
+                    "CONTEXT": "cm_website",
+                    "PR-NUMBER": "42",
+                    "SOURCE-GIT-REF": "abc123",
+                    "RUN-ID": "456",
+                    "RUN-ATTEMPT": "2",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outputs = self.read_outputs(github_output)
+            self.assertEqual(outputs["client-path"], str(client_path))
+            self.assertEqual(outputs["route-path"], "/v1/drivers/odoo/artifact-publish-inputs")
+            self.assertEqual(outputs["fail-result-paths"], "result.input_status")
+            self.assertEqual(outputs["response-output-path"], "result")
+            self.assertEqual(
+                outputs["idempotency-key"],
+                "odoo-artifact-publish-inputs:odoo-tenant-cm-website:cm_website:testing:preview-42-run-456-attempt-2",
+            )
+            self.assertEqual(outputs["payload-json-files"], "")
+            self.assertEqual(
+                json.loads(outputs["payload"]),
+                {
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm-website",
+                    "inputs": {
+                        "schema_version": 1,
+                        "context": "cm_website",
+                        "instance": "testing",
+                        "pr_number": 42,
+                        "isolated": True,
+                        "source_git_ref": "abc123",
+                    },
+                },
+            )
+
+    def test_setup_action_renders_preview_apply_inputs_request_outputs(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            github_output = temporary_root / "github-output.txt"
+
+            result = self.run_setup_action(
+                output_path=temporary_root / "odoo-preview-client.mjs",
+                github_output=github_output,
+                inputs={
+                    "REQUEST-KIND": "preview-apply-inputs",
+                    "PRODUCT": "odoo-tenant-cm-website",
+                    "CONTEXT": "cm_website",
+                    "PR-NUMBER": "42",
+                    "PREVIEW-SLUG": "preview-42",
+                    "SOURCE-GIT-REF": "abc123",
+                    "MANIFEST-FILE": "/tmp/preview-artifact.json",
+                    "RUN-ID": "456",
+                    "RUN-ATTEMPT": "2",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outputs = self.read_outputs(github_output)
+            self.assertEqual(outputs["route-path"], "/v1/drivers/odoo/preview-apply-inputs")
+            self.assertEqual(
+                outputs["payload-json-files"], "inputs.manifest=/tmp/preview-artifact.json"
+            )
+            self.assertEqual(outputs["fail-result-paths"], "result.status")
+            self.assertEqual(outputs["response-output-path"], "result.dry_run_plan")
+            self.assertEqual(
+                outputs["idempotency-key"],
+                "odoo-preview-apply-inputs:odoo-tenant-cm-website:preview-42:abc123:inputs-run-456-attempt-2",
+            )
+            payload = json.loads(outputs["payload"])
+            self.assertNotIn("preview_slug", payload["inputs"])
+
+    def test_setup_action_renders_destroy_apply_request_outputs(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            github_output = temporary_root / "github-output.txt"
+
+            result = self.run_setup_action(
+                output_path=temporary_root / "odoo-preview-client.mjs",
+                github_output=github_output,
+                inputs={
+                    "REQUEST-KIND": "preview-apply",
+                    "PRODUCT": "odoo-tenant-cm-website",
+                    "CONTEXT": "cm_website",
+                    "OPERATION": "destroy",
+                    "PR-NUMBER": "42",
+                    "DRY-RUN-PLAN-FILE": "/tmp/destroy-dry-run.json",
+                    "WAIT-FOR-DEPLOY": "false",
+                    "SMOKE-CHECK": "false",
+                    "RUN-ID": "456",
+                    "RUN-ATTEMPT": "2",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outputs = self.read_outputs(github_output)
+            self.assertEqual(outputs["route-path"], "/v1/drivers/odoo/preview-apply")
+            self.assertEqual(
+                outputs["payload-json-files"], "apply.dry_run_plan=/tmp/destroy-dry-run.json"
+            )
+            self.assertEqual(outputs["fail-result-paths"], "result.status")
+            self.assertEqual(outputs["response-output-path"], "")
+            self.assertEqual(
+                outputs["idempotency-key"],
+                "odoo-preview-apply:odoo-tenant-cm-website:pr-42:destroy:run-456-attempt-2",
+            )
+            self.assertEqual(
+                json.loads(outputs["payload"])["apply"],
+                {"timeout_seconds": 600, "wait_for_deploy": False, "smoke_check": False},
+            )
+
+    def test_setup_action_renders_refresh_apply_request_outputs(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            github_output = temporary_root / "github-output.txt"
+
+            result = self.run_setup_action(
+                output_path=temporary_root / "odoo-preview-client.mjs",
+                github_output=github_output,
+                inputs={
+                    "REQUEST-KIND": "preview-apply",
+                    "PRODUCT": "odoo-tenant-cm-website",
+                    "CONTEXT": "cm_website",
+                    "PR-NUMBER": "42",
+                    "PREVIEW-SLUG": "preview-42",
+                    "SOURCE-GIT-REF": "abc123",
+                    "DRY-RUN-PLAN-FILE": "/tmp/dry-run.json",
+                    "MANIFEST-FILE": "/tmp/preview-artifact.json",
+                    "RUN-ID": "456",
+                    "RUN-ATTEMPT": "2",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outputs = self.read_outputs(github_output)
+            self.assertEqual(outputs["route-path"], "/v1/drivers/odoo/preview-apply")
+            self.assertEqual(
+                outputs["payload-json-files"],
+                "apply.dry_run_plan=/tmp/dry-run.json\napply.manifest=/tmp/preview-artifact.json",
+            )
+            self.assertEqual(outputs["fail-result-paths"], "result.status")
+            self.assertEqual(outputs["response-output-path"], "")
+            self.assertEqual(
+                outputs["idempotency-key"],
+                "odoo-preview-apply:odoo-tenant-cm-website:preview-42:refresh:run-456-attempt-2",
+            )
+            self.assertEqual(
+                json.loads(outputs["payload"]),
+                {
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm-website",
+                    "apply": {"timeout_seconds": 600, "wait_for_deploy": True},
+                },
+            )
+
+    def test_setup_action_rejects_unknown_request_kind(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            result = self.run_setup_action(
+                output_path=Path(temporary_directory) / "odoo-preview-client.mjs",
+                github_output=Path(temporary_directory) / "out",
+                inputs={"REQUEST-KIND": "preview-url"},
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("request-kind must be", result.stderr)
+
+    def test_setup_action_render_mode_rejects_missing_required_facts(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            result = self.run_setup_action(
+                output_path=Path(temporary_directory) / "odoo-preview-client.mjs",
+                github_output=Path(temporary_directory) / "out",
+                inputs={
+                    "REQUEST-KIND": "preview-apply-inputs",
+                    "PRODUCT": "odoo-tenant-cm-website",
+                    "CONTEXT": "cm_website",
+                    "PR-NUMBER": "42",
+                    "SOURCE-GIT-REF": "abc123",
+                    "RUN-ID": "456",
+                    "RUN-ATTEMPT": "2",
+                },
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refresh apply inputs require manifestFile", result.stderr)
 
     def test_client_builds_artifact_publish_inputs_request(self) -> None:
         with TemporaryDirectory() as temporary_directory:
