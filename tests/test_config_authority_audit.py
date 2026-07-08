@@ -2468,6 +2468,26 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         for key, value in (
+            ("audience", "${{ env.LAUNCHPLANE_AUDIENCE }}"),
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("payload-file", "${{ steps.request.outputs.request_file }}"),
+            (
+                "response-output-file",
+                "launchplane-preview-lifecycle-sweep-response.json",
+            ),
+            ("route-path", "/v1/previews/lifecycle-sweep"),
+        ):
+            with self.subTest(preview_lifecycle_mechanic=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/preview-lifecycle.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
             ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
             ("fail-result-paths", '""'),
             ("method", "GET"),
@@ -2490,6 +2510,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("log-response-body", '"false"'),
             ("response-output-file", "dokploy-target-inspect-response.json"),
             ("response-output-file", "ingress-route-audit-read-raw.json"),
+            ("response-output-file", "launchplane-preview-lifecycle-sweep-response.json"),
             ("response-output-file", "launchplane-work-graph-snapshot.json"),
         ):
             with self.subTest(path_scoped_provider_target_mechanic=key):
