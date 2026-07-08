@@ -592,12 +592,6 @@ WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
 WORKFLOW_JQ_OPERATOR_FIELD_PATH_KEYS = {
     ".github/workflows/edge-endpoint-apply.yml": frozenset(("endpoint_key",)),
     ".github/workflows/odoo-config-parameter-override.yml": frozenset(("key",)),
-    ".github/workflows/product-context-cutover.yml": frozenset(
-        ("source_context", "target_context")
-    ),
-    ".github/workflows/product-legacy-context-cleanup.yml": frozenset(
-        ("source_context", "target_context")
-    ),
     ".github/workflows/provider-target-operations.yml": frozenset(
         ("context", "instance", "provider_id")
     ),
@@ -773,6 +767,10 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     ".github/workflows/odoo-website-bootstrap-override.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
         "payload-file": frozenset((".launchplane/odoo-website-bootstrap-override-payload.json",)),
+    },
+    ".github/workflows/product-context-cutover.yml": {
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "payload-file": frozenset(("launchplane-product-context-cutover-payload.json",)),
     },
     ".github/workflows/product-legacy-context-cleanup.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),

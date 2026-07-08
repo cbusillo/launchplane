@@ -1305,6 +1305,56 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
         self.assertEqual(inputs_section.count("        description:"), 6)
 
+    def test_product_context_cutover_uses_launchplane_request(self) -> None:
+        workflow_text = Path(".github/workflows/product-context-cutover.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn(
+            "route-path: /v1/product-profiles/context-cutover/apply",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-file: launchplane-product-context-cutover-payload.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.request.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: launchplane-product-context-cutover.json",
+            workflow_text,
+        )
+        self.assertIn('mode="apply"', workflow_text)
+        self.assertIn('mode="dry-run"', workflow_text)
+        self.assertIn('--arg product "$PRODUCT"', workflow_text)
+        self.assertIn('--arg source_context "$SOURCE_CONTEXT"', workflow_text)
+        self.assertIn('--arg target_context "$TARGET_CONTEXT"', workflow_text)
+        self.assertIn('--arg display_name "$DISPLAY_NAME"', workflow_text)
+        self.assertIn('--arg mode "$mode"', workflow_text)
+        self.assertIn("product: $product", workflow_text)
+        self.assertIn("source_context: $source_context", workflow_text)
+        self.assertIn("target_context: $target_context", workflow_text)
+        self.assertIn("display_name: $display_name", workflow_text)
+        self.assertIn("mode: $mode", workflow_text)
+        self.assertIn('source_label: "workflow:product-context-cutover"', workflow_text)
+        self.assertIn("if: always()", workflow_text)
+        self.assertIn(
+            "CUTOVER_STATUS_CODE: ${{ steps.cutover_request.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn('if [ "$CUTOVER_STATUS_CODE" != "202" ]; then', workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
+
     def test_product_legacy_context_cleanup_uses_launchplane_request(self) -> None:
         workflow_text = Path(".github/workflows/product-legacy-context-cleanup.yml").read_text(
             encoding="utf-8"
