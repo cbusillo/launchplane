@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane.dokploy import JsonObject
+from control_plane.dokploy import JsonObject, JsonValue
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewProviderCapabilities,
@@ -75,6 +75,10 @@ ODOO_PREVIEW_REQUIRED_ENV_KEYS = (
 ODOO_PREVIEW_ARTIFACT_PUBLISH_INPUTS_ROUTE = "/v1/drivers/odoo/artifact-publish-inputs"
 ODOO_PREVIEW_APPLY_INPUTS_ROUTE = "/v1/drivers/odoo/preview-apply-inputs"
 ODOO_PREVIEW_APPLY_ROUTE = "/v1/drivers/odoo/preview-apply"
+
+
+class OdooPreviewTargetDiscoveryAmbiguousError(click.ClickException):
+    pass
 
 
 class OdooPreviewWorkflowRequest(BaseModel):
@@ -380,6 +384,7 @@ def build_odoo_preview_apply_inputs(
     )
     target: OdooPreviewRuntimeTargetEvidence | None = None
     discovery_error = ""
+    block_discovery_error = False
     try:
         target = _discover_odoo_preview_target(
             control_plane_root=control_plane_root,
@@ -389,8 +394,12 @@ def build_odoo_preview_apply_inputs(
             compose_name=compose_name,
             database_url=database_url,
         )
+    except OdooPreviewTargetDiscoveryAmbiguousError as exc:
+        discovery_error = str(exc)
+        block_discovery_error = True
     except click.ClickException as exc:
         discovery_error = str(exc)
+        block_discovery_error = request.operation == "destroy"
     runtime_plan = plan_odoo_preview_runtime(
         request=OdooPreviewRuntimePlanRequest(
             operation=request.operation,
@@ -416,7 +425,7 @@ def build_odoo_preview_apply_inputs(
                 message=preview_url_error,
             ),
         )
-    if discovery_error and request.operation == "destroy":
+    if discovery_error and block_discovery_error:
         runtime_plan = _with_runtime_blocker(
             runtime_plan=runtime_plan,
             blocker=OdooPreviewRuntimeBlocker(
@@ -475,7 +484,11 @@ def build_odoo_preview_apply_inputs(
 
 
 def _needs_preview_environment_id(runtime_plan: OdooPreviewRuntimePlan) -> bool:
-    return runtime_plan.operation == "refresh" and runtime_plan.target is None
+    return (
+        runtime_plan.status == "ready"
+        and runtime_plan.operation == "refresh"
+        and runtime_plan.target is None
+    )
 
 
 def _preview_slug(
@@ -689,7 +702,7 @@ def _discover_odoo_preview_target(
                 token=token,
             )
     if len(matches) > 1:
-        raise click.ClickException(
+        raise OdooPreviewTargetDiscoveryAmbiguousError(
             f"Discovered multiple Odoo preview composes named {compose_name!r}; refusing to plan mutation."
         )
     if matches:
@@ -796,14 +809,20 @@ def _iter_dokploy_composes(raw_projects: object) -> tuple[JsonObject, ...]:
 
 
 def _iter_dokploy_search_composes(raw_search_matches: object) -> tuple[JsonObject, ...]:
+    search_items: list[JsonValue]
     if isinstance(raw_search_matches, list):
-        search_items = raw_search_matches
+        search_items = cast(list[JsonValue], raw_search_matches)
     elif isinstance(raw_search_matches, dict):
         search_items = []
         for key in ("composes", "items", "results", "data"):
             value = raw_search_matches.get(key)
-            if isinstance(value, list):
-                search_items.extend(value)
+            if isinstance(value, list) and value:
+                json_values = cast(list[JsonValue], value)
+                if search_items and json_values != search_items:
+                    raise OdooPreviewTargetDiscoveryAmbiguousError(
+                        "Dokploy compose search returned ambiguous result envelopes."
+                    )
+                search_items = json_values
     else:
         raise click.ClickException("Dokploy compose search returned an invalid response payload.")
 
@@ -1073,7 +1092,7 @@ def build_odoo_preview_dokploy_dry_run(
                 "Odoo preview Dokploy dry-run requires a preview URL with a hostname.",
             )
         )
-    if runtime_plan.operation == "refresh" and runtime_plan.target is None:
+    if _needs_preview_environment_id(runtime_plan):
         if not request.environment_id:
             blockers.append(
                 _blocker(
