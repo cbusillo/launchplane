@@ -748,21 +748,21 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     },
     ".github/workflows/odoo-config-parameter-override.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
-        "payload-file": frozenset(
-            (".launchplane/odoo-config-parameter-override-payload.json",)
-        ),
+        "payload-file": frozenset((".launchplane/odoo-config-parameter-override-payload.json",)),
+    },
+    ".github/workflows/odoo-stable-bootstrap.yml": {
+        "fail-result-paths": frozenset(('""',)),
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "payload-file": frozenset((".launchplane/odoo-stable-bootstrap-payload.json",)),
+        "route-path": frozenset(("${{ steps.create_bootstrap.outputs.poll_url }}",)),
     },
     ".github/workflows/odoo-target-replacement-plan.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
-        "payload-file": frozenset(
-            (".launchplane/odoo-target-replacement-plan-payload.json",)
-        ),
+        "payload-file": frozenset((".launchplane/odoo-target-replacement-plan-payload.json",)),
     },
     ".github/workflows/odoo-website-bootstrap-override.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
-        "payload-file": frozenset(
-            (".launchplane/odoo-website-bootstrap-override-payload.json",)
-        ),
+        "payload-file": frozenset((".launchplane/odoo-website-bootstrap-override-payload.json",)),
     },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "DEFAULT_REPOSITORY": frozenset(("${{ github.repository }}",)),
@@ -940,9 +940,7 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "instance": frozenset(("${{ steps.request.outputs.instance }}",)),
         "inventory_record_id": frozenset(("${{ steps.lp.outputs.inventory_record_id }}",)),
         "product": frozenset(("${{ steps.request.outputs.product }}",)),
-        "promotion_health_status": frozenset(
-            ("${{ steps.lp.outputs.promotion_health_status }}",)
-        ),
+        "promotion_health_status": frozenset(("${{ steps.lp.outputs.promotion_health_status }}",)),
         "promotion_record_id": frozenset(
             (
                 "${{ steps.lp.outputs.promotion_record_id }}",

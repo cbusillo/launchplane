@@ -56,9 +56,7 @@ concurrency:
 
 jobs:
   bootstrap:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     env:
       PRODUCT: ${{ inputs.product }}
       CONTEXT: ${{ inputs.context }}
@@ -69,10 +67,6 @@ jobs:
       VERIFY_LOGO: ${{ inputs.verify_logo }}
       TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
       HEALTH_TIMEOUT_SECONDS: ${{ inputs.health_timeout_seconds }}
-      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-      POLL_INTERVAL_SECONDS: "15"
-      POLL_TIMEOUT_SECONDS: "3600"
     steps:
       - name: Validate runtime inputs
         shell: bash
@@ -88,149 +82,152 @@ jobs:
               exit 1
             fi
           done
-          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ]; then
-            echo 'Missing Launchplane service URL repository variable.' >&2
-            exit 1
-          fi
-          if [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
-            LAUNCHPLANE_SERVICE_AUDIENCE="$({
-              python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
+          for scalar in PRODUCT CONTEXT INSTANCE CONFIRMATION TIMEOUT_SECONDS HEALTH_TIMEOUT_SECONDS; do
+            case "${!scalar}" in
+              *$'\n'*)
+                echo "${scalar} must be a single-line value." >&2
+                exit 1
+                ;;
+            esac
+          done
+          for numeric in TIMEOUT_SECONDS HEALTH_TIMEOUT_SECONDS; do
+            if [ -n "${!numeric}" ]; then
+              case "${!numeric}" in
+                *[!0-9]*)
+                  echo "${numeric} must be a positive integer." >&2
+                  exit 1
+                  ;;
+              esac
+              if [ "${!numeric}" -lt 1 ]; then
+                echo "${numeric} must be a positive integer." >&2
+                exit 1
+              fi
+            fi
+          done
 
-          parsed = urlsplit(os.environ["LAUNCHPLANE_SERVICE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_SERVICE_URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-            })"
-          fi
-          echo "LAUNCHPLANE_SERVICE_AUDIENCE=${LAUNCHPLANE_SERVICE_AUDIENCE}" >>"$GITHUB_ENV"
-
-      - name: Create and poll bootstrap operation
+      - name: Write bootstrap request payload
+        id: request
         shell: bash
         run: |
           set -euo pipefail
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
-            | jq -r '.value'
-          })"
-          payload="$({
-            jq -n \
-              --arg product "$PRODUCT" \
-              --arg context "$CONTEXT" \
-              --arg instance "$INSTANCE" \
-              --arg confirmation "$CONFIRMATION" \
-              --argjson verify_health "$VERIFY_HEALTH" \
-              --argjson verify_canonical "$VERIFY_CANONICAL" \
-              --argjson verify_logo "$VERIFY_LOGO" \
-              '{
+          mkdir -p .launchplane
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg instance "$INSTANCE" \
+            --arg confirmation "$CONFIRMATION" \
+            --argjson verify_health "$VERIFY_HEALTH" \
+            --argjson verify_canonical "$VERIFY_CANONICAL" \
+            --argjson verify_logo "$VERIFY_LOGO" \
+            '{
+              schema_version: 1,
+              product: $product,
+              bootstrap: {
                 schema_version: 1,
                 product: $product,
-                bootstrap: {
-                  schema_version: 1,
-                  product: $product,
-                  context: $context,
-                  instance: $instance,
-                  confirmation: $confirmation,
-                  verify_health: $verify_health,
-                  verify_canonical: $verify_canonical,
-                  verify_logo: $verify_logo
-                }
-              }'
-          })"
+                context: $context,
+                instance: $instance,
+                confirmation: $confirmation,
+                verify_health: $verify_health,
+                verify_canonical: $verify_canonical,
+                verify_logo: $verify_logo
+              }
+            }' > .launchplane/odoo-stable-bootstrap-payload.json
           if [ -n "${TIMEOUT_SECONDS:-}" ]; then
-            payload="$(
-              jq \
-                --argjson timeout_seconds "$TIMEOUT_SECONDS" \
-                '.bootstrap.timeout_seconds = $timeout_seconds' \
-                <<<"$payload"
-            )"
+            tmp_payload="$(mktemp)"
+            jq \
+              --argjson timeout_seconds "$TIMEOUT_SECONDS" \
+              '.bootstrap.timeout_seconds = $timeout_seconds' \
+              .launchplane/odoo-stable-bootstrap-payload.json > "$tmp_payload"
+            mv "$tmp_payload" .launchplane/odoo-stable-bootstrap-payload.json
           fi
           if [ -n "${HEALTH_TIMEOUT_SECONDS:-}" ]; then
-            payload="$(
-              jq \
-                --argjson health_timeout_seconds "$HEALTH_TIMEOUT_SECONDS" \
-                '.bootstrap.health_timeout_seconds = $health_timeout_seconds' \
-                <<<"$payload"
-            )"
+            tmp_payload="$(mktemp)"
+            jq \
+              --argjson health_timeout_seconds "$HEALTH_TIMEOUT_SECONDS" \
+              '.bootstrap.health_timeout_seconds = $health_timeout_seconds' \
+              .launchplane/odoo-stable-bootstrap-payload.json > "$tmp_payload"
+            mv "$tmp_payload" .launchplane/odoo-stable-bootstrap-payload.json
           fi
-          idempotency_key="$({
-            printf '%s' \
-              "odoo-stable-bootstrap:${PRODUCT}:${CONTEXT}:${INSTANCE}:" \
-              "${VERIFY_HEALTH}:${VERIFY_CANONICAL}:${VERIFY_LOGO}:" \
-              "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
-          })"
-          status_code="$({
-            curl -sS \
-              -o odoo-stable-bootstrap.json \
-              -w '%{http_code}' \
-              -X POST \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H 'Content-Type: application/json' \
-              -H "Idempotency-Key: ${idempotency_key}" \
-              --data "$payload" \
-              "${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo/stable-bootstrap"
-          })"
-          if [ "$status_code" != "202" ]; then
+          printf 'idempotency_key=%s\n' \
+            "odoo-stable-bootstrap:${PRODUCT}:${CONTEXT}:${INSTANCE}:${VERIFY_HEALTH}:${VERIFY_CANONICAL}:${VERIFY_LOGO}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+            >>"$GITHUB_OUTPUT"
+
+      - name: Create bootstrap operation
+        id: create_bootstrap
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/drivers/odoo/stable-bootstrap
+          payload-file: .launchplane/odoo-stable-bootstrap-payload.json
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          output-paths: >-
+            poll_url=result.poll_url,operation_id=result.operation_id
+          response-output-file: odoo-stable-bootstrap-create.json
+
+      - name: Verify bootstrap operation create response
+        env:
+          BOOTSTRAP_OPERATION_ID: ${{ steps.create_bootstrap.outputs.operation_id }}
+          BOOTSTRAP_POLL_URL: ${{ steps.create_bootstrap.outputs.poll_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq . odoo-stable-bootstrap-create.json
+          if [ "${{ steps.create_bootstrap.outputs.status-code }}" != "202" ]; then
             echo 'Launchplane Odoo stable bootstrap operation create failed' \
-              "with HTTP ${status_code}." >&2
-            cat odoo-stable-bootstrap.json >&2
+              "with HTTP ${{ steps.create_bootstrap.outputs.status-code }}." >&2
             exit 1
           fi
-          poll_url="$(
-            jq -r '.result.poll_url // empty' odoo-stable-bootstrap.json
-          )"
-          operation_id="$({
-            jq -r \
-              '.records.odoo_stable_bootstrap_operation_id //
-               .result.operation_id //
-               empty' \
-              odoo-stable-bootstrap.json
-          })"
-          if [ -z "$poll_url" ] || [ -z "$operation_id" ]; then
+          if [ "$(jq -r '.status' odoo-stable-bootstrap-create.json)" != "accepted" ]; then
+            echo 'Launchplane Odoo stable bootstrap operation was not accepted.' >&2
+            exit 1
+          fi
+          if [ -z "$BOOTSTRAP_POLL_URL" ] || [ -z "$BOOTSTRAP_OPERATION_ID" ]; then
             echo 'Odoo bootstrap response missing poll metadata.' >&2
-            jq . odoo-stable-bootstrap.json >&2
+            jq . odoo-stable-bootstrap-create.json >&2
             exit 1
           fi
-          deadline=$((SECONDS + POLL_TIMEOUT_SECONDS))
-          while true; do
-            status_code="$({
-              curl -sS \
-                -o odoo-stable-bootstrap.json \
-                -w '%{http_code}' \
-                -H "Authorization: Bearer ${oidc_token}" \
-                "${LAUNCHPLANE_SERVICE_URL}${poll_url}"
-            })"
-            if [ "$status_code" != "200" ]; then
-              echo 'Launchplane Odoo stable bootstrap operation poll failed' \
-                "with HTTP ${status_code}." >&2
-              cat odoo-stable-bootstrap.json >&2
+          case "$BOOTSTRAP_POLL_URL" in
+            *$'\n'* | *://* | //* | *'//'*)
+              echo 'Odoo bootstrap poll URL must be a local Launchplane route path.' >&2
+              jq . odoo-stable-bootstrap-create.json >&2
               exit 1
-            fi
-            operation_status="$(
-              jq -r '.operation.status // empty' odoo-stable-bootstrap.json
-            )"
-            operation_phase="$(
-              jq -r '.operation.phase // empty' odoo-stable-bootstrap.json
-            )"
-            echo 'Odoo stable bootstrap operation:' \
-              "status=${operation_status} phase=${operation_phase}"
-            if [ "$operation_status" = "pass" ] || \
-              [ "$operation_status" = "fail" ]; then
-              break
-            fi
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo 'Launchplane Odoo stable bootstrap operation' \
-                "${operation_id} timed out while polling." >&2
-              jq . odoo-stable-bootstrap.json >&2
+              ;;
+            /v1/drivers/odoo/stable-bootstrap/operations/*)
+              ;;
+            *)
+              echo 'Odoo bootstrap poll URL used an unexpected route path.' >&2
+              jq . odoo-stable-bootstrap-create.json >&2
               exit 1
-            fi
-            sleep "$POLL_INTERVAL_SECONDS"
-          done
+              ;;
+          esac
+
+      - name: Poll bootstrap operation
+        id: poll_bootstrap
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.create_bootstrap.outputs.poll_url }}
+          poll-result-path: operation.status
+          poll-result-statuses: pending,running
+          poll-interval-ms: 15000
+          poll-timeout-ms: 3600000
+          fail-result-paths: ""
+          response-output-file: odoo-stable-bootstrap.json
+
+      - name: Verify bootstrap operation result
+        shell: bash
+        run: |
+          set -euo pipefail
           jq . odoo-stable-bootstrap.json
+          if [ "${{ steps.poll_bootstrap.outputs.status-code }}" != "200" ]; then
+            echo 'Launchplane Odoo stable bootstrap operation poll failed' \
+              "with HTTP ${{ steps.poll_bootstrap.outputs.status-code }}." >&2
+            exit 1
+          fi
           operation_status="$(
             jq -r '.operation.status // ""' odoo-stable-bootstrap.json
           )"
@@ -319,5 +316,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: odoo-stable-bootstrap-result
-          path: odoo-stable-bootstrap.json
+          path: |
+            odoo-stable-bootstrap-create.json
+            odoo-stable-bootstrap.json
           if-no-files-found: ignore
