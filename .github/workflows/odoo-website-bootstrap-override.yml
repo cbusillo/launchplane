@@ -20,7 +20,7 @@ name: Odoo Website Bootstrap Override
           - testing
           - prod
       website_bootstrap_payload:
-        description: Website bootstrap JSON object rendered from the tenant bootstrap settings.
+        description: Website bootstrap JSON object rendered from tenant bootstrap settings; homepage and route URLs must be local Odoo route paths.
         required: true
         type: string
 
@@ -71,7 +71,28 @@ jobs:
             })"
           fi
           echo "LAUNCHPLANE_SERVICE_AUDIENCE=${LAUNCHPLANE_SERVICE_AUDIENCE}" >>"$GITHUB_ENV"
-          jq -e 'type == "object"' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null
+          if ! jq -e 'type == "object"' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
+            echo 'website_bootstrap_payload must be a JSON object.' >&2
+            exit 1
+          fi
+          if ! jq -e '
+            def local_route_path:
+              type == "string" and
+              (. == "" or (startswith("/") and (startswith("//") | not)));
+            (.homepage_url // "") | local_route_path
+          ' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
+            echo 'website_bootstrap.homepage_url must be empty or a local Odoo route path.' >&2
+            exit 1
+          fi
+          if ! jq -e '
+            def local_route_path:
+              type == "string" and
+              (. == "" or (startswith("/") and (startswith("//") | not)));
+            all((.routes // [])[]?; (.url // "") | local_route_path)
+          ' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
+            echo 'website_bootstrap.routes[].url values must be empty or local Odoo route paths.' >&2
+            exit 1
+          fi
 
       - name: Write website bootstrap override
         shell: bash

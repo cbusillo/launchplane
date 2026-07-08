@@ -871,11 +871,14 @@ run` is the foreground loop intended for an external process supervisor, and
   including site identity, canonical URL, logo path, source metadata, and route
   definitions. Product repos remain the source of that intent; Launchplane
   persists the typed payload and renders it during Odoo post-deploy.
-- New website-bootstrap writes through the CLI or service route enforce the
-  devkit-safe contract: homepage and route URLs are local Odoo route paths,
+- New website-bootstrap writes through the service route enforce the devkit-safe
+  contract: homepage and route URLs are local Odoo route paths,
   `primary_page_xmlid` is a dotted XML ID, and at most one route can be marked
-  as the homepage. Persisted record reads remain tolerant so older records can
-  be inspected and repaired instead of becoming unreadable after validation
+  as the homepage. The reusable service workflow prevalidates the local-route
+  portion of that contract for fast operator feedback, while the service remains
+  the write authority. The local CLI applies the same validation for explicit
+  repair writes only. Persisted record reads remain tolerant so older records
+  can be inspected and repaired instead of becoming unreadable after validation
   hardening.
 - Stable bootstrap normalizes the persisted `website_bootstrap.canonical_url`
   to the Launchplane-resolved stable target base URL before post-deploy renders
