@@ -774,6 +774,10 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
         "payload-file": frozenset((".launchplane/odoo-website-bootstrap-override-payload.json",)),
     },
+    ".github/workflows/product-legacy-context-cleanup.yml": {
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "payload-file": frozenset(("launchplane-product-legacy-context-cleanup-payload.json",)),
+    },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "DEFAULT_REPOSITORY": frozenset(("${{ github.repository }}",)),
         "GITHUB_TOKEN": frozenset(("${{ github.token }}",)),

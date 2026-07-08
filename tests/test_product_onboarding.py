@@ -1305,6 +1305,43 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
         self.assertEqual(inputs_section.count("        description:"), 6)
 
+    def test_product_legacy_context_cleanup_uses_launchplane_request(self) -> None:
+        workflow_text = Path(".github/workflows/product-legacy-context-cleanup.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn(
+            "route-path: /v1/product-profiles/legacy-context-cleanup/apply",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-file: launchplane-product-legacy-context-cleanup-payload.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.request.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: launchplane-product-legacy-context-cleanup.json",
+            workflow_text,
+        )
+        self.assertIn("if: always()", workflow_text)
+        self.assertIn(
+            "CLEANUP_STATUS_CODE: ${{ steps.cleanup_request.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn('if [ "$CLEANUP_STATUS_CODE" != "202" ]; then', workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
+
     def test_github_metadata_prefers_repository_merge_method(self) -> None:
         metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
 

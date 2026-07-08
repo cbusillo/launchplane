@@ -34,9 +34,7 @@ concurrency:
 
 jobs:
   cleanup:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       PRODUCT: ${{ inputs.product }}
@@ -45,6 +43,7 @@ jobs:
       DRY_RUN: ${{ inputs.dry_run }}
     steps:
       - name: Request legacy context cleanup
+        id: request
         shell: bash
         run: |
           set -euo pipefail
@@ -53,57 +52,26 @@ jobs:
           : "${SOURCE_CONTEXT:?Missing source_context input}"
           : "${TARGET_CONTEXT:?Missing target_context input}"
 
-          service_origin="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
-          print(f"{parsed.scheme}://{parsed.netloc}")
-          PY
-          })"
-          service_audience="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-          })"
           mode="apply"
           if [ "$DRY_RUN" = "true" ]; then
             mode="dry-run"
           fi
 
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}" \
-            | jq -r '.value'
-          })"
-          request_payload="$({
-            actor="github-actions:${GITHUB_REPOSITORY}:${GITHUB_RUN_ID}"
-            jq -n \
-              --arg product "$PRODUCT" \
-              --arg source_context "$SOURCE_CONTEXT" \
-              --arg target_context "$TARGET_CONTEXT" \
-              --arg mode "$mode" \
-              --arg actor "$actor" \
-              '{
-                product: $product,
-                source_context: $source_context,
-                target_context: $target_context,
-                mode: $mode,
-                actor: $actor,
-                source_label: "workflow:product-legacy-context-cleanup"
-              }'
-          })"
-          response_file="launchplane-product-legacy-context-cleanup.json"
+          actor="github-actions:${GITHUB_REPOSITORY}:${GITHUB_RUN_ID}"
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg source_context "$SOURCE_CONTEXT" \
+            --arg target_context "$TARGET_CONTEXT" \
+            --arg mode "$mode" \
+            --arg actor "$actor" \
+            '{
+              product: $product,
+              source_context: $source_context,
+              target_context: $target_context,
+              mode: $mode,
+              actor: $actor,
+              source_label: "workflow:product-legacy-context-cleanup"
+            }' > launchplane-product-legacy-context-cleanup-payload.json
           idempotency_key="$({
             printf 'product-legacy-context-cleanup:%s:%s:%s:%s:%s' \
               "$PRODUCT" \
@@ -112,23 +80,34 @@ jobs:
               "$mode" \
               "$GITHUB_RUN_ID"
           })"
-          status_code="$(curl -sS \
-            -o "$response_file" \
-            -w '%{http_code}' \
-            -X POST \
-            -H "Authorization: Bearer ${oidc_token}" \
-            -H 'Content-Type: application/json' \
-            -H "Idempotency-Key: ${idempotency_key}" \
-            --data "$request_payload" \
-            "${service_origin}/v1/product-profiles/legacy-context-cleanup/apply")"
-          if [ "$status_code" != "202" ]; then
+          printf 'idempotency_key=%s\n' "$idempotency_key" >> "$GITHUB_OUTPUT"
+
+      - name: Request Launchplane legacy context cleanup
+        id: cleanup_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          route-path: /v1/product-profiles/legacy-context-cleanup/apply
+          payload-file: launchplane-product-legacy-context-cleanup-payload.json
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          response-output-file: launchplane-product-legacy-context-cleanup.json
+
+      - name: Check cleanup response
+        shell: bash
+        env:
+          CLEANUP_STATUS_CODE: ${{ steps.cleanup_request.outputs.status-code }}
+        run: |
+          set -euo pipefail
+          response_file="launchplane-product-legacy-context-cleanup.json"
+          if [ "$CLEANUP_STATUS_CODE" != "202" ]; then
             cat "$response_file" >&2
-            echo "Cleanup failed with HTTP ${status_code}." >&2
+            echo "Cleanup failed with HTTP ${CLEANUP_STATUS_CODE}." >&2
             exit 1
           fi
           jq . "$response_file"
 
       - name: Upload cleanup artifact
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: launchplane-product-legacy-context-cleanup-${{ inputs.product }}
