@@ -13,10 +13,10 @@ ACTION_METADATA = Path(".github/actions/launchplane-request/action.yml")
 
 class LaunchplaneRequestActionTests(unittest.TestCase):
     def test_action_metadata_uses_supported_node_runtime(self) -> None:
-        self.assertIn(
-            "using: node24",
-            ACTION_METADATA.read_text(encoding="utf-8"),
-        )
+        metadata = ACTION_METADATA.read_text(encoding="utf-8")
+        self.assertIn("using: node24", metadata)
+        self.assertIn("log-response-body:", metadata)
+        self.assertIn('default: "true"', metadata)
 
     def run_action(
         self,
@@ -142,8 +142,7 @@ process.on('beforeExit', () => {{
         launchplane_calls = [
             call
             for call in calls
-            if call["url"]
-            == "https://launchplane.example/v1/drivers/odoo/prod-promotion-run"
+            if call["url"] == "https://launchplane.example/v1/drivers/odoo/prod-promotion-run"
         ]
         self.assertEqual(len(launchplane_calls), 2)
         self.assertEqual(
@@ -172,6 +171,66 @@ process.on('beforeExit', () => {{
                     "error_message": "",
                     "application_id": "app-123",
                 },
+            )
+
+    def test_can_write_response_file_without_logging_response_body(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            response_output_path = Path(temporary_directory) / "result.json"
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/ingress/route-audits/records?product=demo&context=dev",
+                    "method": "GET",
+                    "response-output-file": str(response_output_path),
+                    "log-response-body": "false",
+                },
+                environment={"TEST_ERROR_MESSAGE": "sensitive-audit-payload"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("sensitive-audit-payload", result.stdout)
+            self.assertIn(
+                "sensitive-audit-payload",
+                response_output_path.read_text(encoding="utf-8"),
+            )
+
+    def test_logs_response_body_by_default(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/drivers/generic-web/preview-refresh",
+                "payload": '{"schema_version":1,"product":"sellyouroutboard"}',
+            },
+            environment={"TEST_ERROR_MESSAGE": "default-log-marker"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("default-log-marker", result.stdout)
+
+    def test_omits_non_ok_response_body_from_error_when_logging_disabled(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            response_output_path = Path(temporary_directory) / "result.json"
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/ingress/route-audits/records?product=demo&context=dev",
+                    "method": "GET",
+                    "response-output-file": str(response_output_path),
+                    "log-response-body": "false",
+                },
+                environment={
+                    "TEST_ERROR_MESSAGE": "sensitive-audit-error",
+                    "TEST_STATUS": "500",
+                },
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Launchplane request failed with 500", result.stderr)
+            self.assertNotIn("sensitive-audit-error", result.stdout)
+            self.assertNotIn("sensitive-audit-error", result.stderr)
+            self.assertIn(
+                "sensitive-audit-error",
+                response_output_path.read_text(encoding="utf-8"),
             )
 
     def test_overlays_payload_fields_before_request(self) -> None:

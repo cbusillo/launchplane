@@ -768,6 +768,14 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "response-output-file": frozenset(("dokploy-target-inspect-response.json",)),
         "route-path": frozenset(("${{ steps.request.outputs.route_path }}",)),
     },
+    ".github/workflows/ingress-route-audit-read.yml": {
+        "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
+        "fail-result-paths": frozenset(('""',)),
+        "log-response-body": frozenset(('"false"',)),
+        "method": frozenset(("GET",)),
+        "response-output-file": frozenset(("ingress-route-audit-read-raw.json",)),
+        "route-path": frozenset(("${{ steps.route.outputs.route_path }}",)),
+    },
     ".github/workflows/product-onboarding.yml": {
         "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
         "fail-result-paths": frozenset(('""',)),

@@ -1307,20 +1307,42 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             encoding="utf-8"
         )
 
-        self.assertIn("curl -sS", workflow_text)
-        self.assertIn("-w '%{http_code}'", workflow_text)
-        self.assertIn('"$read_url"', workflow_text)
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
+        self.assertIn("method: GET", workflow_text)
+        self.assertIn("route-path: ${{ steps.route.outputs.route_path }}", workflow_text)
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn("response-output-file: ingress-route-audit-read-raw.json", workflow_text)
+        self.assertIn('log-response-body: "false"', workflow_text)
+        self.assertIn(
+            "STATUS_CODE: ${{ steps.audit_read_request.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn("Launchplane ingress route audit read did not produce", workflow_text)
+        self.assertIn("if [ \"$STATUS_CODE\" != '200' ]; then", workflow_text)
+        self.assertIn("non-JSON error response", workflow_text)
+        self.assertNotIn('cat "$raw_response"', workflow_text)
+        self.assertIn('echo "route_path=${read_url}"', workflow_text)
         self.assertIn("/v1/ingress/route-audits/records", workflow_text)
         self.assertIn("product", workflow_text)
         self.assertIn("context", workflow_text)
         self.assertIn("record_id", workflow_text)
         self.assertIn("limit must be between 1 and 100", workflow_text)
-        self.assertIn(
-            'raw_response="$RUNNER_TEMP/ingress-route-audit-read-raw.json"', workflow_text
-        )
+        self.assertIn('raw_response="ingress-route-audit-read-raw.json"', workflow_text)
         self.assertIn("redacted", workflow_text)
         self.assertIn("operation_count", workflow_text)
-        self.assertNotIn("launchplane-request", workflow_text)
+        self.assertIn("if: always()", workflow_text)
+        self.assertIn("path: ingress-route-audit-read.json", workflow_text)
+        self.assertIn("if-no-files-found: warn", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
         self.assertNotIn("ingress_route.apply", workflow_text)
         self.assertNotIn("provider_host_id:", workflow_text)
         self.assertNotIn("idempotency-key:", workflow_text)

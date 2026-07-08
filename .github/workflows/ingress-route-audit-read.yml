@@ -50,11 +50,8 @@ concurrency:
 
 jobs:
   read:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     env:
-      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       PRODUCT: ${{ inputs.product }}
       CONTEXT: ${{ inputs.context }}
       RECORD_ID: ${{ inputs.record_id }}
@@ -63,7 +60,7 @@ jobs:
       TRACE_ID: ${{ inputs.trace_id }}
       LIMIT: ${{ inputs.limit }}
     steps:
-      - name: Request redacted audit records
+      - name: Build audit read request
         id: route
         shell: bash
         run: |
@@ -73,12 +70,8 @@ jobs:
           read_url="$({
             python3 - <<'PY'
           import os
-          from urllib.parse import urlencode, quote, urlsplit
+          from urllib.parse import urlencode, quote
 
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL")
-          origin = f"{parsed.scheme}://{parsed.netloc}"
           product = os.environ["PRODUCT"].strip()
           context = os.environ["CONTEXT"].strip()
           record_id = os.environ["RECORD_ID"].strip()
@@ -112,41 +105,40 @@ jobs:
                   if value:
                       query[query_name] = value
               route_path = f"/v1/ingress/route-audits/records?{urlencode(query)}"
-          print(f"{origin}{route_path}")
+          print(route_path)
           PY
           })"
+          echo "route_path=${read_url}" >> "$GITHUB_OUTPUT"
 
-          service_audience="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
+      - name: Request redacted audit records
+        id: audit_read_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.route.outputs.route_path }}
+          fail-result-paths: ""
+          response-output-file: ingress-route-audit-read-raw.json
+          log-response-body: "false"
 
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must include a hostname")
-          print(parsed.hostname)
-          PY
-          })"
-
-          oidc_response="$(curl -fsS \
-            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}")"
-          oidc_token="$(jq -r '.value // empty' <<< "$oidc_response")"
-          if [ -z "$oidc_token" ]; then
-            echo 'GitHub OIDC token response did not include a token value.' >&2
+      - name: Redact audit read response
+        if: always()
+        shell: bash
+        env:
+          STATUS_CODE: ${{ steps.audit_read_request.outputs.status-code }}
+        run: |
+          set -euo pipefail
+          raw_response="ingress-route-audit-read-raw.json"
+          if [ ! -f "$raw_response" ]; then
+            echo 'Launchplane ingress route audit read did not produce a response file.' >&2
             exit 1
           fi
-
-          raw_response="$RUNNER_TEMP/ingress-route-audit-read-raw.json"
-          status_code="$(curl -sS \
-            -o "$raw_response" \
-            -w '%{http_code}' \
-            -H "Authorization: Bearer ${oidc_token}" \
-            -H 'Accept: application/json' \
-            "$read_url")"
-          if [ "$status_code" != '200' ]; then
-            jq '{status, trace_id, error}' "$raw_response" >&2 || cat "$raw_response" >&2
-            echo "Launchplane ingress route audit read failed with HTTP ${status_code}." >&2
+          if [ "$STATUS_CODE" != '200' ]; then
+            if ! jq '{status, trace_id, error}' "$raw_response" >&2; then
+              echo 'Launchplane ingress route audit read returned a non-JSON error response.' >&2
+            fi
+            echo "Launchplane ingress route audit read failed with HTTP ${STATUS_CODE}." >&2
             exit 1
           fi
 
@@ -182,8 +174,6 @@ jobs:
             end
           ' "$raw_response" >ingress-route-audit-read.json
 
-          jq . ingress-route-audit-read.json
-
       - name: Summarize audit read
         shell: bash
         run: |
@@ -209,8 +199,9 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Upload audit read response
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ingress-route-audit-read
           path: ingress-route-audit-read.json
-          if-no-files-found: error
+          if-no-files-found: warn
