@@ -40,13 +40,19 @@ class OdooStableAuthorityTests(TestCase):
         self.assertEqual(offenders, [])
 
     def test_reusable_testing_deploy_uses_target_replacement_apply(self) -> None:
-        workflow = Path(
-            ".github/workflows/reusable-product-driver-testing-deploy.yml"
-        ).read_text(encoding="utf-8")
+        workflow = Path(".github/workflows/reusable-product-driver-testing-deploy.yml").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("route-path: /v1/drivers/odoo/target-replacement-apply", workflow)
         self.assertIn("poll_url=result.poll_url", workflow)
-        self.assertIn('${LAUNCHPLANE_URL}${POLL_URL}', workflow)
+        self.assertIn("method: GET", workflow)
+        self.assertIn("route-path: ${{ steps.lp.outputs.poll_url }}", workflow)
+        self.assertIn("poll-result-path: operation.status", workflow)
+        self.assertIn('fail-result-paths: ""', workflow)
+        self.assertNotIn("${LAUNCHPLANE_URL}${POLL_URL}", workflow)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow)
+        self.assertNotIn("Authorization: Bearer", workflow)
         self.assertNotIn("route-path: /v1/drivers/odoo/testing-deploy", workflow)
         self.assertNotIn("odoo_testing_deploy.execute", workflow)
 
@@ -101,4 +107,6 @@ class OdooStableAuthorityTests(TestCase):
 
         self.assertIn("through the stable target replacement executor", operations_doc)
         self.assertIn("delegates the rollback deploy to stable target replacement", records_doc)
-        self.assertIn("delegates the provider mutation to\nstable target replacement", service_boundary_doc)
+        self.assertIn(
+            "delegates the provider mutation to\nstable target replacement", service_boundary_doc
+        )

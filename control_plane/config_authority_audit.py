@@ -400,9 +400,6 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
         )
     },
     ".github/workflows/reusable-product-driver-testing-deploy.yml": {
-        "LAUNCHPLANE_URL": frozenset(
-            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
-        ),
         "launchplane-url": frozenset(
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         ),
@@ -505,6 +502,7 @@ PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS = frozenset(
 )
 PRODUCT_DRIVER_TESTING_DEPLOY_PAYLOAD_FIELD_KEYS = frozenset(
     (
+        "product",
         "replacement.artifact_id",
         "replacement.product",
         "replacement.source_git_ref",
@@ -530,7 +528,13 @@ PRODUCT_DRIVER_REUSABLE_WRAPPER_LITERAL_VALUES = {
         "INTENT": frozenset(("stable-testing-reset",)),
     },
     ".github/workflows/reusable-product-driver-testing-deploy.yml": {
-        "route-path": frozenset(("/v1/drivers/odoo/target-replacement-apply",)),
+        "fail-result-paths": frozenset(('""',)),
+        "route-path": frozenset(
+            (
+                "/v1/drivers/odoo/target-replacement-apply",
+                "${{ steps.lp.outputs.poll_url }}",
+            )
+        ),
     },
 }
 WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
