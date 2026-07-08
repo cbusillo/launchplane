@@ -1451,19 +1451,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             "launchplane_self_bootstrap",
         )
-        for key in ("launchplane-url", "LAUNCHPLANE_URL"):
-            with self.subTest(
+        self.assertEqual(
+            _allow_reason(
                 path=".github/workflows/reusable-product-driver-testing-deploy.yml",
-                key=key,
-            ):
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/reusable-product-driver-testing-deploy.yml",
-                        key=key,
-                        value="${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",
-                    ),
-                    "launchplane_self_bootstrap",
-                )
+                key="launchplane-url",
+                value="${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",
+            ),
+            "launchplane_self_bootstrap",
+        )
         for path, key in (
             (".github/workflows/odoo-driver-route-smoke.yml", "LAUNCHPLANE_URL"),
             (".github/workflows/reusable-odoo-preview.yml", "launchplane-url"),

@@ -554,6 +554,29 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             "Target replacement poll URL is not an Odoo operation path",
             workflow_text,
         )
+        self.assertIn(
+            "Target replacement poll URL must be a local Launchplane route path.",
+            workflow_text,
+        )
+        self.assertIn(
+            "Target replacement poll URL operation ID must be a single path segment.",
+            workflow_text,
+        )
+        self.assertIn("*$'\\n'* | *$'\\r'*)", workflow_text)
+        self.assertIn('[[ "$POLL_URL" == *', workflow_text)
+        self.assertIn("*'?'*", workflow_text)
+        self.assertIn("*'#'*", workflow_text)
+        self.assertIn("*'%'*", workflow_text)
+        self.assertIn("method: GET", workflow_text)
+        self.assertIn("route-path: ${{ steps.lp.outputs.poll_url }}", workflow_text)
+        self.assertIn("poll-result-path: operation.status", workflow_text)
+        self.assertIn("poll-result-statuses: pending,running", workflow_text)
+        self.assertIn("poll-timeout-ms: ${{ inputs['timeout-ms'] }}", workflow_text)
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn(
+            "response-output-file: odoo-testing-target-replacement.json",
+            workflow_text,
+        )
         self.assertIn("for required in PRODUCT ARTIFACT_ID; do", workflow_text)
         self.assertIn('echo "${required} is required."', workflow_text)
         self.assertNotIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
@@ -593,6 +616,9 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn('PRODUCT="${GITHUB_REPOSITORY#*/}"', workflow_text)
         self.assertNotIn("permissions:\n  contents: read\n  id-token: write", workflow_text)
         self.assertIn("permissions:\n      contents: read\n      id-token: write", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
 
     def test_reusable_odoo_workflows_use_caller_visible_runner(self) -> None:
         workflow_paths = (
@@ -1304,6 +1330,11 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn(
             "deployment_record_id: ${{ steps.poll.outputs.deployment_record_id }}", workflow_text
         )
+        self.assertIn(
+            "POLL_STATUS_CODE: ${{ steps.poll_result.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn('if [ "$POLL_STATUS_CODE" != "200" ]; then', workflow_text)
         for result_path in (
             "deploy_status",
             "post_deploy_status",

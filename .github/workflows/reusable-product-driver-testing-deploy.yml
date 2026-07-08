@@ -213,29 +213,66 @@ jobs:
             poll_url=result.poll_url
 
       - name: Poll target replacement operation
-        id: poll
+        id: poll_operation
         env:
-          LAUNCHPLANE_URL: >-
-            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
-          AUDIENCE: ${{ inputs.launchplane_audience }}
           OPERATION_ID: ${{ steps.lp.outputs.operation_id }}
           POLL_URL: ${{ steps.lp.outputs.poll_url }}
         run: |
           set -euo pipefail
-          : "${LAUNCHPLANE_URL:?Missing Launchplane service URL. Set LAUNCHPLANE_PUBLIC_URL or pass launchplane_url.}"
-          if [ -z "${AUDIENCE:-}" ]; then
-            AUDIENCE="$({
-              python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-            })"
+          if [ -z "$OPERATION_ID" ] || [ -z "$POLL_URL" ]; then
+            echo 'Target replacement response missing operation metadata.' >&2
+            exit 1
           fi
+          if [[ "$POLL_URL" == *\\* ]]; then
+            echo 'Target replacement poll URL must be a local Launchplane route path.' >&2
+            exit 1
+          fi
+          case "$POLL_URL" in
+            *$'\n'* | *$'\r'*)
+              echo 'Target replacement poll URL must be a single-line value.' >&2
+              exit 1
+              ;;
+            *://* | //* | *'//'* | *'?'* | *'#'* | *'%'*)
+              echo 'Target replacement poll URL must be a local Launchplane route path.' >&2
+              exit 1
+              ;;
+            /v1/drivers/odoo/target-replacement/operations/*) ;;
+            *)
+              echo "Target replacement poll URL is not an Odoo operation path: ${POLL_URL}" >&2
+              exit 1
+              ;;
+          esac
+          operation_path_id="${POLL_URL#/v1/drivers/odoo/target-replacement/operations/}"
+          case "$operation_path_id" in
+            "" | */* | *.*)
+              echo 'Target replacement poll URL operation ID must be a single path segment.' >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Poll target replacement operation result
+        id: poll_result
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          method: GET
+          route-path: ${{ steps.lp.outputs.poll_url }}
+          poll-result-path: operation.status
+          poll-result-statuses: pending,running
+          poll-interval-ms: 15000
+          poll-timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: ""
+          response-output-file: odoo-testing-target-replacement.json
+
+      - name: Read target replacement operation result
+        id: poll
+        env:
+          OPERATION_ID: ${{ steps.lp.outputs.operation_id }}
+          POLL_STATUS_CODE: ${{ steps.poll_result.outputs.status-code }}
+        run: |
+          set -euo pipefail
           write_output() {
             file="$1"
             name="$2"
@@ -247,49 +284,12 @@ jobs:
               printf '%s\n' "$delimiter"
             } >>"$file"
           }
-          write_output "$GITHUB_ENV" AUDIENCE "$AUDIENCE"
-          if [ -z "$OPERATION_ID" ] || [ -z "$POLL_URL" ]; then
-            echo 'Target replacement response missing operation metadata.' >&2
+          if [ "$POLL_STATUS_CODE" != "200" ]; then
+            echo "Target replacement poll failed with HTTP ${POLL_STATUS_CODE}." >&2
+            jq . odoo-testing-target-replacement.json >&2
             exit 1
           fi
-          case "$POLL_URL" in
-            /v1/drivers/odoo/target-replacement/operations/*) ;;
-            *)
-              echo "Target replacement poll URL is not an Odoo operation path: ${POLL_URL}" >&2
-              exit 1
-              ;;
-          esac
-          deadline=$((SECONDS + 3600))
-          while true; do
-            token="$({
-              curl -fsSL \
-                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" \
-              | jq -r '.value'
-            })"
-            status_code="$({
-              curl -sS \
-                -o odoo-testing-target-replacement.json \
-                -w '%{http_code}' \
-                -H "Authorization: Bearer ${token}" \
-                "${LAUNCHPLANE_URL}${POLL_URL}"
-            })"
-            if [ "$status_code" != "200" ]; then
-              echo "Target replacement poll failed: ${status_code}." >&2
-              cat odoo-testing-target-replacement.json >&2
-              exit 1
-            fi
-            operation_status="$(jq -r '.operation.status // empty' odoo-testing-target-replacement.json)"
-            if [ "$operation_status" = "pass" ] || [ "$operation_status" = "fail" ]; then
-              break
-            fi
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "Target replacement operation ${OPERATION_ID} timed out." >&2
-              jq . odoo-testing-target-replacement.json >&2
-              exit 1
-            fi
-            sleep 15
-          done
+          operation_status="$(jq -r '.operation.status // empty' odoo-testing-target-replacement.json)"
           result='.operation.result'
           deployment_status="$(jq -r "${result}.deploy_status // \"\"" odoo-testing-target-replacement.json)"
           post_deploy_status="$(jq -r "${result}.post_deploy_status // \"\"" odoo-testing-target-replacement.json)"
