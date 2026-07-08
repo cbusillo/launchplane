@@ -642,6 +642,41 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn('startswith("/")', workflow_text)
         self.assertIn('startswith("//") | not', workflow_text)
 
+    def test_odoo_operator_workflows_use_launchplane_request_action(self) -> None:
+        workflow_expectations = {
+            "odoo-target-replacement-plan.yml": (
+                "/v1/drivers/odoo/target-replacement-plan",
+                ".launchplane/odoo-target-replacement-plan-payload.json",
+                "odoo-target-replacement-plan.json",
+            ),
+            "odoo-website-bootstrap-override.yml": (
+                "/v1/drivers/odoo/website-bootstrap-override",
+                ".launchplane/odoo-website-bootstrap-override-payload.json",
+                "odoo-website-bootstrap-override.json",
+            ),
+        }
+
+        for workflow_name, (route_path, payload_file, response_file) in workflow_expectations.items():
+            with self.subTest(workflow=workflow_name):
+                workflow_text = Path(f".github/workflows/{workflow_name}").read_text(
+                    encoding="utf-8"
+                )
+
+                self.assertIn("runs-on: ubuntu-latest", workflow_text)
+                self.assertIn(
+                    "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+                    workflow_text,
+                )
+                self.assertIn(f"route-path: {route_path}", workflow_text)
+                self.assertIn(f"payload-file: {payload_file}", workflow_text)
+                self.assertIn(f"response-output-file: {response_file}", workflow_text)
+                self.assertIn("idempotency-key: ${{ steps.request.outputs.idempotency_key }}", workflow_text)
+                self.assertIn('steps.launchplane.outputs.status-code }}" != "202"', workflow_text)
+                self.assertIn('!= "accepted"', workflow_text)
+                self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+                self.assertNotIn("Authorization: Bearer", workflow_text)
+                self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+
     def test_launchplane_workflows_do_not_hardcode_public_service_defaults(self) -> None:
         workflow_dir = Path(".github/workflows")
         forbidden_literals = (

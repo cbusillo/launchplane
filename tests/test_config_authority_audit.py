@@ -1787,6 +1787,26 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "${{ env.PRODUCT }}:${{",
             ),
             (
+                ".github/workflows/odoo-target-replacement-plan.yml",
+                "idempotency-key",
+                "${{ steps.request.outputs.idempotency_key }}",
+            ),
+            (
+                ".github/workflows/odoo-target-replacement-plan.yml",
+                "payload-file",
+                ".launchplane/odoo-target-replacement-plan-payload.json",
+            ),
+            (
+                ".github/workflows/odoo-website-bootstrap-override.yml",
+                "idempotency-key",
+                "${{ steps.request.outputs.idempotency_key }}",
+            ),
+            (
+                ".github/workflows/odoo-website-bootstrap-override.yml",
+                "payload-file",
+                ".launchplane/odoo-website-bootstrap-override-payload.json",
+            ),
+            (
                 ".github/workflows/launchplane-config-authority.yml",
                 "checkout.repository[1]",
                 "${{ github.repository_owner }}/launchplane",
@@ -1857,6 +1877,16 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/launchplane-deploy.yml",
                 "uses",
                 "cbusillo/not-launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@main",
+            ),
+            (
+                ".github/workflows/unrelated.yml",
+                "payload-file",
+                ".launchplane/odoo-target-replacement-plan-payload.json",
+            ),
+            (
+                ".github/workflows/unrelated.yml",
+                "payload-file",
+                ".launchplane/odoo-website-bootstrap-override-payload.json",
             ),
             (
                 ".github/workflows/launchplane-deploy.yml",

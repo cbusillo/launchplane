@@ -34,16 +34,12 @@ concurrency:
 
 jobs:
   write:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     env:
       PRODUCT: ${{ inputs.product }}
       CONTEXT_NAME: ${{ inputs.context }}
       INSTANCE: ${{ inputs.instance }}
       WEBSITE_BOOTSTRAP_PAYLOAD: ${{ inputs.website_bootstrap_payload }}
-      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
     steps:
       - name: Validate runtime inputs
         shell: bash
@@ -53,24 +49,14 @@ jobs:
           : "${CONTEXT_NAME:?Missing context input}"
           : "${INSTANCE:?Missing instance input}"
           : "${WEBSITE_BOOTSTRAP_PAYLOAD:?Missing website bootstrap payload input}"
-          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ]; then
-            echo 'Missing Launchplane service URL repository variable.' >&2
-            exit 1
-          fi
-          if [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
-            LAUNCHPLANE_SERVICE_AUDIENCE="$({
-              python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_SERVICE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_SERVICE_URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-            })"
-          fi
-          echo "LAUNCHPLANE_SERVICE_AUDIENCE=${LAUNCHPLANE_SERVICE_AUDIENCE}" >>"$GITHUB_ENV"
+          for scalar in PRODUCT CONTEXT_NAME INSTANCE; do
+            case "${!scalar}" in
+              *$'\n'*)
+                echo "${scalar} must be a single-line value." >&2
+                exit 1
+                ;;
+            esac
+          done
           if ! jq -e 'type == "object"' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
             echo 'website_bootstrap_payload must be a JSON object.' >&2
             exit 1
@@ -94,52 +80,57 @@ jobs:
             exit 1
           fi
 
-      - name: Write website bootstrap override
+      - name: Write website bootstrap override payload
+        id: request
         shell: bash
         run: |
           set -euo pipefail
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
-            | jq -r '.value'
-          })"
+          mkdir -p .launchplane
           website_bootstrap="$({
             jq -c . <<< "$WEBSITE_BOOTSTRAP_PAYLOAD"
           })"
-          payload="$({
-            jq -n \
-              --arg product "$PRODUCT" \
-              --arg context "$CONTEXT_NAME" \
-              --arg instance "$INSTANCE" \
-              --argjson website_bootstrap "$website_bootstrap" \
-              '{
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT_NAME" \
+            --arg instance "$INSTANCE" \
+            --argjson website_bootstrap "$website_bootstrap" \
+            '{
+              schema_version: 1,
+              product: $product,
+              override: {
                 schema_version: 1,
                 product: $product,
-                override: {
-                  schema_version: 1,
-                  product: $product,
-                  context: $context,
-                  instance: $instance,
-                  website_bootstrap: $website_bootstrap,
-                  source_label: "github-actions:odoo-website-bootstrap-override"
-                }
-              }'
-          })"
-          status_code="$({
-            curl -sS \
-              -o odoo-website-bootstrap-override.json \
-              -w '%{http_code}' \
-              -X POST \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H 'Content-Type: application/json' \
-              -H "Idempotency-Key: odoo-website-bootstrap-override:${PRODUCT}:${CONTEXT_NAME}:${INSTANCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
-              --data "$payload" \
-              "${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo/website-bootstrap-override"
-          })"
+                context: $context,
+                instance: $instance,
+                website_bootstrap: $website_bootstrap,
+                source_label: "github-actions:odoo-website-bootstrap-override"
+              }
+            }' > .launchplane/odoo-website-bootstrap-override-payload.json
+
+          printf 'idempotency_key=%s\n' \
+            "odoo-website-bootstrap-override:${PRODUCT}:${CONTEXT_NAME}:${INSTANCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+            >>"$GITHUB_OUTPUT"
+
+      - name: Write website bootstrap override
+        id: launchplane
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/drivers/odoo/website-bootstrap-override
+          payload-file: .launchplane/odoo-website-bootstrap-override-payload.json
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          response-output-file: odoo-website-bootstrap-override.json
+
+      - name: Verify website bootstrap override response
+        shell: bash
+        run: |
+          set -euo pipefail
           jq . odoo-website-bootstrap-override.json
-          if [ "$status_code" != "202" ]; then
-            echo "Launchplane Odoo website-bootstrap override failed with HTTP ${status_code}." >&2
+          if [ "${{ steps.launchplane.outputs.status-code }}" != "202" ]; then
+            echo \
+              "Launchplane Odoo website-bootstrap override failed with HTTP ${{ steps.launchplane.outputs.status-code }}." \
+              >&2
             exit 1
           fi
           if [ "$(jq -r '.status' odoo-website-bootstrap-override.json)" != "accepted" ]; then
