@@ -320,9 +320,6 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
         "inputs.timeout-ms.default": frozenset(("660000",)),
         "inputs.wait_for_deploy.default": frozenset(("true",)),
     },
-    ".github/workflows/reusable-odoo-testing-deploy.yml": {
-        "inputs.timeout-ms.default": frozenset(("2700000",)),
-    },
     ".github/workflows/reusable-product-driver-testing-deploy.yml": {
         "inputs.timeout-ms.default": frozenset(("2700000",)),
     },
@@ -387,7 +384,7 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         )
     },
-    ".github/workflows/reusable-odoo-testing-deploy.yml": {
+    ".github/workflows/reusable-product-driver-testing-deploy.yml": {
         "LAUNCHPLANE_URL": frozenset(
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         ),
@@ -481,6 +478,13 @@ PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS = frozenset(
         "verification.verification_status",
     )
 )
+PRODUCT_DRIVER_TESTING_DEPLOY_PAYLOAD_FIELD_KEYS = frozenset(
+    (
+        "replacement.artifact_id",
+        "replacement.product",
+        "replacement.source_git_ref",
+    )
+)
 PRODUCT_DRIVER_REUSABLE_WITH_INPUT_KEYS = frozenset(
     (
         "artifact_id",
@@ -501,12 +505,7 @@ PRODUCT_DRIVER_REUSABLE_WRAPPER_LITERAL_VALUES = {
         "INTENT": frozenset(("stable-testing-reset",)),
     },
     ".github/workflows/reusable-product-driver-testing-deploy.yml": {
-        "uses": frozenset(
-            (
-                "cbusillo/launchplane/.github/workflows/"
-                "reusable-odoo-testing-deploy.yml@main",
-            )
-        ),
+        "route-path": frozenset(("/v1/drivers/odoo/target-replacement-apply",)),
     },
 }
 WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
@@ -630,10 +629,6 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "SOURCE_ACCESS_PROBE_REPOSITORY": frozenset(
             ("${{ inputs.source_access_probe_repository }}",)
         ),
-    },
-    ".github/workflows/reusable-odoo-testing-deploy.yml": {
-        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
-        "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
     },
     ".github/workflows/reusable-generic-web-preview-lifecycle.yml": {
         "ANCHOR_PR_NUMBER": frozenset(("${{ inputs.anchor_pr_number }}",)),
@@ -811,9 +806,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "runs-on": frozenset(("${{ fromJSON(inputs.runs_on) }}",)),
         "token": frozenset(("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}",)),
         "username": frozenset(("${{ github.repository_owner }}",)),
-    },
-    ".github/workflows/reusable-odoo-testing-deploy.yml": {
-        "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
     },
     ".github/workflows/reusable-preview-feedback-status.yml": {
         "launchplane_url": frozenset(("${{ inputs.launchplane_url }}",)),
@@ -2733,20 +2725,23 @@ def _is_product_driver_reusable_workflow_mechanic(*, path: str, key: str, value:
         return False
     value_text = _string_value(value).strip().rstrip(",")
     key_text = _semantic_full_key_text(key)
+    if value_text in PRODUCT_DRIVER_REUSABLE_WRAPPER_LITERAL_VALUES.get(path, {}).get(
+        key_text, frozenset()
+    ):
+        return True
     if key == "launchplane-url":
         return value_text == "${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}"
     if key_text == "LAUNCHPLANE_URL":
-        return _is_github_direct_input_reference(value)
+        return (
+            _is_github_direct_input_reference(value)
+            or value_text == "${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}"
+        )
     if key == "idempotency-key":
         return value_text == "${{ steps.request.outputs.idempotency_key }}"
     if key == "route-path":
         return value_text == "${{ steps.request.outputs.route_path }}"
     if _is_workflow_input_default_key(key):
         return value_text in PRODUCT_DRIVER_REUSABLE_INPUT_DEFAULT_VALUES
-    if value_text in PRODUCT_DRIVER_REUSABLE_WRAPPER_LITERAL_VALUES.get(path, {}).get(
-        key_text, frozenset()
-    ):
-        return True
     if key in PRODUCT_DRIVER_REUSABLE_WITH_INPUT_KEYS:
         return (
             _is_github_step_output_reference(value_text)
@@ -2754,7 +2749,11 @@ def _is_product_driver_reusable_workflow_mechanic(*, path: str, key: str, value:
             or _is_github_bracket_input_reference(value_text)
         )
     if key.startswith("payload-fields."):
-        if key.removeprefix("payload-fields.") not in PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS:
+        payload_field = key.removeprefix("payload-fields.")
+        if payload_field in PRODUCT_DRIVER_TESTING_DEPLOY_PAYLOAD_FIELD_KEYS:
+            if path != ".github/workflows/reusable-product-driver-testing-deploy.yml":
+                return False
+        elif payload_field not in PRODUCT_DRIVER_REUSABLE_PAYLOAD_FIELD_KEYS:
             return False
         return (
             _is_github_step_output_reference(value_text)
@@ -2795,6 +2794,7 @@ def _is_product_driver_reusable_workflow_mechanic(*, path: str, key: str, value:
         "TIMEOUT_MS",
         "POLL_INTERVAL_MS",
         "POLL_TIMEOUT_MS",
+        "PRODUCT",
         "TO_INSTANCE",
         "VERIFICATION_STATUS",
     }:
