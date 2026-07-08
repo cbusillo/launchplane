@@ -1279,6 +1279,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("target_id", "${{ inputs.target_id }}"),
             ("target_id", "${{ github.event.inputs.target_id }}"),
             ("environment_name", "${{ inputs.environment_name }}"),
+            (
+                "EXPECTED_CURRENT_PROVIDER_TARGET_JSON",
+                "${{ inputs.expected_current_provider_target_json }}",
+            ),
             ("compose_path", "${{ inputs.compose_path }}"),
             ("edge_endpoint_key", "${{ inputs.edge_endpoint_key }}"),
             ("healthcheck_path", "${{ inputs.healthcheck_path }}"),
@@ -1319,8 +1323,13 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         mechanics = (
+            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
+            ("fail-result-paths", '""'),
             ("id-token", "write"),
             ("group", "dokploy-target-setup-${{ inputs.context }}-${{ inputs.instance }}"),
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("payload-file", "dokploy-target-setup-payload.json"),
+            ("response-output-file", "dokploy-target-setup.json"),
             ("path", "dokploy-target-setup.json"),
         )
         for key, value in mechanics:
@@ -1332,6 +1341,21 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         value=value,
                     ),
                     "thin_connector_input",
+                )
+
+        for key, value in (
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("payload-file", "dokploy-target-setup-payload.json"),
+            ("response-output-file", "dokploy-target-setup.json"),
+        ):
+            with self.subTest(path_scoped_key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/generic-workflow.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
                 )
 
     def test_workflow_operator_input_allow_reasons_stay_narrow(self) -> None:

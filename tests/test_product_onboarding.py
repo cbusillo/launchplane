@@ -943,16 +943,45 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             encoding="utf-8"
         )
 
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
+        self.assertIn("route-path: /v1/dokploy-targets/setup", workflow_text)
+        self.assertIn("payload-file: dokploy-target-setup-payload.json", workflow_text)
+        self.assertIn(
+            "idempotency-key: ${{ steps.request.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn("response-output-file: dokploy-target-setup.json", workflow_text)
+        self.assertIn(
+            "SETUP_STATUS_CODE: ${{ steps.target_setup_request.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn('if [ "$SETUP_STATUS_CODE" != "202" ]; then', workflow_text)
         self.assertIn("- reconcile-compose-domain", workflow_text)
         self.assertIn("DOMAIN: ${{ inputs.domain }}", workflow_text)
         self.assertIn("RUNTIME_PORT: ${{ inputs.runtime_port }}", workflow_text)
         self.assertIn("Validate reconcile compose domain inputs", workflow_text)
         self.assertIn("domain is required for compose domain reconcile/prune", workflow_text)
         self.assertIn("runtime_port is required for reconcile-compose-domain", workflow_text)
+        self.assertIn("deploy_timeout_seconds must be a positive integer.", workflow_text)
         self.assertIn("expected_current_provider_target_json:", workflow_text)
         self.assertIn("EXPECTED_CURRENT_PROVIDER_TARGET_JSON", workflow_text)
         self.assertIn("expected_current_provider_target", workflow_text)
         self.assertIn("APPLY DOKPLOY TARGET SETUP", workflow_text)
+        self.assertIn("dokploy-target-setup-payload.json", workflow_text)
+        self.assertIn("dokploy-target-setup:${OPERATION}:", workflow_text)
+        self.assertIn("if-no-files-found: warn", workflow_text)
+        self.assertNotIn("actions/checkout", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
 
     def test_reusable_odoo_workflows_accept_configured_service_identity(self) -> None:
         workflow_paths = (
