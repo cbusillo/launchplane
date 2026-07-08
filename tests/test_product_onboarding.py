@@ -1700,11 +1700,38 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_product_onboarding_workflow_calls_service_route_with_apply_guard(self) -> None:
         workflow_text = Path(".github/workflows/product-onboarding.yml").read_text(encoding="utf-8")
 
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
         self.assertIn("/v1/product-onboarding/apply", workflow_text)
+        self.assertIn("payload-file: ${{ steps.onboarding.outputs.request_file }}", workflow_text)
+        self.assertIn(
+            "idempotency-key: ${{ steps.onboarding.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn("response-output-file: product-onboarding.json", workflow_text)
+        self.assertIn(
+            "STATUS_CODE: ${{ steps.onboarding_request.outputs.status-code }}", workflow_text
+        )
+        self.assertIn('if [ "$STATUS_CODE" != "202" ]; then', workflow_text)
         self.assertIn("APPLY PRODUCT ONBOARDING", workflow_text)
         self.assertIn("manifest_base64", workflow_text)
-        self.assertIn("product-onboarding:${PRODUCT}:${GITHUB_RUN_ID}", workflow_text)
+        self.assertIn(
+            "product-onboarding:${product}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}",
+            workflow_text,
+        )
         self.assertIn("product-onboarding-result", workflow_text)
+        self.assertIn("if-no-files-found: warn", workflow_text)
+        self.assertNotIn("actions/checkout", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
 
     def test_product_expected_config_workflow_calls_service_route_with_apply_guard(
         self,
