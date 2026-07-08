@@ -644,6 +644,11 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
 
     def test_odoo_operator_workflows_use_launchplane_request_action(self) -> None:
         workflow_expectations = {
+            "odoo-config-parameter-override.yml": (
+                "/v1/drivers/odoo/config-parameter-override",
+                ".launchplane/odoo-config-parameter-override-payload.json",
+                "odoo-config-parameter-override.json",
+            ),
             "odoo-target-replacement-plan.yml": (
                 "/v1/drivers/odoo/target-replacement-plan",
                 ".launchplane/odoo-target-replacement-plan-payload.json",
@@ -673,9 +678,22 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 self.assertIn("idempotency-key: ${{ steps.request.outputs.idempotency_key }}", workflow_text)
                 self.assertIn('steps.launchplane.outputs.status-code }}" != "202"', workflow_text)
                 self.assertIn('!= "accepted"', workflow_text)
+                self.assertIn("if: always()", workflow_text)
                 self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
                 self.assertNotIn("Authorization: Bearer", workflow_text)
                 self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+
+        config_parameter_workflow = Path(
+            ".github/workflows/odoo-config-parameter-override.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "group: odoo-config-parameter-override-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}-${{ inputs.key }}",
+            config_parameter_workflow,
+        )
+        self.assertIn(
+            'source_label: "github-actions:odoo-config-parameter-override"',
+            config_parameter_workflow,
+        )
 
     def test_launchplane_workflows_do_not_hardcode_public_service_defaults(self) -> None:
         workflow_dir = Path(".github/workflows")
