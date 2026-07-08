@@ -14,66 +14,40 @@ concurrency:
 
 jobs:
   validate:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
-    env:
-      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+    runs-on: ubuntu-latest
     steps:
       - name: Request work graph snapshot
+        id: snapshot_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: /v1/work-graph/snapshot
+          fail-result-paths: ""
+          response-output-file: launchplane-work-graph-snapshot.json
+
+      - name: Check work graph snapshot response
         shell: bash
+        env:
+          STATUS_CODE: ${{ steps.snapshot_request.outputs.status-code }}
         run: |
           set -euo pipefail
-          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
-
-          service_origin="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
-          print(f"{parsed.scheme}://{parsed.netloc}")
-          PY
-          })"
-          service_audience="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-          })"
-
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}" \
-            | jq -r '.value'
-          })"
           response_file="launchplane-work-graph-snapshot.json"
-          status_code="$(curl -sS \
-            -o "$response_file" \
-            -w '%{http_code}' \
-            -H "Authorization: Bearer ${oidc_token}" \
-            "${service_origin}/v1/work-graph/snapshot")"
-          if [ "$status_code" != "200" ]; then
+          if [ "$STATUS_CODE" != "200" ]; then
             cat "$response_file" >&2
-            echo "Launchplane work graph snapshot failed with HTTP ${status_code}." >&2
+            echo "Launchplane work graph snapshot failed with HTTP ${STATUS_CODE}." >&2
             exit 1
           fi
           jq . "$response_file"
 
       - name: Upload snapshot artifact
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: launchplane-work-graph-snapshot
           path: launchplane-work-graph-snapshot.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Summarize snapshot
         shell: bash

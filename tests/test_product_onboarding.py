@@ -1733,6 +1733,37 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
         self.assertNotIn("curl ", workflow_text)
 
+    def test_work_graph_snapshot_validate_uses_shared_launchplane_request(self) -> None:
+        workflow_text = Path(".github/workflows/work-graph-snapshot-validate.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
+        self.assertIn("method: GET", workflow_text)
+        self.assertIn("route-path: /v1/work-graph/snapshot", workflow_text)
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn(
+            "response-output-file: launchplane-work-graph-snapshot.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "STATUS_CODE: ${{ steps.snapshot_request.outputs.status-code }}", workflow_text
+        )
+        self.assertIn('if [ "$STATUS_CODE" != "200" ]; then', workflow_text)
+        self.assertIn("name: launchplane-work-graph-snapshot", workflow_text)
+        self.assertIn("if: always()", workflow_text)
+        self.assertIn("if-no-files-found: warn", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
+
     def test_product_expected_config_workflow_calls_service_route_with_apply_guard(
         self,
     ) -> None:

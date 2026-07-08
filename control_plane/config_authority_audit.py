@@ -775,6 +775,12 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "payload-file": frozenset(("${{ steps.request.outputs.payload_file }}",)),
         "response-output-file": frozenset(("${{ steps.request.outputs.response_file }}",)),
     },
+    ".github/workflows/work-graph-snapshot-validate.yml": {
+        "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
+        "fail-result-paths": frozenset(('""',)),
+        "method": frozenset(("GET",)),
+        "response-output-file": frozenset(("launchplane-work-graph-snapshot.json",)),
+    },
     ".github/workflows/odoo-config-parameter-override.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
         "payload-file": frozenset((".launchplane/odoo-config-parameter-override-payload.json",)),
