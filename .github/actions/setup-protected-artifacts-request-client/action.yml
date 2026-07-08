@@ -1,0 +1,44 @@
+---
+name: Setup protected artifacts request client
+description: Write Launchplane's protected artifact request-shaping Node client.
+
+inputs:
+  output-path:
+    description: Path where the ESM client module should be written.
+    required: false
+    default: .launchplane/protected-artifacts-request-client.mjs
+  render-request:
+    description: >-
+      Whether to render launchplane-request inputs for the protected artifacts
+      inventory request. When false, the action only writes the importable
+      client module and request outputs are empty.
+    required: false
+    default: "false"
+  product:
+    description: Launchplane product key. Required when render-request is true.
+    required: false
+    default: ""
+  context:
+    description: Optional Launchplane context for scoped protected inventory.
+    required: false
+    default: ""
+  response-output-file:
+    description: Optional file path where launchplane-request should write the inventory.
+    required: false
+    default: ""
+
+outputs:
+  client-path:
+    description: Path to the generated ESM client module.
+  route-path:
+    description: Launchplane route path for the rendered request; empty unless render-request is true.
+  method:
+    description: HTTP method for launchplane-request; empty unless render-request is true.
+  response-output-path:
+    description: Response output path for launchplane-request; empty unless render-request is true.
+  response-output-file:
+    description: Response output file for launchplane-request; empty unless render-request is true.
+
+runs:
+  using: node24
+  main: dist/index.js
