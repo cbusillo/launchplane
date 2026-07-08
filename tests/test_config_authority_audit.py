@@ -2436,6 +2436,23 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
             ("fail-result-paths", '""'),
             ("method", "GET"),
+            ("response-output-file", "dokploy-target-inspect-response.json"),
+            ("route-path", "${{ steps.request.outputs.route_path }}"),
+        ):
+            with self.subTest(dokploy_target_inspect_mechanic=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/dokploy-target-inspect.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
+            ("fail-result-paths", '""'),
+            ("method", "GET"),
             ("response-output-file", "launchplane-work-graph-snapshot.json"),
         ):
             with self.subTest(work_graph_snapshot_mechanic=key):
@@ -2452,6 +2469,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("fail-result-paths", "result.operation_status"),
             ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
             ("idempotency-key", "${{ steps.onboarding.outputs.idempotency_key }}"),
+            ("response-output-file", "dokploy-target-inspect-response.json"),
             ("response-output-file", "launchplane-work-graph-snapshot.json"),
         ):
             with self.subTest(path_scoped_provider_target_mechanic=key):

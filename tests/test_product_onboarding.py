@@ -1764,6 +1764,45 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
         self.assertNotIn("curl ", workflow_text)
 
+    def test_dokploy_target_inspect_uses_shared_launchplane_request(self) -> None:
+        workflow_text = Path(".github/workflows/dokploy-target-inspect.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn("Use context/instance or target_type/target_id, not both.", workflow_text)
+        self.assertIn("context and instance are both required for tracked inspect.", workflow_text)
+        self.assertIn(
+            "target_type and target_id are both required for explicit inspect.", workflow_text
+        )
+        self.assertIn("context/instance or target_type/target_id is required.", workflow_text)
+        self.assertIn('echo "route_path=/v1/dokploy-targets/inspect?${query}"', workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
+        self.assertIn("method: GET", workflow_text)
+        self.assertIn("route-path: ${{ steps.request.outputs.route_path }}", workflow_text)
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn(
+            "response-output-file: dokploy-target-inspect-response.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "STATUS_CODE: ${{ steps.inspect_request.outputs.status-code }}", workflow_text
+        )
+        self.assertIn('if [ "$STATUS_CODE" != "200" ]; then', workflow_text)
+        self.assertIn("name: dokploy-target-inspect", workflow_text)
+        self.assertIn("if: always()", workflow_text)
+        self.assertIn("if-no-files-found: warn", workflow_text)
+        self.assertNotIn("actions/checkout", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
+
     def test_product_expected_config_workflow_calls_service_route_with_apply_guard(
         self,
     ) -> None:

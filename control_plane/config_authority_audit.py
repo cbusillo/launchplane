@@ -761,6 +761,13 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "payload-file": frozenset(("dokploy-target-setup-payload.json",)),
         "response-output-file": frozenset(("dokploy-target-setup.json",)),
     },
+    ".github/workflows/dokploy-target-inspect.yml": {
+        "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
+        "fail-result-paths": frozenset(('""',)),
+        "method": frozenset(("GET",)),
+        "response-output-file": frozenset(("dokploy-target-inspect-response.json",)),
+        "route-path": frozenset(("${{ steps.request.outputs.route_path }}",)),
+    },
     ".github/workflows/product-onboarding.yml": {
         "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
         "fail-result-paths": frozenset(('""',)),
