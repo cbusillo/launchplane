@@ -49,9 +49,7 @@ concurrency:
 
 jobs:
   plan:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     env:
       PRODUCT: ${{ inputs.product }}
       INSTANCE: ${{ inputs.instance }}
@@ -59,8 +57,6 @@ jobs:
       ALLOW_EMPTY_DATA: ${{ inputs.allow_empty_data }}
       DATA_SOURCE_MODE: ${{ inputs.data_source_mode }}
       CONFIRMATION: ${{ inputs.confirmation }}
-      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
     steps:
       - name: Validate runtime inputs
         shell: bash
@@ -69,83 +65,74 @@ jobs:
           : "${PRODUCT:?Missing product input}"
           : "${INSTANCE:?Missing instance input}"
           : "${STRATEGY:?Missing strategy input}"
-          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ]; then
-            echo \
-              'Missing Launchplane service URL variable.' \
-              >&2
-            exit 1
-          fi
-          if [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
-            LAUNCHPLANE_SERVICE_AUDIENCE="$({
-              python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
+          for scalar in PRODUCT INSTANCE STRATEGY DATA_SOURCE_MODE CONFIRMATION; do
+            case "${!scalar}" in
+              *$'\n'*)
+                echo "${scalar} must be a single-line value." >&2
+                exit 1
+                ;;
+            esac
+          done
 
-          parsed = urlsplit(os.environ["LAUNCHPLANE_SERVICE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_SERVICE_URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-            })"
-          fi
-          echo "LAUNCHPLANE_SERVICE_AUDIENCE=${LAUNCHPLANE_SERVICE_AUDIENCE}" >>"$GITHUB_ENV"
-
-      - name: Build replacement plan
+      - name: Write target replacement plan payload
+        id: request
         shell: bash
         run: |
           set -euo pipefail
-          oidc_token="$({
-            token_url="${ACTIONS_ID_TOKEN_REQUEST_URL}"
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${token_url}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
-            | jq -r '.value'
-          })"
-          payload="$({
-            jq -n \
-              --arg product "$PRODUCT" \
-              --arg instance "$INSTANCE" \
-              --arg strategy "$STRATEGY" \
-              --arg data_source_mode "$DATA_SOURCE_MODE" \
-              --arg confirmation "$CONFIRMATION" \
-              --argjson allow_empty_data "$ALLOW_EMPTY_DATA" \
-              '{
+          mkdir -p .launchplane
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg instance "$INSTANCE" \
+            --arg strategy "$STRATEGY" \
+            --arg data_source_mode "$DATA_SOURCE_MODE" \
+            --arg confirmation "$CONFIRMATION" \
+            --argjson allow_empty_data "$ALLOW_EMPTY_DATA" \
+            '{
+              schema_version: 1,
+              product: $product,
+              replacement: {
                 schema_version: 1,
                 product: $product,
-                replacement: {
-                  schema_version: 1,
-                  product: $product,
-                  instance: $instance,
-                  strategy: $strategy,
-                  allow_empty_data: $allow_empty_data,
-                  data_source_mode: $data_source_mode,
-                  confirmation: $confirmation
-                }
-              }'
-          })"
+                instance: $instance,
+                strategy: $strategy,
+                allow_empty_data: $allow_empty_data,
+                data_source_mode: $data_source_mode,
+                confirmation: $confirmation
+              }
+            }' > .launchplane/odoo-target-replacement-plan-payload.json
+
           idempotency_key="$({
             printf '%s' \
               "odoo-target-replacement-plan:${PRODUCT}:${INSTANCE}:" \
               "${STRATEGY}:${ALLOW_EMPTY_DATA}:${DATA_SOURCE_MODE}:" \
               "${CONFIRMATION}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
           })"
-          route="${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo"
-          status_code="$({
-            curl -sS \
-              -o odoo-target-replacement-plan.json \
-              -w '%{http_code}' \
-              -X POST \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H 'Content-Type: application/json' \
-              -H "Idempotency-Key: ${idempotency_key}" \
-              --data "$payload" \
-              "${route}/target-replacement-plan"
-          })"
+          echo "idempotency_key=${idempotency_key}" >>"$GITHUB_OUTPUT"
+
+      - name: Build replacement plan
+        id: launchplane
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/drivers/odoo/target-replacement-plan
+          payload-file: .launchplane/odoo-target-replacement-plan-payload.json
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          response-output-file: odoo-target-replacement-plan.json
+
+      - name: Verify replacement plan response
+        shell: bash
+        run: |
+          set -euo pipefail
           jq . odoo-target-replacement-plan.json
-          if [ "$status_code" != "202" ]; then
+          if [ "${{ steps.launchplane.outputs.status-code }}" != "202" ]; then
             echo \
-              "Odoo replacement plan failed: ${status_code}." \
+              "Odoo replacement plan failed: ${{ steps.launchplane.outputs.status-code }}." \
               >&2
+            exit 1
+          fi
+          if [ "$(jq -r '.status' odoo-target-replacement-plan.json)" != "accepted" ]; then
+            echo 'Launchplane Odoo target replacement plan was not accepted.' >&2
             exit 1
           fi
 

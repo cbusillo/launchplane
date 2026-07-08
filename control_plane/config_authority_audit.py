@@ -746,6 +746,18 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
             )
         ),
     },
+    ".github/workflows/odoo-target-replacement-plan.yml": {
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "payload-file": frozenset(
+            (".launchplane/odoo-target-replacement-plan-payload.json",)
+        ),
+    },
+    ".github/workflows/odoo-website-bootstrap-override.yml": {
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "payload-file": frozenset(
+            (".launchplane/odoo-website-bootstrap-override-payload.json",)
+        ),
+    },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "DEFAULT_REPOSITORY": frozenset(("${{ github.repository }}",)),
         "GITHUB_TOKEN": frozenset(("${{ github.token }}",)),
