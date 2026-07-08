@@ -776,6 +776,13 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "response-output-file": frozenset(("ingress-route-audit-read-raw.json",)),
         "route-path": frozenset(("${{ steps.route.outputs.route_path }}",)),
     },
+    ".github/workflows/preview-lifecycle.yml": {
+        "audience": frozenset(("${{ env.LAUNCHPLANE_AUDIENCE }}",)),
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "payload-file": frozenset(("${{ steps.request.outputs.request_file }}",)),
+        "response-output-file": frozenset(("launchplane-preview-lifecycle-sweep-response.json",)),
+        "route-path": frozenset(("/v1/previews/lifecycle-sweep",)),
+    },
     ".github/workflows/product-onboarding.yml": {
         "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
         "fail-result-paths": frozenset(('""',)),

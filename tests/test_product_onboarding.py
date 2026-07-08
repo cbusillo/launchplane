@@ -1461,6 +1461,37 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("Authorization: Bearer", workflow_text)
         self.assertNotIn("curl ", workflow_text)
 
+    def test_preview_lifecycle_uses_launchplane_request(self) -> None:
+        workflow_text = Path(".github/workflows/preview-lifecycle.yml").read_text(encoding="utf-8")
+
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("launchplane-url: ${{ env.LAUNCHPLANE_URL }}", workflow_text)
+        self.assertIn("audience: ${{ env.LAUNCHPLANE_AUDIENCE }}", workflow_text)
+        self.assertIn("route-path: /v1/previews/lifecycle-sweep", workflow_text)
+        self.assertIn("payload-file: ${{ steps.request.outputs.request_file }}", workflow_text)
+        self.assertIn(
+            "idempotency-key: ${{ steps.request.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: launchplane-preview-lifecycle-sweep-response.json",
+            workflow_text,
+        )
+        self.assertIn("request_file=", workflow_text)
+        self.assertIn("launchplane-preview-lifecycle-sweep.json", workflow_text)
+        self.assertIn("launchplane-preview-lifecycle-sweep-response.json", workflow_text)
+        self.assertIn("steps.request.outputs.apply_json", workflow_text)
+        self.assertNotIn("post_launchplane_json", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
+
     def test_product_legacy_context_cleanup_uses_launchplane_request(self) -> None:
         workflow_text = Path(".github/workflows/product-legacy-context-cleanup.yml").read_text(
             encoding="utf-8"

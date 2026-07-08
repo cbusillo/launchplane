@@ -22,9 +22,7 @@ concurrency:
 
 jobs:
   preview_lifecycle:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     env:
       APPLY: ${{ github.event_name == 'workflow_dispatch' && inputs.apply || false }}
       LAUNCHPLANE_AUDIENCE: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_AUDIENCE }}
@@ -38,33 +36,10 @@ jobs:
           : "${LAUNCHPLANE_AUDIENCE:?Missing LAUNCHPLANE_PREVIEW_LIFECYCLE_AUDIENCE variable}"
           : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PREVIEW_LIFECYCLE_URL variable}"
 
-      - name: Run Launchplane-owned preview lifecycle
+      - name: Build preview lifecycle request
+        id: request
         run: |
           set -euo pipefail
-
-          oidc_response="$(curl -fsS \
-            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${LAUNCHPLANE_AUDIENCE}")"
-          oidc_token="$(jq -r '.value // empty' <<< "$oidc_response")"
-          if [ -z "$oidc_token" ]; then
-            echo 'GitHub OIDC token response did not include a token value.' >&2
-            exit 1
-          fi
-
-          post_launchplane_json() {
-            local route="$1"
-            local idempotency_key="$2"
-            local payload="$3"
-            curl -fsS \
-              -X POST \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H 'Accept: application/json' \
-              -H 'Content-Type: application/json' \
-              -H "Idempotency-Key: ${idempotency_key}" \
-              --data "$payload" \
-              "${LAUNCHPLANE_URL}${route}"
-          }
-
           run_identity="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
           apply_json='false'
           if [ "$APPLY" = 'true' ]; then
@@ -75,18 +50,37 @@ jobs:
             --arg source "$SOURCE" \
             --argjson apply "$apply_json" \
             '{schema_version: 1, source: $source, apply: $apply, destroy_reason: "launchplane_preview_lifecycle_cleanup", timeout_seconds: 300}')"
-          sweep_response="$(post_launchplane_json \
-            '/v1/previews/lifecycle-sweep' \
-            "preview-lifecycle-sweep:${run_identity}:${apply_json}" \
-            "$sweep_payload")"
-          echo "$sweep_response" | jq .
+          request_file="launchplane-preview-lifecycle-sweep.json"
+          printf '%s\n' "$sweep_payload" > "$request_file"
+          {
+            echo "apply_json=${apply_json}"
+            echo "idempotency_key=preview-lifecycle-sweep:${run_identity}:${apply_json}"
+            echo "request_file=${request_file}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Launchplane-owned preview lifecycle
+        id: preview_lifecycle_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ env.LAUNCHPLANE_AUDIENCE }}
+          route-path: /v1/previews/lifecycle-sweep
+          payload-file: ${{ steps.request.outputs.request_file }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          response-output-file: launchplane-preview-lifecycle-sweep-response.json
+
+      - name: Summarize preview lifecycle
+        run: |
+          set -euo pipefail
+          response_file="launchplane-preview-lifecycle-sweep-response.json"
+          jq . "$response_file"
 
           {
             echo '## Launchplane preview lifecycle'
             echo
-            echo "- Apply: ${apply_json}"
-            echo "- Sweep status: $(jq -r '.result.status // empty' <<< "$sweep_response")"
-            echo "- Profiles: $(jq -r '.result.profile_count // 0' <<< "$sweep_response")"
+            echo "- Apply: ${{ steps.request.outputs.apply_json }}"
+            echo "- Sweep status: $(jq -r '.result.status // empty' "$response_file")"
+            echo "- Profiles: $(jq -r '.result.profile_count // 0' "$response_file")"
             echo
-            jq -r '.result.profiles[]? | "- \(.product) / \(.context): \(.status) (orphaned: \((.orphaned_slugs // []) | length), destroyed: \((.destroyed_slugs // []) | length), failed: \((.failed_slugs // []) | length))"' <<< "$sweep_response"
+            jq -r '.result.profiles[]? | "- \(.product) / \(.context): \(.status) (orphaned: \((.orphaned_slugs // []) | length), destroyed: \((.destroyed_slugs // []) | length), failed: \((.failed_slugs // []) | length))"' "$response_file"
           } >> "$GITHUB_STEP_SUMMARY"
