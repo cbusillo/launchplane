@@ -771,6 +771,101 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("LAUNCHPLANE_SERVICE_URL", stable_bootstrap_workflow)
         self.assertNotIn("curl ", stable_bootstrap_workflow)
 
+        target_apply_workflow = Path(
+            ".github/workflows/odoo-target-replacement-apply.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("runs-on: ubuntu-latest", target_apply_workflow)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            target_apply_workflow,
+        )
+        self.assertIn(
+            "route-path: /v1/drivers/odoo/target-replacement-apply",
+            target_apply_workflow,
+        )
+        self.assertIn(
+            "payload-file: .launchplane/odoo-target-replacement-apply-payload.json",
+            target_apply_workflow,
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.request.outputs.idempotency_key }}",
+            target_apply_workflow,
+        )
+        self.assertIn(
+            "response-output-file: odoo-target-replacement-apply-create.json",
+            target_apply_workflow,
+        )
+        self.assertIn("poll_url=result.poll_url", target_apply_workflow)
+        self.assertIn("operation_id=result.operation_id", target_apply_workflow)
+        self.assertIn(
+            "CREATE_STATUS_CODE: ${{ steps.create_replacement.outputs.status-code }}",
+            target_apply_workflow,
+        )
+        self.assertIn(
+            'if [ "$CREATE_STATUS_CODE" != "202" ]; then',
+            target_apply_workflow,
+        )
+        self.assertIn('!= "accepted"', target_apply_workflow)
+        self.assertIn(
+            "for numeric in TIMEOUT_SECONDS HEALTH_TIMEOUT_SECONDS", target_apply_workflow
+        )
+        self.assertIn("${numeric} must be a positive integer.", target_apply_workflow)
+        self.assertIn("REPLACEMENT_POLL_URL", target_apply_workflow)
+        self.assertIn("CREATE_STATUS_CODE", target_apply_workflow)
+        self.assertIn("POLL_STATUS_CODE", target_apply_workflow)
+        self.assertIn('case "$DATA_SOURCE_MODE" in', target_apply_workflow)
+        self.assertIn("existing | empty | upstream_restore)", target_apply_workflow)
+        self.assertIn("*://* | //* | *'//'*)", target_apply_workflow)
+        self.assertIn(
+            "Odoo target replacement poll URL must be a local Launchplane route path.",
+            target_apply_workflow,
+        )
+        self.assertIn(
+            "/v1/drivers/odoo/target-replacement/operations/*)",
+            target_apply_workflow,
+        )
+        self.assertIn("method: GET", target_apply_workflow)
+        self.assertIn(
+            "route-path: ${{ steps.create_replacement.outputs.poll_url }}",
+            target_apply_workflow,
+        )
+        self.assertIn("poll-result-path: operation.status", target_apply_workflow)
+        self.assertIn("poll-result-statuses: pending,running", target_apply_workflow)
+        self.assertIn('fail-result-paths: ""', target_apply_workflow)
+        self.assertIn(
+            "response-output-file: odoo-target-replacement-apply.json",
+            target_apply_workflow,
+        )
+        self.assertIn(
+            "POLL_STATUS_CODE: ${{ steps.poll_replacement.outputs.status-code }}",
+            target_apply_workflow,
+        )
+        self.assertIn(
+            'if [ "$POLL_STATUS_CODE" != "200" ]; then',
+            target_apply_workflow,
+        )
+        self.assertIn('operation_status" != "pass"', target_apply_workflow)
+        self.assertIn('deploy_status" != "pass"', target_apply_workflow)
+        self.assertIn('post_deploy_status" != "pass"', target_apply_workflow)
+        self.assertIn("odoo-target-replacement-apply-create.json", target_apply_workflow)
+        self.assertIn("if: always()", target_apply_workflow)
+        self.assertIn(
+            "group: >-\n    odoo-target-replacement-apply-${{ inputs.product }}-${{ inputs.instance }}",
+            target_apply_workflow,
+        )
+        self.assertIn("cancel-in-progress: false", target_apply_workflow)
+        self.assertNotIn(
+            '${{ steps.create_replacement.outputs.status-code }}" !=', target_apply_workflow
+        )
+        self.assertNotIn(
+            '${{ steps.poll_replacement.outputs.status-code }}" !=', target_apply_workflow
+        )
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", target_apply_workflow)
+        self.assertNotIn("Authorization: Bearer", target_apply_workflow)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", target_apply_workflow)
+        self.assertNotIn("LAUNCHPLANE_SERVICE_URL", target_apply_workflow)
+        self.assertNotIn("curl ", target_apply_workflow)
+
     def test_launchplane_workflows_do_not_hardcode_public_service_defaults(self) -> None:
         workflow_dir = Path(".github/workflows")
         forbidden_literals = (

@@ -93,9 +93,7 @@ concurrency:
 
 jobs:
   apply:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     env:
       PRODUCT: ${{ inputs.product }}
       INSTANCE: ${{ inputs.instance }}
@@ -111,10 +109,6 @@ jobs:
       NO_CACHE: ${{ inputs.no_cache }}
       TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
       HEALTH_TIMEOUT_SECONDS: ${{ inputs.health_timeout_seconds }}
-      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-      POLL_INTERVAL_SECONDS: "15"
-      POLL_TIMEOUT_SECONDS: "3600"
     steps:
       - name: Validate runtime inputs
         shell: bash
@@ -127,6 +121,14 @@ jobs:
             echo 'Only recreate-in-place is currently supported.' >&2
             exit 1
           fi
+          case "$DATA_SOURCE_MODE" in
+            existing | empty | upstream_restore)
+              ;;
+            *)
+              echo 'Unsupported data_source_mode input.' >&2
+              exit 1
+              ;;
+          esac
           for value in \
             "$ALLOW_EMPTY_DATA" \
             "$VERIFY_HEALTH" \
@@ -138,180 +140,165 @@ jobs:
               exit 1
             fi
           done
-          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ]; then
-            echo \
-              'Missing Launchplane service URL variable.' \
-              >&2
-            exit 1
-          fi
-          if [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
-            LAUNCHPLANE_SERVICE_AUDIENCE="$({
-              python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
+          for scalar in PRODUCT INSTANCE STRATEGY ARTIFACT_ID SOURCE_GIT_REF DATA_SOURCE_MODE CONFIRMATION TIMEOUT_SECONDS HEALTH_TIMEOUT_SECONDS; do
+            case "${!scalar}" in
+              *$'\n'*)
+                echo "${scalar} must be a single-line value." >&2
+                exit 1
+                ;;
+            esac
+          done
+          for numeric in TIMEOUT_SECONDS HEALTH_TIMEOUT_SECONDS; do
+            if [ -n "${!numeric}" ]; then
+              case "${!numeric}" in
+                *[!0-9]*)
+                  echo "${numeric} must be a positive integer." >&2
+                  exit 1
+                  ;;
+              esac
+              if [ "${!numeric}" -lt 1 ]; then
+                echo "${numeric} must be a positive integer." >&2
+                exit 1
+              fi
+            fi
+          done
 
-          parsed = urlsplit(os.environ["LAUNCHPLANE_SERVICE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_SERVICE_URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-            })"
-          fi
-          echo "LAUNCHPLANE_SERVICE_AUDIENCE=${LAUNCHPLANE_SERVICE_AUDIENCE}" >>"$GITHUB_ENV"
-
-      - name: Create and poll replacement operation
+      - name: Write replacement request payload
+        id: request
         shell: bash
         run: |
           set -euo pipefail
-          launchplane_oidc_token() {
-            token_url="${ACTIONS_ID_TOKEN_REQUEST_URL}"
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${token_url}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
-            | jq -r '.value'
-          }
-          payload="$({
-            jq -n \
-              --arg product "$PRODUCT" \
-              --arg instance "$INSTANCE" \
-              --arg strategy "$STRATEGY" \
-              --arg artifact_id "$ARTIFACT_ID" \
-              --arg source_git_ref "$SOURCE_GIT_REF" \
-              --arg data_source_mode "$DATA_SOURCE_MODE" \
-              --arg confirmation "$CONFIRMATION" \
-              --argjson allow_empty_data "$ALLOW_EMPTY_DATA" \
-              --argjson verify_health "$VERIFY_HEALTH" \
-              --argjson verify_canonical "$VERIFY_CANONICAL" \
-              --argjson verify_logo "$VERIFY_LOGO" \
-              --argjson no_cache "$NO_CACHE" \
-              '{
+          mkdir -p .launchplane
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg instance "$INSTANCE" \
+            --arg strategy "$STRATEGY" \
+            --arg artifact_id "$ARTIFACT_ID" \
+            --arg source_git_ref "$SOURCE_GIT_REF" \
+            --arg data_source_mode "$DATA_SOURCE_MODE" \
+            --arg confirmation "$CONFIRMATION" \
+            --argjson allow_empty_data "$ALLOW_EMPTY_DATA" \
+            --argjson verify_health "$VERIFY_HEALTH" \
+            --argjson verify_canonical "$VERIFY_CANONICAL" \
+            --argjson verify_logo "$VERIFY_LOGO" \
+            --argjson no_cache "$NO_CACHE" \
+            '{
+              schema_version: 1,
+              product: $product,
+              replacement: {
                 schema_version: 1,
                 product: $product,
-                replacement: {
-                  schema_version: 1,
-                  product: $product,
-                  instance: $instance,
-                  strategy: $strategy,
-                  artifact_id: $artifact_id,
-                  source_git_ref: $source_git_ref,
-                  allow_empty_data: $allow_empty_data,
-                  data_source_mode: $data_source_mode,
-                  confirmation: $confirmation,
-                  verify_health: $verify_health,
-                  verify_canonical: $verify_canonical,
-                  verify_logo: $verify_logo,
-                  no_cache: $no_cache
-                }
-              }'
-          })"
+                instance: $instance,
+                strategy: $strategy,
+                artifact_id: $artifact_id,
+                source_git_ref: $source_git_ref,
+                allow_empty_data: $allow_empty_data,
+                data_source_mode: $data_source_mode,
+                confirmation: $confirmation,
+                verify_health: $verify_health,
+                verify_canonical: $verify_canonical,
+                verify_logo: $verify_logo,
+                no_cache: $no_cache
+              }
+            }' > .launchplane/odoo-target-replacement-apply-payload.json
           if [ -n "${TIMEOUT_SECONDS:-}" ]; then
-            payload="$({
-              jq \
-                --argjson timeout_seconds "$TIMEOUT_SECONDS" \
-                '.replacement.timeout_seconds = $timeout_seconds' \
-                <<<"$payload"
-            })"
+            tmp_payload="$(mktemp)"
+            jq \
+              --argjson timeout_seconds "$TIMEOUT_SECONDS" \
+              '.replacement.timeout_seconds = $timeout_seconds' \
+              .launchplane/odoo-target-replacement-apply-payload.json > "$tmp_payload"
+            mv "$tmp_payload" .launchplane/odoo-target-replacement-apply-payload.json
           fi
           if [ -n "${HEALTH_TIMEOUT_SECONDS:-}" ]; then
-            payload="$({
-              filter='.replacement.health_timeout_seconds = '
-              filter="${filter}\$health_timeout_seconds"
-              jq \
-                --argjson health_timeout_seconds "$HEALTH_TIMEOUT_SECONDS" \
-                "$filter" \
-                <<<"$payload"
-            })"
+            tmp_payload="$(mktemp)"
+            jq \
+              --argjson health_timeout_seconds "$HEALTH_TIMEOUT_SECONDS" \
+              '.replacement.health_timeout_seconds = $health_timeout_seconds' \
+              .launchplane/odoo-target-replacement-apply-payload.json > "$tmp_payload"
+            mv "$tmp_payload" .launchplane/odoo-target-replacement-apply-payload.json
           fi
-          idempotency_key="$({
-            printf '%s' \
-              "odoo-target-replacement-apply:${PRODUCT}:${INSTANCE}:" \
-              "${STRATEGY}:${ARTIFACT_ID}:${SOURCE_GIT_REF}:" \
-              "${ALLOW_EMPTY_DATA}:${DATA_SOURCE_MODE}:${CONFIRMATION}:" \
-              "${VERIFY_HEALTH}:${VERIFY_CANONICAL}:${VERIFY_LOGO}:" \
-              "${NO_CACHE}:${GITHUB_RUN_ID}:" \
-              "${GITHUB_RUN_ATTEMPT}"
-          })"
-          route="${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo"
-          oidc_token="$(launchplane_oidc_token)"
-          status_code="$({
-            curl -sS \
-              -o odoo-target-replacement-apply.json \
-              -w '%{http_code}' \
-              -X POST \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H 'Content-Type: application/json' \
-              -H "Idempotency-Key: ${idempotency_key}" \
-              --data "$payload" \
-              "${route}/target-replacement-apply"
-          })"
-          if [ "$status_code" != "202" ]; then
-            echo 'Odoo target replacement operation create failed:' \
-              "${status_code}." >&2
-            cat odoo-target-replacement-apply.json >&2
+          printf 'idempotency_key=%s\n' \
+            "odoo-target-replacement-apply:${PRODUCT}:${INSTANCE}:${STRATEGY}:${ARTIFACT_ID}:${SOURCE_GIT_REF}:${ALLOW_EMPTY_DATA}:${DATA_SOURCE_MODE}:${CONFIRMATION}:${VERIFY_HEALTH}:${VERIFY_CANONICAL}:${VERIFY_LOGO}:${NO_CACHE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+            >>"$GITHUB_OUTPUT"
+
+      - name: Create replacement operation
+        id: create_replacement
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/drivers/odoo/target-replacement-apply
+          payload-file: .launchplane/odoo-target-replacement-apply-payload.json
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          output-paths: >-
+            poll_url=result.poll_url,operation_id=result.operation_id
+          response-output-file: odoo-target-replacement-apply-create.json
+
+      - name: Verify replacement operation create response
+        env:
+          CREATE_STATUS_CODE: ${{ steps.create_replacement.outputs.status-code }}
+          REPLACEMENT_OPERATION_ID: ${{ steps.create_replacement.outputs.operation_id }}
+          REPLACEMENT_POLL_URL: ${{ steps.create_replacement.outputs.poll_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq . odoo-target-replacement-apply-create.json
+          if [ "$CREATE_STATUS_CODE" != "202" ]; then
+            echo 'Odoo target replacement operation create failed' \
+              "with HTTP ${CREATE_STATUS_CODE}." >&2
             exit 1
           fi
-          jq . odoo-target-replacement-apply.json
-          poll_url="$(
-            jq -r \
-              '.result.poll_url // empty' \
-              odoo-target-replacement-apply.json
-          )"
-          operation_id="$({
-            jq -r \
-              '.records.odoo_stable_target_replacement_operation_id //
-               .result.operation_id //
-               empty' \
-              odoo-target-replacement-apply.json
-          })"
-          if [ -z "$poll_url" ] || [ -z "$operation_id" ]; then
+          if [ "$(jq -r '.status' odoo-target-replacement-apply-create.json)" != "accepted" ]; then
+            echo 'Odoo target replacement operation was not accepted.' >&2
+            exit 1
+          fi
+          if [ -z "$REPLACEMENT_POLL_URL" ] || [ -z "$REPLACEMENT_OPERATION_ID" ]; then
             echo 'Odoo target replacement response missing poll metadata.' >&2
-            jq . odoo-target-replacement-apply.json >&2
+            jq . odoo-target-replacement-apply-create.json >&2
             exit 1
           fi
-          deadline=$((SECONDS + POLL_TIMEOUT_SECONDS))
-          parsed_response="$(mktemp)"
-          while true; do
-            oidc_token="$(launchplane_oidc_token)"
-            status_code="$({
-              curl -sS \
-                -o odoo-target-replacement-apply.json \
-                -w '%{http_code}' \
-                -H "Authorization: Bearer ${oidc_token}" \
-                "${LAUNCHPLANE_SERVICE_URL}${poll_url}"
-            })"
-            if [ "$status_code" != "200" ]; then
-              echo 'Odoo target replacement operation poll failed:' \
-                "${status_code}." >&2
-              cat odoo-target-replacement-apply.json >&2
+          case "$REPLACEMENT_POLL_URL" in
+            *$'\n'* | *://* | //* | *'//'*)
+              echo 'Odoo target replacement poll URL must be a local Launchplane route path.' >&2
+              jq . odoo-target-replacement-apply-create.json >&2
               exit 1
-            fi
-            jq . odoo-target-replacement-apply.json > "$parsed_response"
-            operation_status="$(
-              jq -r \
-                '.operation.status // empty' \
-                "$parsed_response"
-            )"
-            operation_phase="$(
-              jq -r \
-                '.operation.phase // empty' \
-                "$parsed_response"
-            )"
-            echo 'Odoo target replacement operation:' \
-              "status=${operation_status} phase=${operation_phase}"
-            if [ "$operation_status" = "pass" ] || \
-              [ "$operation_status" = "fail" ]; then
-              break
-            fi
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo 'Launchplane Odoo target replacement operation' \
-                "${operation_id} timed out while polling." >&2
-              jq . odoo-target-replacement-apply.json >&2
+              ;;
+            /v1/drivers/odoo/target-replacement/operations/*)
+              ;;
+            *)
+              echo 'Odoo target replacement poll URL used an unexpected route path.' >&2
+              jq . odoo-target-replacement-apply-create.json >&2
               exit 1
-            fi
-            sleep "$POLL_INTERVAL_SECONDS"
-          done
-          mv "$parsed_response" odoo-target-replacement-apply.json
+              ;;
+          esac
+
+      - name: Poll replacement operation
+        id: poll_replacement
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.create_replacement.outputs.poll_url }}
+          poll-result-path: operation.status
+          poll-result-statuses: pending,running
+          poll-interval-ms: 15000
+          poll-timeout-ms: 3600000
+          fail-result-paths: ""
+          response-output-file: odoo-target-replacement-apply.json
+
+      - name: Verify replacement operation result
+        env:
+          POLL_STATUS_CODE: ${{ steps.poll_replacement.outputs.status-code }}
+        shell: bash
+        run: |
+          set -euo pipefail
           jq . odoo-target-replacement-apply.json
+          if [ "$POLL_STATUS_CODE" != "200" ]; then
+            echo 'Odoo target replacement operation poll failed' \
+              "with HTTP ${POLL_STATUS_CODE}." >&2
+            exit 1
+          fi
           operation_status="$(
             jq -r '.operation.status // ""' odoo-target-replacement-apply.json
           )"
@@ -351,7 +338,11 @@ jobs:
           fi
 
       - name: Upload replacement apply result
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: odoo-target-replacement-apply
-          path: odoo-target-replacement-apply.json
+          path: |
+            odoo-target-replacement-apply-create.json
+            odoo-target-replacement-apply.json
+          if-no-files-found: ignore

@@ -756,6 +756,12 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "payload-file": frozenset((".launchplane/odoo-stable-bootstrap-payload.json",)),
         "route-path": frozenset(("${{ steps.create_bootstrap.outputs.poll_url }}",)),
     },
+    ".github/workflows/odoo-target-replacement-apply.yml": {
+        "fail-result-paths": frozenset(('""',)),
+        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
+        "payload-file": frozenset((".launchplane/odoo-target-replacement-apply-payload.json",)),
+        "route-path": frozenset(("${{ steps.create_replacement.outputs.poll_url }}",)),
+    },
     ".github/workflows/odoo-target-replacement-plan.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
         "payload-file": frozenset((".launchplane/odoo-target-replacement-plan-payload.json",)),
