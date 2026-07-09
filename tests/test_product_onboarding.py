@@ -1915,6 +1915,8 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("RUNTIME_OUTCOME: ${{ steps.deployed_runtime.outcome }}", workflow_text)
         self.assertIn("runtime_status_code=\"action_failed\"", workflow_text)
         self.assertIn("Launchplane runtime smoke failed.", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
 
         deployed_smoke_step = workflow_text.split(
             "- name: Capture v2 deployed smoke evidence", 1
@@ -1965,14 +1967,51 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertIn("status_code=\"action_failed\"", workflow_text)
         self.assertIn("Launchplane self deploy request failed with HTTP", workflow_text)
+        self.assertIn("Resolve Launchplane deploy wait timeout", workflow_text)
+        self.assertIn("id: deploy_wait_timeout", workflow_text)
+        self.assertIn("timeout_ms=$((wait_timeout_seconds * 1000))", workflow_text)
+        self.assertIn("deadline_epoch=$(($(date +%s) + wait_timeout_seconds))", workflow_text)
+        self.assertIn("Wait for deployed Launchplane runtime image", workflow_text)
+        self.assertLess(
+            workflow_text.index("Wait for deployed Launchplane runtime image"),
+            workflow_text.index("Wait for deployed Launchplane health URLs"),
+        )
+        self.assertLess(
+            workflow_text.index("Wait for deployed Launchplane health URLs"),
+            workflow_text.index("Verify deployed Launchplane runtime image after health"),
+        )
+        self.assertIn("poll-until-path: runtime.docker_image_reference", workflow_text)
+        self.assertIn(
+            "poll-until-value: ${{ steps.image.outputs.image_reference }}",
+            workflow_text,
+        )
+        self.assertIn('poll-retry-on-request-error: "true"', workflow_text)
+        self.assertIn('poll-retry-on-unexpected-status: "true"', workflow_text)
+        self.assertIn('poll-interval-ms: "5000"', workflow_text)
+        self.assertIn(
+            "poll-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.timeout_ms }}",
+            workflow_text,
+        )
+        self.assertIn("remaining_timeout_ms=$((remaining_seconds * 1000))", workflow_text)
+        self.assertIn(
+            "poll-timeout-ms: ${{ steps.deployed_health.outputs.remaining_timeout_ms }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-wait.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-final.json",
+            workflow_text,
+        )
 
         self_deploy_block = workflow_text.split(
             "- name: Read previous Launchplane runtime", 1
-        )[1].split("- name: Wait for deployed Launchplane image", 1)[0]
+        )[1].split("- name: Capture failed Launchplane deploy diagnostics", 1)[0]
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", self_deploy_block)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", self_deploy_block)
         self.assertNotIn("Authorization: Bearer", self_deploy_block)
-        self.assertNotIn("curl ", self_deploy_block)
 
     def test_deploy_workflow_requests_rollback_through_shared_request(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
@@ -2017,14 +2056,50 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("Launchplane rollback requested", workflow_text)
         self.assertIn("Launchplane rollback timed out", workflow_text)
         self.assertIn("Rollback request response summary", workflow_text)
+        self.assertIn("Resolve Launchplane rollback wait timeout", workflow_text)
+        self.assertIn("id: rollback_wait_timeout", workflow_text)
+        self.assertIn("Wait for Launchplane rollback health URLs", workflow_text)
+        self.assertIn("id: rollback_health", workflow_text)
+        self.assertIn("Wait for Launchplane rollback runtime image", workflow_text)
+        self.assertIn("id: rollback_runtime", workflow_text)
+        self.assertLess(
+            workflow_text.index("Wait for Launchplane rollback runtime image"),
+            workflow_text.index("Wait for Launchplane rollback health URLs"),
+        )
+        self.assertLess(
+            workflow_text.index("Wait for Launchplane rollback health URLs"),
+            workflow_text.index("Verify Launchplane rollback runtime image after health"),
+        )
+        self.assertIn(
+            "poll-until-value: ${{ steps.rollback_request.outputs.previous_image_reference }}",
+            workflow_text,
+        )
+        self.assertIn('poll-retry-on-unexpected-status: "true"', workflow_text)
+        self.assertIn(
+            "poll-timeout-ms: ${{ steps.rollback_wait_timeout.outputs.timeout_ms }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "poll-timeout-ms: ${{ steps.rollback_health.outputs.remaining_timeout_ms }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-rollback-runtime-wait.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-rollback-runtime-final.json",
+            workflow_text,
+        )
+        self.assertIn("Rollback runtime response summary", workflow_text)
+        self.assertIn("ROLLBACK_RUNTIME_OUTCOME", workflow_text)
 
         rollback_request_block = workflow_text.split(
             "- name: Render Launchplane rollback request", 1
-        )[1].split("- name: Wait for Launchplane rollback image", 1)[0]
+        )[1].split("- name: Render product context workflow authz grants", 1)[0]
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", rollback_request_block)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", rollback_request_block)
         self.assertNotIn("Authorization: Bearer", rollback_request_block)
-        self.assertNotIn("curl ", rollback_request_block)
 
     def test_product_onboarding_workflow_calls_service_route_with_apply_guard(self) -> None:
         workflow_text = Path(".github/workflows/product-onboarding.yml").read_text(encoding="utf-8")

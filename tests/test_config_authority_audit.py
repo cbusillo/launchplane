@@ -2947,7 +2947,49 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("method", "GET"),
             ("payload-file", "${{ steps.self_deploy.outputs.payload_file }}"),
             ("payload-file", "${{ steps.rollback_request.outputs.payload_file }}"),
+            ("poll-interval-ms", '"1000"'),
+            ("poll-interval-ms", '"5000"'),
+            ("poll-retry-on-request-error", '"true"'),
+            ("poll-retry-on-unexpected-status", '"true"'),
+            (
+                "poll-timeout-ms",
+                "${{ steps.deploy_wait_timeout.outputs.timeout_ms }}",
+            ),
+            (
+                "poll-timeout-ms",
+                "${{ steps.deployed_health.outputs.remaining_timeout_ms }}",
+            ),
+            (
+                "poll-timeout-ms",
+                "${{ steps.rollback_wait_timeout.outputs.timeout_ms }}",
+            ),
+            (
+                "poll-timeout-ms",
+                "${{ steps.rollback_health.outputs.remaining_timeout_ms }}",
+            ),
+            ("poll-until-path", "runtime.docker_image_reference"),
+            ("poll-until-value", "${{ steps.image.outputs.image_reference }}"),
+            (
+                "poll-until-value",
+                "${{ steps.rollback_request.outputs.previous_image_reference }}",
+            ),
+            (
+                "response-output-file",
+                "${{ runner.temp }}/launchplane-deployed-runtime-wait.json",
+            ),
+            (
+                "response-output-file",
+                "${{ runner.temp }}/launchplane-deployed-runtime-final.json",
+            ),
             ("response-output-file", "${{ runner.temp }}/launchplane-previous-runtime.json"),
+            (
+                "response-output-file",
+                "${{ runner.temp }}/launchplane-rollback-runtime-final.json",
+            ),
+            (
+                "response-output-file",
+                "${{ runner.temp }}/launchplane-rollback-runtime-wait.json",
+            ),
             ("response-output-file", "${{ runner.temp }}/launchplane-runtime-smoke.json"),
             (
                 "response-output-file",

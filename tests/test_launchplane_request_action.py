@@ -60,6 +60,15 @@ global.fetch = async (url, init) => {{
   if (failureAttempts.includes(launchplaneRequestCount)) {{
     throw new TypeError('simulated Launchplane network failure');
   }}
+  const configuredStatusCodes = String(process.env.TEST_STATUS_SEQUENCE || '').split(',').filter(Boolean);
+  const statusCode = Number(configuredStatusCodes[launchplaneRequestCount - 1] || process.env.TEST_STATUS || '200');
+  const configuredRuntimeImages = String(process.env.TEST_RUNTIME_IMAGES || '').split(',').filter(Boolean);
+  if (configuredRuntimeImages.length > 0) {{
+    const imageReference = configuredRuntimeImages[launchplaneRequestCount - 1] || configuredRuntimeImages.at(-1);
+    return new Response(JSON.stringify({{
+      runtime: {{ docker_image_reference: imageReference }}
+    }}), {{status: statusCode}});
+  }}
   const configuredStatuses = String(process.env.TEST_REFRESH_STATUSES || '').split(',').filter(Boolean);
   const refreshStatus = configuredStatuses[launchplaneRequestCount - 1] || process.env.TEST_REFRESH_STATUS || 'pass';
   return new Response(JSON.stringify({{
@@ -68,8 +77,8 @@ global.fetch = async (url, init) => {{
       refresh_status: refreshStatus,
       error_message: process.env.TEST_ERROR_MESSAGE || '',
       application_id: 'app-123'
-    }}
-  }}), {{status: Number(process.env.TEST_STATUS || '200')}});
+      }}
+  }}), {{status: statusCode}});
 }};
 require('./{ACTION_ENTRYPOINT.as_posix()}');
 process.on('beforeExit', () => {{
@@ -292,6 +301,181 @@ process.on('beforeExit', () => {{
             self.assertEqual(json.loads(launchplane_calls[0]["body"]), payloads[0])
             self.assertEqual(json.loads(launchplane_calls[1]["body"]), payloads[1])
             self.assertEqual(result.stdout, "")
+
+    def test_get_request_polls_until_json_path_matches_expected_value(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            response_output_path = Path(temporary_directory) / "runtime.json"
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/service/runtime",
+                    "method": "GET",
+                    "poll-until-path": "runtime.docker_image_reference",
+                    "poll-until-value": "registry.example/launchplane@sha256:new",
+                    "poll-interval-ms": "1",
+                    "poll-timeout-ms": "1000",
+                    "response-output-file": str(response_output_path),
+                    "log-response-body": "false",
+                },
+                environment={
+                    "TEST_RUNTIME_IMAGES": (
+                        "registry.example/launchplane@sha256:old,"
+                        "registry.example/launchplane@sha256:new"
+                    )
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = json.loads(result.stderr.strip().splitlines()[-1])
+            launchplane_calls = [
+                call
+                for call in calls
+                if call["url"] == "https://launchplane.example/v1/service/runtime"
+            ]
+            self.assertEqual(len(launchplane_calls), 2)
+            self.assertEqual(
+                [call["headers"]["Authorization"] for call in launchplane_calls],
+                ["Bearer oidc-token-1", "Bearer oidc-token-2"],
+            )
+            self.assertEqual(
+                json.loads(response_output_path.read_text(encoding="utf-8"))["runtime"][
+                    "docker_image_reference"
+                ],
+                "registry.example/launchplane@sha256:new",
+            )
+            self.assertIn(
+                "waiting for registry.example/launchplane@sha256:new",
+                result.stderr,
+            )
+
+    def test_poll_until_can_retry_launchplane_request_error(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/service/runtime",
+                "method": "GET",
+                "poll-until-path": "runtime.docker_image_reference",
+                "poll-until-value": "registry.example/launchplane@sha256:new",
+                "poll-retry-on-request-error": "true",
+                "poll-interval-ms": "1",
+                "poll-timeout-ms": "1000",
+                "retry-attempts": "1",
+                "log-response-body": "false",
+            },
+            environment={
+                "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "1",
+                "TEST_RUNTIME_IMAGES": "registry.example/launchplane@sha256:new",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stderr.strip().splitlines()[-1])
+        launchplane_calls = [
+            call
+            for call in calls
+            if call["url"] == "https://launchplane.example/v1/service/runtime"
+        ]
+        self.assertEqual(len(launchplane_calls), 2)
+        self.assertIn(
+            "Launchplane request failed while waiting for runtime.docker_image_reference",
+            result.stderr,
+        )
+
+    def test_poll_until_rejects_unexpected_status_by_default(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/service/runtime",
+                "method": "GET",
+                "expected-status": "200",
+                "poll-until-path": "runtime.docker_image_reference",
+                "poll-until-value": "registry.example/launchplane@sha256:new",
+                "poll-interval-ms": "1",
+                "poll-timeout-ms": "1000",
+                "log-response-body": "false",
+            },
+            environment={
+                "TEST_RUNTIME_IMAGES": "registry.example/launchplane@sha256:new",
+                "TEST_STATUS": "503",
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Launchplane request failed with 503", result.stderr)
+        calls = json.loads(result.stderr.strip().splitlines()[-1])
+        launchplane_calls = [
+            call
+            for call in calls
+            if call["url"] == "https://launchplane.example/v1/service/runtime"
+        ]
+        self.assertEqual(len(launchplane_calls), 1)
+
+    def test_poll_until_can_retry_unexpected_status_when_enabled(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/service/runtime",
+                "method": "GET",
+                "expected-status": "200",
+                "poll-until-path": "runtime.docker_image_reference",
+                "poll-until-value": "registry.example/launchplane@sha256:new",
+                "poll-retry-on-unexpected-status": "true",
+                "poll-interval-ms": "1",
+                "poll-timeout-ms": "1000",
+                "log-response-body": "false",
+            },
+            environment={
+                "TEST_RUNTIME_IMAGES": (
+                    "registry.example/launchplane@sha256:old,"
+                    "registry.example/launchplane@sha256:new"
+                ),
+                "TEST_STATUS_SEQUENCE": "503,200",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stderr.strip().splitlines()[-1])
+        launchplane_calls = [
+            call
+            for call in calls
+            if call["url"] == "https://launchplane.example/v1/service/runtime"
+        ]
+        self.assertEqual(len(launchplane_calls), 2)
+        self.assertIn("Launchplane result runtime.docker_image_reference is HTTP 503", result.stderr)
+
+    def test_poll_until_requires_expected_value(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/service/runtime",
+                "method": "GET",
+                "poll-until-path": "runtime.docker_image_reference",
+            }
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "poll-until-value is required when poll-until-path is set",
+            result.stderr,
+        )
+
+    def test_poll_until_and_poll_result_are_mutually_exclusive(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/service/runtime",
+                "method": "GET",
+                "poll-until-path": "runtime.docker_image_reference",
+                "poll-until-value": "registry.example/launchplane@sha256:new",
+                "poll-result-path": "result.refresh_status",
+            }
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Use either poll-until-path or poll-result-path, not both",
+            result.stderr,
+        )
 
     def test_payload_list_requires_idempotency_prefix(self) -> None:
         with TemporaryDirectory() as temporary_directory:

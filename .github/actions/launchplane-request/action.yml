@@ -95,6 +95,28 @@ inputs:
       Comma-separated result status values that should keep polling.
     required: false
     default: pending
+  poll-until-path:
+    description: >-
+      JSON path to inspect after each Launchplane response. When set, the action
+      repeats the request until the value equals poll-until-value.
+    required: false
+    default: ""
+  poll-until-value:
+    description: Expected string value for poll-until-path.
+    required: false
+    default: ""
+  poll-retry-on-request-error:
+    description: >-
+      When true, continue polling through Launchplane request network errors
+      until poll-timeout-ms expires.
+    required: false
+    default: "false"
+  poll-retry-on-unexpected-status:
+    description: >-
+      When true with poll-until-path, continue polling through non-2xx
+      Launchplane responses until poll-timeout-ms expires.
+    required: false
+    default: "false"
   poll-interval-ms:
     description: Delay between polling requests in milliseconds.
     required: false
