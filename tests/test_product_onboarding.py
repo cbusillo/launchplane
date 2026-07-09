@@ -1110,6 +1110,55 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
         self.assertNotIn("curl ", workflow_text)
 
+    def test_live_target_runtime_workflow_uses_launchplane_request(self) -> None:
+        workflow_text = Path(".github/workflows/live-target-runtime.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn("Deploy options require mode=apply.", workflow_text)
+        self.assertIn("live-target-runtime-request.json", workflow_text)
+        self.assertIn("live-target-runtime-response.json", workflow_text)
+        self.assertIn("payload_file=${payload_file}", workflow_text)
+        self.assertIn("response_file=${response_file}", workflow_text)
+        self.assertIn("idempotency_key=${idempotency_key}", workflow_text)
+        self.assertIn(
+            "live-target-runtime:${MODE}:${CONTEXT}:${INSTANCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}",
+            workflow_text,
+        )
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}", workflow_text)
+        self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
+        self.assertIn("route-path: /v1/live-target-runtime/apply", workflow_text)
+        self.assertIn("payload-file: ${{ steps.request.outputs.payload_file }}", workflow_text)
+        self.assertIn(
+            "idempotency-key: ${{ steps.request.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn(
+            "response-output-file: ${{ steps.request.outputs.response_file }}",
+            workflow_text,
+        )
+        self.assertIn('log-response-body: "false"', workflow_text)
+        self.assertIn(
+            "STATUS_CODE: ${{ steps.live_target_runtime_request.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn("Summarize live target runtime sync", workflow_text)
+        self.assertIn("$result.runtime_key_safety.status", workflow_text)
+        self.assertIn("if: always()", workflow_text)
+        self.assertIn("if-no-files-found: warn", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("service_audience", workflow_text)
+        self.assertNotIn("oidc_token", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
+
     def test_reusable_odoo_workflows_accept_configured_service_identity(self) -> None:
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),

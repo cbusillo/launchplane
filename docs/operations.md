@@ -761,8 +761,9 @@ Current derived-state behavior:
   by key/count metadata only, and never prints plaintext env or secret values.
   Use `mode: "dry-run"` first, confirm the returned `changed_keys` are expected,
   then use `mode: "apply"` through an authorized workflow or operator API
-  caller. The `live-target-runtime.yml` workflow wraps this route with GitHub
-  OIDC and uploads the sanitized response artifact.
+  caller. The `live-target-runtime.yml` workflow wraps this route with the
+  shared Launchplane request action and uploads sanitized request/response
+  artifacts.
 - TOML/env files are not runtime import surfaces; use DB-native
   runtime-environment records and managed secrets instead.
 - Product repos and GitHub issues must not contain product secret values. Put

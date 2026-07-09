@@ -48,8 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Request live target runtime sync
+        id: request
         env:
-          SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
           PRODUCT: ${{ inputs.product }}
           CONTEXT: ${{ inputs.context }}
           INSTANCE: ${{ inputs.instance }}
@@ -65,27 +65,6 @@ jobs:
               echo "Deploy options require mode=apply." >&2
               exit 1
             fi
-          fi
-
-          service_audience="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["SERVICE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("SERVICE_URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-          })"
-
-          token_json="$(curl -fsSL \
-            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}")"
-          oidc_token="$(jq -r '.value' <<<"$token_json")"
-          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
-            echo "GitHub OIDC token response did not include a token." >&2
-            exit 1
           fi
 
           payload="$(jq -n \
@@ -112,17 +91,37 @@ jobs:
               end')"
 
           response_file="live-target-runtime-response.json"
-          status_code="$(curl -sS -o "$response_file" -w '%{http_code}' \
-            -X POST \
-            -H "Authorization: Bearer ${oidc_token}" \
-            -H 'Content-Type: application/json' \
-            -H "Idempotency-Key: live-target-runtime:${MODE}:${CONTEXT}:${INSTANCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
-            --data "$payload" \
-            "${SERVICE_URL}/v1/live-target-runtime/apply")"
-          cat "$response_file"
-          echo
-          if [ "$status_code" -lt 200 ] || [ "$status_code" -ge 300 ]; then
-            echo "Launchplane live target runtime request failed with HTTP ${status_code}." >&2
+          payload_file="live-target-runtime-request.json"
+          jq . <<<"$payload" > "$payload_file"
+          idempotency_key="live-target-runtime:${MODE}:${CONTEXT}:${INSTANCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "payload_file=${payload_file}"
+            echo "response_file=${response_file}"
+            echo "idempotency_key=${idempotency_key}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Apply live target runtime sync
+        id: live_target_runtime_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/live-target-runtime/apply
+          payload-file: ${{ steps.request.outputs.payload_file }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          fail-result-paths: ""
+          response-output-file: ${{ steps.request.outputs.response_file }}
+          log-response-body: "false"
+
+      - name: Summarize live target runtime sync
+        env:
+          MODE: ${{ inputs.mode }}
+          RESPONSE_FILE: ${{ steps.request.outputs.response_file }}
+          STATUS_CODE: ${{ steps.live_target_runtime_request.outputs.status-code }}
+        run: |
+          set -euo pipefail
+          if [ "$STATUS_CODE" -lt 200 ] || [ "$STATUS_CODE" -ge 300 ]; then
+            echo "Launchplane live target runtime request failed with HTTP ${STATUS_CODE}." >&2
             exit 1
           fi
 
@@ -137,11 +136,15 @@ jobs:
                 "- Runtime key-safety: \($result.runtime_key_safety.status)",
                 "- Env updated: \($result.apply.env_updated)",
                 "- Deploy triggered: \($result.deploy.triggered)"
-            ' "$response_file"
+            ' "$RESPONSE_FILE"
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Upload response artifact
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: live-target-runtime-response
-          path: live-target-runtime-response.json
+          path: |
+            live-target-runtime-request.json
+            live-target-runtime-response.json
+          if-no-files-found: warn

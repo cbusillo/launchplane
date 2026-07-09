@@ -2531,6 +2531,25 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         for key, value in (
             ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
             ("fail-result-paths", '""'),
+            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
+            ("log-response-body", '"false"'),
+            ("payload-file", "${{ steps.request.outputs.payload_file }}"),
+            ("response-output-file", "${{ steps.request.outputs.response_file }}"),
+            ("route-path", "/v1/live-target-runtime/apply"),
+        ):
+            with self.subTest(live_target_runtime_mechanic=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/live-target-runtime.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
+            ("fail-result-paths", '""'),
             ("method", "GET"),
             ("response-output-file", "launchplane-work-graph-snapshot.json"),
         ):
