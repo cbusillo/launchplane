@@ -321,6 +321,13 @@ For an existing repo, classify each workflow and script before deleting code:
   keep only dispatch inputs, confirmation text, and product-owned build or test
   facts locally.
 
+`launchplane-request` also supports `payload-list-file` with
+`idempotency-key-prefix` for bounded fan-out where Launchplane has already
+generated a JSON array of public-safe request payloads, such as merge-train PR
+feedback delivery. The action appends a stable digest for each payload, requests
+GitHub OIDC per POST, and writes a JSON response array. Do not use shell loops
+or repo-local OIDC clients for those remaining connector calls.
+
 Odoo artifact publication now follows the reusable workflow shape: tenant repos
 own the manual dispatch confirmation and the source workspace, while
 `reusable-odoo-artifact-publish.yml` owns the Launchplane publish-input request,

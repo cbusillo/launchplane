@@ -125,6 +125,160 @@ process.on('beforeExit', () => {{
             self.assertEqual(json.loads(calls[1]["body"])["product"], "sellyouroutboard")
             self.assertIn("application_id<<", output_path.read_text(encoding="utf-8"))
 
+    def test_posts_payload_list_with_per_payload_idempotency_keys(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            payload_list_path = Path(temporary_directory) / "payloads.json"
+            response_output_path = Path(temporary_directory) / "responses.json"
+            payloads = [
+                {
+                    "schema_version": 1,
+                    "repository": "example/repo",
+                    "pull_request_number": 1,
+                },
+                {
+                    "schema_version": 1,
+                    "repository": "example/repo",
+                    "pull_request_number": 2,
+                },
+            ]
+            payload_list_path.write_text(json.dumps(payloads), encoding="utf-8")
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/work-graph/merge-train/pr-feedback",
+                    "payload-list-file": str(payload_list_path),
+                    "idempotency-key-prefix": "merge-train-feedback:controller:run-1",
+                    "response-output-file": str(response_output_path),
+                    "log-response-body": "false",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(response_output_path.read_text(encoding="utf-8")), [
+                {
+                    "ok": True,
+                    "result": {
+                        "refresh_status": "pass",
+                        "error_message": "",
+                        "application_id": "app-123",
+                    },
+                },
+                {
+                    "ok": True,
+                    "result": {
+                        "refresh_status": "pass",
+                        "error_message": "",
+                        "application_id": "app-123",
+                    },
+                },
+            ])
+            calls = json.loads(result.stderr.strip().splitlines()[-1])
+            launchplane_calls = [
+                call
+                for call in calls
+                if call["url"]
+                == "https://launchplane.example/v1/work-graph/merge-train/pr-feedback"
+            ]
+            self.assertEqual(len(launchplane_calls), 2)
+            self.assertEqual(
+                [call["headers"]["Authorization"] for call in launchplane_calls],
+                ["Bearer oidc-token-1", "Bearer oidc-token-2"],
+            )
+            self.assertTrue(
+                all(
+                    call["headers"]["Idempotency-Key"].startswith(
+                        "merge-train-feedback:controller:run-1:"
+                    )
+                    for call in launchplane_calls
+                )
+            )
+            self.assertNotEqual(
+                launchplane_calls[0]["headers"]["Idempotency-Key"],
+                launchplane_calls[1]["headers"]["Idempotency-Key"],
+            )
+            self.assertEqual(json.loads(launchplane_calls[0]["body"]), payloads[0])
+            self.assertEqual(json.loads(launchplane_calls[1]["body"]), payloads[1])
+            self.assertEqual(result.stdout, "")
+
+    def test_payload_list_requires_idempotency_prefix(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            payload_list_path = Path(temporary_directory) / "payloads.json"
+            payload_list_path.write_text("[]", encoding="utf-8")
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/work-graph/merge-train/pr-feedback",
+                    "payload-list-file": str(payload_list_path),
+                },
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("idempotency-key-prefix is required", result.stderr)
+
+    def test_payload_list_validates_all_entries_before_posting(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            payload_list_path = Path(temporary_directory) / "payloads.json"
+            payload_list_path.write_text(
+                json.dumps(
+                    [
+                        {"schema_version": 1, "pull_request_number": 1},
+                        ["not", "an", "object"],
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/work-graph/merge-train/pr-feedback",
+                    "payload-list-file": str(payload_list_path),
+                    "idempotency-key-prefix": "merge-train-feedback:controller:run-1",
+                },
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("payload-list-file entry 2 must be a JSON object", result.stderr)
+        self.assertEqual(json.loads(result.stderr.strip().splitlines()[-1]), [])
+
+    def test_payload_list_writes_prior_responses_when_later_request_throws(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            payload_list_path = Path(temporary_directory) / "payloads.json"
+            response_output_path = Path(temporary_directory) / "responses.json"
+            payload_list_path.write_text(
+                json.dumps(
+                    [
+                        {"schema_version": 1, "pull_request_number": 1},
+                        {"schema_version": 1, "pull_request_number": 2},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/work-graph/merge-train/pr-feedback",
+                    "payload-list-file": str(payload_list_path),
+                    "idempotency-key-prefix": "merge-train-feedback:controller:run-1",
+                    "response-output-file": str(response_output_path),
+                    "retry-attempts": "1",
+                    "log-response-body": "false",
+                },
+                environment={"TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "2"},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("simulated Launchplane network failure", result.stderr)
+            self.assertEqual(json.loads(response_output_path.read_text(encoding="utf-8")), [
+                {
+                    "ok": True,
+                    "result": {
+                        "refresh_status": "pass",
+                        "error_message": "",
+                        "application_id": "app-123",
+                    },
+                }
+            ])
+
     def test_retries_launchplane_request_with_fresh_oidc_token(self) -> None:
         result = self.run_action(
             inputs={
