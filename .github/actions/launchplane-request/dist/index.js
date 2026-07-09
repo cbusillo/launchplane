@@ -267,6 +267,28 @@ function splitCommaSeparated(value) {
     .filter(Boolean);
 }
 
+function parseExpectedStatuses(value) {
+  const statuses = splitCommaSeparated(value);
+  if (statuses.length === 0) {
+    return null;
+  }
+  const expectedStatuses = new Set();
+  for (const status of statuses) {
+    if (!/^\d{3}$/.test(status)) {
+      throw new Error(`expected-status entry '${status}' must be a three-digit HTTP status code.`);
+    }
+    expectedStatuses.add(Number(status));
+  }
+  return expectedStatuses;
+}
+
+function isExpectedStatus(response, expectedStatuses) {
+  if (!expectedStatuses) {
+    return response.ok;
+  }
+  return expectedStatuses.has(response.status);
+}
+
 function readJsonPath(value, path) {
   let cursor = value;
   for (const segment of path.split(".").filter(Boolean)) {
@@ -352,6 +374,7 @@ function assertResultStatuses(responseBody) {
 
 function getActionOptions() {
   return {
+    expectedStatuses: parseExpectedStatuses(getInput("expected-status")),
     oidcTimeoutMs: getInput("oidc-timeout-ms", { defaultValue: "30000" }),
     pollIntervalMs: getInput("poll-interval-ms", { defaultValue: "30000" }),
     pollResultPath: getInput("poll-result-path"),
@@ -499,7 +522,7 @@ async function main() {
       }
       lastStatus = String(response.status);
       responseBodies.push(responseBody);
-      if (!response.ok) {
+      if (!isExpectedStatus(response, options.expectedStatuses)) {
         writeResponseOutputFile(responseBodies);
         const responseDetail = logResponseBody ? `: ${responseText || "empty response"}` : "";
         throw new Error(
@@ -545,7 +568,7 @@ async function main() {
   if (logResponseBody) {
     process.stdout.write(`${JSON.stringify(responseBody, null, 2)}\n`);
   }
-  if (!response.ok) {
+  if (!isExpectedStatus(response, options.expectedStatuses)) {
     const responseDetail = logResponseBody ? `: ${responseText || "empty response"}` : "";
     throw new Error(
       `Launchplane request failed with ${response.status}${responseDetail}`,

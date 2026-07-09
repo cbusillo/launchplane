@@ -755,6 +755,12 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
             (
                 "odoo-driver-route-smoke:${{ env.PRODUCT }}:${{ env.CONTEXT_NAME }}:${{ "
                 "env.INSTANCE }}:run-${{ github.run_id }}-attempt-${{ github.run_attempt }}",
+                "odoo-driver-route-smoke:preview-apply-inputs:${{ "
+                "github.run_id }}:${{ github.run_attempt }}",
+                "odoo-driver-route-smoke:preview-apply:${{ "
+                "github.run_id }}:${{ github.run_attempt }}",
+                "odoo-driver-route-smoke:preview-pr-feedback:${{ "
+                "github.run_id }}:${{ github.run_attempt }}",
             )
         ),
         "odoo-driver-route-smoke": frozenset(

@@ -2942,11 +2942,38 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "odoo-driver-route-smoke:${{ env.PRODUCT }}:${{ env.CONTEXT_NAME }}:${{ "
             "env.INSTANCE }}:run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
         )
+        preview_apply_inputs_key = (
+            "odoo-driver-route-smoke:preview-apply-inputs:${{ "
+            "github.run_id }}:${{ github.run_attempt }}"
+        )
+        preview_apply_key = (
+            "odoo-driver-route-smoke:preview-apply:${{ "
+            "github.run_id }}:${{ github.run_attempt }}"
+        )
+        preview_pr_feedback_key = (
+            "odoo-driver-route-smoke:preview-pr-feedback:${{ "
+            "github.run_id }}:${{ github.run_attempt }}"
+        )
         for path, key, value in (
             (
                 ".github/workflows/odoo-driver-route-smoke.yml",
                 "idempotency-key",
                 route_smoke_key,
+            ),
+            (
+                ".github/workflows/odoo-driver-route-smoke.yml",
+                "idempotency-key",
+                preview_apply_inputs_key,
+            ),
+            (
+                ".github/workflows/odoo-driver-route-smoke.yml",
+                "idempotency-key",
+                preview_apply_key,
+            ),
+            (
+                ".github/workflows/odoo-driver-route-smoke.yml",
+                "idempotency-key",
+                preview_pr_feedback_key,
             ),
             (
                 ".github/workflows/public-ingress-monitor.yml",
