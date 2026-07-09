@@ -540,8 +540,9 @@ jobs:
         env:
           LAUNCHPLANE_EXPECTED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
 
-      - name: Roll back failed Launchplane deploy
+      - name: Render Launchplane rollback request
         if: failure() && steps.self_deploy.outputs.previous_image_reference != ''
+        id: rollback_request
         shell: bash
         run: |
           set -euo pipefail
@@ -552,13 +553,6 @@ jobs:
             exit 0
           fi
 
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
-            | jq -r '.value'
-          })"
-
           rollback_payload="$({
             jq -n \
               --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
@@ -566,30 +560,85 @@ jobs:
               --arg image_reference "$previous_image_reference" \
               '{schema_version: 1, product: "launchplane", deploy: {target_type: $target_type, target_id: $target_id, image_reference: $image_reference, no_cache: true}}'
           })"
-          rollback_response_file="$(mktemp)"
-          rollback_status="$(curl -sS \
-            -o "$rollback_response_file" \
-            -w '%{http_code}' \
-            -X POST \
-            -H "Authorization: Bearer ${oidc_token}" \
-            -H "Content-Type: application/json" \
-            -H "Idempotency-Key: launchplane-self-deploy-rollback:${previous_image_reference}:${{ github.run_id }}:${{ github.run_attempt }}" \
-            --data "$rollback_payload" \
-            "${{ steps.service.outputs.service_url }}/v1/drivers/launchplane/self-deploy" || true)"
+
+          rollback_payload_file="$RUNNER_TEMP/launchplane-self-deploy-rollback-payload.json"
+          printf '%s\n' "$rollback_payload" > "$rollback_payload_file"
+          echo "previous_image_reference=$previous_image_reference" >> "$GITHUB_OUTPUT"
+          echo "payload_file=$rollback_payload_file" >> "$GITHUB_OUTPUT"
+
+      - name: Request Launchplane rollback through service
+        if: >-
+          failure()
+          && steps.rollback_request.outputs.payload_file != ''
+          && steps.rollback_request.outputs.previous_image_reference != ''
+        id: rollback_request_action
+        continue-on-error: true
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/drivers/launchplane/self-deploy
+          payload-file: ${{ steps.rollback_request.outputs.payload_file }}
+          idempotency-key: launchplane-self-deploy-rollback:${{ steps.rollback_request.outputs.previous_image_reference }}:${{ github.run_id }}:${{ github.run_attempt }}
+          expected-status: "200,202"
+          fail-result-paths: ""
+          timeout-ms: "30000"
+          response-output-file: ${{ runner.temp }}/launchplane-self-deploy-rollback-response.json
+          log-response-body: "false"
+
+      - name: Check Launchplane rollback request
+        if: >-
+          failure()
+          && steps.rollback_request.outputs.payload_file != ''
+          && steps.rollback_request.outputs.previous_image_reference != ''
+        shell: bash
+        env:
+          PREVIOUS_IMAGE_REFERENCE: ${{ steps.rollback_request.outputs.previous_image_reference }}
+          ROLLBACK_RESPONSE_FILE: ${{ runner.temp }}/launchplane-self-deploy-rollback-response.json
+          ROLLBACK_STATUS: ${{ steps.rollback_request_action.outputs.status-code }}
+          ROLLBACK_OUTCOME: ${{ steps.rollback_request_action.outcome }}
+        run: |
+          set -euo pipefail
+
+          rollback_status="$ROLLBACK_STATUS"
+          if [ -z "$rollback_status" ]; then
+            rollback_status="action_failed"
+          fi
           if [ "$rollback_status" != "200" ] && [ "$rollback_status" != "202" ]; then
-            cat "$rollback_response_file" >&2
+            if [ -s "$ROLLBACK_RESPONSE_FILE" ]; then
+              cat "$ROLLBACK_RESPONSE_FILE" >&2
+            fi
             {
               echo "## Launchplane rollback failed"
               echo
               echo "- Service rollback HTTP status: $rollback_status"
-              echo "- Rollback image: $previous_image_reference"
+              echo "- Rollback action outcome: ${ROLLBACK_OUTCOME:-failure}"
+              echo "- Rollback image: $PREVIOUS_IMAGE_REFERENCE"
               echo "- Direct Dokploy mutation is manual break-glass only. Run Deploy Launchplane with the exact break-glass confirmation inputs if service rollback is unavailable."
             } >>"$GITHUB_STEP_SUMMARY"
             exit 1
-          else
-            cat "$rollback_response_file"
           fi
+          {
+            echo "## Launchplane rollback requested"
+            echo
+            echo "- Service rollback HTTP status: $rollback_status"
+            echo "- Rollback image: $PREVIOUS_IMAGE_REFERENCE"
+          } >>"$GITHUB_STEP_SUMMARY"
 
+      - name: Wait for Launchplane rollback image
+        if: >-
+          failure()
+          && steps.rollback_request.outputs.payload_file != ''
+          && steps.rollback_request.outputs.previous_image_reference != ''
+          && steps.rollback_request_action.outcome == 'success'
+        shell: bash
+        env:
+          ROLLBACK_RESPONSE_FILE: ${{ runner.temp }}/launchplane-self-deploy-rollback-response.json
+          ROLLBACK_STATUS: ${{ steps.rollback_request_action.outputs.status-code }}
+        run: |
+          set -euo pipefail
+
+          previous_image_reference="${{ steps.rollback_request.outputs.previous_image_reference }}"
           deadline=$((SECONDS + ${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
           last_report_seconds=0
           while [ "$SECONDS" -lt "$deadline" ]; do
@@ -646,6 +695,17 @@ jobs:
           done
 
           echo "Timed out waiting for Launchplane rollback image '$previous_image_reference' to become live and healthy." >&2
+          if [ -s "$ROLLBACK_RESPONSE_FILE" ]; then
+            echo "Rollback request response summary:" >&2
+            jq '{status, trace_id, error, result}' "$ROLLBACK_RESPONSE_FILE" >&2 || cat "$ROLLBACK_RESPONSE_FILE" >&2 || true
+          fi
+          {
+            echo "## Launchplane rollback timed out"
+            echo
+            echo "- Service rollback HTTP status: ${ROLLBACK_STATUS:-unknown}"
+            echo "- Rollback image: $previous_image_reference"
+            echo "- Rollback request response file: $ROLLBACK_RESPONSE_FILE"
+          } >>"$GITHUB_STEP_SUMMARY"
           exit 1
 
       - name: Render product context workflow authz grants

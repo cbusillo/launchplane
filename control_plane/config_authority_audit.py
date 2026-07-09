@@ -743,11 +743,27 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
         "audience": frozenset(("${{ steps.service.outputs.service_audience }}",)),
         "context": frozenset((".",)),
-        "expected-status": frozenset(('"200"',)),
+        "expected-status": frozenset(('"200"', '"200,202"')),
+        "fail-result-paths": frozenset(('""',)),
+        "idempotency-key": frozenset(
+            (
+                "launchplane-self-deploy-rollback:${{ "
+                "steps.rollback_request.outputs.previous_image_reference }}:${{ "
+                "github.run_id }}:${{ github.run_attempt }}",
+            )
+        ),
         "log-response-body": frozenset(('"false"',)),
         "method": frozenset(("GET",)),
-        "response-output-file": frozenset(("${{ runner.temp }}/launchplane-runtime-smoke.json",)),
-        "route-path": frozenset(("/v1/service/runtime",)),
+        "payload-file": frozenset(("${{ steps.rollback_request.outputs.payload_file }}",)),
+        "response-output-file": frozenset(
+            (
+                "${{ runner.temp }}/launchplane-runtime-smoke.json",
+                "${{ runner.temp }}/launchplane-self-deploy-rollback-response.json",
+            )
+        ),
+        "route-path": frozenset(
+            ("/v1/service/runtime", "/v1/drivers/launchplane/self-deploy")
+        ),
         "timeout-ms": frozenset(('"30000"',)),
     },
     ".github/workflows/launchplane-config-authority.yml": {
