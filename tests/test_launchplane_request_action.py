@@ -125,6 +125,65 @@ process.on('beforeExit', () => {{
             self.assertEqual(json.loads(calls[1]["body"])["product"], "sellyouroutboard")
             self.assertIn("application_id<<", output_path.read_text(encoding="utf-8"))
 
+    def test_accepts_configured_non_2xx_status(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            response_output_path = Path(temporary_directory) / "response.json"
+            output_path = Path(temporary_directory) / "github-output.txt"
+            result = self.run_action(
+                output_path=output_path,
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/drivers/odoo/preview-apply-inputs",
+                    "payload": '{"schema_version":1,"product":"demo"}',
+                    "expected-status": "202,403,503",
+                    "response-output-file": str(response_output_path),
+                    "log-response-body": "false",
+                },
+                environment={"TEST_STATUS": "403", "TEST_ERROR_MESSAGE": "forbidden"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(response_output_path.read_text(encoding="utf-8"))["result"][
+                    "error_message"
+                ],
+                "forbidden",
+            )
+            self.assertIn("status-code<<", output_path.read_text(encoding="utf-8"))
+            self.assertIn("403", output_path.read_text(encoding="utf-8"))
+            self.assertEqual(result.stdout, "")
+
+    def test_rejects_unexpected_status_when_expected_status_is_configured(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/drivers/odoo/preview-apply-inputs",
+                "payload": '{"schema_version":1,"product":"demo"}',
+                "expected-status": "202,403,503",
+                "log-response-body": "false",
+            },
+            environment={"TEST_STATUS": "401"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Launchplane request failed with 401", result.stderr)
+
+    def test_rejects_invalid_expected_status_input(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/drivers/odoo/preview-apply-inputs",
+                "payload": '{"schema_version":1,"product":"demo"}',
+                "expected-status": "202,not-a-status",
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "expected-status entry 'not-a-status' must be a three-digit HTTP status code",
+            result.stderr,
+        )
+
     def test_posts_payload_list_with_per_payload_idempotency_keys(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             payload_list_path = Path(temporary_directory) / "payloads.json"

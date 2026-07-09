@@ -78,6 +78,12 @@ inputs:
     description: Base retry delay in milliseconds.
     required: false
     default: "250"
+  expected-status:
+    description: >-
+      Comma-separated HTTP status codes that should be accepted for the
+      Launchplane request. Defaults to any 2xx status.
+    required: false
+    default: ""
   poll-result-path:
     description: >-
       JSON path to inspect after each Launchplane response. When set, the action
