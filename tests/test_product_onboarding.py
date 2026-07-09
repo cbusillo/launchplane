@@ -993,6 +993,78 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", provider_target_workflow)
         self.assertNotIn("curl ", provider_target_workflow)
 
+    def test_product_environment_evidence_uses_launchplane_request(self) -> None:
+        workflow_text = Path(".github/workflows/product-environment-evidence.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn(
+            "route_matrix: ${{ steps.routes.outputs.route_matrix }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "route: ${{ fromJson(needs.resolve.outputs.route_matrix) }}",
+            workflow_text,
+        )
+        self.assertIn("product:.value.product", workflow_text)
+        self.assertIn("environment:.value.environment", workflow_text)
+        self.assertIn("fail-fast: false", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertEqual(
+            workflow_text.count(
+                "uses: cbusillo/launchplane/.github/actions/launchplane-request@main"
+            ),
+            2,
+        )
+        self.assertIn("launchplane-url: ${{ env.LAUNCHPLANE_URL }}", workflow_text)
+        self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
+        self.assertIn("method: GET", workflow_text)
+        self.assertIn("route-path: ${{ steps.request.outputs.environment_route }}", workflow_text)
+        self.assertIn("route-path: ${{ steps.request.outputs.config_status_route }}", workflow_text)
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn('log-response-body: "false"', workflow_text)
+        self.assertIn(
+            "response-output-file: ${{ steps.request.outputs.environment_response_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ steps.request.outputs.config_status_response_file }}",
+            workflow_text,
+        )
+        self.assertIn('quote(product, safe="")', workflow_text)
+        self.assertIn('quote(environment, safe="")', workflow_text)
+        self.assertIn(
+            "STATUS_CODE: ${{ steps.environment_request.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "STATUS_CODE: ${{ steps.config_status_request.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn(
+            'all($config_status.runtime_settings[]; .status == "configured")', workflow_text
+        )
+        self.assertIn(
+            'all($config_status.managed_secrets[]; .status == "configured")', workflow_text
+        )
+        self.assertIn('$config_status.trust_state == "recorded"', workflow_text)
+        self.assertIn('if [ "$status" != "ok" ]; then', workflow_text)
+        self.assertIn("Product environment config status was not ok", workflow_text)
+        self.assertIn("Write product environment step summary", workflow_text)
+        self.assertIn("product-environment-evidence-${TARGET_SET}-${ROUTE_INDEX}", workflow_text)
+        self.assertIn("if-no-files-found: warn", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+        self.assertNotIn("service_audience", workflow_text)
+        self.assertNotIn("oidc_token", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
+
     def test_dokploy_target_setup_workflow_supports_compose_domain_reconcile(self) -> None:
         workflow_text = Path(".github/workflows/dokploy-target-setup.yml").read_text(
             encoding="utf-8"

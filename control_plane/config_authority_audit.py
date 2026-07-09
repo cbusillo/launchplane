@@ -218,8 +218,10 @@ WORKFLOW_RESPONSE_SUMMARY_PATH_VALUES = {
         "context": frozenset(("$environment_detail.context",)),
         "environment": frozenset(("$environment",)),
         "provider_target_type": frozenset(("$target.provider_target_type",)),
+        "status": frozenset(('"blocked"', '"ok"')),
         "target_id_recorded": frozenset(("$target.target_id_recorded",)),
         "target_type": frozenset(("$target.target_type",)),
+        "trust_state": frozenset(("$config_status.trust_state",)),
     },
     ".github/workflows/provider-target-operations.yml": {
         "context": frozenset((".result.context",)),
@@ -633,7 +635,9 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "TARGET_CONTEXT": frozenset(("${{ inputs.target_context }}",)),
     },
     ".github/workflows/product-environment-evidence.yml": {
+        "ENVIRONMENT": frozenset(("${{ matrix.route.environment }}",)),
         "PROVIDER_ID": frozenset(("${{ inputs.provider_id }}",)),
+        "PRODUCT": frozenset(("${{ matrix.route.product }}",)),
         "TARGET_SET": frozenset(("${{ inputs.target_set }}",)),
     },
     ".github/workflows/product-legacy-context-cleanup.yml": {
@@ -786,6 +790,24 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "method": frozenset(("GET",)),
         "response-output-file": frozenset(("launchplane-context-cutover-audit.json",)),
         "route-path": frozenset(("${{ steps.request.outputs.route_path }}",)),
+    },
+    ".github/workflows/product-environment-evidence.yml": {
+        "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
+        "fail-result-paths": frozenset(('""',)),
+        "log-response-body": frozenset(('"false"',)),
+        "method": frozenset(("GET",)),
+        "response-output-file": frozenset(
+            (
+                "${{ steps.request.outputs.config_status_response_file }}",
+                "${{ steps.request.outputs.environment_response_file }}",
+            )
+        ),
+        "route-path": frozenset(
+            (
+                "${{ steps.request.outputs.config_status_route }}",
+                "${{ steps.request.outputs.environment_route }}",
+            )
+        ),
     },
     ".github/workflows/product-onboarding.yml": {
         "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
