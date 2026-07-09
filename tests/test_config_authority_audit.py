@@ -2360,11 +2360,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "/v1/drivers/odoo/preview-apply /v1/previews/pr-feedback",
             ),
             (
-                ".github/workflows/product-context-cutover-audit.yml",
-                "key",
-                'claims.get(key, "")',
-            ),
-            (
                 ".github/workflows/provider-target-operations.yml",
                 "path",
                 "provider-target-routes.json",
@@ -2491,6 +2486,23 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
             ("fail-result-paths", '""'),
             ("method", "GET"),
+            ("response-output-file", "launchplane-context-cutover-audit.json"),
+            ("route-path", "${{ steps.request.outputs.route_path }}"),
+        ):
+            with self.subTest(product_context_cutover_audit_mechanic=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/product-context-cutover-audit.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
+            ("fail-result-paths", '""'),
+            ("method", "GET"),
             ("response-output-file", "launchplane-work-graph-snapshot.json"),
         ):
             with self.subTest(work_graph_snapshot_mechanic=key):
@@ -2510,6 +2522,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("log-response-body", '"false"'),
             ("response-output-file", "dokploy-target-inspect-response.json"),
             ("response-output-file", "ingress-route-audit-read-raw.json"),
+            ("response-output-file", "launchplane-context-cutover-audit.json"),
             ("response-output-file", "launchplane-preview-lifecycle-sweep-response.json"),
             ("response-output-file", "launchplane-work-graph-snapshot.json"),
         ):

@@ -236,9 +236,6 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
             )
         )
     },
-    ".github/workflows/product-context-cutover-audit.yml": {
-        "key": frozenset(('claims.get(key, "")',))
-    },
     ".github/workflows/provider-target-operations.yml": {
         "path": frozenset(
             (
@@ -782,6 +779,13 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "payload-file": frozenset(("${{ steps.request.outputs.request_file }}",)),
         "response-output-file": frozenset(("launchplane-preview-lifecycle-sweep-response.json",)),
         "route-path": frozenset(("/v1/previews/lifecycle-sweep",)),
+    },
+    ".github/workflows/product-context-cutover-audit.yml": {
+        "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
+        "fail-result-paths": frozenset(('""',)),
+        "method": frozenset(("GET",)),
+        "response-output-file": frozenset(("launchplane-context-cutover-audit.json",)),
+        "route-path": frozenset(("${{ steps.request.outputs.route_path }}",)),
     },
     ".github/workflows/product-onboarding.yml": {
         "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
