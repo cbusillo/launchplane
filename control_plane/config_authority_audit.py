@@ -618,8 +618,17 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "idempotency-key": frozenset(("${{ inputs.idempotency_key }}",)),
     },
     ".github/workflows/merge-train-policy-import.yml": {
+        "POLICY_BLOCKED_LABEL": frozenset(("${{ inputs.blocked_label }}",)),
         "POLICY_BASE_BRANCH": frozenset(("${{ inputs.base_branch }}",)),
+        "POLICY_ENQUEUE_LABEL": frozenset(("${{ inputs.enqueue_label }}",)),
+        "POLICY_FAILURE_POLICY": frozenset(("${{ inputs.failure_policy }}",)),
+        "POLICY_MERGE_METHOD": frozenset(("${{ inputs.merge_method }}",)),
+        "POLICY_REASON": frozenset(("${{ inputs.reason }}",)),
         "POLICY_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
+        "POLICY_SOURCE_LABEL": frozenset(("${{ inputs.source_label }}",)),
+        "POLICY_STACK_CHILD_DISPOSITION_LABEL": frozenset(
+            ("${{ inputs.stack_child_disposition_label }}",)
+        ),
     },
     ".github/workflows/merge-train-runner.yml": {
         "REQUESTED_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
@@ -785,6 +794,23 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "payload-file": frozenset(("${{ steps.request.outputs.payload_file }}",)),
         "response-output-file": frozenset(("${{ steps.request.outputs.response_file }}",)),
         "route-path": frozenset(("/v1/live-target-runtime/apply",)),
+    },
+    ".github/workflows/merge-train-policy-import.yml": {
+        "audience": frozenset(("${{ steps.service.outputs.audience }}",)),
+        "fail-result-paths": frozenset(('""',)),
+        "idempotency-key": frozenset(("${{ steps.apply_policy.outputs.idempotency_key }}",)),
+        "log-response-body": frozenset(('"false"',)),
+        "method": frozenset(("POST",)),
+        "payload-file": frozenset(
+            (
+                "${{ steps.apply_policy.outputs.payload }}",
+                "${{ steps.policy.outputs.dry_run_payload }}",
+            )
+        ),
+        "response-output-file": frozenset(
+            ("merge-train-policy-apply.json", "merge-train-policy-dry-run.json")
+        ),
+        "route-path": frozenset(("/v1/merge-train/policies/import",)),
     },
     ".github/workflows/merge-train-runner.yml": {
         "audience": frozenset(

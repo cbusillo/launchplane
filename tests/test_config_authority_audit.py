@@ -55,6 +55,44 @@ def _gaps(payload: dict[str, object]) -> list[dict[str, object]]:
 
 
 class ConfigAuthorityAuditTest(unittest.TestCase):
+    def test_merge_train_policy_import_uses_shared_request(self) -> None:
+        workflow_text = Path(".github/workflows/merge-train-policy-import.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Resolve service endpoint", workflow_text)
+        self.assertIn("Build policy payload", workflow_text)
+        self.assertIn("Request policy import dry-run", workflow_text)
+        self.assertIn("Build policy apply payload", workflow_text)
+        self.assertIn("Apply policy import", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("route-path: /v1/merge-train/policies/import", workflow_text)
+        self.assertIn("payload-file: ${{ steps.policy.outputs.dry_run_payload }}", workflow_text)
+        self.assertIn("payload-file: ${{ steps.apply_policy.outputs.payload }}", workflow_text)
+        self.assertIn(
+            "idempotency-key: ${{ steps.apply_policy.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn("response-output-file: merge-train-policy-dry-run.json", workflow_text)
+        self.assertIn("response-output-file: merge-train-policy-apply.json", workflow_text)
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn('log-response-body: "false"', workflow_text)
+        self.assertIn("build-import-request", workflow_text)
+        self.assertIn("merge-train-policy-dry-run-request.json", workflow_text)
+        self.assertIn("merge-train-policy-apply-request.json", workflow_text)
+        self.assertIn("stack_child_disposition_label:", workflow_text)
+        self.assertIn("POLICY_STACK_CHILD_DISPOSITION_LABEL", workflow_text)
+        self.assertIn('print(f"{key} = {json.dumps(values[key])}")', workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_SERVICE_TOKEN", workflow_text)
+        self.assertNotIn("import-policy \\", workflow_text)
+        self.assertNotIn("SERVICE_ORIGIN", workflow_text)
+        self.assertNotIn("curl -fsSL", workflow_text)
+
     def test_merge_train_runner_uses_shared_request_for_reads_worker_and_feedback_posts(
         self,
     ) -> None:
