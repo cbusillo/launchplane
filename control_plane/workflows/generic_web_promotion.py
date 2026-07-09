@@ -221,7 +221,7 @@ def execute_generic_web_prod_promotion(
         request=request,
         source_lane=source_lane,
     )
-    if request.release_tag and not request.dry_run:
+    if request.release_tag:
         _preflight_github_release(
             control_plane_root=control_plane_root,
             profile=profile,
