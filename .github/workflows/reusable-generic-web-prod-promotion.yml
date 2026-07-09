@@ -241,7 +241,7 @@ jobs:
             dry_run: dryRun,
             no_cache: booleanInput('NO_CACHE'),
           };
-          if (!dryRun && releaseTag) promotion.release_tag = releaseTag;
+          if (releaseTag) promotion.release_tag = releaseTag;
 
           const payload = {
             schema_version: 1,
@@ -256,7 +256,7 @@ jobs:
           NODE
 
       - name: Verify release tag is unused
-        if: ${{ !inputs.dry_run && inputs.release_tag != '' }}
+        if: ${{ inputs.release_tag != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -323,6 +323,12 @@ jobs:
             if [ "$PROMOTION_STATUS" != "pending" ] || [ "$RESULT_DRY_RUN" != "true" ]; then
               echo "Launchplane dry-run promotion did not return pending dry-run evidence." >&2
               exit 1
+            fi
+            if [ -n "$REQUESTED_RELEASE_TAG" ]; then
+              if [ "$RELEASE_STATUS" != "pending" ] || [ "$RELEASE_TAG" != "$REQUESTED_RELEASE_TAG" ]; then
+                echo "Launchplane dry-run release preflight did not return pending evidence." >&2
+                exit 1
+              fi
             fi
           elif [ "$PROMOTION_STATUS" != "pass" ]; then
             echo "Launchplane live promotion did not pass." >&2

@@ -578,6 +578,38 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(result.source_git_ref, "abc123")
         self.assertEqual(result.promotion_status, "pending")
 
+    def test_dry_run_rejects_release_tag_mismatch_before_mutation(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        store.write_environment_inventory(_testing_inventory())
+
+        def fake_github_api_request(
+            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
+        ) -> object:
+            if path.endswith("/git/ref/tags/v0.3.0"):
+                return {"object": {"type": "commit", "sha": "different"}}
+            raise AssertionError(path)
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion.resolve_launchplane_github_token",
+                return_value="release-token",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.github_api_request",
+                side_effect=fake_github_api_request,
+            ),
+            self.assertRaises(click.ClickException) as caught,
+        ):
+            execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(dry_run=True, release_tag="v0.3.0"),
+            )
+
+        self.assertEqual(store.deployments, {})
+        self.assertEqual(store.promotions, {})
+        self.assertIn("not promoted revision", str(caught.exception))
+
     def test_request_requires_testing_to_prod(self) -> None:
         with self.assertRaises(ValidationError):
             _request(from_instance="staging", to_instance="prod")

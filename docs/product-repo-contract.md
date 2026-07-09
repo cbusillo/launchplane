@@ -457,7 +457,9 @@ The promotion workflow defaults artifact identity and source revision from the
 Launchplane-owned source-lane inventory. Optional explicit artifact and source
 revision inputs are validation overrides: they must match that stored inventory.
 Dry run is the fail-closed default and returns pending evidence without mutating
-prod or creating a release. Live callers must explicitly set `dry_run: false`.
+prod or creating a release. When a release tag is supplied, dry run also
+validates managed GitHub credentials, tag target, and release availability.
+Live callers must explicitly set `dry_run: false`.
 
 Production rollback uses stored Launchplane deployment evidence rather than
 product-provided provider targets:
