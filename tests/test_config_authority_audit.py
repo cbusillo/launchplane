@@ -67,6 +67,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("Prepare merge-train controller request", workflow_text)
         self.assertIn("Send merge-train controller request", workflow_text)
         self.assertIn("Summarize merge-train controller response", workflow_text)
+        for phase_name in (
+            "batch-candidate",
+            "stack-collapse",
+            "batch-landing",
+        ):
+            self.assertIn(f"Prepare {phase_name} phase request", workflow_text)
+            self.assertIn(f"Send {phase_name} phase request", workflow_text)
+            self.assertIn(f"Summarize {phase_name} phase response", workflow_text)
         self.assertIn(
             "uses: cbusillo/launchplane/.github/actions/launchplane-request@main", workflow_text
         )
@@ -87,10 +95,34 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("route-path: /v1/work-graph/merge-train/run-once", workflow_text)
         self.assertIn("route-path: /v1/work-graph/merge-train/controller/run-once", workflow_text)
         self.assertIn(
+            "route-path: /v1/work-graph/merge-train/batch-candidate/run-once",
+            workflow_text,
+        )
+        self.assertIn(
+            "route-path: /v1/work-graph/merge-train/stack-collapse/run-once",
+            workflow_text,
+        )
+        self.assertIn(
+            "route-path: /v1/work-graph/merge-train/batch-landing/run-once",
+            workflow_text,
+        )
+        self.assertIn(
             "payload-file: ${{ steps.level1_request.outputs.payload_file }}", workflow_text
         )
         self.assertIn(
             "payload-file: ${{ steps.controller_request.outputs.payload_file }}", workflow_text
+        )
+        self.assertIn(
+            "payload-file: ${{ steps.batch_candidate_request.outputs.payload_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-file: ${{ steps.stack_collapse_request.outputs.payload_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-file: ${{ steps.batch_landing_request.outputs.payload_file }}",
+            workflow_text,
         )
         self.assertIn(
             "idempotency-key: ${{ steps.level1_request.outputs.idempotency_key }}",
@@ -98,6 +130,18 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
         self.assertIn(
             "idempotency-key: ${{ steps.controller_request.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.batch_candidate_request.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.stack_collapse_request.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.batch_landing_request.outputs.idempotency_key }}",
             workflow_text,
         )
         self.assertIn(
@@ -115,6 +159,18 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "response-output-file: ${{ steps.controller_request.outputs.response_file }}",
             workflow_text,
         )
+        self.assertIn(
+            "response-output-file: ${{ steps.batch_candidate_request.outputs.response_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ steps.stack_collapse_request.outputs.response_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ steps.batch_landing_request.outputs.response_file }}",
+            workflow_text,
+        )
         self.assertIn('fail-result-paths: ""', workflow_text)
         self.assertIn('log-response-body: "false"', workflow_text)
         self.assertIn("launchplane-merge-train-policy-targets.json", workflow_text)
@@ -123,8 +179,17 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("launchplane-merge-train-run-once.json", workflow_text)
         self.assertIn("launchplane-merge-train-controller-run-once-request.json", workflow_text)
         self.assertIn("launchplane-merge-train-controller-run-once.json", workflow_text)
+        self.assertIn("launchplane-merge-train-batch-candidate-request.json", workflow_text)
+        self.assertIn("launchplane-merge-train-batch-candidate.json", workflow_text)
+        self.assertIn("launchplane-merge-train-stack-collapse-request.json", workflow_text)
+        self.assertIn("launchplane-merge-train-stack-collapse.json", workflow_text)
+        self.assertIn("launchplane-merge-train-batch-landing-request.json", workflow_text)
+        self.assertIn("launchplane-merge-train-batch-landing.json", workflow_text)
         self.assertIn('idempotency_key="merge-train-run-once"', workflow_text)
         self.assertIn('idempotency_key="merge-train-controller-run-once"', workflow_text)
+        self.assertIn('idempotency_key="merge-train-batch-candidate-run-once"', workflow_text)
+        self.assertIn('idempotency_key="merge-train-stack-collapse-run-once"', workflow_text)
+        self.assertIn('idempotency_key="merge-train-batch-landing-run-once"', workflow_text)
         self.assertNotIn("${GITHUB_RUN_ATTEMPT}:${payload_digest}", workflow_text)
         self.assertRegex(
             workflow_text,
@@ -138,6 +203,24 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             r"\$\{\{ steps\.controller_request\.outputs\.idempotency_key \}\}.*"
             r"log-response-body: \"false\"",
         )
+        self.assertRegex(
+            workflow_text,
+            r"(?s)Send batch-candidate phase request.*idempotency-key: "
+            r"\$\{\{ steps\.batch_candidate_request\.outputs\.idempotency_key \}\}.*"
+            r"log-response-body: \"false\"",
+        )
+        self.assertRegex(
+            workflow_text,
+            r"(?s)Send stack-collapse phase request.*idempotency-key: "
+            r"\$\{\{ steps\.stack_collapse_request\.outputs\.idempotency_key \}\}.*"
+            r"log-response-body: \"false\"",
+        )
+        self.assertRegex(
+            workflow_text,
+            r"(?s)Send batch-landing phase request.*idempotency-key: "
+            r"\$\{\{ steps\.batch_landing_request\.outputs\.idempotency_key \}\}.*"
+            r"log-response-body: \"false\"",
+        )
         self.assertNotIn(
             '"${service_origin}/v1/work-graph/merge-train/policy-targets"', workflow_text
         )
@@ -146,6 +229,9 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             workflow_text,
         )
         self.assertNotIn('"${SERVICE_ORIGIN}/v1/work-graph/merge-train/run-once"', workflow_text)
+        self.assertNotIn("batch_candidate_url=", workflow_text)
+        self.assertNotIn("stack_collapse_url=", workflow_text)
+        self.assertNotIn("batch_landing_url=", workflow_text)
         self.assertNotIn('"$controller_url"', workflow_text)
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_REPOSITORY", workflow_text)
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH", workflow_text)
@@ -2640,13 +2726,28 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("audience", "${{ steps.admission.outputs.service_audience }}"),
             ("audience", "${{ steps.scheduled_target_request.outputs.service_audience }}"),
             ("fail-result-paths", '""'),
+            (
+                "idempotency-key",
+                "${{ steps.batch_candidate_request.outputs.idempotency_key }}",
+            ),
+            (
+                "idempotency-key",
+                "${{ steps.batch_landing_request.outputs.idempotency_key }}",
+            ),
             ("idempotency-key", "${{ steps.controller_request.outputs.idempotency_key }}"),
             ("idempotency-key", "${{ steps.level1_request.outputs.idempotency_key }}"),
+            (
+                "idempotency-key",
+                "${{ steps.stack_collapse_request.outputs.idempotency_key }}",
+            ),
             ("log-response-body", '"false"'),
             ("method", "GET"),
             ("method", "POST"),
+            ("payload-file", "${{ steps.batch_candidate_request.outputs.payload_file }}"),
+            ("payload-file", "${{ steps.batch_landing_request.outputs.payload_file }}"),
             ("payload-file", "${{ steps.controller_request.outputs.payload_file }}"),
             ("payload-file", "${{ steps.level1_request.outputs.payload_file }}"),
+            ("payload-file", "${{ steps.stack_collapse_request.outputs.payload_file }}"),
             (
                 "response-output-file",
                 "${{ steps.scheduled_target_request.outputs.response_file }}",
@@ -2657,15 +2758,30 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 "response-output-file",
+                "${{ steps.batch_candidate_request.outputs.response_file }}",
+            ),
+            (
+                "response-output-file",
+                "${{ steps.batch_landing_request.outputs.response_file }}",
+            ),
+            (
+                "response-output-file",
                 "${{ steps.level1_request.outputs.response_file }}",
             ),
             (
                 "response-output-file",
                 "${{ steps.controller_request.outputs.response_file }}",
             ),
+            (
+                "response-output-file",
+                "${{ steps.stack_collapse_request.outputs.response_file }}",
+            ),
             ("route-path", "/v1/work-graph/merge-train/policy-targets"),
+            ("route-path", "/v1/work-graph/merge-train/batch-candidate/run-once"),
+            ("route-path", "/v1/work-graph/merge-train/batch-landing/run-once"),
             ("route-path", "/v1/work-graph/merge-train/controller/run-once"),
             ("route-path", "/v1/work-graph/merge-train/run-once"),
+            ("route-path", "/v1/work-graph/merge-train/stack-collapse/run-once"),
             ("route-path", "${{ steps.admission_request.outputs.route_path }}"),
         ):
             with self.subTest(merge_train_runner_get_mechanic=key):

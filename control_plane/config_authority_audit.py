@@ -797,31 +797,43 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "fail-result-paths": frozenset(('""',)),
         "idempotency-key": frozenset(
             (
+                "${{ steps.batch_candidate_request.outputs.idempotency_key }}",
+                "${{ steps.batch_landing_request.outputs.idempotency_key }}",
                 "${{ steps.controller_request.outputs.idempotency_key }}",
                 "${{ steps.level1_request.outputs.idempotency_key }}",
+                "${{ steps.stack_collapse_request.outputs.idempotency_key }}",
             )
         ),
         "log-response-body": frozenset(('"false"',)),
         "method": frozenset(("GET", "POST")),
         "payload-file": frozenset(
             (
+                "${{ steps.batch_candidate_request.outputs.payload_file }}",
+                "${{ steps.batch_landing_request.outputs.payload_file }}",
                 "${{ steps.controller_request.outputs.payload_file }}",
                 "${{ steps.level1_request.outputs.payload_file }}",
+                "${{ steps.stack_collapse_request.outputs.payload_file }}",
             )
         ),
         "response-output-file": frozenset(
             (
                 "${{ steps.admission_request.outputs.response_file }}",
+                "${{ steps.batch_candidate_request.outputs.response_file }}",
+                "${{ steps.batch_landing_request.outputs.response_file }}",
                 "${{ steps.controller_request.outputs.response_file }}",
                 "${{ steps.level1_request.outputs.response_file }}",
                 "${{ steps.scheduled_target_request.outputs.response_file }}",
+                "${{ steps.stack_collapse_request.outputs.response_file }}",
             )
         ),
         "route-path": frozenset(
             (
+                "/v1/work-graph/merge-train/batch-candidate/run-once",
+                "/v1/work-graph/merge-train/batch-landing/run-once",
                 "/v1/work-graph/merge-train/controller/run-once",
                 "/v1/work-graph/merge-train/run-once",
                 "/v1/work-graph/merge-train/policy-targets",
+                "/v1/work-graph/merge-train/stack-collapse/run-once",
                 "${{ steps.admission_request.outputs.route_path }}",
             )
         ),
