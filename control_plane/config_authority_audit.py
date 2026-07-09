@@ -795,19 +795,31 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
             )
         ),
         "fail-result-paths": frozenset(('""',)),
-        "idempotency-key": frozenset(("${{ steps.level1_request.outputs.idempotency_key }}",)),
+        "idempotency-key": frozenset(
+            (
+                "${{ steps.controller_request.outputs.idempotency_key }}",
+                "${{ steps.level1_request.outputs.idempotency_key }}",
+            )
+        ),
         "log-response-body": frozenset(('"false"',)),
         "method": frozenset(("GET", "POST")),
-        "payload-file": frozenset(("${{ steps.level1_request.outputs.payload_file }}",)),
+        "payload-file": frozenset(
+            (
+                "${{ steps.controller_request.outputs.payload_file }}",
+                "${{ steps.level1_request.outputs.payload_file }}",
+            )
+        ),
         "response-output-file": frozenset(
             (
                 "${{ steps.admission_request.outputs.response_file }}",
+                "${{ steps.controller_request.outputs.response_file }}",
                 "${{ steps.level1_request.outputs.response_file }}",
                 "${{ steps.scheduled_target_request.outputs.response_file }}",
             )
         ),
         "route-path": frozenset(
             (
+                "/v1/work-graph/merge-train/controller/run-once",
                 "/v1/work-graph/merge-train/run-once",
                 "/v1/work-graph/merge-train/policy-targets",
                 "${{ steps.admission_request.outputs.route_path }}",

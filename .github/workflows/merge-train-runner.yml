@@ -448,7 +448,7 @@ jobs:
             }' > "$request_payload_file"
           payload_digest="$(sha256sum "$request_payload_file" | cut -d' ' -f1)"
           idempotency_key="merge-train-run-once"
-          idempotency_key="${idempotency_key}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          idempotency_key="${idempotency_key}:${GITHUB_RUN_ID}"
           idempotency_key="${idempotency_key}:${payload_digest}"
           {
             echo "should_request=true"
@@ -537,7 +537,54 @@ jobs:
             exit 1
           fi
 
-      - name: Run one merge-train controller action
+      - name: Prepare merge-train controller request
+        id: controller_request
+        if: >-
+          steps.admission.outputs.admission_status == 'admitted' &&
+          env.MERGE_TRAIN_RUNNER_MODE == 'controller'
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_payload_file="launchplane-merge-train-controller-run-once-request.json"
+          response_file="launchplane-merge-train-controller-run-once.json"
+          jq -n \
+            --arg repository "$MERGE_TRAIN_REPOSITORY" \
+            --arg base_branch "$MERGE_TRAIN_BASE_BRANCH" \
+            --argjson mutate "$MERGE_TRAIN_MUTATE" \
+            '{
+              schema_version: 1,
+              repository: $repository,
+              base_branch: $base_branch,
+              mutate: $mutate
+            }' > "$request_payload_file"
+          payload_digest="$(sha256sum "$request_payload_file" | cut -d' ' -f1)"
+          idempotency_key="merge-train-controller-run-once"
+          idempotency_key="${idempotency_key}:${GITHUB_RUN_ID}"
+          idempotency_key="${idempotency_key}:${payload_digest}"
+          {
+            echo "idempotency_key=${idempotency_key}"
+            echo "payload_file=${request_payload_file}"
+            echo "response_file=${response_file}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Send merge-train controller request
+        if: >-
+          steps.admission.outputs.admission_status == 'admitted' &&
+          env.MERGE_TRAIN_RUNNER_MODE == 'controller'
+        id: controller_run
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ steps.admission.outputs.service_audience }}
+          method: POST
+          route-path: /v1/work-graph/merge-train/controller/run-once
+          payload-file: ${{ steps.controller_request.outputs.payload_file }}
+          idempotency-key: ${{ steps.controller_request.outputs.idempotency_key }}
+          fail-result-paths: ""
+          response-output-file: ${{ steps.controller_request.outputs.response_file }}
+          log-response-body: "false"
+
+      - name: Summarize merge-train controller response
         if: >-
           steps.admission.outputs.admission_status == 'admitted' &&
           env.MERGE_TRAIN_RUNNER_MODE == 'controller'
@@ -545,54 +592,33 @@ jobs:
         env:
           SERVICE_ORIGIN: ${{ steps.admission.outputs.service_origin }}
           SERVICE_AUDIENCE: ${{ steps.admission.outputs.service_audience }}
+          RESPONSE_FILE: ${{ steps.controller_request.outputs.response_file }}
+          STATUS_CODE: ${{ steps.controller_run.outputs.status-code }}
         run: |
           set -euo pipefail
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
-            | jq -r '.value'
-          })"
-          request_payload="$({
-            jq -n \
-              --arg repository "$MERGE_TRAIN_REPOSITORY" \
-              --arg base_branch "$MERGE_TRAIN_BASE_BRANCH" \
-              --argjson mutate "$MERGE_TRAIN_MUTATE" \
-              '{
-                schema_version: 1,
-                repository: $repository,
-                base_branch: $base_branch,
-                mutate: $mutate
-              }'
-          })"
-          response_file="launchplane-merge-train-controller-run-once.json"
-          controller_url="${SERVICE_ORIGIN}/v1/work-graph/merge-train"
-          controller_url="${controller_url}/controller/run-once"
-          status_code="$(curl -sS \
-            -o "$response_file" \
-            -w '%{http_code}' \
-            -X POST \
-            -H "Authorization: Bearer ${oidc_token}" \
-            -H 'Content-Type: application/json' \
-            --data "$request_payload" \
-            "$controller_url")"
-          if [ "$status_code" != "202" ]; then
-            cat "$response_file" >&2
+          if [ "$STATUS_CODE" != "202" ]; then
+            cat "$RESPONSE_FILE" >&2
             echo "Merge-train controller run-once failed" \
-              "with HTTP ${status_code}." >&2
+              "with HTTP ${STATUS_CODE}." >&2
             exit 1
           fi
 
-          jq . "$response_file"
+          jq . "$RESPONSE_FILE"
           feedback_payloads="launchplane-merge-train-controller-feedback.json"
           python3 scripts/merge_train_controller_feedback.py \
-            --response-file "$response_file" \
+            --response-file "$RESPONSE_FILE" \
             > "$feedback_payloads"
           feedback_count="$(jq 'length' "$feedback_payloads")"
           if [ "$MERGE_TRAIN_MUTATE" != "true" ]; then
             feedback_count=0
           fi
           if [ "$feedback_count" -gt 0 ]; then
+            oidc_token="$({
+              curl -fsSL \
+                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
+              | jq -r '.value'
+            })"
             feedback_url="${SERVICE_ORIGIN}/v1/work-graph/merge-train/pr-feedback"
             feedback_index=0
             while IFS= read -r feedback_payload; do
@@ -626,21 +652,21 @@ jobs:
             echo
             echo '## Launchplane merge train controller'
             echo
-            echo "- Mode: $(jq -r '.result.mode' "$response_file")"
+            echo "- Mode: $(jq -r '.result.mode' "$RESPONSE_FILE")"
             controller_action="$(
-              jq -r '.result.controller_action // "unknown"' "$response_file"
+              jq -r '.result.controller_action // "unknown"' "$RESPONSE_FILE"
             )"
             candidate_record="$(
               jq -r '.records.merge_train_batch_candidate_record_id // ""' \
-                "$response_file"
+                "$RESPONSE_FILE"
             )"
             landing_record="$(
               jq -r '.records.merge_train_batch_landing_plan_record_id // ""' \
-                "$response_file"
+                "$RESPONSE_FILE"
             )"
             stack_record="$(
               jq -r '.records.merge_train_stack_collapse_plan_record_id // ""' \
-                "$response_file"
+                "$RESPONSE_FILE"
             )"
             echo "- Controller action: ${controller_action}"
             echo "- Candidate record: ${candidate_record}"
