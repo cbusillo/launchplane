@@ -238,7 +238,31 @@ closed.
 
 Prepare a TOML payload with every repository/base policy the service should
 support, store it outside the repo or generate it from operator automation, then
-import it through the deployed service API:
+import it through the deployed service API. GitHub Actions operator workflows
+should build the JSON request with Launchplane's typed CLI and call the shared
+`launchplane-request` action rather than fetching GitHub OIDC tokens in shell:
+
+```sh
+uv run launchplane merge-train-policies build-import-request \
+  --policy-file path/to/merge-train-policy.toml \
+  --source-label operator:update \
+  --reason "Configure merge train repositories" \
+  --apply \
+  > merge-train-policy-import-request.json
+```
+
+```yaml
+- uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+  with:
+    launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+    route-path: /v1/merge-train/policies/import
+    payload-file: merge-train-policy-import-request.json
+    idempotency-key: merge-train-policy-import:${{ github.run_id }}
+```
+
+For local operator terminals, the compatibility CLI import path still reads the
+bearer token from `LAUNCHPLANE_SERVICE_TOKEN` unless a browser
+`--session-cookie` is supplied:
 
 ```sh
 uv run launchplane merge-train-policies import-policy \
@@ -249,9 +273,7 @@ uv run launchplane merge-train-policies import-policy \
   --apply
 ```
 
-The command reads the bearer token from `LAUNCHPLANE_SERVICE_TOKEN` unless a
-browser `--session-cookie` is supplied. Direct `--database-url --apply` import is
-reserved for local development and DB repair, requires
+Direct `--database-url --apply` import is reserved for local development and DB repair, requires
 `--allow-direct-db-mutation`, and is not for shared or production live mutation.
 
 For local development or DB repair only:

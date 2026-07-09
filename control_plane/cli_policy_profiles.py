@@ -826,6 +826,48 @@ def merge_train_policies_list(database_url: str, status_filter: str) -> None:
     )
 
 
+@merge_train_policies.command("build-import-request")
+@click.option(
+    "--policy-file",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="TOML policy file containing merge-train repository policies.",
+)
+@click.option("--status", type=click.Choice(["active", "superseded"]), default="active")
+@click.option("--source-label", default="cli:import-policy", show_default=True)
+@click.option("--reason", default="", help="Required audit reason when --apply is used.")
+@click.option("--dry-run", "mode", flag_value="dry_run", default="dry_run")
+@click.option("--apply", "mode", flag_value="apply")
+def merge_train_policies_build_import_request(
+    policy_file: Path,
+    status: MergeTrainPolicyRecordStatus,
+    source_label: str,
+    reason: str,
+    mode: str,
+) -> None:
+    normalized_reason = reason.strip()
+    if mode == "apply" and not normalized_reason:
+        raise click.ClickException("reason is required when apply is true")
+    record = _build_merge_train_policy_record(
+        policy_file=policy_file,
+        source_label=source_label,
+        status=status,
+    )
+    click.echo(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "product": "launchplane",
+                "mode": mode,
+                "reason": normalized_reason,
+                "record": _merge_train_policy_record_payload(record),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 @merge_train_policies.command("import-policy")
 @click.option(
     "--database-url",

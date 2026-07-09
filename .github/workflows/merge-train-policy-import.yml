@@ -20,6 +20,10 @@ name: Merge Train Policy Import
         description: Label Launchplane applies when a pull request blocks
         required: true
         type: string
+      stack_child_disposition_label:
+        description: Label Launchplane applies to stacked child pull requests
+        required: true
+        type: string
       merge_method:
         description: GitHub merge method
         required: true
@@ -54,7 +58,8 @@ permissions:
   id-token: write
 
 concurrency:
-  group: merge-train-policy-import
+  group: >-
+    merge-train-policy-import:${{ inputs.repository }}:${{ inputs.base_branch }}
   cancel-in-progress: false
 
 jobs:
@@ -69,6 +74,7 @@ jobs:
       POLICY_BASE_BRANCH: ${{ inputs.base_branch }}
       POLICY_ENQUEUE_LABEL: ${{ inputs.enqueue_label }}
       POLICY_BLOCKED_LABEL: ${{ inputs.blocked_label }}
+      POLICY_STACK_CHILD_DISPOSITION_LABEL: ${{ inputs.stack_child_disposition_label }}
       POLICY_MERGE_METHOD: ${{ inputs.merge_method }}
       POLICY_FAILURE_POLICY: ${{ inputs.failure_policy }}
       POLICY_SOURCE_LABEL: ${{ inputs.source_label }}
@@ -90,7 +96,6 @@ jobs:
               raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
           output_path = os.environ["GITHUB_OUTPUT"]
           with open(output_path, "a", encoding="utf-8") as handle:
-              handle.write(f"origin={parsed.scheme}://{parsed.netloc}\n")
               handle.write(f"audience={parsed.hostname}\n")
           PY
 
@@ -111,12 +116,16 @@ jobs:
           policy_file="${RUNNER_TEMP}/merge-train-policy.toml"
           python3 - <<'PY' > "$policy_file"
           import os
+          import json
 
           values = {
               "repository": os.environ["POLICY_REPOSITORY"].strip(),
               "base_branch": os.environ["POLICY_BASE_BRANCH"].strip(),
               "enqueue_label": os.environ["POLICY_ENQUEUE_LABEL"].strip(),
               "blocked_label": os.environ["POLICY_BLOCKED_LABEL"].strip(),
+              "stack_child_disposition_label": os.environ[
+                  "POLICY_STACK_CHILD_DISPOSITION_LABEL"
+              ].strip(),
               "merge_method": os.environ["POLICY_MERGE_METHOD"].strip(),
               "failure_policy": os.environ["POLICY_FAILURE_POLICY"].strip(),
           }
@@ -129,6 +138,14 @@ jobs:
               raise SystemExit("repository must be owner/name")
           if values["enqueue_label"] == values["blocked_label"]:
               raise SystemExit("enqueue_label and blocked_label must differ")
+          if values["stack_child_disposition_label"] in {
+              values["enqueue_label"],
+              values["blocked_label"],
+          }:
+              raise SystemExit(
+                  "stack_child_disposition_label must differ from enqueue_label "
+                  "and blocked_label"
+              )
           print("schema_version = 1")
           print()
           print("[[policies]]")
@@ -137,10 +154,11 @@ jobs:
               "base_branch",
               "enqueue_label",
               "blocked_label",
+              "stack_child_disposition_label",
               "merge_method",
               "failure_policy",
           ):
-              print(f'{key} = "{values[key]}"')
+              print(f"{key} = {json.dumps(values[key])}")
           print()
           print("[policies.enqueue]")
           print("label_required = true")
@@ -168,36 +186,32 @@ jobs:
           )"
           echo "file=${policy_file}" >> "$GITHUB_OUTPUT"
           echo "sha256=${policy_sha256}" >> "$GITHUB_OUTPUT"
+          dry_run_payload="merge-train-policy-dry-run-request.json"
+          uv run launchplane merge-train-policies build-import-request \
+            --policy-file "$policy_file" \
+            --source-label "$POLICY_SOURCE_LABEL" \
+            --dry-run \
+            > "$dry_run_payload"
+          echo "dry_run_payload=${dry_run_payload}" >> "$GITHUB_OUTPUT"
 
       - name: Request policy import dry-run
         id: dry_run
-        shell: bash
-        env:
-          SERVICE_ORIGIN: ${{ steps.service.outputs.origin }}
-          SERVICE_AUDIENCE: ${{ steps.service.outputs.audience }}
-          POLICY_FILE: ${{ steps.policy.outputs.file }}
-        run: |
-          set -euo pipefail
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
-            | jq -r '.value'
-          })"
-          LAUNCHPLANE_SERVICE_TOKEN="$oidc_token" \
-            uv run launchplane merge-train-policies import-policy \
-              --service-url "$SERVICE_ORIGIN" \
-              --policy-file "$POLICY_FILE" \
-              --source-label "$POLICY_SOURCE_LABEL" \
-              --dry-run \
-              | tee merge-train-policy-dry-run.json
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ steps.service.outputs.audience }}
+          method: POST
+          route-path: /v1/merge-train/policies/import
+          payload-file: ${{ steps.policy.outputs.dry_run_payload }}
+          fail-result-paths: ""
+          response-output-file: merge-train-policy-dry-run.json
+          log-response-body: "false"
 
-      - name: Apply policy import
+      - name: Build policy apply payload
+        id: apply_policy
         if: env.APPLY_POLICY == 'true'
         shell: bash
         env:
-          SERVICE_ORIGIN: ${{ steps.service.outputs.origin }}
-          SERVICE_AUDIENCE: ${{ steps.service.outputs.audience }}
           POLICY_FILE: ${{ steps.policy.outputs.file }}
         run: |
           set -euo pipefail
@@ -206,28 +220,39 @@ jobs:
             echo "reason is required when apply is true" >&2
             exit 1
           fi
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
-            | jq -r '.value'
+          apply_payload="merge-train-policy-apply-request.json"
+          idempotency_key="$({
+            printf 'merge-train-policy-import:%s:%s:%s:%s:%s' \
+              "$POLICY_REPOSITORY" \
+              "$POLICY_BASE_BRANCH" \
+              '${{ steps.policy.outputs.sha256 }}' \
+              "$GITHUB_RUN_ID" \
+              "$GITHUB_RUN_ATTEMPT"
           })"
-          LAUNCHPLANE_SERVICE_TOKEN="$oidc_token" \
-            uv run launchplane merge-train-policies import-policy \
-              --service-url "$SERVICE_ORIGIN" \
-              --policy-file "$POLICY_FILE" \
-              --source-label "$POLICY_SOURCE_LABEL" \
-              --reason "$reason" \
-              --idempotency-key "$({
-                printf 'merge-train-policy-import:%s:%s:%s:%s:%s' \
-                  "$POLICY_REPOSITORY" \
-                  "$POLICY_BASE_BRANCH" \
-                  '${{ steps.policy.outputs.sha256 }}' \
-                  "$GITHUB_RUN_ID" \
-                  "$GITHUB_RUN_ATTEMPT"
-              })" \
-              --apply \
-              | tee merge-train-policy-apply.json
+          uv run launchplane merge-train-policies build-import-request \
+            --policy-file "$POLICY_FILE" \
+            --source-label "$POLICY_SOURCE_LABEL" \
+            --reason "$reason" \
+            --apply \
+            > "$apply_payload"
+          {
+            echo "idempotency_key=${idempotency_key}"
+            echo "payload=${apply_payload}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Apply policy import
+        if: env.APPLY_POLICY == 'true'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ steps.service.outputs.audience }}
+          method: POST
+          route-path: /v1/merge-train/policies/import
+          payload-file: ${{ steps.apply_policy.outputs.payload }}
+          idempotency-key: ${{ steps.apply_policy.outputs.idempotency_key }}
+          fail-result-paths: ""
+          response-output-file: merge-train-policy-apply.json
+          log-response-body: "false"
 
       - name: Summarize
         shell: bash

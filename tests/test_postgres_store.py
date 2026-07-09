@@ -2609,6 +2609,7 @@ repository = "cbusillo/codex-skills"
 base_branch = "main"
 enqueue_label = "ready-to-merge"
 blocked_label = "merge-blocked"
+stack_child_disposition_label = "stack-landed"
 merge_method = "merge"
 failure_policy = "pause_train"
 [policies.enqueue]
@@ -2657,6 +2658,78 @@ env_var = "GH_TOKEN"
         self.assertEqual(list_result.exit_code, 0, list_result.output)
         self.assertIn('"count": 1', list_result.output)
         self.assertIn('"cbusillo/codex-skills:main"', list_result.output)
+
+    def test_merge_train_policy_cli_builds_service_import_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy_file = Path(temporary_directory_name) / "merge-train-policy.toml"
+            policy_file.write_text(
+                """
+schema_version = 1
+
+[[policies]]
+repository = "cbusillo/codex-skills"
+base_branch = "main"
+enqueue_label = "ready-to-merge"
+blocked_label = "merge-blocked"
+stack_child_disposition_label = "stack-landed"
+merge_method = "merge"
+failure_policy = "pause_train"
+[policies.enqueue]
+label_required = true
+allowed_actor_roles = ["repo_owner", "repo_admin"]
+[policies.merge_identity]
+kind = "github_actions_oidc"
+name = "launchplane-merge-train"
+[policies.github_token]
+env_var = "GH_TOKEN"
+""".strip(),
+                encoding="utf-8",
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "merge-train-policies",
+                    "build-import-request",
+                    "--policy-file",
+                    str(policy_file),
+                    "--source-label",
+                    "workflow:merge-train-policy-import",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["product"], "launchplane")
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertEqual(payload["reason"], "")
+        record = payload["record"]
+        self.assertEqual(record["source"], "workflow:merge-train-policy-import")
+        self.assertEqual(record["status"], "active")
+        self.assertEqual(record["policy"]["policies"][0]["repository"], "cbusillo/codex-skills")
+        self.assertEqual(record["policy"]["policies"][0]["base_branch"], "main")
+        self.assertEqual(
+            record["policy"]["policies"][0]["stack_child_disposition_label"],
+            "stack-landed",
+        )
+
+    def test_merge_train_policy_build_import_request_apply_requires_reason(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy_file = Path(temporary_directory_name) / "merge-train-policy.toml"
+            policy_file.write_text("schema_version = 1\n", encoding="utf-8")
+            result = CliRunner().invoke(
+                main,
+                [
+                    "merge-train-policies",
+                    "build-import-request",
+                    "--policy-file",
+                    str(policy_file),
+                    "--apply",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("reason is required when apply is true", result.output)
 
     def test_merge_train_policy_direct_import_requires_direct_db_acknowledgement(
         self,
