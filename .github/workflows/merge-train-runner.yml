@@ -174,24 +174,13 @@ jobs:
             echo "MERGE_TRAIN_SCHEDULED_TARGET=manual"
           } >> "$GITHUB_ENV"
 
-      - name: Resolve scheduled merge-train target
+      - name: Prepare scheduled merge-train target request
+        id: scheduled_target_request
         if: github.event_name == 'schedule'
         shell: bash
         run: |
           set -euo pipefail
           : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
-
-          service_origin="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
-          print(f"{parsed.scheme}://{parsed.netloc}")
-          PY
-          })"
           service_audience="$({
             python3 - <<'PY'
           import os
@@ -203,28 +192,41 @@ jobs:
           print(parsed.hostname)
           PY
           })"
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}" \
-            | jq -r '.value'
-          })"
-
           targets_file="launchplane-merge-train-policy-targets.json"
-          status_code="$(curl -sS \
-            -o "$targets_file" \
-            -w '%{http_code}' \
-            -H "Authorization: Bearer ${oidc_token}" \
-            "${service_origin}/v1/work-graph/merge-train/policy-targets"
-          )"
-          if [ "$status_code" != "200" ]; then
-            cat "$targets_file" >&2
-            echo "Merge-train policy target lookup failed with HTTP ${status_code}." >&2
+          {
+            echo "service_audience=${service_audience}"
+            echo "response_file=${targets_file}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read scheduled merge-train targets
+        if: github.event_name == 'schedule'
+        id: scheduled_target_read
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ steps.scheduled_target_request.outputs.service_audience }}
+          method: GET
+          route-path: /v1/work-graph/merge-train/policy-targets
+          fail-result-paths: ""
+          response-output-file: ${{ steps.scheduled_target_request.outputs.response_file }}
+          log-response-body: "false"
+
+      - name: Resolve scheduled merge-train target
+        if: github.event_name == 'schedule'
+        shell: bash
+        env:
+          TARGETS_FILE: ${{ steps.scheduled_target_request.outputs.response_file }}
+          STATUS_CODE: ${{ steps.scheduled_target_read.outputs.status-code }}
+        run: |
+          set -euo pipefail
+          if [ "$STATUS_CODE" != "200" ]; then
+            cat "$TARGETS_FILE" >&2
+            echo "Merge-train policy target lookup failed with HTTP ${STATUS_CODE}." >&2
             exit 1
           fi
 
-          jq . "$targets_file"
-          scheduled_targets="$(jq -c '[.targets[] | select(.scheduler.enabled == true)]' "$targets_file")"
+          jq . "$TARGETS_FILE"
+          scheduled_targets="$(jq -c '[.targets[] | select(.scheduler.enabled == true)]' "$TARGETS_FILE")"
           scheduled_target_count="$(jq 'length' <<< "$scheduled_targets")"
           if [ "$scheduled_target_count" -eq 0 ]; then
             echo "MERGE_TRAIN_SCHEDULED_TARGET=disabled" >> "$GITHUB_ENV"
@@ -276,18 +278,14 @@ jobs:
             echo "- Mutate: ${mutate}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Request admission decision
-        id: admission
+      - name: Prepare merge-train admission request
+        id: admission_request
         shell: bash
         run: |
           set -euo pipefail
           : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
           if [ "${MERGE_TRAIN_SCHEDULED_TARGET}" = "disabled" ]; then
-            {
-              echo "admission_status=deferred"
-              echo "reason_code=no_enabled_scheduler_target"
-              echo "next_allowed_at="
-            } >> "$GITHUB_OUTPUT"
+            echo "should_request=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           : "${MERGE_TRAIN_REPOSITORY:?Set repository input or enable one policy scheduler target}"
@@ -326,35 +324,62 @@ jobs:
           }))
           PY
           })"
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}" \
-            | jq -r '.value'
-          })"
-
           response_file="launchplane-merge-train-admission.json"
-          status_code="$(curl -sS \
-            -o "$response_file" \
-            -w '%{http_code}' \
-            -H "Authorization: Bearer ${oidc_token}" \
-            "${service_origin}/v1/work-graph/merge-train/admission?${query_string}"
-          )"
-          if [ "$status_code" != "200" ]; then
-            cat "$response_file" >&2
-            echo "Merge-train admission failed with HTTP ${status_code}." >&2
+          {
+            echo "should_request=true"
+            echo "service_origin=${service_origin}"
+            echo "service_audience=${service_audience}"
+            echo "route_path=/v1/work-graph/merge-train/admission?${query_string}"
+            echo "response_file=${response_file}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read merge-train admission
+        if: steps.admission_request.outputs.should_request == 'true'
+        id: admission_read
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ steps.admission_request.outputs.service_audience }}
+          method: GET
+          route-path: ${{ steps.admission_request.outputs.route_path }}
+          fail-result-paths: ""
+          response-output-file: ${{ steps.admission_request.outputs.response_file }}
+          log-response-body: "false"
+
+      - name: Request admission decision
+        id: admission
+        shell: bash
+        env:
+          RESPONSE_FILE: ${{ steps.admission_request.outputs.response_file }}
+          SERVICE_ORIGIN: ${{ steps.admission_request.outputs.service_origin }}
+          SERVICE_AUDIENCE: ${{ steps.admission_request.outputs.service_audience }}
+          SHOULD_REQUEST: ${{ steps.admission_request.outputs.should_request }}
+          STATUS_CODE: ${{ steps.admission_read.outputs.status-code }}
+        run: |
+          set -euo pipefail
+          if [ "$SHOULD_REQUEST" != "true" ]; then
+            {
+              echo "admission_status=deferred"
+              echo "reason_code=no_enabled_scheduler_target"
+              echo "next_allowed_at="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$STATUS_CODE" != "200" ]; then
+            cat "$RESPONSE_FILE" >&2
+            echo "Merge-train admission failed with HTTP ${STATUS_CODE}." >&2
             exit 1
           fi
 
-          jq . "$response_file"
-          admission_status="$(jq -r '.admission.status' "$response_file")"
-          reason_code="$(jq -r '.admission.reason_code' "$response_file")"
+          jq . "$RESPONSE_FILE"
+          admission_status="$(jq -r '.admission.status' "$RESPONSE_FILE")"
+          reason_code="$(jq -r '.admission.reason_code' "$RESPONSE_FILE")"
           next_allowed_at="$(
-            jq -r '.admission.next_allowed_at' "$response_file"
+            jq -r '.admission.next_allowed_at' "$RESPONSE_FILE"
           )"
           {
-            echo "service_origin=${service_origin}"
-            echo "service_audience=${service_audience}"
+            echo "service_origin=${SERVICE_ORIGIN}"
+            echo "service_audience=${SERVICE_AUDIENCE}"
             echo "admission_status=${admission_status}"
             echo "reason_code=${reason_code}"
             echo "next_allowed_at=${next_allowed_at}"
