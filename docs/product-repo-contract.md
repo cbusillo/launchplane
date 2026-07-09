@@ -387,6 +387,9 @@ instead of introducing a second product literal. The caller must use an
 Context-specific cleanup may pass `context=` and use a matching scoped grant.
 Product repos may still own provider-specific deletion and package tokens, but
 not the protected-inventory route shape or response extraction contract.
+The Odoo ownership check treats this shared-action composition as compliant;
+it rejects executable repo-local HTTP clients, not descriptive workflow step
+names such as `Fetch Launchplane protected artifact inventory`.
 
 ## Canonical Image Deploy Connector
 
