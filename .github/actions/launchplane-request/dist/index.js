@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 const os = require("node:os");
 
 function inputNameToEnvKey(name) {
@@ -143,16 +144,25 @@ async function requestGitHubOidcToken(audience, options) {
 function readPayload() {
   const inlinePayload = getInput("payload");
   const payloadFile = getInput("payload-file");
-  if (inlinePayload && payloadFile) {
-    throw new Error("Use payload or payload-file, not both.");
+  const payloadListFile = getInput("payload-list-file");
+  const configuredPayloadInputs = [inlinePayload, payloadFile, payloadListFile].filter(Boolean);
+  if (configuredPayloadInputs.length > 1) {
+    throw new Error("Use only one of payload, payload-file, or payload-list-file.");
+  }
+  if (payloadListFile) {
+    const payloads = JSON.parse(fs.readFileSync(payloadListFile, "utf8"));
+    if (!Array.isArray(payloads)) {
+      throw new Error("payload-list-file must contain a JSON array.");
+    }
+    return { mode: "list", payloads };
   }
   if (inlinePayload) {
-    return JSON.parse(inlinePayload);
+    return { mode: "single", payload: JSON.parse(inlinePayload) };
   }
   if (payloadFile) {
-    return JSON.parse(fs.readFileSync(payloadFile, "utf8"));
+    return { mode: "single", payload: JSON.parse(fs.readFileSync(payloadFile, "utf8")) };
   }
-  return null;
+  return { mode: "single", payload: null };
 }
 
 function parsePayloadFieldValue(value) {
@@ -207,6 +217,19 @@ function applyPayloadFields(payload) {
     writeJsonPath(payload, path, parsePayloadFieldValue(value));
   }
   return payload;
+}
+
+function applyPayloadTransforms(payloadConfig) {
+  if (payloadConfig.mode === "list") {
+    if (getInput("payload-fields") || getInput("payload-json-files")) {
+      throw new Error("payload-list-file cannot be combined with payload-fields or payload-json-files.");
+    }
+    return payloadConfig;
+  }
+  return {
+    mode: "single",
+    payload: applyPayloadJsonFiles(applyPayloadFields(payloadConfig.payload)),
+  };
 }
 
 function applyPayloadJsonFiles(payload) {
@@ -290,6 +313,13 @@ function writeResponseOutputFile(responseBody) {
   const outputPath = getInput("response-output-path");
   const outputValue = outputPath ? readJsonPath(responseBody, outputPath) : responseBody;
   fs.writeFileSync(outputFile, `${JSON.stringify(outputValue ?? null)}\n`, "utf8");
+}
+
+function payloadDigest(payload) {
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(payload))
+    .digest("hex");
 }
 
 function assertResultStatuses(responseBody) {
@@ -396,13 +426,14 @@ async function main() {
   const requestUrl = new URL(routePath, launchplaneUrl).toString();
   const audience = getInput("audience") || launchplaneUrl.host;
   const idempotencyKey = getInput("idempotency-key");
+  const idempotencyKeyPrefix = getInput("idempotency-key-prefix");
   const logResponseBody = parseBooleanInput(
     getInput("log-response-body", { defaultValue: "true" }),
     "log-response-body",
   );
-  const payload = applyPayloadJsonFiles(applyPayloadFields(readPayload()));
+  const payloadConfig = applyPayloadTransforms(readPayload());
   const options = getActionOptions();
-  async function requestInit() {
+  async function requestInit(payload, requestIdempotencyKey) {
     const token = await requestGitHubOidcToken(audience, options);
     const headers = {
       Authorization: `Bearer ${token}`,
@@ -413,8 +444,8 @@ async function main() {
       headers,
       signal: buildAbortSignal(getInput("timeout-ms", { defaultValue: "0" })),
     };
-    if (idempotencyKey) {
-      headers["Idempotency-Key"] = idempotencyKey;
+    if (requestIdempotencyKey) {
+      headers["Idempotency-Key"] = requestIdempotencyKey;
     }
     if (payload !== null) {
       headers["Content-Type"] = "application/json";
@@ -423,9 +454,83 @@ async function main() {
     return init;
   }
 
+  if (payloadConfig.mode === "list") {
+    if (idempotencyKey) {
+      throw new Error("Use idempotency-key-prefix with payload-list-file, not idempotency-key.");
+    }
+    if (!idempotencyKeyPrefix) {
+      throw new Error("idempotency-key-prefix is required when payload-list-file is set.");
+    }
+    if (payloadConfig.payloads.length === 0) {
+      setOutput("launchplane-url", requestUrl);
+      setOutput("route-path", routePath);
+      setOutput("audience", audience);
+      setOutput("status-code", "");
+      setOutput("response-body", "[]");
+      writeResponseOutputFile([]);
+      if (logResponseBody) {
+        process.stdout.write("[]\n");
+      }
+      return;
+    }
+    for (const [index, payload] of payloadConfig.payloads.entries()) {
+      if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+        throw new Error(`payload-list-file entry ${index + 1} must be a JSON object.`);
+      }
+    }
+    const responseBodies = [];
+    let lastStatus = "";
+    for (const [index, payload] of payloadConfig.payloads.entries()) {
+      const requestIdempotencyKey = `${idempotencyKeyPrefix}:${payloadDigest(payload)}`;
+      let response;
+      let responseBody;
+      let responseText;
+      try {
+        ({ response, responseBody, responseText } = await requestLaunchplaneUntilComplete(
+          requestUrl,
+          () => requestInit(payload, requestIdempotencyKey),
+          options,
+        ));
+      } catch (error) {
+        if (responseBodies.length > 0) {
+          writeResponseOutputFile(responseBodies);
+        }
+        throw error;
+      }
+      lastStatus = String(response.status);
+      responseBodies.push(responseBody);
+      if (!response.ok) {
+        writeResponseOutputFile(responseBodies);
+        const responseDetail = logResponseBody ? `: ${responseText || "empty response"}` : "";
+        throw new Error(
+          `Launchplane request ${index + 1} failed with ${response.status}${responseDetail}`,
+        );
+      }
+      try {
+        assertResultStatuses(responseBody);
+      } catch (error) {
+        writeResponseOutputFile(responseBodies);
+        throw error;
+      }
+    }
+    setOutput("launchplane-url", requestUrl);
+    setOutput("route-path", routePath);
+    setOutput("audience", audience);
+    setOutput("status-code", lastStatus);
+    setOutput("response-body", JSON.stringify(responseBodies));
+    writeMappedOutputs(responseBodies.at(-1) ?? {});
+    writeResponseOutputFile(responseBodies);
+    if (logResponseBody) {
+      process.stdout.write(`${JSON.stringify(responseBodies, null, 2)}\n`);
+    }
+    return;
+  }
+
+  const payload = payloadConfig.payload;
+
   const { response, responseBody, responseText } = await requestLaunchplaneUntilComplete(
     requestUrl,
-    requestInit,
+    () => requestInit(payload, idempotencyKey),
     options,
   );
 

@@ -55,7 +55,9 @@ def _gaps(payload: dict[str, object]) -> list[dict[str, object]]:
 
 
 class ConfigAuthorityAuditTest(unittest.TestCase):
-    def test_merge_train_runner_uses_shared_request_for_reads_and_worker_posts(self) -> None:
+    def test_merge_train_runner_uses_shared_request_for_reads_worker_and_feedback_posts(
+        self,
+    ) -> None:
         workflow_text = Path(".github/workflows/merge-train-runner.yml").read_text(encoding="utf-8")
 
         self.assertIn("/v1/work-graph/merge-train/policy-targets", workflow_text)
@@ -67,6 +69,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("Prepare merge-train controller request", workflow_text)
         self.assertIn("Send merge-train controller request", workflow_text)
         self.assertIn("Summarize merge-train controller response", workflow_text)
+        self.assertIn("Send merge-train controller PR feedback", workflow_text)
         for phase_name in (
             "batch-candidate",
             "stack-collapse",
@@ -75,6 +78,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             self.assertIn(f"Prepare {phase_name} phase request", workflow_text)
             self.assertIn(f"Send {phase_name} phase request", workflow_text)
             self.assertIn(f"Summarize {phase_name} phase response", workflow_text)
+        self.assertIn("Post manual phase PR feedback", workflow_text)
+        self.assertIn("Send manual phase PR feedback", workflow_text)
         self.assertIn(
             "uses: cbusillo/launchplane/.github/actions/launchplane-request@main", workflow_text
         )
@@ -94,6 +99,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
         self.assertIn("route-path: /v1/work-graph/merge-train/run-once", workflow_text)
         self.assertIn("route-path: /v1/work-graph/merge-train/controller/run-once", workflow_text)
+        self.assertIn("route-path: /v1/work-graph/merge-train/pr-feedback", workflow_text)
         self.assertIn(
             "route-path: /v1/work-graph/merge-train/batch-candidate/run-once",
             workflow_text,
@@ -125,6 +131,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             workflow_text,
         )
         self.assertIn(
+            "payload-list-file: ${{ steps.controller_summary.outputs.feedback_payloads }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-list-file: ${{ steps.manual_phase_feedback.outputs.feedback_payloads }}",
+            workflow_text,
+        )
+        self.assertIn(
             "idempotency-key: ${{ steps.level1_request.outputs.idempotency_key }}",
             workflow_text,
         )
@@ -142,6 +156,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
         self.assertIn(
             "idempotency-key: ${{ steps.batch_landing_request.outputs.idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "${{ steps.controller_summary.outputs.feedback_idempotency_key_prefix }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "${{ steps.manual_phase_feedback.outputs.feedback_idempotency_key_prefix }}",
             workflow_text,
         )
         self.assertIn(
@@ -171,6 +193,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "response-output-file: ${{ steps.batch_landing_request.outputs.response_file }}",
             workflow_text,
         )
+        self.assertIn(
+            "response-output-file: ${{ steps.controller_summary.outputs.feedback_response }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ steps.manual_phase_feedback.outputs.feedback_response }}",
+            workflow_text,
+        )
         self.assertIn('fail-result-paths: ""', workflow_text)
         self.assertIn('log-response-body: "false"', workflow_text)
         self.assertIn("launchplane-merge-train-policy-targets.json", workflow_text)
@@ -185,11 +215,23 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("launchplane-merge-train-stack-collapse.json", workflow_text)
         self.assertIn("launchplane-merge-train-batch-landing-request.json", workflow_text)
         self.assertIn("launchplane-merge-train-batch-landing.json", workflow_text)
+        self.assertIn("launchplane-merge-train-controller-feedback.json", workflow_text)
+        self.assertIn("launchplane-merge-train-feedback-responses.json", workflow_text)
+        self.assertIn("launchplane-merge-train-${phase}-feedback.json", workflow_text)
+        self.assertIn("launchplane-merge-train-${phase}-feedback-responses.json", workflow_text)
         self.assertIn('idempotency_key="merge-train-run-once"', workflow_text)
         self.assertIn('idempotency_key="merge-train-controller-run-once"', workflow_text)
         self.assertIn('idempotency_key="merge-train-batch-candidate-run-once"', workflow_text)
         self.assertIn('idempotency_key="merge-train-stack-collapse-run-once"', workflow_text)
         self.assertIn('idempotency_key="merge-train-batch-landing-run-once"', workflow_text)
+        self.assertIn(
+            'feedback_idempotency_key_prefix="merge-train-feedback:controller"',
+            workflow_text,
+        )
+        self.assertIn(
+            'feedback_idempotency_key_prefix="merge-train-feedback:${phase}"',
+            workflow_text,
+        )
         self.assertNotIn("${GITHUB_RUN_ATTEMPT}:${payload_digest}", workflow_text)
         self.assertRegex(
             workflow_text,
@@ -221,6 +263,18 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             r"\$\{\{ steps\.batch_landing_request\.outputs\.idempotency_key \}\}.*"
             r"log-response-body: \"false\"",
         )
+        self.assertRegex(
+            workflow_text,
+            r"(?s)Send merge-train controller PR feedback.*payload-list-file: "
+            r"\$\{\{ steps\.controller_summary\.outputs\.feedback_payloads \}\}.*"
+            r"log-response-body: \"false\"",
+        )
+        self.assertRegex(
+            workflow_text,
+            r"(?s)Send manual phase PR feedback.*payload-list-file: "
+            r"\$\{\{ steps\.manual_phase_feedback\.outputs\.feedback_payloads \}\}.*"
+            r"log-response-body: \"false\"",
+        )
         self.assertNotIn(
             '"${service_origin}/v1/work-graph/merge-train/policy-targets"', workflow_text
         )
@@ -233,6 +287,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("stack_collapse_url=", workflow_text)
         self.assertNotIn("batch_landing_url=", workflow_text)
         self.assertNotIn('"$controller_url"', workflow_text)
+        self.assertNotIn("feedback_url=", workflow_text)
+        self.assertNotIn('"$feedback_url"', workflow_text)
+        self.assertNotIn("feedback_status=", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_REPOSITORY", workflow_text)
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH", workflow_text)
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_MUTATE", workflow_text)

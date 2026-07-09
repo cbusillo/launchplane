@@ -291,17 +291,6 @@ jobs:
           : "${MERGE_TRAIN_REPOSITORY:?Set repository input or enable one policy scheduler target}"
           : "${MERGE_TRAIN_BASE_BRANCH:?Missing base branch}"
 
-          service_origin="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
-          print(f"{parsed.scheme}://{parsed.netloc}")
-          PY
-          })"
           service_audience="$({
             python3 - <<'PY'
           import os
@@ -327,7 +316,6 @@ jobs:
           response_file="launchplane-merge-train-admission.json"
           {
             echo "should_request=true"
-            echo "service_origin=${service_origin}"
             echo "service_audience=${service_audience}"
             echo "route_path=/v1/work-graph/merge-train/admission?${query_string}"
             echo "response_file=${response_file}"
@@ -351,7 +339,6 @@ jobs:
         shell: bash
         env:
           RESPONSE_FILE: ${{ steps.admission_request.outputs.response_file }}
-          SERVICE_ORIGIN: ${{ steps.admission_request.outputs.service_origin }}
           SERVICE_AUDIENCE: ${{ steps.admission_request.outputs.service_audience }}
           SHOULD_REQUEST: ${{ steps.admission_request.outputs.should_request }}
           STATUS_CODE: ${{ steps.admission_read.outputs.status-code }}
@@ -378,7 +365,6 @@ jobs:
             jq -r '.admission.next_allowed_at' "$RESPONSE_FILE"
           )"
           {
-            echo "service_origin=${SERVICE_ORIGIN}"
             echo "service_audience=${SERVICE_AUDIENCE}"
             echo "admission_status=${admission_status}"
             echo "reason_code=${reason_code}"
@@ -585,13 +571,12 @@ jobs:
           log-response-body: "false"
 
       - name: Summarize merge-train controller response
+        id: controller_summary
         if: >-
           steps.admission.outputs.admission_status == 'admitted' &&
           env.MERGE_TRAIN_RUNNER_MODE == 'controller'
         shell: bash
         env:
-          SERVICE_ORIGIN: ${{ steps.admission.outputs.service_origin }}
-          SERVICE_AUDIENCE: ${{ steps.admission.outputs.service_audience }}
           RESPONSE_FILE: ${{ steps.controller_request.outputs.response_file }}
           STATUS_CODE: ${{ steps.controller_run.outputs.status-code }}
         run: |
@@ -612,42 +597,15 @@ jobs:
           if [ "$MERGE_TRAIN_MUTATE" != "true" ]; then
             feedback_count=0
           fi
-          if [ "$feedback_count" -gt 0 ]; then
-            oidc_token="$({
-              curl -fsSL \
-                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
-              | jq -r '.value'
-            })"
-            feedback_url="${SERVICE_ORIGIN}/v1/work-graph/merge-train/pr-feedback"
-            feedback_index=0
-            while IFS= read -r feedback_payload; do
-              feedback_index="$((feedback_index + 1))"
-              feedback_response="launchplane-merge-train-feedback-${feedback_index}.json"
-              feedback_payload_digest="$(
-                printf '%s' "$feedback_payload" | sha256sum | cut -d' ' -f1
-              )"
-              feedback_idempotency_key="merge-train-feedback:controller"
-              feedback_idempotency_key="${feedback_idempotency_key}:${GITHUB_RUN_ID}"
-              feedback_idempotency_key="${feedback_idempotency_key}:${feedback_payload_digest}"
-              feedback_status="$(curl -sS \
-                -o "$feedback_response" \
-                -w '%{http_code}' \
-                -X POST \
-                -H "Authorization: Bearer ${oidc_token}" \
-                -H "Idempotency-Key: ${feedback_idempotency_key}" \
-                -H 'Content-Type: application/json' \
-                --data "$feedback_payload" \
-                "$feedback_url")"
-              if [ "$feedback_status" != "202" ]; then
-                cat "$feedback_response" >&2
-                echo "Merge-train PR feedback failed" \
-                  "with HTTP ${feedback_status}." >&2
-                exit 1
-              fi
-              jq . "$feedback_response"
-            done < <(jq -c '.[]' "$feedback_payloads")
-          fi
+          feedback_response="launchplane-merge-train-feedback-responses.json"
+          feedback_idempotency_key_prefix="merge-train-feedback:controller"
+          feedback_idempotency_key_prefix="${feedback_idempotency_key_prefix}:${GITHUB_RUN_ID}"
+          {
+            echo "feedback_count=${feedback_count}"
+            echo "feedback_idempotency_key_prefix=${feedback_idempotency_key_prefix}"
+            echo "feedback_payloads=${feedback_payloads}"
+            echo "feedback_response=${feedback_response}"
+          } >> "$GITHUB_OUTPUT"
           {
             echo
             echo '## Launchplane merge train controller'
@@ -674,6 +632,24 @@ jobs:
             echo "- Stack-collapse record: ${stack_record}"
             echo "- Feedback payloads: ${feedback_count}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send merge-train controller PR feedback
+        if: >-
+          steps.admission.outputs.admission_status == 'admitted' &&
+          env.MERGE_TRAIN_RUNNER_MODE == 'controller' &&
+          steps.controller_summary.outputs.feedback_count != '0'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ steps.admission.outputs.service_audience }}
+          method: POST
+          route-path: /v1/work-graph/merge-train/pr-feedback
+          payload-list-file: ${{ steps.controller_summary.outputs.feedback_payloads }}
+          idempotency-key-prefix: >-
+            ${{ steps.controller_summary.outputs.feedback_idempotency_key_prefix }}
+          fail-result-paths: ""
+          response-output-file: ${{ steps.controller_summary.outputs.feedback_response }}
+          log-response-body: "false"
 
       - name: Prepare batch-candidate phase request
         id: batch_candidate_request
@@ -1010,6 +986,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Post manual phase PR feedback
+        id: manual_phase_feedback
         if: >-
           steps.admission.outputs.admission_status == 'admitted' &&
           env.MERGE_TRAIN_RUNNER_MODE == 'level1' &&
@@ -1018,8 +995,6 @@ jobs:
           steps.batch_landing.outputs.response_file != '')
         shell: bash
         env:
-          SERVICE_ORIGIN: ${{ steps.admission.outputs.service_origin }}
-          SERVICE_AUDIENCE: ${{ steps.admission.outputs.service_audience }}
           BATCH_CANDIDATE_RESPONSE: >-
             ${{ steps.batch_candidate.outputs.response_file }}
           STACK_COLLAPSE_RESPONSE: >-
@@ -1052,42 +1027,18 @@ jobs:
             --source "workflow:merge-train-runner:${phase}" \
             > "$feedback_payloads"
           feedback_count="$(jq 'length' "$feedback_payloads")"
-          if [ "$feedback_count" -gt 0 ]; then
-            oidc_token="$({
-              curl -fsSL \
-                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
-              | jq -r '.value'
-            })"
-            feedback_url="${SERVICE_ORIGIN}/v1/work-graph/merge-train/pr-feedback"
-            feedback_index=0
-            while IFS= read -r feedback_payload; do
-              feedback_index="$((feedback_index + 1))"
-              feedback_response="launchplane-manual-phase-feedback-${feedback_index}.json"
-              feedback_payload_digest="$(
-                printf '%s' "$feedback_payload" | sha256sum | cut -d' ' -f1
-              )"
-              feedback_idempotency_key="merge-train-feedback:${phase}"
-              feedback_idempotency_key="${feedback_idempotency_key}:${GITHUB_RUN_ID}"
-              feedback_idempotency_key="${feedback_idempotency_key}:${feedback_payload_digest}"
-              feedback_status="$(curl -sS \
-                -o "$feedback_response" \
-                -w '%{http_code}' \
-                -X POST \
-                -H "Authorization: Bearer ${oidc_token}" \
-                -H "Idempotency-Key: ${feedback_idempotency_key}" \
-                -H 'Content-Type: application/json' \
-                --data "$feedback_payload" \
-                "$feedback_url")"
-              if [ "$feedback_status" != "202" ]; then
-                cat "$feedback_response" >&2
-                echo "Merge-train manual phase feedback failed" \
-                  "with HTTP ${feedback_status}." >&2
-                exit 1
-              fi
-              jq . "$feedback_response"
-            done < <(jq -c '.[]' "$feedback_payloads")
+          if [ "$MERGE_TRAIN_MUTATE" != "true" ]; then
+            feedback_count=0
           fi
+          feedback_response="launchplane-merge-train-${phase}-feedback-responses.json"
+          feedback_idempotency_key_prefix="merge-train-feedback:${phase}"
+          feedback_idempotency_key_prefix="${feedback_idempotency_key_prefix}:${GITHUB_RUN_ID}"
+          {
+            echo "feedback_count=${feedback_count}"
+            echo "feedback_idempotency_key_prefix=${feedback_idempotency_key_prefix}"
+            echo "feedback_payloads=${feedback_payloads}"
+            echo "feedback_response=${feedback_response}"
+          } >> "$GITHUB_OUTPUT"
           {
             echo
             echo '## Launchplane merge train manual phase feedback'
@@ -1095,6 +1046,24 @@ jobs:
             echo "- Phase: ${phase}"
             echo "- Feedback payloads: ${feedback_count}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send manual phase PR feedback
+        if: >-
+          steps.admission.outputs.admission_status == 'admitted' &&
+          env.MERGE_TRAIN_RUNNER_MODE == 'level1' &&
+          steps.manual_phase_feedback.outputs.feedback_count != '0'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ steps.admission.outputs.service_audience }}
+          method: POST
+          route-path: /v1/work-graph/merge-train/pr-feedback
+          payload-list-file: ${{ steps.manual_phase_feedback.outputs.feedback_payloads }}
+          idempotency-key-prefix: >-
+            ${{ steps.manual_phase_feedback.outputs.feedback_idempotency_key_prefix }}
+          fail-result-paths: ""
+          response-output-file: ${{ steps.manual_phase_feedback.outputs.feedback_response }}
+          log-response-body: "false"
 
       - name: Record deferred decision
         if: steps.admission.outputs.admission_status != 'admitted'
