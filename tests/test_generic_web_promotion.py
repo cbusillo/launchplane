@@ -493,8 +493,11 @@ class GenericWebProdPromotionTests(unittest.TestCase):
     def test_execute_prod_promotion_rejects_release_tag_mismatch(self) -> None:
         store = _GenericWebPromotionStore(_profile())
         store.write_environment_inventory(_testing_inventory())
+        deploy_called = False
 
         def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+            nonlocal deploy_called
+            deploy_called = True
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -529,15 +532,17 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 side_effect=fake_github_api_request,
             ),
         ):
-            result = execute_generic_web_prod_promotion(
-                control_plane_root=Path("."),
-                record_store=store,
-                request=_request(release_tag="v0.3.0"),
-            )
+            with self.assertRaises(click.ClickException) as caught:
+                execute_generic_web_prod_promotion(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=_request(release_tag="v0.3.0"),
+                )
 
-        self.assertEqual(result.promotion_status, "pass")
-        self.assertEqual(result.release_status, "fail")
-        self.assertIn("not promoted revision", result.error_message)
+        self.assertFalse(deploy_called)
+        self.assertEqual(store.deployments, {})
+        self.assertEqual(store.promotions, {})
+        self.assertIn("not promoted revision", str(caught.exception))
 
     def test_dry_run_returns_pending_evidence_without_mutation(self) -> None:
         store = _GenericWebPromotionStore(_profile())
@@ -555,6 +560,23 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(result.destination_health_status, "pending")
         self.assertEqual(store.deployments, {})
         self.assertEqual(store.promotions, {})
+
+    def test_dry_run_defaults_artifact_and_source_from_inventory(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        store.write_environment_inventory(_testing_inventory())
+
+        result = execute_generic_web_prod_promotion(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(artifact_id="", source_git_ref="", dry_run=True),
+        )
+
+        self.assertEqual(
+            result.artifact_id,
+            "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+        )
+        self.assertEqual(result.source_git_ref, "abc123")
+        self.assertEqual(result.promotion_status, "pending")
 
     def test_request_requires_testing_to_prod(self) -> None:
         with self.assertRaises(ValidationError):

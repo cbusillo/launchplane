@@ -164,7 +164,9 @@ The `prod_promotion` action routes to the native FastAPI
 `POST /v1/drivers/generic-web/prod-promotion` endpoint. It promotes a
 generic-web testing image to prod using DB-backed product profile lanes, records
 source and destination health evidence, writes promotion/deployment linkage, and
-refreshes prod inventory after successful verified deploys. Direct browser
+refreshes prod inventory after successful verified deploys. Artifact identity
+and source revision may be omitted to use the current source-lane inventory;
+explicit values act as fail-closed inventory validation overrides. Direct browser
 sessions may only dry-run this route; live direct promotion remains a workflow
 or automation responsibility. Product-specific drivers such as VeriReel or Odoo
 can wrap this common action when they need additional gates such as backups,
