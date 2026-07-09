@@ -786,6 +786,29 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "response-output-file": frozenset(("${{ steps.request.outputs.response_file }}",)),
         "route-path": frozenset(("/v1/live-target-runtime/apply",)),
     },
+    ".github/workflows/merge-train-runner.yml": {
+        "audience": frozenset(
+            (
+                "${{ steps.admission_request.outputs.service_audience }}",
+                "${{ steps.scheduled_target_request.outputs.service_audience }}",
+            )
+        ),
+        "fail-result-paths": frozenset(('""',)),
+        "log-response-body": frozenset(('"false"',)),
+        "method": frozenset(("GET",)),
+        "response-output-file": frozenset(
+            (
+                "${{ steps.admission_request.outputs.response_file }}",
+                "${{ steps.scheduled_target_request.outputs.response_file }}",
+            )
+        ),
+        "route-path": frozenset(
+            (
+                "/v1/work-graph/merge-train/policy-targets",
+                "${{ steps.admission_request.outputs.route_path }}",
+            )
+        ),
+    },
     ".github/workflows/preview-lifecycle.yml": {
         "audience": frozenset(("${{ env.LAUNCHPLANE_AUDIENCE }}",)),
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),

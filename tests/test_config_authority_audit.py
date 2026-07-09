@@ -59,6 +59,42 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         workflow_text = Path(".github/workflows/merge-train-runner.yml").read_text(encoding="utf-8")
 
         self.assertIn("/v1/work-graph/merge-train/policy-targets", workflow_text)
+        self.assertIn("Read scheduled merge-train targets", workflow_text)
+        self.assertIn("Read merge-train admission", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main", workflow_text
+        )
+        self.assertIn(
+            "audience: ${{ steps.scheduled_target_request.outputs.service_audience }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "audience: ${{ steps.admission_request.outputs.service_audience }}", workflow_text
+        )
+        self.assertIn("method: GET", workflow_text)
+        self.assertIn("route-path: /v1/work-graph/merge-train/policy-targets", workflow_text)
+        self.assertIn(
+            "route-path: ${{ steps.admission_request.outputs.route_path }}", workflow_text
+        )
+        self.assertIn(
+            "response-output-file: ${{ steps.scheduled_target_request.outputs.response_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ steps.admission_request.outputs.response_file }}",
+            workflow_text,
+        )
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn('log-response-body: "false"', workflow_text)
+        self.assertIn("launchplane-merge-train-policy-targets.json", workflow_text)
+        self.assertIn("launchplane-merge-train-admission.json", workflow_text)
+        self.assertNotIn(
+            '"${service_origin}/v1/work-graph/merge-train/policy-targets"', workflow_text
+        )
+        self.assertNotIn(
+            '"${service_origin}/v1/work-graph/merge-train/admission?${query_string}"',
+            workflow_text,
+        )
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_REPOSITORY", workflow_text)
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH", workflow_text)
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_MUTATE", workflow_text)
@@ -2541,6 +2577,33 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 self.assertEqual(
                     _allow_reason(
                         path=".github/workflows/live-target-runtime.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("audience", "${{ steps.admission_request.outputs.service_audience }}"),
+            ("audience", "${{ steps.scheduled_target_request.outputs.service_audience }}"),
+            ("fail-result-paths", '""'),
+            ("log-response-body", '"false"'),
+            ("method", "GET"),
+            (
+                "response-output-file",
+                "${{ steps.scheduled_target_request.outputs.response_file }}",
+            ),
+            (
+                "response-output-file",
+                "${{ steps.admission_request.outputs.response_file }}",
+            ),
+            ("route-path", "/v1/work-graph/merge-train/policy-targets"),
+            ("route-path", "${{ steps.admission_request.outputs.route_path }}"),
+        ):
+            with self.subTest(merge_train_runner_get_mechanic=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/merge-train-runner.yml",
                         key=key,
                         value=value,
                     ),
