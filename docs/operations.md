@@ -237,9 +237,10 @@ grants for product-config writes. Set
 `LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS`,
 `LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS`, and
 `LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS` as comma-separated repository
-variables. During deploy, `scripts/deploy/ensure-authz-grants.sh` writes
-DB-backed GitHub-human grants for `product_config.plan` and
-`product_config.apply` through `/v1/authz-policies/github-humans/grants`.
+variables. During deploy, `scripts/deploy/ensure-authz-grants.sh` renders
+GitHub-human grant payloads for `product_config.plan` and
+`product_config.apply`; the deploy workflow submits those payloads through the
+shared `launchplane-request` action to `/v1/authz-policies/github-humans/grants`.
 Leave those variables unset to skip reconciliation; do not hard-code human
 logins or product-specific operator grants in source.
 
@@ -247,9 +248,11 @@ Product-specific GitHub Actions grants are not authored in the deploy script.
 When a temporary deploy-time bridge is needed, provide
 `LAUNCHPLANE_AUTHZ_GRANTS_JSON` as an explicit operator-controlled JSON array of
 grant requests with repository, workflow file, product, context, action, source
-label, and idempotency suffix fields. The script only submits that configured
-payload through the service; checked-in shell tuples must not become the live
-workflow grant catalog. Prefer the operator UI or service-backed authz policy
+label, optional event/ref override fields, and optional legacy idempotency suffix
+fields. The script only renders that configured payload for the deploy workflow
+to submit through the shared Launchplane request action; checked-in shell tuples
+must not become the live workflow grant catalog. Prefer the operator UI or
+service-backed authz policy
 management routes for steady-state shared and production grant changes.
 
 The deploy workflow also reconciles its own `authz_policy_grant.write` grants

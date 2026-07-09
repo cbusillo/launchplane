@@ -648,20 +648,93 @@ jobs:
           echo "Timed out waiting for Launchplane rollback image '$previous_image_reference' to become live and healthy." >&2
           exit 1
 
-      - name: Ensure product context workflow authz grants
+      - name: Render product context workflow authz grants
+        id: authz_grants
         shell: bash
         env:
-          LAUNCHPLANE_SERVICE_AUDIENCE: ${{ steps.service.outputs.service_audience }}
-          LAUNCHPLANE_SERVICE_URL: ${{ steps.service.outputs.service_url }}
           LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON: >-
             ${{ vars.LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON }}
           LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON: >-
             ${{ vars.LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON }}
+          LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON: >-
+            ${{ vars.LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON }}
           LAUNCHPLANE_AUTHZ_GRANTS_JSON: >-
             ${{ vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON }}
           LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON: >-
             ${{ vars.LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON }}
         run: bash scripts/deploy/ensure-authz-grants.sh
+
+      - name: Ensure GitHub Actions authz grants
+        if: steps.authz_grants.outputs.has_github_actions_grants == 'true'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/authz-policies/github-actions/grants
+          payload-list-file: ${{ steps.authz_grants.outputs.github_actions_grants_file }}
+          idempotency-key-prefix: launchplane-authz-grant:${{ github.sha }}
+          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/github-actions-grants-responses.json
+          log-response-body: "false"
+
+      - name: Ensure terminal-agent authz grants
+        if: steps.authz_grants.outputs.has_terminal_agents_grants == 'true'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/authz-policies/terminal-agents/grants
+          payload-list-file: ${{ steps.authz_grants.outputs.terminal_agents_grants_file }}
+          idempotency-key-prefix: launchplane-terminal-agent-authz-grant:${{ github.sha }}
+          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/terminal-agents-grants-responses.json
+          log-response-body: "false"
+
+      - name: Ensure local-operator authz grants
+        if: steps.authz_grants.outputs.has_local_operators_grants == 'true'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/authz-policies/local-operators/grants
+          payload-list-file: ${{ steps.authz_grants.outputs.local_operators_grants_file }}
+          idempotency-key-prefix: launchplane-local-operator-authz-grant:${{ github.sha }}
+          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/local-operators-grants-responses.json
+          log-response-body: "false"
+
+      - name: Ensure local-admin authz grants
+        if: steps.authz_grants.outputs.has_local_admins_grants == 'true'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/authz-policies/local-admins/grants
+          payload-list-file: ${{ steps.authz_grants.outputs.local_admins_grants_file }}
+          idempotency-key-prefix: launchplane-local-admin-authz-grant:${{ github.sha }}
+          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/local-admins-grants-responses.json
+          log-response-body: "false"
+
+      - name: Ensure GitHub human authz grants
+        if: steps.authz_grants.outputs.has_github_humans_grants == 'true'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/authz-policies/github-humans/grants
+          payload-list-file: ${{ steps.authz_grants.outputs.github_humans_grants_file }}
+          idempotency-key-prefix: launchplane-product-config-human-grant:${{ github.sha }}
+          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/github-humans-grants-responses.json
+          log-response-body: "false"
+
+      - name: Ensure runtime key-safety policy
+        if: steps.authz_grants.outputs.has_runtime_key_safety_policy == 'true'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/runtime-key-safety/policies/apply
+          payload-file: ${{ steps.authz_grants.outputs.runtime_key_safety_policy_file }}
+          idempotency-key: ${{ steps.authz_grants.outputs.runtime_key_safety_idempotency_key }}
+          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/runtime-key-safety-policy-response.json
+          log-response-body: "false"
 
       - name: Capture v2 deployed smoke evidence
         shell: bash

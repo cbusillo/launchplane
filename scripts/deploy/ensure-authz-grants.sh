@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?Missing GitHub Actions OIDC request token.}"
-: "${ACTIONS_ID_TOKEN_REQUEST_URL:?Missing GitHub Actions OIDC request URL.}"
 : "${GITHUB_REPOSITORY:?Missing GitHub repository.}"
 : "${GITHUB_SHA:?Missing GitHub SHA.}"
-: "${LAUNCHPLANE_SERVICE_AUDIENCE:?Missing Launchplane service audience.}"
-: "${LAUNCHPLANE_SERVICE_URL:?Missing Launchplane service URL.}"
 
-oidc_token="$({
-	curl -fsSL \
-		-H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-		"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" |
-		jq -r '.value'
-})"
+authz_grants_output_dir="${LAUNCHPLANE_AUTHZ_GRANTS_OUTPUT_DIR:-${RUNNER_TEMP:-.}/launchplane-authz-grants}"
+github_actions_grants_file="${authz_grants_output_dir}/github-actions-grants.json"
+terminal_agents_grants_file="${authz_grants_output_dir}/terminal-agents-grants.json"
+local_operators_grants_file="${authz_grants_output_dir}/local-operators-grants.json"
+local_admins_grants_file="${authz_grants_output_dir}/local-admins-grants.json"
+github_humans_grants_file="${authz_grants_output_dir}/github-humans-grants.json"
+runtime_key_safety_policy_file="${authz_grants_output_dir}/runtime-key-safety-policy.json"
+runtime_key_safety_idempotency_key=""
+
+mkdir -p "$authz_grants_output_dir"
+printf '[]\n' >"$github_actions_grants_file"
+printf '[]\n' >"$terminal_agents_grants_file"
+printf '[]\n' >"$local_operators_grants_file"
+printf '[]\n' >"$local_admins_grants_file"
+printf '[]\n' >"$github_humans_grants_file"
+rm -f "$runtime_key_safety_policy_file"
 
 require_non_empty() {
 	local value="$1"
@@ -47,30 +53,57 @@ sha256_stdin() {
 	fi
 }
 
-post_payload() {
+append_payload() {
+	local payload_file="$1"
+	local request_payload="$2"
+	local temporary_file
+
+	temporary_file="$(mktemp)"
+	jq --argjson request_payload "$request_payload" '. + [$request_payload]' \
+		"$payload_file" >"$temporary_file"
+	mv "$temporary_file" "$payload_file"
+}
+
+write_output() {
+	local output_name="$1"
+	local output_value="$2"
+
+	if [ -n "${GITHUB_OUTPUT:-}" ]; then
+		printf '%s=%s\n' "$output_name" "$output_value" >>"$GITHUB_OUTPUT"
+	fi
+}
+
+write_payload() {
 	local route_path="$1"
 	local idempotency_key="$2"
 	local request_payload="$3"
-	local failure_message="$4"
-	local response_file status_code
+	local _failure_message="${4:-}"
 
-	response_file="$(mktemp)"
-	status_code="$(curl -sS \
-		-o "$response_file" \
-		-w '%{http_code}' \
-		-X POST \
-		-H "Authorization: Bearer ${oidc_token}" \
-		-H 'Content-Type: application/json' \
-		-H "Idempotency-Key: ${idempotency_key}" \
-		--data "$request_payload" \
-		"${LAUNCHPLANE_SERVICE_URL}${route_path}")"
-	if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
-		cat "$response_file"
-		return 0
-	fi
-	cat "$response_file" >&2
-	echo "${failure_message} HTTP ${status_code}." >&2
-	return 1
+	case "$route_path" in
+		/v1/authz-policies/github-actions/grants)
+			append_payload "$github_actions_grants_file" "$request_payload"
+			;;
+		/v1/authz-policies/terminal-agents/grants)
+			append_payload "$terminal_agents_grants_file" "$request_payload"
+			;;
+		/v1/authz-policies/local-operators/grants)
+			append_payload "$local_operators_grants_file" "$request_payload"
+			;;
+		/v1/authz-policies/local-admins/grants)
+			append_payload "$local_admins_grants_file" "$request_payload"
+			;;
+		/v1/authz-policies/github-humans/grants)
+			append_payload "$github_humans_grants_file" "$request_payload"
+			;;
+		/v1/runtime-key-safety/policies/apply)
+			printf '%s\n' "$request_payload" >"$runtime_key_safety_policy_file"
+			runtime_key_safety_idempotency_key="$idempotency_key"
+			;;
+		*)
+			echo "Unsupported Launchplane authz payload route ${route_path}." >&2
+			return 1
+			;;
+	esac
 }
 
 post_grant() {
@@ -114,7 +147,7 @@ post_grant() {
         }
       }'
 	})"
-	post_payload \
+	write_payload \
 		/v1/authz-policies/github-actions/grants \
 		"launchplane-authz-grant:${idempotency_suffix}:${GITHUB_SHA}" \
 		"$request_payload" \
@@ -158,7 +191,7 @@ post_terminal_agent_grant() {
         }
       }'
 	})"
-	post_payload \
+	write_payload \
 		/v1/authz-policies/terminal-agents/grants \
 		"launchplane-terminal-agent-authz-grant:${idempotency_suffix}:${GITHUB_SHA}" \
 		"$request_payload" \
@@ -217,7 +250,7 @@ post_local_owner_grant() {
         }
       }'
 	})"
-	post_payload \
+	write_payload \
 		"$route_path" \
 		"launchplane-${principal}-authz-grant:${idempotency_suffix}:${GITHUB_SHA}" \
 		"$request_payload" \
@@ -395,7 +428,7 @@ post_product_config_human_grant() {
         }
       }'
 	})"
-	post_payload \
+	write_payload \
 		/v1/authz-policies/github-humans/grants \
 		"launchplane-product-config-human-grant:${idempotency_suffix}:${GITHUB_SHA}" \
 		"$request_payload" \
@@ -417,7 +450,7 @@ configured_github_action_grants_json() {
         context: (.context // ""),
         action: (.action // ""),
         source_label: (.source_label // ""),
-        idempotency_suffix: (.idempotency_suffix // ""),
+        idempotency_suffix: (.idempotency_suffix // .source_label // ""),
         event_name: (.event_name // "workflow_dispatch"),
         workflow_ref_suffix: (.workflow_ref_suffix // "refs/heads/main"),
         job_workflow_ref: (.job_workflow_ref // "")
@@ -456,7 +489,6 @@ post_configured_github_action_grants() {
 		require_non_empty "$context_name" context
 		require_non_empty "$action_name" action
 		require_non_empty "$source_label" source_label
-		require_non_empty "$idempotency_suffix" idempotency_suffix
 		require_non_empty "$event_name" event_name
 		require_non_empty "$workflow_ref_suffix" workflow_ref_suffix
 
@@ -541,7 +573,7 @@ post_runtime_key_safety_rules() {
       }'
 	})"
 	payload_sha256="$(printf '%s' "$request_payload" | sha256_stdin)"
-	post_payload \
+	write_payload \
 		/v1/runtime-key-safety/policies/apply \
 		"launchplane-runtime-key-safety-rules:${GITHUB_SHA}:${payload_sha256}" \
 		"$request_payload" \
@@ -831,3 +863,31 @@ post_product_config_human_grant \
 	product-config-human-apply
 post_configured_github_action_grants
 post_runtime_key_safety_rules
+
+github_actions_grant_count="$(jq 'length' "$github_actions_grants_file")"
+terminal_agents_grant_count="$(jq 'length' "$terminal_agents_grants_file")"
+local_operators_grant_count="$(jq 'length' "$local_operators_grants_file")"
+local_admins_grant_count="$(jq 'length' "$local_admins_grants_file")"
+github_humans_grant_count="$(jq 'length' "$github_humans_grants_file")"
+
+write_output authz_grants_output_dir "$authz_grants_output_dir"
+write_output github_actions_grants_file "$github_actions_grants_file"
+write_output github_actions_grant_count "$github_actions_grant_count"
+write_output has_github_actions_grants "$([ "$github_actions_grant_count" -gt 0 ] && echo true || echo false)"
+write_output terminal_agents_grants_file "$terminal_agents_grants_file"
+write_output terminal_agents_grant_count "$terminal_agents_grant_count"
+write_output has_terminal_agents_grants "$([ "$terminal_agents_grant_count" -gt 0 ] && echo true || echo false)"
+write_output local_operators_grants_file "$local_operators_grants_file"
+write_output local_operators_grant_count "$local_operators_grant_count"
+write_output has_local_operators_grants "$([ "$local_operators_grant_count" -gt 0 ] && echo true || echo false)"
+write_output local_admins_grants_file "$local_admins_grants_file"
+write_output local_admins_grant_count "$local_admins_grant_count"
+write_output has_local_admins_grants "$([ "$local_admins_grant_count" -gt 0 ] && echo true || echo false)"
+write_output github_humans_grants_file "$github_humans_grants_file"
+write_output github_humans_grant_count "$github_humans_grant_count"
+write_output has_github_humans_grants "$([ "$github_humans_grant_count" -gt 0 ] && echo true || echo false)"
+write_output runtime_key_safety_policy_file "$runtime_key_safety_policy_file"
+write_output runtime_key_safety_idempotency_key "$runtime_key_safety_idempotency_key"
+write_output has_runtime_key_safety_policy "$([ -f "$runtime_key_safety_policy_file" ] && echo true || echo false)"
+
+echo "Rendered Launchplane authz grant payloads: github-actions=${github_actions_grant_count} terminal-agents=${terminal_agents_grant_count} local-operators=${local_operators_grant_count} local-admins=${local_admins_grant_count} github-humans=${github_humans_grant_count} runtime-key-safety=$([ -f "$runtime_key_safety_policy_file" ] && echo 1 || echo 0)."
