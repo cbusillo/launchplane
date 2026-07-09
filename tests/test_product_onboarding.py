@@ -1916,6 +1916,56 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("Authorization: Bearer", deployed_smoke_step)
         self.assertNotIn('--data-urlencode "audience=', deployed_smoke_step)
 
+    def test_deploy_workflow_requests_self_deploy_through_shared_request(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+
+        self.assertIn("Read previous Launchplane runtime", workflow_text)
+        self.assertIn("id: previous_runtime", workflow_text)
+        self.assertIn("Render Launchplane self deploy request", workflow_text)
+        self.assertIn("id: self_deploy", workflow_text)
+        self.assertIn("Request Launchplane self deploy", workflow_text)
+        self.assertIn("id: self_deploy_request", workflow_text)
+        self.assertIn("continue-on-error: true", workflow_text)
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-previous-runtime.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-file: ${{ steps.self_deploy.outputs.payload_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "idempotency-key: launchplane-self-deploy:${{ "
+            "steps.image.outputs.image_reference }}:${{ github.run_id }}:${{ "
+            "github.run_attempt }}:db-authz",
+            workflow_text,
+        )
+        self.assertIn('expected-status: "200,202"', workflow_text)
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn('timeout-ms: "30000"', workflow_text)
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-self-deploy-response.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "SELF_DEPLOY_STATUS: ${{ steps.self_deploy_request.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "SELF_DEPLOY_OUTCOME: ${{ steps.self_deploy_request.outcome }}",
+            workflow_text,
+        )
+        self.assertIn("status_code=\"action_failed\"", workflow_text)
+        self.assertIn("Launchplane self deploy request failed with HTTP", workflow_text)
+
+        self_deploy_block = workflow_text.split(
+            "- name: Read previous Launchplane runtime", 1
+        )[1].split("- name: Wait for deployed Launchplane image", 1)[0]
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", self_deploy_block)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", self_deploy_block)
+        self.assertNotIn("Authorization: Bearer", self_deploy_block)
+        self.assertNotIn("curl ", self_deploy_block)
+
     def test_deploy_workflow_requests_rollback_through_shared_request(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
 

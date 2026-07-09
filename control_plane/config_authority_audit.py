@@ -747,6 +747,8 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "fail-result-paths": frozenset(('""',)),
         "idempotency-key": frozenset(
             (
+                "launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ "
+                "github.run_id }}:${{ github.run_attempt }}:db-authz",
                 "launchplane-self-deploy-rollback:${{ "
                 "steps.rollback_request.outputs.previous_image_reference }}:${{ "
                 "github.run_id }}:${{ github.run_attempt }}",
@@ -754,10 +756,17 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         ),
         "log-response-body": frozenset(('"false"',)),
         "method": frozenset(("GET",)),
-        "payload-file": frozenset(("${{ steps.rollback_request.outputs.payload_file }}",)),
+        "payload-file": frozenset(
+            (
+                "${{ steps.self_deploy.outputs.payload_file }}",
+                "${{ steps.rollback_request.outputs.payload_file }}",
+            )
+        ),
         "response-output-file": frozenset(
             (
+                "${{ runner.temp }}/launchplane-previous-runtime.json",
                 "${{ runner.temp }}/launchplane-runtime-smoke.json",
+                "${{ runner.temp }}/launchplane-self-deploy-response.json",
                 "${{ runner.temp }}/launchplane-self-deploy-rollback-response.json",
             )
         ),
