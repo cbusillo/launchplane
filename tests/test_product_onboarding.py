@@ -1916,6 +1916,58 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("Authorization: Bearer", deployed_smoke_step)
         self.assertNotIn('--data-urlencode "audience=', deployed_smoke_step)
 
+    def test_deploy_workflow_requests_rollback_through_shared_request(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+
+        self.assertIn("Render Launchplane rollback request", workflow_text)
+        self.assertIn("id: rollback_request", workflow_text)
+        self.assertIn("Request Launchplane rollback through service", workflow_text)
+        self.assertIn("id: rollback_request_action", workflow_text)
+        self.assertIn("continue-on-error: true", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("route-path: /v1/drivers/launchplane/self-deploy", workflow_text)
+        self.assertIn(
+            "payload-file: ${{ steps.rollback_request.outputs.payload_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "idempotency-key: launchplane-self-deploy-rollback:${{ "
+            "steps.rollback_request.outputs.previous_image_reference }}:${{ "
+            "github.run_id }}:${{ github.run_attempt }}",
+            workflow_text,
+        )
+        self.assertIn('expected-status: "200,202"', workflow_text)
+        self.assertIn('fail-result-paths: ""', workflow_text)
+        self.assertIn('timeout-ms: "30000"', workflow_text)
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-self-deploy-rollback-response.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "ROLLBACK_STATUS: ${{ steps.rollback_request_action.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "ROLLBACK_OUTCOME: ${{ steps.rollback_request_action.outcome }}",
+            workflow_text,
+        )
+        self.assertIn("rollback_status=\"action_failed\"", workflow_text)
+        self.assertIn("Launchplane rollback failed", workflow_text)
+        self.assertIn("Launchplane rollback requested", workflow_text)
+        self.assertIn("Launchplane rollback timed out", workflow_text)
+        self.assertIn("Rollback request response summary", workflow_text)
+
+        rollback_request_block = workflow_text.split(
+            "- name: Render Launchplane rollback request", 1
+        )[1].split("- name: Wait for Launchplane rollback image", 1)[0]
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", rollback_request_block)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", rollback_request_block)
+        self.assertNotIn("Authorization: Bearer", rollback_request_block)
+        self.assertNotIn("curl ", rollback_request_block)
+
     def test_product_onboarding_workflow_calls_service_route_with_apply_guard(self) -> None:
         workflow_text = Path(".github/workflows/product-onboarding.yml").read_text(encoding="utf-8")
 

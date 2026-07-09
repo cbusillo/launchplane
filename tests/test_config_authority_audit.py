@@ -2931,12 +2931,26 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         for key, value in (
             ("audience", "${{ steps.service.outputs.service_audience }}"),
             ("expected-status", '"200"'),
+            ("expected-status", '"200,202"'),
+            ("fail-result-paths", '""'),
+            (
+                "idempotency-key",
+                "launchplane-self-deploy-rollback:${{ "
+                "steps.rollback_request.outputs.previous_image_reference }}:${{ "
+                "github.run_id }}:${{ github.run_attempt }}",
+            ),
             ("method", "GET"),
+            ("payload-file", "${{ steps.rollback_request.outputs.payload_file }}"),
             ("response-output-file", "${{ runner.temp }}/launchplane-runtime-smoke.json"),
+            (
+                "response-output-file",
+                "${{ runner.temp }}/launchplane-self-deploy-rollback-response.json",
+            ),
             ("route-path", "/v1/service/runtime"),
+            ("route-path", "/v1/drivers/launchplane/self-deploy"),
             ("timeout-ms", '"30000"'),
         ):
-            with self.subTest(deploy_runtime_smoke_mechanic=key):
+            with self.subTest(deploy_workflow_thin_connector_mechanic=key):
                 self.assertEqual(
                     _allow_reason(
                         path=".github/workflows/deploy-launchplane.yml",
