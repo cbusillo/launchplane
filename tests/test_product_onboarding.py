@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import textwrap
 from tempfile import TemporaryDirectory
 from typing import Callable, cast
 import unittest
@@ -1713,9 +1714,9 @@ class ProductOnboardingTests(unittest.TestCase):
             "Missing LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK variable",
             workflow_text,
         )
+        self.assertIn('if $compose_external_network != "" then', workflow_text)
         self.assertIn(
-            'if $compose_external_network != "" then\n'
-            "                      {LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: $compose_external_network}",
+            "{LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: $compose_external_network}",
             workflow_text,
         )
         self.assertNotIn("omit_compose_external_network_env", workflow_text)
@@ -1756,9 +1757,16 @@ class ProductOnboardingTests(unittest.TestCase):
         )
 
         removals_block = workflow_text.split("service_env_removals_json=", 1)[1].split(
-            '            })"', 1
+            '          })"', 1
         )[0]
-        jq_filter = removals_block.split("                '", 1)[1].rsplit("'", 1)[0]
+        removal_lines = removals_block.splitlines()
+        start = next(index for index, line in enumerate(removal_lines) if line.strip() == "'(")
+        end = next(
+            index for index, line in enumerate(removal_lines[start + 1 :], start + 1) if line.strip() == ")'"
+        )
+        removal_lines[start] = removal_lines[start].split("'", 1)[1]
+        removal_lines[end] = removal_lines[end].rsplit("'", 1)[0]
+        jq_filter = textwrap.dedent("\n".join(removal_lines[start : end + 1]))
         self.assertIn("$public_ingress_github_token", jq_filter)
         self.assertIn("LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN", jq_filter)
 
