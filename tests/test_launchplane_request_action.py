@@ -125,6 +125,40 @@ process.on('beforeExit', () => {{
             self.assertEqual(json.loads(calls[1]["body"])["product"], "sellyouroutboard")
             self.assertIn("application_id<<", output_path.read_text(encoding="utf-8"))
 
+    def test_get_request_omits_payload_and_idempotency_header(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            response_output_path = Path(temporary_directory) / "response.json"
+            output_path = Path(temporary_directory) / "github-output.txt"
+            result = self.run_action(
+                output_path=output_path,
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/service/runtime",
+                    "method": "GET",
+                    "response-output-file": str(response_output_path),
+                    "log-response-body": "false",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = json.loads(result.stderr.strip().splitlines()[-1])
+            self.assertEqual(calls[1]["method"], "GET")
+            self.assertEqual(
+                calls[1]["url"],
+                "https://launchplane.example/v1/service/runtime",
+            )
+            self.assertEqual(calls[1]["headers"]["Authorization"], "Bearer oidc-token-1")
+            self.assertNotIn("Idempotency-Key", calls[1]["headers"])
+            self.assertNotIn("Content-Type", calls[1]["headers"])
+            self.assertEqual(calls[1]["body"], "")
+            self.assertIn("status-code<<", output_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                json.loads(response_output_path.read_text(encoding="utf-8"))["result"][
+                    "refresh_status"
+                ],
+                "pass",
+            )
+
     def test_accepts_configured_non_2xx_status(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             response_output_path = Path(temporary_directory) / "response.json"

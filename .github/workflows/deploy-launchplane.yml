@@ -736,12 +736,28 @@ jobs:
           response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/runtime-key-safety-policy-response.json
           log-response-body: "false"
 
+      - name: Read deployed Launchplane runtime
+        id: deployed_runtime
+        continue-on-error: true
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/runtime
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          response-output-file: ${{ runner.temp }}/launchplane-runtime-smoke.json
+          log-response-body: "false"
+
       - name: Capture v2 deployed smoke evidence
         shell: bash
         env:
           DEPLOYED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
-          LAUNCHPLANE_SERVICE_AUDIENCE: ${{ steps.service.outputs.service_audience }}
           LAUNCHPLANE_SERVICE_URL: ${{ steps.service.outputs.service_url }}
+          RUNTIME_RESPONSE_FILE: ${{ runner.temp }}/launchplane-runtime-smoke.json
+          RUNTIME_STATUS_CODE: ${{ steps.deployed_runtime.outputs.status-code }}
+          RUNTIME_OUTCOME: ${{ steps.deployed_runtime.outcome }}
         run: |
           set -euo pipefail
 
@@ -809,22 +825,12 @@ jobs:
           fi
           rm -f "$health_response_file"
 
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              -G \
-              --data-urlencode "audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL" \
-            | jq -r '.value'
-          })"
-          runtime_response_file="$(mktemp)"
-          runtime_status_code="$(curl -sS \
-            -o "$runtime_response_file" \
-            -w '%{http_code}' \
-            -H "Authorization: Bearer ${oidc_token}" \
-            "${LAUNCHPLANE_SERVICE_URL}/v1/service/runtime")"
-          actual_image_reference="$(jq -r '.runtime.docker_image_reference // empty' "$runtime_response_file" 2>/dev/null || true)"
-          runtime_trace_id="$(jq -r '.trace_id // empty' "$runtime_response_file" 2>/dev/null || true)"
+          runtime_status_code="$RUNTIME_STATUS_CODE"
+          if [ -z "$runtime_status_code" ]; then
+            runtime_status_code="action_failed"
+          fi
+          actual_image_reference="$(jq -r '.runtime.docker_image_reference // empty' "$RUNTIME_RESPONSE_FILE" 2>/dev/null || true)"
+          runtime_trace_id="$(jq -r '.trace_id // empty' "$RUNTIME_RESPONSE_FILE" 2>/dev/null || true)"
           append_result \
             "/v1/service/runtime" \
             "GET" \
@@ -834,12 +840,13 @@ jobs:
             "$runtime_trace_id" \
             "200 matching image" \
             "$([ "$runtime_status_code" = "200" ] && [ "$actual_image_reference" = "$DEPLOYED_IMAGE_REFERENCE" ] && echo true || echo false)"
-          if [ "$runtime_status_code" != "200" ] || [ "$actual_image_reference" != "$DEPLOYED_IMAGE_REFERENCE" ]; then
-            jq '{status, trace_id, error, runtime: {docker_image_reference: .runtime.docker_image_reference}}' "$runtime_response_file" >&2 || cat "$runtime_response_file" >&2
+          if [ "${RUNTIME_OUTCOME:-failure}" != "success" ] \
+            || [ "$runtime_status_code" != "200" ] \
+            || [ "$actual_image_reference" != "$DEPLOYED_IMAGE_REFERENCE" ]; then
+            jq '{status, trace_id, error, runtime: {docker_image_reference: .runtime.docker_image_reference}}' "$RUNTIME_RESPONSE_FILE" >&2 || cat "$RUNTIME_RESPONSE_FILE" >&2 || true
             echo "Launchplane runtime smoke failed." >&2
             exit 1
           fi
-          rm -f "$runtime_response_file"
 
           openapi_response_file="$(mktemp)"
           openapi_status_code="$(curl -sS \

@@ -1882,6 +1882,40 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("Authorization: Bearer", script_text)
         self.assertNotIn("curl ", script_text)
 
+    def test_deploy_workflow_reads_deployed_runtime_through_shared_request(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+
+        self.assertIn("Read deployed Launchplane runtime", workflow_text)
+        self.assertIn("id: deployed_runtime", workflow_text)
+        self.assertIn("continue-on-error: true", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            workflow_text,
+        )
+        self.assertIn("route-path: /v1/service/runtime", workflow_text)
+        self.assertIn("method: GET", workflow_text)
+        self.assertIn('expected-status: "200"', workflow_text)
+        self.assertIn('timeout-ms: "30000"', workflow_text)
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-runtime-smoke.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "RUNTIME_STATUS_CODE: ${{ steps.deployed_runtime.outputs.status-code }}",
+            workflow_text,
+        )
+        self.assertIn("RUNTIME_OUTCOME: ${{ steps.deployed_runtime.outcome }}", workflow_text)
+        self.assertIn("runtime_status_code=\"action_failed\"", workflow_text)
+        self.assertIn("Launchplane runtime smoke failed.", workflow_text)
+
+        deployed_smoke_step = workflow_text.split(
+            "- name: Capture v2 deployed smoke evidence", 1
+        )[1].split("- name: Upload v2 deployed smoke evidence", 1)[0]
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", deployed_smoke_step)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", deployed_smoke_step)
+        self.assertNotIn("Authorization: Bearer", deployed_smoke_step)
+        self.assertNotIn('--data-urlencode "audience=', deployed_smoke_step)
+
     def test_product_onboarding_workflow_calls_service_route_with_apply_guard(self) -> None:
         workflow_text = Path(".github/workflows/product-onboarding.yml").read_text(encoding="utf-8")
 
