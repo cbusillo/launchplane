@@ -138,6 +138,8 @@ _LAUNCHPLANE_ALLOWED_LINE_PATTERNS = (
     re.compile(r"LAUNCHPLANE_RUNTIME_IDENTITY_JSON"),
 )
 
+_YAML_NAME_LINE_PATTERN = re.compile(r"^\s*(?:-\s*)?name:\s*", re.IGNORECASE)
+
 _RULES: tuple[_Rule, ...] = (
     _Rule(
         rule_id="repo-local-oidc-client",
@@ -152,11 +154,12 @@ _RULES: tuple[_Rule, ...] = (
         rule_id="repo-local-launchplane-http-client",
         message="Repo-local Launchplane HTTP clients duplicate the shared request boundary.",
         pattern=re.compile(
-            r"\b(fetch|axios|requests\.(?:get|post|put|patch|delete)|urlopen|curl)\b.*\blaunchplane\b",
+            r"\b(fetch|axios|requests\.(?:request|get|post|put|patch|delete)|urlopen|curl)\b"
+            r".*\blaunchplane[\w-]*",
             re.IGNORECASE,
         ),
         families=("tenant", "image", "shared_addons", "devkit", "retired"),
-        allowed_line_patterns=_LAUNCHPLANE_ALLOWED_LINE_PATTERNS,
+        allowed_line_patterns=(*_LAUNCHPLANE_ALLOWED_LINE_PATTERNS, _YAML_NAME_LINE_PATTERN),
     ),
     _Rule(
         rule_id="tenant-provider-mutation",

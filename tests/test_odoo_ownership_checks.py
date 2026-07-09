@@ -70,6 +70,60 @@ jobs:
         self.assertEqual(result.status, "fail")
         self.assertEqual(result.findings[0].rule_id, "repo-local-oidc-client")
 
+    def test_rejects_repo_local_launchplane_http_client(self) -> None:
+        clients = (
+            "const response = await fetch(launchplaneUrl);\n",
+            "const response = await axios(launchplaneUrl, {method: 'GET'});\n",
+            "const response = await axios.request({url: launchplaneUrl});\n",
+            "response = requests.get(launchplane_url)\n",
+            "response = requests.request('GET', launchplane_url)\n",
+            "response = urlopen(launchplane_url)\n",
+            'subprocess.run(["curl", launchplane_url])\n',
+            "curl https://launchplane.example/v1/service/runtime\n",
+        )
+        for client in clients:
+            with self.subTest(client=client), TemporaryDirectory() as workspace:
+                workspace_root = Path(workspace)
+                script = workspace_root / "odoo-tenant-cm" / "scripts" / "launchplane-client.mjs"
+                script.parent.mkdir(parents=True)
+                script.write_text(client, encoding="utf-8")
+
+                result = scan_odoo_ownership_boundaries(
+                    workspace_root=workspace_root,
+                    repo_policies=(OdooOwnershipRepoPolicy("odoo-tenant-cm", "tenant"),),
+                )
+
+            self.assertEqual(result.status, "fail")
+            self.assertEqual(result.findings[0].rule_id, "repo-local-launchplane-http-client")
+
+    def test_allows_shared_request_action_with_descriptive_fetch_step_name(self) -> None:
+        with TemporaryDirectory() as workspace:
+            workspace_root = Path(workspace)
+            workflow = (
+                workspace_root / "odoo-tenant-cm" / ".github" / "workflows" / "cleanup-ghcr.yml"
+            )
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                """
+jobs:
+  cleanup:
+    steps:
+      - name: Fetch Launchplane protected artifact inventory
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+      - name: Curl Launchplane protected artifact inventory
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            result = scan_odoo_ownership_boundaries(
+                workspace_root=workspace_root,
+                repo_policies=(OdooOwnershipRepoPolicy("odoo-tenant-cm", "tenant"),),
+            )
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.findings, ())
+
     def test_rejects_tenant_provider_mutation(self) -> None:
         with TemporaryDirectory() as workspace:
             workspace_root = Path(workspace)

@@ -132,6 +132,7 @@
     "cbusillo/odoo-docker",
     "cbusillo/odoo-shared-addons",
     "cbusillo/odoo-tenant-cm",
+    "cbusillo/odoo-tenant-cm-website",
     "cbusillo/odoo-tenant-opw",
     "cbusillo/disable_odoo_online"
   ],
