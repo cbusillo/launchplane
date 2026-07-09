@@ -2935,13 +2935,24 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("fail-result-paths", '""'),
             (
                 "idempotency-key",
+                "launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ "
+                "github.run_id }}:${{ github.run_attempt }}:db-authz",
+            ),
+            (
+                "idempotency-key",
                 "launchplane-self-deploy-rollback:${{ "
                 "steps.rollback_request.outputs.previous_image_reference }}:${{ "
                 "github.run_id }}:${{ github.run_attempt }}",
             ),
             ("method", "GET"),
+            ("payload-file", "${{ steps.self_deploy.outputs.payload_file }}"),
             ("payload-file", "${{ steps.rollback_request.outputs.payload_file }}"),
+            ("response-output-file", "${{ runner.temp }}/launchplane-previous-runtime.json"),
             ("response-output-file", "${{ runner.temp }}/launchplane-runtime-smoke.json"),
+            (
+                "response-output-file",
+                "${{ runner.temp }}/launchplane-self-deploy-response.json",
+            ),
             (
                 "response-output-file",
                 "${{ runner.temp }}/launchplane-self-deploy-rollback-response.json",

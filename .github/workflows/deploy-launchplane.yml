@@ -247,226 +247,244 @@ jobs:
           fi
           echo "image_reference=$image_reference" >> "$GITHUB_OUTPUT"
 
-      - name: Request Launchplane self deploy
+      - name: Read previous Launchplane runtime
+        id: previous_runtime
+        continue-on-error: true
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/runtime
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          response-output-file: ${{ runner.temp }}/launchplane-previous-runtime.json
+          log-response-body: "false"
+
+      - name: Render Launchplane self deploy request
         id: self_deploy
         shell: bash
+        env:
+          PREVIOUS_RUNTIME_RESPONSE_FILE: ${{ runner.temp }}/launchplane-previous-runtime.json
         run: |
           set -euo pipefail
 
-          request_deploy() {
-            local response_file="$1"
-            local request_payload=""
-            local idempotency_key=""
-            local service_env_json=""
-            local oidc_token=""
+          previous_image_reference="$(jq -r '.runtime.docker_image_reference // empty' "$PREVIOUS_RUNTIME_RESPONSE_FILE" 2>/dev/null || true)"
+          echo "previous_image_reference=$previous_image_reference" >> "$GITHUB_OUTPUT"
 
-            oidc_token="$({
-              curl -fsSL \
-                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
-              | jq -r '.value'
-            })"
-
-            previous_runtime_payload="$(curl -fsSL \
-              -H "Authorization: Bearer ${oidc_token}" \
-              "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
-            previous_image_reference="$(printf '%s' "$previous_runtime_payload" | jq -r '.runtime.docker_image_reference // empty' 2>/dev/null || true)"
-            echo "previous_image_reference=$previous_image_reference" >> "$GITHUB_OUTPUT"
-
-            service_env_json="$({
-              jq -n \
-                --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
-                --arg github_client_secret "${LAUNCHPLANE_GITHUB_CLIENT_SECRET:-}" \
-                --arg public_url "${LAUNCHPLANE_PUBLIC_URL:-}" \
-                --arg session_secret "${LAUNCHPLANE_SESSION_SECRET:-}" \
-                --arg cookie_secure "${LAUNCHPLANE_COOKIE_SECURE:-}" \
-                --arg bootstrap_admin_emails "${LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS:-}" \
-                --arg work_graph_project_owner "${LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER:-}" \
-                --arg work_graph_project_number "${LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER:-}" \
-                --arg work_graph_project_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT:-}" \
-                --arg work_graph_project_signal_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT:-}" \
-                --arg work_graph_issue_inbox_repositories "${LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES:-}" \
-                --arg work_graph_issue_inbox_limit "${LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT:-}" \
-                --arg work_graph_gh_binary "${LAUNCHPLANE_WORK_GRAPH_GH_BINARY:-}" \
-                --arg work_graph_gh_token "${LAUNCHPLANE_WORK_GRAPH_GH_TOKEN:-}" \
-                --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
-                --arg enable_every_code_runtime_secrets "${LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS:-}" \
-                --arg every_code_worker_token "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" \
-                --arg every_code_webhook_secret "${LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET:-}" \
-                --arg every_code_github_token "${LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN:-}" \
-                --arg every_code_github_actor "${LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR:-}" \
-                --arg terminal_agent_read_token "${LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN:-}" \
-                --arg terminal_agent_subject "${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-}" \
-                --arg terminal_agent_token_label "${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-}" \
-                --arg local_operator_token "${LAUNCHPLANE_LOCAL_OPERATOR_TOKEN:-}" \
-                --arg local_operator_subject "${LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT:-}" \
-                --arg local_operator_token_label "${LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL:-}" \
-                --arg local_admin_token "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN:-}" \
-                --arg local_admin_subject "${LAUNCHPLANE_LOCAL_ADMIN_SUBJECT:-}" \
-                --arg local_admin_token_label "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL:-}" \
-                --arg compose_external_network "${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK:-}" \
-                --arg npmplus_base_url "${LAUNCHPLANE_NPMPLUS_BASE_URL:-}" \
-                --arg npmplus_identity "${LAUNCHPLANE_NPMPLUS_IDENTITY:-}" \
-                --arg npmplus_secret "${LAUNCHPLANE_NPMPLUS_SECRET:-}" \
-                --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
-                --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env || false }}' \
-                --argjson omit_owner_agent_env '${{ inputs.omit_owner_agent_env || false }}' \
-                --argjson omit_npmplus_env '${{ inputs.omit_npmplus_env || false }}' \
-                '(
-                  {
-                  LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
-                  LAUNCHPLANE_GITHUB_CLIENT_SECRET: $github_client_secret,
-                  LAUNCHPLANE_PUBLIC_URL: $public_url,
-                  LAUNCHPLANE_SESSION_SECRET: $session_secret,
-                  LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
-                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
-                  }
-                  + (
-                    if ($omit_terminal_agent_env | not) then
-                      {
-                        LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: $terminal_agent_read_token,
-                        LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: $terminal_agent_subject,
-                        LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: $terminal_agent_token_label
-                      }
-                    else
-                      {}
-                    end
-                  )
-                  + (
-                    if ($omit_owner_agent_env | not) then
-                      {
-                        LAUNCHPLANE_LOCAL_OPERATOR_TOKEN: $local_operator_token,
-                        LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT: $local_operator_subject,
-                        LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL: $local_operator_token_label,
-                        LAUNCHPLANE_LOCAL_ADMIN_TOKEN: $local_admin_token,
-                        LAUNCHPLANE_LOCAL_ADMIN_SUBJECT: $local_admin_subject,
-                        LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL: $local_admin_token_label
-                      }
-                    else
-                      {}
-                    end
-                  )
-                  + (
-                    if (($omit_every_code_env | not)
-                      and (($enable_every_code_runtime_secrets | ascii_downcase) == "true")) then
-                      {
-                        LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: $every_code_worker_token,
-                        LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: $every_code_webhook_secret,
-                        LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN: $every_code_github_token,
-                        LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR: $every_code_github_actor
-                      }
-                    else
-                      {}
-                    end
-                  )
-                  + (
-                    if $compose_external_network != "" then
-                      {LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: $compose_external_network}
-                    else
-                      {}
-                    end
-                  )
-                  + (
-                    if (($omit_npmplus_env | not) and $npmplus_base_url != "") then
-                      {LAUNCHPLANE_NPMPLUS_BASE_URL: $npmplus_base_url}
-                    else
-                      {}
-                    end
-                  )
-                  + (
-                    if (($omit_npmplus_env | not) and $npmplus_identity != "") then
-                      {LAUNCHPLANE_NPMPLUS_IDENTITY: $npmplus_identity}
-                    else
-                      {}
-                    end
-                  )
-                  + (
-                    if (($omit_npmplus_env | not) and $npmplus_secret != "") then
-                      {LAUNCHPLANE_NPMPLUS_SECRET: $npmplus_secret}
-                    else
-                      {}
-                    end
-                  )
-                  + (
-                    if $public_ingress_github_token != "" then
-                      {LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN: $public_ingress_github_token}
-                    else
-                      {}
-                    end
-                  )
-                  + (
-                    if $work_graph_gh_token != "" then
-                      {
-                        LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER: $work_graph_project_owner,
-                        LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER: $work_graph_project_number,
-                        LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT: $work_graph_project_limit,
-                        LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT: $work_graph_project_signal_limit,
-                        LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES: $work_graph_issue_inbox_repositories,
-                        LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT: $work_graph_issue_inbox_limit,
-                        LAUNCHPLANE_WORK_GRAPH_GH_BINARY: $work_graph_gh_binary,
-                        GH_TOKEN: $work_graph_gh_token
-                      }
-                    else
-                      {}
-                    end
-                  )
-                ) | with_entries(select(.value != ""))'
-            })"
-            service_env_removals_json="$({
-              jq -n \
-                --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
-                --argjson omit_npmplus_env '${{ inputs.omit_npmplus_env || false }}' \
-                '(
-                  if $omit_npmplus_env then
-                    [
-                      "LAUNCHPLANE_NPMPLUS_BASE_URL",
-                      "LAUNCHPLANE_NPMPLUS_IDENTITY",
-                      "LAUNCHPLANE_NPMPLUS_SECRET"
-                    ]
+          service_env_json="$({
+            jq -n \
+              --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
+              --arg github_client_secret "${LAUNCHPLANE_GITHUB_CLIENT_SECRET:-}" \
+              --arg public_url "${LAUNCHPLANE_PUBLIC_URL:-}" \
+              --arg session_secret "${LAUNCHPLANE_SESSION_SECRET:-}" \
+              --arg cookie_secure "${LAUNCHPLANE_COOKIE_SECURE:-}" \
+              --arg bootstrap_admin_emails "${LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS:-}" \
+              --arg work_graph_project_owner "${LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER:-}" \
+              --arg work_graph_project_number "${LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER:-}" \
+              --arg work_graph_project_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT:-}" \
+              --arg work_graph_project_signal_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT:-}" \
+              --arg work_graph_issue_inbox_repositories "${LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES:-}" \
+              --arg work_graph_issue_inbox_limit "${LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT:-}" \
+              --arg work_graph_gh_binary "${LAUNCHPLANE_WORK_GRAPH_GH_BINARY:-}" \
+              --arg work_graph_gh_token "${LAUNCHPLANE_WORK_GRAPH_GH_TOKEN:-}" \
+              --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
+              --arg enable_every_code_runtime_secrets "${LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS:-}" \
+              --arg every_code_worker_token "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" \
+              --arg every_code_webhook_secret "${LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET:-}" \
+              --arg every_code_github_token "${LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN:-}" \
+              --arg every_code_github_actor "${LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR:-}" \
+              --arg terminal_agent_read_token "${LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN:-}" \
+              --arg terminal_agent_subject "${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-}" \
+              --arg terminal_agent_token_label "${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-}" \
+              --arg local_operator_token "${LAUNCHPLANE_LOCAL_OPERATOR_TOKEN:-}" \
+              --arg local_operator_subject "${LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT:-}" \
+              --arg local_operator_token_label "${LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL:-}" \
+              --arg local_admin_token "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN:-}" \
+              --arg local_admin_subject "${LAUNCHPLANE_LOCAL_ADMIN_SUBJECT:-}" \
+              --arg local_admin_token_label "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL:-}" \
+              --arg compose_external_network "${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK:-}" \
+              --arg npmplus_base_url "${LAUNCHPLANE_NPMPLUS_BASE_URL:-}" \
+              --arg npmplus_identity "${LAUNCHPLANE_NPMPLUS_IDENTITY:-}" \
+              --arg npmplus_secret "${LAUNCHPLANE_NPMPLUS_SECRET:-}" \
+              --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
+              --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env || false }}' \
+              --argjson omit_owner_agent_env '${{ inputs.omit_owner_agent_env || false }}' \
+              --argjson omit_npmplus_env '${{ inputs.omit_npmplus_env || false }}' \
+              '(
+                {
+                LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
+                LAUNCHPLANE_GITHUB_CLIENT_SECRET: $github_client_secret,
+                LAUNCHPLANE_PUBLIC_URL: $public_url,
+                LAUNCHPLANE_SESSION_SECRET: $session_secret,
+                LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
+                LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
+                }
+                + (
+                  if ($omit_terminal_agent_env | not) then
+                    {
+                      LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: $terminal_agent_read_token,
+                      LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: $terminal_agent_subject,
+                      LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: $terminal_agent_token_label
+                    }
                   else
-                    []
+                    {}
                   end
                 )
                 + (
-                  if $public_ingress_github_token == "" then
-                    ["LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"]
+                  if ($omit_owner_agent_env | not) then
+                    {
+                      LAUNCHPLANE_LOCAL_OPERATOR_TOKEN: $local_operator_token,
+                      LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT: $local_operator_subject,
+                      LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL: $local_operator_token_label,
+                      LAUNCHPLANE_LOCAL_ADMIN_TOKEN: $local_admin_token,
+                      LAUNCHPLANE_LOCAL_ADMIN_SUBJECT: $local_admin_subject,
+                      LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL: $local_admin_token_label
+                    }
                   else
-                    []
+                    {}
                   end
-                )'
-            })"
-            request_payload="$({
-              jq -n \
-                --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
-                --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
-                --arg image_reference "${{ steps.image.outputs.image_reference }}" \
-                --argjson service_env "$service_env_json" \
-                --argjson service_env_removals "$service_env_removals_json" \
-                '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference} + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end) + (if ($service_env_removals | length) > 0 then {oauth_env_removals: $service_env_removals} else {} end))}'
-            })"
-            idempotency_key="launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ github.run_id }}:${{ github.run_attempt }}:db-authz"
+                )
+                + (
+                  if (($omit_every_code_env | not)
+                    and (($enable_every_code_runtime_secrets | ascii_downcase) == "true")) then
+                    {
+                      LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: $every_code_worker_token,
+                      LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: $every_code_webhook_secret,
+                      LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN: $every_code_github_token,
+                      LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR: $every_code_github_actor
+                    }
+                  else
+                    {}
+                  end
+                )
+                + (
+                  if $compose_external_network != "" then
+                    {LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: $compose_external_network}
+                  else
+                    {}
+                  end
+                )
+                + (
+                  if (($omit_npmplus_env | not) and $npmplus_base_url != "") then
+                    {LAUNCHPLANE_NPMPLUS_BASE_URL: $npmplus_base_url}
+                  else
+                    {}
+                  end
+                )
+                + (
+                  if (($omit_npmplus_env | not) and $npmplus_identity != "") then
+                    {LAUNCHPLANE_NPMPLUS_IDENTITY: $npmplus_identity}
+                  else
+                    {}
+                  end
+                )
+                + (
+                  if (($omit_npmplus_env | not) and $npmplus_secret != "") then
+                    {LAUNCHPLANE_NPMPLUS_SECRET: $npmplus_secret}
+                  else
+                    {}
+                  end
+                )
+                + (
+                  if $public_ingress_github_token != "" then
+                    {LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN: $public_ingress_github_token}
+                  else
+                    {}
+                  end
+                )
+                + (
+                  if $work_graph_gh_token != "" then
+                    {
+                      LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER: $work_graph_project_owner,
+                      LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER: $work_graph_project_number,
+                      LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT: $work_graph_project_limit,
+                      LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT: $work_graph_project_signal_limit,
+                      LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES: $work_graph_issue_inbox_repositories,
+                      LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT: $work_graph_issue_inbox_limit,
+                      LAUNCHPLANE_WORK_GRAPH_GH_BINARY: $work_graph_gh_binary,
+                      GH_TOKEN: $work_graph_gh_token
+                    }
+                  else
+                    {}
+                  end
+                )
+              ) | with_entries(select(.value != ""))'
+          })"
+          service_env_removals_json="$({
+            jq -n \
+              --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
+              --argjson omit_npmplus_env '${{ inputs.omit_npmplus_env || false }}' \
+              '(
+                if $omit_npmplus_env then
+                  [
+                    "LAUNCHPLANE_NPMPLUS_BASE_URL",
+                    "LAUNCHPLANE_NPMPLUS_IDENTITY",
+                    "LAUNCHPLANE_NPMPLUS_SECRET"
+                  ]
+                else
+                  []
+                end
+              )
+              + (
+                if $public_ingress_github_token == "" then
+                  ["LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"]
+                else
+                  []
+                end
+              )'
+          })"
+          request_payload="$({
+            jq -n \
+              --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
+              --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
+              --arg image_reference "${{ steps.image.outputs.image_reference }}" \
+              --argjson service_env "$service_env_json" \
+              --argjson service_env_removals "$service_env_removals_json" \
+              '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference} + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end) + (if ($service_env_removals | length) > 0 then {oauth_env_removals: $service_env_removals} else {} end))}'
+          })"
 
-            curl -sS \
-              -o "$response_file" \
-              -w '%{http_code}' \
-              -X POST \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H "Content-Type: application/json" \
-              -H "Idempotency-Key: ${idempotency_key}" \
-              --data "$request_payload" \
-              "${{ steps.service.outputs.service_url }}/v1/drivers/launchplane/self-deploy"
-          }
+          request_payload_file="$RUNNER_TEMP/launchplane-self-deploy-payload.json"
+          printf '%s\n' "$request_payload" > "$request_payload_file"
+          echo "payload_file=$request_payload_file" >> "$GITHUB_OUTPUT"
 
-          response_file="$(mktemp)"
-          status_code="$(request_deploy "$response_file")"
-          if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
-            cat "$response_file"
-            exit 0
+      - name: Request Launchplane self deploy
+        id: self_deploy_request
+        continue-on-error: true
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/drivers/launchplane/self-deploy
+          payload-file: ${{ steps.self_deploy.outputs.payload_file }}
+          idempotency-key: launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ github.run_id }}:${{ github.run_attempt }}:db-authz
+          expected-status: "200,202"
+          fail-result-paths: ""
+          timeout-ms: "30000"
+          response-output-file: ${{ runner.temp }}/launchplane-self-deploy-response.json
+          log-response-body: "false"
+
+      - name: Check Launchplane self deploy request
+        shell: bash
+        env:
+          SELF_DEPLOY_RESPONSE_FILE: ${{ runner.temp }}/launchplane-self-deploy-response.json
+          SELF_DEPLOY_STATUS: ${{ steps.self_deploy_request.outputs.status-code }}
+          SELF_DEPLOY_OUTCOME: ${{ steps.self_deploy_request.outcome }}
+        run: |
+          set -euo pipefail
+
+          status_code="$SELF_DEPLOY_STATUS"
+          if [ -z "$status_code" ]; then
+            status_code="action_failed"
           fi
-
-          cat "$response_file" >&2
-          echo "Launchplane self deploy request failed with HTTP ${status_code}." >&2
-          exit 1
+          if [ "${SELF_DEPLOY_OUTCOME:-failure}" != "success" ] \
+            || { [ "$status_code" != "200" ] && [ "$status_code" != "202" ]; }; then
+            if [ -s "$SELF_DEPLOY_RESPONSE_FILE" ]; then
+              cat "$SELF_DEPLOY_RESPONSE_FILE" >&2
+            fi
+            echo "Launchplane self deploy request failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
 
       - name: Wait for deployed Launchplane image
         shell: bash
