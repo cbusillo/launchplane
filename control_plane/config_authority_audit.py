@@ -762,9 +762,31 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "${{ steps.rollback_request.outputs.payload_file }}",
             )
         ),
+        "poll-interval-ms": frozenset(('"1000"', '"5000"')),
+        "poll-retry-on-request-error": frozenset(('"true"',)),
+        "poll-retry-on-unexpected-status": frozenset(('"true"',)),
+        "poll-timeout-ms": frozenset(
+            (
+                "${{ steps.deploy_wait_timeout.outputs.timeout_ms }}",
+                "${{ steps.deployed_health.outputs.remaining_timeout_ms }}",
+                "${{ steps.rollback_wait_timeout.outputs.timeout_ms }}",
+                "${{ steps.rollback_health.outputs.remaining_timeout_ms }}",
+            )
+        ),
+        "poll-until-path": frozenset(("runtime.docker_image_reference",)),
+        "poll-until-value": frozenset(
+            (
+                "${{ steps.image.outputs.image_reference }}",
+                "${{ steps.rollback_request.outputs.previous_image_reference }}",
+            )
+        ),
         "response-output-file": frozenset(
             (
+                "${{ runner.temp }}/launchplane-deployed-runtime-wait.json",
+                "${{ runner.temp }}/launchplane-deployed-runtime-final.json",
                 "${{ runner.temp }}/launchplane-previous-runtime.json",
+                "${{ runner.temp }}/launchplane-rollback-runtime-final.json",
+                "${{ runner.temp }}/launchplane-rollback-runtime-wait.json",
                 "${{ runner.temp }}/launchplane-runtime-smoke.json",
                 "${{ runner.temp }}/launchplane-self-deploy-response.json",
                 "${{ runner.temp }}/launchplane-self-deploy-rollback-response.json",

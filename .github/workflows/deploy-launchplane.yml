@@ -486,15 +486,48 @@ jobs:
             exit 1
           fi
 
-      - name: Wait for deployed Launchplane image
+      - name: Resolve Launchplane deploy wait timeout
+        id: deploy_wait_timeout
         shell: bash
         run: |
           set -euo pipefail
 
-          deadline=$((SECONDS + ${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
-          expected_image_reference="${{ steps.image.outputs.image_reference }}"
+          wait_timeout_seconds=$((${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
+          {
+            echo "timeout_seconds=$wait_timeout_seconds"
+            echo "timeout_ms=$((wait_timeout_seconds * 1000))"
+            echo "deadline_epoch=$(($(date +%s) + wait_timeout_seconds))"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Wait for deployed Launchplane runtime image
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/runtime
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          poll-until-path: runtime.docker_image_reference
+          poll-until-value: ${{ steps.image.outputs.image_reference }}
+          poll-retry-on-request-error: "true"
+          poll-retry-on-unexpected-status: "true"
+          poll-interval-ms: "5000"
+          poll-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.timeout_ms }}
+          response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-wait.json
+          log-response-body: "false"
+
+      - name: Wait for deployed Launchplane health URLs
+        id: deployed_health
+        shell: bash
+        env:
+          WAIT_DEADLINE_EPOCH: ${{ steps.deploy_wait_timeout.outputs.deadline_epoch }}
+        run: |
+          set -euo pipefail
+
+          deadline_epoch="${WAIT_DEADLINE_EPOCH:?}"
           last_report_seconds=0
-          while [ "$SECONDS" -lt "$deadline" ]; do
+          while [ "$(date +%s)" -lt "$deadline_epoch" ]; do
             all_healthy=1
             health_report=""
             while IFS= read -r raw_url; do
@@ -518,36 +551,43 @@ jobs:
               rm -f "$health_response_file"
             done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
 
-            oidc_token="$({
-              curl -fsSL \
-                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
-              | jq -r '.value'
-            })"
-
-            runtime_response_file="$(mktemp)"
-            runtime_status_code="$(curl -sS \
-              -o "$runtime_response_file" \
-              -w '%{http_code}' \
-              -H "Authorization: Bearer ${oidc_token}" \
-              "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
-            actual_image_reference="$(jq -r '.runtime.docker_image_reference // empty' "$runtime_response_file" 2>/dev/null || true)"
-            runtime_error_code="$(jq -r '.error.code // empty' "$runtime_response_file" 2>/dev/null || true)"
-
-            if [ "$all_healthy" -eq 1 ] && [ "$runtime_status_code" = "200" ] && [ "$actual_image_reference" = "$expected_image_reference" ]; then
-              rm -f "$runtime_response_file"
+            if [ "$all_healthy" -eq 1 ]; then
+              remaining_seconds=$((deadline_epoch - $(date +%s)))
+              if [ "$remaining_seconds" -lt 0 ]; then
+                remaining_seconds=0
+              fi
+              remaining_timeout_ms=$((remaining_seconds * 1000))
+              if [ "$remaining_timeout_ms" -lt 1 ]; then
+                remaining_timeout_ms=1
+              fi
+              echo "remaining_timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
               exit 0
             fi
             if [ "$((SECONDS - last_report_seconds))" -ge 30 ]; then
-              echo "Waiting for Launchplane image. health=${health_report:-none} runtime_http=${runtime_status_code:-curl_failed} runtime_image=${actual_image_reference:-none} runtime_error=${runtime_error_code:-none}"
+              echo "Waiting for Launchplane health URLs. health=${health_report:-none}"
               last_report_seconds=$SECONDS
             fi
-            rm -f "$runtime_response_file"
             sleep 5
           done
 
-          echo "Timed out waiting for Launchplane image '$expected_image_reference' to become live and healthy." >&2
+          echo "Timed out waiting for Launchplane health URLs to become healthy." >&2
           exit 1
+
+      - name: Verify deployed Launchplane runtime image after health
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/runtime
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          poll-until-path: runtime.docker_image_reference
+          poll-until-value: ${{ steps.image.outputs.image_reference }}
+          poll-interval-ms: "1000"
+          poll-timeout-ms: ${{ steps.deployed_health.outputs.remaining_timeout_ms }}
+          response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-final.json
+          log-response-body: "false"
 
       - name: Capture failed Launchplane deploy diagnostics
         if: failure()
@@ -643,7 +683,50 @@ jobs:
             echo "- Rollback image: $PREVIOUS_IMAGE_REFERENCE"
           } >>"$GITHUB_STEP_SUMMARY"
 
-      - name: Wait for Launchplane rollback image
+      - name: Resolve Launchplane rollback wait timeout
+        if: >-
+          failure()
+          && steps.rollback_request.outputs.payload_file != ''
+          && steps.rollback_request.outputs.previous_image_reference != ''
+          && steps.rollback_request_action.outcome == 'success'
+        id: rollback_wait_timeout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          wait_timeout_seconds=$((${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
+          {
+            echo "timeout_seconds=$wait_timeout_seconds"
+            echo "timeout_ms=$((wait_timeout_seconds * 1000))"
+            echo "deadline_epoch=$(($(date +%s) + wait_timeout_seconds))"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Wait for Launchplane rollback runtime image
+        if: >-
+          failure()
+          && steps.rollback_request.outputs.payload_file != ''
+          && steps.rollback_request.outputs.previous_image_reference != ''
+          && steps.rollback_request_action.outcome == 'success'
+        id: rollback_runtime
+        continue-on-error: true
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/runtime
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          poll-until-path: runtime.docker_image_reference
+          poll-until-value: ${{ steps.rollback_request.outputs.previous_image_reference }}
+          poll-retry-on-request-error: "true"
+          poll-retry-on-unexpected-status: "true"
+          poll-interval-ms: "5000"
+          poll-timeout-ms: ${{ steps.rollback_wait_timeout.outputs.timeout_ms }}
+          response-output-file: ${{ runner.temp }}/launchplane-rollback-runtime-wait.json
+          log-response-body: "false"
+
+      - name: Check Launchplane rollback runtime image
         if: >-
           failure()
           && steps.rollback_request.outputs.payload_file != ''
@@ -651,15 +734,56 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
         shell: bash
         env:
+          PREVIOUS_IMAGE_REFERENCE: ${{ steps.rollback_request.outputs.previous_image_reference }}
           ROLLBACK_RESPONSE_FILE: ${{ runner.temp }}/launchplane-self-deploy-rollback-response.json
+          ROLLBACK_RUNTIME_RESPONSE_FILE: ${{ runner.temp }}/launchplane-rollback-runtime-wait.json
+          ROLLBACK_RUNTIME_OUTCOME: ${{ steps.rollback_runtime.outcome }}
           ROLLBACK_STATUS: ${{ steps.rollback_request_action.outputs.status-code }}
         run: |
           set -euo pipefail
 
-          previous_image_reference="${{ steps.rollback_request.outputs.previous_image_reference }}"
-          deadline=$((SECONDS + ${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
+          if [ "${ROLLBACK_RUNTIME_OUTCOME:-failure}" = "success" ]; then
+            echo "Rolled Launchplane back to $PREVIOUS_IMAGE_REFERENCE."
+            exit 0
+          fi
+          echo "Timed out waiting for Launchplane rollback image '$PREVIOUS_IMAGE_REFERENCE' to become live." >&2
+          if [ -s "$ROLLBACK_RUNTIME_RESPONSE_FILE" ]; then
+            echo "Rollback runtime response summary:" >&2
+            jq '{runtime, error}' "$ROLLBACK_RUNTIME_RESPONSE_FILE" >&2 || cat "$ROLLBACK_RUNTIME_RESPONSE_FILE" >&2 || true
+          fi
+          if [ -s "$ROLLBACK_RESPONSE_FILE" ]; then
+            echo "Rollback request response summary:" >&2
+            jq '{status, trace_id, error, result}' "$ROLLBACK_RESPONSE_FILE" >&2 || cat "$ROLLBACK_RESPONSE_FILE" >&2 || true
+          fi
+          {
+            echo "## Launchplane rollback timed out"
+            echo
+            echo "- Service rollback HTTP status: ${ROLLBACK_STATUS:-unknown}"
+            echo "- Rollback image: $PREVIOUS_IMAGE_REFERENCE"
+            echo "- Rollback runtime action outcome: ${ROLLBACK_RUNTIME_OUTCOME:-failure}"
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Wait for Launchplane rollback health URLs
+        if: >-
+          failure()
+          && steps.rollback_request.outputs.payload_file != ''
+          && steps.rollback_request.outputs.previous_image_reference != ''
+          && steps.rollback_request_action.outcome == 'success'
+          && steps.rollback_runtime.outcome == 'success'
+        id: rollback_health
+        shell: bash
+        env:
+          PREVIOUS_IMAGE_REFERENCE: ${{ steps.rollback_request.outputs.previous_image_reference }}
+          ROLLBACK_RESPONSE_FILE: ${{ runner.temp }}/launchplane-self-deploy-rollback-response.json
+          ROLLBACK_STATUS: ${{ steps.rollback_request_action.outputs.status-code }}
+          WAIT_DEADLINE_EPOCH: ${{ steps.rollback_wait_timeout.outputs.deadline_epoch }}
+        run: |
+          set -euo pipefail
+
+          deadline_epoch="${WAIT_DEADLINE_EPOCH:?}"
           last_report_seconds=0
-          while [ "$SECONDS" -lt "$deadline" ]; do
+          while [ "$(date +%s)" -lt "$deadline_epoch" ]; do
             all_healthy=1
             health_report=""
             while IFS= read -r raw_url; do
@@ -683,36 +807,26 @@ jobs:
               rm -f "$health_response_file"
             done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
 
-            oidc_token="$({
-              curl -fsSL \
-                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
-              | jq -r '.value'
-            })"
-
-            runtime_response_file="$(mktemp)"
-            runtime_status_code="$(curl -sS \
-              -o "$runtime_response_file" \
-              -w '%{http_code}' \
-              -H "Authorization: Bearer ${oidc_token}" \
-              "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
-            actual_image_reference="$(jq -r '.runtime.docker_image_reference // empty' "$runtime_response_file" 2>/dev/null || true)"
-            runtime_error_code="$(jq -r '.error.code // empty' "$runtime_response_file" 2>/dev/null || true)"
-
-            if [ "$all_healthy" -eq 1 ] && [ "$runtime_status_code" = "200" ] && [ "$actual_image_reference" = "$previous_image_reference" ]; then
-              echo "Rolled Launchplane back to $previous_image_reference."
-              rm -f "$runtime_response_file"
+            if [ "$all_healthy" -eq 1 ]; then
+              remaining_seconds=$((deadline_epoch - $(date +%s)))
+              if [ "$remaining_seconds" -lt 0 ]; then
+                remaining_seconds=0
+              fi
+              remaining_timeout_ms=$((remaining_seconds * 1000))
+              if [ "$remaining_timeout_ms" -lt 1 ]; then
+                remaining_timeout_ms=1
+              fi
+              echo "remaining_timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
               exit 0
             fi
             if [ "$((SECONDS - last_report_seconds))" -ge 30 ]; then
-              echo "Waiting for Launchplane rollback image. health=${health_report:-none} runtime_http=${runtime_status_code:-curl_failed} runtime_image=${actual_image_reference:-none} runtime_error=${runtime_error_code:-none}"
+              echo "Waiting for Launchplane rollback health URLs. health=${health_report:-none}"
               last_report_seconds=$SECONDS
             fi
-            rm -f "$runtime_response_file"
             sleep 5
           done
 
-          echo "Timed out waiting for Launchplane rollback image '$previous_image_reference' to become live and healthy." >&2
+          echo "Timed out waiting for Launchplane rollback health URLs to become healthy." >&2
           if [ -s "$ROLLBACK_RESPONSE_FILE" ]; then
             echo "Rollback request response summary:" >&2
             jq '{status, trace_id, error, result}' "$ROLLBACK_RESPONSE_FILE" >&2 || cat "$ROLLBACK_RESPONSE_FILE" >&2 || true
@@ -721,10 +835,33 @@ jobs:
             echo "## Launchplane rollback timed out"
             echo
             echo "- Service rollback HTTP status: ${ROLLBACK_STATUS:-unknown}"
-            echo "- Rollback image: $previous_image_reference"
+            echo "- Rollback image: $PREVIOUS_IMAGE_REFERENCE"
             echo "- Rollback request response file: $ROLLBACK_RESPONSE_FILE"
           } >>"$GITHUB_STEP_SUMMARY"
           exit 1
+
+      - name: Verify Launchplane rollback runtime image after health
+        if: >-
+          failure()
+          && steps.rollback_request.outputs.payload_file != ''
+          && steps.rollback_request.outputs.previous_image_reference != ''
+          && steps.rollback_request_action.outcome == 'success'
+          && steps.rollback_runtime.outcome == 'success'
+          && steps.rollback_health.outcome == 'success'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/runtime
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          poll-until-path: runtime.docker_image_reference
+          poll-until-value: ${{ steps.rollback_request.outputs.previous_image_reference }}
+          poll-interval-ms: "1000"
+          poll-timeout-ms: ${{ steps.rollback_health.outputs.remaining_timeout_ms }}
+          response-output-file: ${{ runner.temp }}/launchplane-rollback-runtime-final.json
+          log-response-body: "false"
 
       - name: Render product context workflow authz grants
         id: authz_grants
