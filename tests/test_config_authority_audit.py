@@ -55,12 +55,15 @@ def _gaps(payload: dict[str, object]) -> list[dict[str, object]]:
 
 
 class ConfigAuthorityAuditTest(unittest.TestCase):
-    def test_merge_train_runner_uses_policy_targets_for_scheduled_authority(self) -> None:
+    def test_merge_train_runner_uses_shared_request_for_reads_and_level1_post(self) -> None:
         workflow_text = Path(".github/workflows/merge-train-runner.yml").read_text(encoding="utf-8")
 
         self.assertIn("/v1/work-graph/merge-train/policy-targets", workflow_text)
         self.assertIn("Read scheduled merge-train targets", workflow_text)
         self.assertIn("Read merge-train admission", workflow_text)
+        self.assertIn("Prepare merge-train run-once request", workflow_text)
+        self.assertIn("Send merge-train run-once request", workflow_text)
+        self.assertIn("Summarize merge-train run-once response", workflow_text)
         self.assertIn(
             "uses: cbusillo/launchplane/.github/actions/launchplane-request@main", workflow_text
         )
@@ -71,10 +74,20 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn(
             "audience: ${{ steps.admission_request.outputs.service_audience }}", workflow_text
         )
+        self.assertIn("audience: ${{ steps.admission.outputs.service_audience }}", workflow_text)
         self.assertIn("method: GET", workflow_text)
+        self.assertIn("method: POST", workflow_text)
         self.assertIn("route-path: /v1/work-graph/merge-train/policy-targets", workflow_text)
         self.assertIn(
             "route-path: ${{ steps.admission_request.outputs.route_path }}", workflow_text
+        )
+        self.assertIn("route-path: /v1/work-graph/merge-train/run-once", workflow_text)
+        self.assertIn(
+            "payload-file: ${{ steps.level1_request.outputs.payload_file }}", workflow_text
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.level1_request.outputs.idempotency_key }}",
+            workflow_text,
         )
         self.assertIn(
             "response-output-file: ${{ steps.scheduled_target_request.outputs.response_file }}",
@@ -84,10 +97,22 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "response-output-file: ${{ steps.admission_request.outputs.response_file }}",
             workflow_text,
         )
+        self.assertIn(
+            "response-output-file: ${{ steps.level1_request.outputs.response_file }}", workflow_text
+        )
         self.assertIn('fail-result-paths: ""', workflow_text)
         self.assertIn('log-response-body: "false"', workflow_text)
         self.assertIn("launchplane-merge-train-policy-targets.json", workflow_text)
         self.assertIn("launchplane-merge-train-admission.json", workflow_text)
+        self.assertIn("launchplane-merge-train-run-once-request.json", workflow_text)
+        self.assertIn("launchplane-merge-train-run-once.json", workflow_text)
+        self.assertIn('idempotency_key="merge-train-run-once"', workflow_text)
+        self.assertRegex(
+            workflow_text,
+            r"(?s)Send merge-train run-once request.*idempotency-key: "
+            r"\$\{\{ steps\.level1_request\.outputs\.idempotency_key \}\}.*"
+            r"log-response-body: \"false\"",
+        )
         self.assertNotIn(
             '"${service_origin}/v1/work-graph/merge-train/policy-targets"', workflow_text
         )
@@ -95,6 +120,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             '"${service_origin}/v1/work-graph/merge-train/admission?${query_string}"',
             workflow_text,
         )
+        self.assertNotIn('"${SERVICE_ORIGIN}/v1/work-graph/merge-train/run-once"', workflow_text)
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_REPOSITORY", workflow_text)
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH", workflow_text)
         self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_MUTATE", workflow_text)
@@ -2585,10 +2611,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
         for key, value in (
             ("audience", "${{ steps.admission_request.outputs.service_audience }}"),
+            ("audience", "${{ steps.admission.outputs.service_audience }}"),
             ("audience", "${{ steps.scheduled_target_request.outputs.service_audience }}"),
             ("fail-result-paths", '""'),
+            ("idempotency-key", "${{ steps.level1_request.outputs.idempotency_key }}"),
             ("log-response-body", '"false"'),
             ("method", "GET"),
+            ("method", "POST"),
+            ("payload-file", "${{ steps.level1_request.outputs.payload_file }}"),
             (
                 "response-output-file",
                 "${{ steps.scheduled_target_request.outputs.response_file }}",
@@ -2597,7 +2627,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "response-output-file",
                 "${{ steps.admission_request.outputs.response_file }}",
             ),
+            (
+                "response-output-file",
+                "${{ steps.level1_request.outputs.response_file }}",
+            ),
             ("route-path", "/v1/work-graph/merge-train/policy-targets"),
+            ("route-path", "/v1/work-graph/merge-train/run-once"),
             ("route-path", "${{ steps.admission_request.outputs.route_path }}"),
         ):
             with self.subTest(merge_train_runner_get_mechanic=key):
