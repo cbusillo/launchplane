@@ -2266,6 +2266,9 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("target_type", "$target.target_type,"),
             ("provider_target_type", "$target.provider_target_type,"),
             ("target_id_recorded", "$target.target_id_recorded,"),
+            ("trust_state", "$config_status.trust_state,"),
+            ("status", '"ok"'),
+            ("status", '"blocked"'),
         ):
             with self.subTest(key=key):
                 self.assertEqual(
@@ -2493,6 +2496,32 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 self.assertEqual(
                     _allow_reason(
                         path=".github/workflows/product-context-cutover-audit.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
+            ("fail-result-paths", '""'),
+            ("log-response-body", '"false"'),
+            ("method", "GET"),
+            (
+                "response-output-file",
+                "${{ steps.request.outputs.environment_response_file }}",
+            ),
+            (
+                "response-output-file",
+                "${{ steps.request.outputs.config_status_response_file }}",
+            ),
+            ("route-path", "${{ steps.request.outputs.environment_route }}"),
+            ("route-path", "${{ steps.request.outputs.config_status_route }}"),
+        ):
+            with self.subTest(product_environment_evidence_mechanic=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/product-environment-evidence.yml",
                         key=key,
                         value=value,
                     ),

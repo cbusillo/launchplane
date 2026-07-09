@@ -32,43 +32,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  collect:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      route_matrix: ${{ steps.routes.outputs.route_matrix }}
     env:
-      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       TARGET_SET: ${{ inputs.target_set }}
       ROUTES_JSON: ${{ inputs.routes_json }}
-      PROVIDER_ID: ${{ inputs.provider_id }}
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Resolve service endpoint
-        id: service
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
-          service_origin="$(
-            printf '%s' "${LAUNCHPLANE_URL%/}" \
-              | sed -E 's#^([^:]+://[^/]+).*$#\1#'
-          )"
-          service_audience="$(
-            printf '%s' "$service_origin" \
-              | sed -E 's#^[^:]+://([^/:]+).*#\1#'
-          )"
-          if [ -z "$service_audience" ] \
-            || [ "$service_audience" = "$service_origin" ]; then
-            echo "LAUNCHPLANE_URL must be an absolute URL." >&2
-            exit 1
-          fi
-          {
-            echo "origin=${service_origin}"
-            echo "audience=${service_audience}"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Resolve product environments
+        id: routes
         shell: bash
         run: |
           set -euo pipefail
@@ -92,147 +65,228 @@ jobs:
               ;;
           esac
           jq . "$routes_file"
+          {
+            echo "route_matrix<<JSON"
+            jq -c '[to_entries[] | {
+              route_index:(.key | tostring),
+              product:.value.product,
+              environment:.value.environment
+            }]' "$routes_file"
+            echo "JSON"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Read product environment evidence
-        env:
-          SERVICE_ORIGIN: ${{ steps.service.outputs.origin }}
-          SERVICE_AUDIENCE: ${{ steps.service.outputs.audience }}
+      - name: Upload route evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: >-
+            product-environment-evidence-${{ inputs.target_set }}-routes
+          path: product-environment-routes.json
+          if-no-files-found: warn
+
+  collect:
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        route: ${{ fromJson(needs.resolve.outputs.route_matrix) }}
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      TARGET_SET: ${{ inputs.target_set }}
+      PROVIDER_ID: ${{ inputs.provider_id }}
+      ROUTE_INDEX: ${{ matrix.route.route_index }}
+      PRODUCT: ${{ matrix.route.product }}
+      ENVIRONMENT: ${{ matrix.route.environment }}
+    steps:
+      - name: Prepare product environment request
+        id: request
         shell: bash
         run: |
           set -euo pipefail
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
-            | jq -r '.value'
-          })"
-          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
-            echo "GitHub OIDC token response did not include a token value." >&2
+          mkdir -p product-environment-evidence-results
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          from urllib.parse import quote
+
+          product = os.environ["PRODUCT"].strip()
+          environment = os.environ["ENVIRONMENT"].strip()
+          route_index = os.environ["ROUTE_INDEX"].strip()
+          if not product:
+              raise SystemExit("product is required")
+          if not environment:
+              raise SystemExit("environment is required")
+          if not route_index:
+              raise SystemExit("route_index is required")
+          product_path = quote(product, safe="")
+          environment_path = quote(environment, safe="")
+          prefix = f"product-environment-evidence-results/{route_index}"
+          print(f"environment_route=/v1/products/{product_path}/environments/{environment_path}")
+          print(
+              "config_status_route="
+              f"/v1/products/{product_path}/environments/{environment_path}/config-status"
+          )
+          print(f"environment_response_file={prefix}-environment.json")
+          print(f"environment_summary_file={prefix}-summary.json")
+          print(f"config_status_response_file={prefix}-config-status.json")
+          print(f"config_status_summary_file={prefix}-config-status-summary.json")
+          PY
+
+      - name: Read product environment evidence
+        id: environment_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.request.outputs.environment_route }}
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: ${{ steps.request.outputs.environment_response_file }}
+
+      - name: Summarize product environment evidence
+        env:
+          RESPONSE_FILE: ${{ steps.request.outputs.environment_response_file }}
+          SUMMARY_FILE: ${{ steps.request.outputs.environment_summary_file }}
+          STATUS_CODE: ${{ steps.environment_request.outputs.status-code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$STATUS_CODE" != "200" ]; then
+            printf 'Product environment read failed for %s/%s.\n' \
+              "$PRODUCT" "$ENVIRONMENT" >&2
+            echo "HTTP status: ${STATUS_CODE}." >&2
+            exit 1
+          fi
+          jq \
+            --arg expected_provider "$PROVIDER_ID" \
+            --arg product "$PRODUCT" \
+            --arg environment "$ENVIRONMENT" \
+            '.environment as $environment_detail
+              | $environment_detail.target as $target
+              | {
+                  product: $product,
+                  environment: $environment,
+                  context: $environment_detail.context,
+                  provider: $target.provider,
+                  target_type: $target.target_type,
+                  provider_target_type: $target.provider_target_type,
+                  trust_state: $target.trust_state,
+                  target_id_recorded: $target.target_id_recorded,
+                  action_count: (
+                    $environment_detail.available_actions | length
+                  ),
+                  runtime_settings_count: (
+                    $environment_detail.runtime_settings | length
+                  ),
+                  managed_secrets_count: (
+                    $environment_detail.managed_secrets | length
+                  ),
+                  status: (
+                    if $target.provider == $expected_provider
+                      and ($target.provider_target_type | type) == "string"
+                      and ($target.provider_target_type | length) > 0
+                      and $target.trust_state == "recorded"
+                      and $target.target_id_recorded == true
+                    then "ok"
+                    else "blocked"
+                    end
+                  )
+                }' \
+            "$RESPONSE_FILE" > "$SUMMARY_FILE"
+          jq . "$SUMMARY_FILE"
+          status="$(jq -r '.status' "$SUMMARY_FILE")"
+          if [ "$status" != "ok" ]; then
+            printf 'Provider-target read evidence was not ok for %s/%s.\n' \
+              "$PRODUCT" "$ENVIRONMENT" >&2
             exit 1
           fi
 
-          raw_response_dir="$(mktemp -d)"
-          trap 'rm -rf "$raw_response_dir"' EXIT
-          mkdir -p product-environment-evidence-results
-          jq -c '.[]' product-environment-routes.json | while read -r route; do
-            product="$(jq -r '.product' <<< "$route")"
-            environment="$(jq -r '.environment' <<< "$route")"
-            response_file="${raw_response_dir}/${product}-${environment}.json"
-            summary_file="product-environment-evidence-results/${product}-${environment}-summary.json"
-            config_status_file="${raw_response_dir}/${product}-${environment}-config-status.json"
-            config_summary_file="product-environment-evidence-results/${product}-${environment}-config-status-summary.json"
-            status_code="$(curl -sS \
-              -o "$response_file" \
-              -w '%{http_code}' \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H 'Accept: application/json' \
-              "${SERVICE_ORIGIN%/}/v1/products/${product}/environments/${environment}")"
-            if [ "$status_code" != "200" ]; then
-              printf 'Product environment read failed for %s/%s.\n' \
-                "$product" "$environment" >&2
-              echo "HTTP status: ${status_code}." >&2
-              exit 1
-            fi
-            jq \
-              --arg expected_provider "$PROVIDER_ID" \
-              --arg product "$product" \
-              --arg environment "$environment" \
-              '.environment as $environment_detail
-                | $environment_detail.target as $target
-                | {
-                    product: $product,
-                    environment: $environment,
-                    context: $environment_detail.context,
-                    provider: $target.provider,
-                    target_type: $target.target_type,
-                    provider_target_type: $target.provider_target_type,
-                    trust_state: $target.trust_state,
-                    target_id_recorded: $target.target_id_recorded,
-                    action_count: (
-                      $environment_detail.available_actions | length
-                    ),
-                    runtime_settings_count: (
-                      $environment_detail.runtime_settings | length
-                    ),
-                    managed_secrets_count: (
-                      $environment_detail.managed_secrets | length
-                    ),
-                    status: (
-                      if $target.provider == $expected_provider
-                        and ($target.provider_target_type | type) == "string"
-                        and ($target.provider_target_type | length) > 0
-                        and $target.trust_state == "recorded"
-                        and $target.target_id_recorded == true
-                      then "ok"
-                      else "blocked"
-                      end
-                    )
-                  }' \
-              "$response_file" > "$summary_file"
-            jq . "$summary_file"
-            status="$(jq -r '.status' "$summary_file")"
-            if [ "$status" != "ok" ]; then
-              printf 'Provider-target read evidence was not ok for %s/%s.\n' \
-                "$product" "$environment" >&2
-              exit 1
-            fi
-            config_status_code="$(curl -sS \
-              -o "$config_status_file" \
-              -w '%{http_code}' \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H 'Accept: application/json' \
-              "${SERVICE_ORIGIN%/}/v1/products/${product}/environments/${environment}/config-status")"
-            if [ "$config_status_code" != "200" ]; then
-              printf 'Product environment config-status read failed for %s/%s.\n' \
-                "$product" "$environment" >&2
-              echo "HTTP status: ${config_status_code}." >&2
-              exit 1
-            fi
-            jq \
-              --arg product "$product" \
-              --arg environment "$environment" \
-              '(.config_status // .environment // .) as $config_status
-              | {
-                product: $product,
-                environment: $environment,
-                context: $config_status.context,
-                trust_state: $config_status.trust_state,
-                runtime_settings: [
-                  $config_status.runtime_settings[] | {
-                    key,
-                    status,
-                    trust_state,
-                    source_label,
-                    updated_at
-                  }
-                ],
-                managed_secrets: [
-                  $config_status.managed_secrets[] | {
-                    binding_key,
-                    status,
-                    integration,
-                    trust_state,
-                    updated_at
-                  }
-                ],
-                warnings: $config_status.warnings
-              }' \
-              "$config_status_file" > "$config_summary_file"
-            jq . "$config_summary_file"
-          done
+      - name: Read product environment config status
+        id: config_status_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.request.outputs.config_status_route }}
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: ${{ steps.request.outputs.config_status_response_file }}
+
+      - name: Summarize product environment config status
+        env:
+          CONFIG_STATUS_FILE: ${{ steps.request.outputs.config_status_response_file }}
+          CONFIG_SUMMARY_FILE: ${{ steps.request.outputs.config_status_summary_file }}
+          STATUS_CODE: ${{ steps.config_status_request.outputs.status-code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$STATUS_CODE" != "200" ]; then
+            printf 'Product environment config-status read failed for %s/%s.\n' \
+              "$PRODUCT" "$ENVIRONMENT" >&2
+            echo "HTTP status: ${STATUS_CODE}." >&2
+            exit 1
+          fi
+          jq \
+            --arg product "$PRODUCT" \
+            --arg environment "$ENVIRONMENT" \
+            '(.config_status // .environment // .) as $config_status
+            | {
+              product: $product,
+              environment: $environment,
+              context: $config_status.context,
+              trust_state: $config_status.trust_state,
+              runtime_settings: [
+                $config_status.runtime_settings[] | {
+                  key,
+                  status,
+                  trust_state,
+                  source_label,
+                  updated_at
+                }
+              ],
+              managed_secrets: [
+                $config_status.managed_secrets[] | {
+                  binding_key,
+                  status,
+                  integration,
+                  trust_state,
+                  updated_at
+                }
+              ],
+              warnings: $config_status.warnings,
+              status: (
+                if $config_status.trust_state == "recorded"
+                  and all($config_status.runtime_settings[]; .status == "configured")
+                  and all($config_status.managed_secrets[]; .status == "configured")
+                  and (($config_status.warnings // []) | length) == 0
+                then "ok"
+                else "blocked"
+                end
+              )
+            }' \
+            "$CONFIG_STATUS_FILE" > "$CONFIG_SUMMARY_FILE"
+          jq . "$CONFIG_SUMMARY_FILE"
+          status="$(jq -r '.status' "$CONFIG_SUMMARY_FILE")"
+          if [ "$status" != "ok" ]; then
+            printf 'Product environment config status was not ok for %s/%s.\n' \
+              "$PRODUCT" "$ENVIRONMENT" >&2
+            exit 1
+          fi
 
       - name: Upload product environment evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: >-
-            product-environment-evidence-${{ inputs.target_set }}
+            product-environment-evidence-${{ inputs.target_set }}-${{
+            matrix.route.route_index }}
           path: |
-            product-environment-routes.json
             product-environment-evidence-results/*-summary.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
-      - name: Summarize product environment evidence
+      - name: Write product environment step summary
         if: always()
         shell: bash
         run: |
@@ -242,7 +296,8 @@ jobs:
             echo
             echo "- Target set: $TARGET_SET"
             echo "- Expected provider: $PROVIDER_ID"
-            echo "- Results: product-environment-evidence-${TARGET_SET}"
+            echo "- Route: ${PRODUCT}/${ENVIRONMENT}"
+            echo "- Results: product-environment-evidence-${TARGET_SET}-${ROUTE_INDEX}"
             echo
             results_dir="product-environment-evidence-results"
             if compgen -G "${results_dir}/*-summary.json" > /dev/null; then

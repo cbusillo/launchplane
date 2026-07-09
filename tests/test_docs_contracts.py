@@ -25,9 +25,12 @@ class DocsContractsTests(TestCase):
         )
 
         self.assertIn(
-            "/v1/products/${product}/environments/${environment}/config-status",
+            "config_status_route=",
             workflow_text,
         )
+        self.assertIn("/config-status", workflow_text)
+        self.assertIn('quote(product, safe="")', workflow_text)
+        self.assertIn('quote(environment, safe="")', workflow_text)
         self.assertIn("(.config_status // .environment // .) as $config_status", workflow_text)
         self.assertIn("config-status-summary.json", workflow_text)
         self.assertIn("product-environment-evidence-results/*-summary.json", workflow_text)
@@ -145,16 +148,16 @@ class DocsContractsTests(TestCase):
         self.assertIn("reusable-generic-web-stable-deploy.yml@main", product_repo_contract)
         self.assertIn("reusable-generic-web-prod-promotion.yml@main", product_repo_contract)
         self.assertIn("reusable-generic-web-prod-rollback.yml@main", product_repo_contract)
-        self.assertIn(
-            "reusable-generic-web-stable-verification.yml@main", product_repo_contract
-        )
+        self.assertIn("reusable-generic-web-stable-verification.yml@main", product_repo_contract)
         self.assertIn("reusable-generic-web-preview-lifecycle.yml@main", product_repo_contract)
         self.assertIn("reusable-generic-web-preview-verification.yml@main", product_repo_contract)
         self.assertIn("route path, request JSON shape", product_repo_contract)
         self.assertIn("product key from the caller repository name", product_repo_contract)
         self.assertIn("`testing` stable lane", product_repo_contract)
         self.assertIn("Production rollback uses stored Launchplane", product_repo_contract)
-        self.assertIn("Stable verification uses product-owned smoke evidence", product_repo_contract)
+        self.assertIn(
+            "Stable verification uses product-owned smoke evidence", product_repo_contract
+        )
         self.assertIn("idempotency key", product_repo_contract)
         self.assertIn("Destroy calls set `operation: destroy`", product_repo_contract)
         self.assertIn("unsupported_notice", product_repo_contract)
