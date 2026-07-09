@@ -56,6 +56,73 @@ OWNER_AUTHZ_ENV = {
 }
 
 
+def _run_authz_grants_generator(
+    temporary_directory: Path,
+    *,
+    extra_env: dict[str, str] | None = None,
+    owner_authz_env: dict[str, str] | None = OWNER_AUTHZ_ENV,
+) -> subprocess.CompletedProcess[str]:
+    output_directory = temporary_directory / "authz-grants"
+    github_output = temporary_directory / "github-output.txt"
+    env = {**os.environ}
+    for key in OWNER_AUTHZ_ENV:
+        env.pop(key, None)
+    if owner_authz_env is not None:
+        env.update(owner_authz_env)
+    env.update(
+        {
+            "GITHUB_REPOSITORY": "cbusillo/launchplane",
+            "GITHUB_SHA": "test-sha",
+            "GITHUB_OUTPUT": str(github_output),
+            "LAUNCHPLANE_AUTHZ_GRANTS_OUTPUT_DIR": str(output_directory),
+        }
+    )
+    if extra_env:
+        env.update(extra_env)
+
+    return subprocess.run(
+        ["bash", "scripts/deploy/ensure-authz-grants.sh"],
+        check=False,
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _read_authz_grant_payloads(temporary_directory: Path, filename: str) -> list[dict[str, object]]:
+    payload_path = temporary_directory / "authz-grants" / filename
+    return cast(list[dict[str, object]], json.loads(payload_path.read_text(encoding="utf-8")))
+
+
+def _read_authz_grants(temporary_directory: Path, filename: str) -> list[dict[str, object]]:
+    return [
+        cast(dict[str, object], payload["grant"])
+        for payload in _read_authz_grant_payloads(temporary_directory, filename)
+    ]
+
+
+def _grant_string(grant: dict[str, object], key: str) -> str:
+    return cast(str, grant[key])
+
+
+def _grant_string_list(grant: dict[str, object], key: str) -> list[str]:
+    return cast(list[str], grant[key])
+
+
+def _read_github_outputs(temporary_directory: Path) -> dict[str, str]:
+    output_path = temporary_directory / "github-output.txt"
+    outputs: dict[str, str] = {}
+    if not output_path.exists():
+        return outputs
+    for line in output_path.read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        outputs[name] = value
+    return outputs
+
+
 def _load_health_monitoring_migration() -> object:
     spec = importlib.util.spec_from_file_location(
         "launchplane_health_monitoring_migration", _HEALTH_MONITORING_MIGRATION_PATH
@@ -285,11 +352,6 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_deploy_authz_grants_accept_configured_github_action_grants(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
         configured_grants = [
             {
                 "repository": "example-org/example-product",
@@ -298,7 +360,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 "context": "example-context",
                 "action": "example_action.execute",
                 "source_label": "operator-config:example-product-deploy",
-                "idempotency_suffix": "example-product-deploy",
                 "event_name": "push",
                 "workflow_ref_suffix": "refs/heads/release",
                 "job_workflow_ref": (
@@ -308,70 +369,16 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         ]
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                '    printf \'%s\\n\' "$*" >> "$CAPTURED_GRANT_ATTEMPTS"\n'
-                "    output_file=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                '        --data) shift; request_payload="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                "    if printf '%s' \"$request_payload\" | grep -q 'example-product-deploy'; then\n"
-                "      printf '%s\\n%s\\n' \"$request_payload\" '---END-GRANT---' >> \"$CAPTURED_GRANTS\"\n"
-                "    fi\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_grants = temporary_directory / "grants.jsonl"
-            captured_grants.touch()
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                **OWNER_AUTHZ_ENV,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
-                "CAPTURED_GRANTS": str(captured_grants),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
+            result = _run_authz_grants_generator(
+                temporary_directory,
+                extra_env={"LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants)},
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             grants = [
-                json.loads(grant_text)["grant"]
-                for grant_text in captured_grants.read_text().split("---END-GRANT---")
-                if grant_text.strip()
+                grant
+                for grant in _read_authz_grants(temporary_directory, "github-actions-grants.json")
+                if grant["source_label"] == "operator-config:example-product-deploy"
             ]
 
         self.assertEqual(len(grants), 1)
@@ -394,72 +401,15 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_deploy_authz_grants_require_configured_owner_identities(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                '    printf \'%s\\n\' "$*" >> "$CAPTURED_GRANT_ATTEMPTS"\n'
-                "    output_file=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_response_file = temporary_directory / "response.json"
-            captured_grant_attempts = temporary_directory / "grant-attempts.txt"
-            env = {key: value for key, value in os.environ.items() if key not in OWNER_AUTHZ_ENV}
-            env.update(
-                {
-                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                    "GITHUB_SHA": "test-sha",
-                    "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                    "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                    "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                    "CAPTURED_GRANT_ATTEMPTS": str(captured_grant_attempts),
-                    "CAPTURED_BIN_DIR": str(captured_bin_directory),
-                }
-            )
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
+            result = _run_authz_grants_generator(temporary_directory, owner_authz_env={})
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
-            "Configured authz grant is missing LAUNCHPLANE_TERMINAL_AGENT_SUBJECT.",
+            "Configured authz grant is missing LAUNCHPLANE_",
             result.stderr,
         )
-        self.assertFalse(captured_grant_attempts.exists())
 
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-artifact-publish.yml").read_text(
@@ -1904,6 +1854,27 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON", workflow_text)
         self.assertIn("vars.LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON", workflow_text)
 
+    def test_deploy_workflow_sends_authz_grants_through_shared_request(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("id: authz_grants", workflow_text)
+        self.assertIn("LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON", workflow_text)
+        self.assertIn("vars.LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON", workflow_text)
+        self.assertIn("payload-list-file: ${{ steps.authz_grants.outputs.github_actions_grants_file }}", workflow_text)
+        self.assertIn("payload-list-file: ${{ steps.authz_grants.outputs.terminal_agents_grants_file }}", workflow_text)
+        self.assertIn("payload-list-file: ${{ steps.authz_grants.outputs.local_operators_grants_file }}", workflow_text)
+        self.assertIn("payload-list-file: ${{ steps.authz_grants.outputs.local_admins_grants_file }}", workflow_text)
+        self.assertIn("payload-list-file: ${{ steps.authz_grants.outputs.github_humans_grants_file }}", workflow_text)
+        self.assertIn("payload-file: ${{ steps.authz_grants.outputs.runtime_key_safety_policy_file }}", workflow_text)
+        self.assertIn("idempotency-key: ${{ steps.authz_grants.outputs.runtime_key_safety_idempotency_key }}", workflow_text)
+        self.assertIn("route-path: /v1/authz-policies/github-actions/grants", workflow_text)
+        self.assertIn("route-path: /v1/runtime-key-safety/policies/apply", workflow_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", script_text)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", script_text)
+        self.assertNotIn("Authorization: Bearer", script_text)
+        self.assertNotIn("curl ", script_text)
+
     def test_product_onboarding_workflow_calls_service_route_with_apply_guard(self) -> None:
         workflow_text = Path(".github/workflows/product-onboarding.yml").read_text(encoding="utf-8")
 
@@ -2073,11 +2044,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_deploy_authz_grants_accept_configured_runtime_key_safety_rules(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
         configured_rules = [
             {
                 "binding_key": "EXAMPLE_API_TOKEN",
@@ -2088,80 +2054,28 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         ]
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'all_args="$*"\n'
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                "    idempotency_header=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                '        -H) shift; case "$1" in Idempotency-Key:*) idempotency_header="$1" ;; esac ;;\n'
-                '        --data) shift; request_payload="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                '    case "$all_args" in\n'
-                "      */v1/runtime-key-safety/policies/apply*)\n"
-                '      printf \'%s\\n\' "$request_payload" > "$CAPTURED_POLICY"\n'
-                '      printf \'%s\\n\' "$idempotency_header" > "$CAPTURED_POLICY_IDEMPOTENCY"\n'
-                "        ;;\n"
-                "    esac\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_policy = temporary_directory / "policy.json"
-            captured_policy_idempotency = temporary_directory / "policy-idempotency.txt"
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                **OWNER_AUTHZ_ENV,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(configured_rules),
-                "CAPTURED_POLICY": str(captured_policy),
-                "CAPTURED_POLICY_IDEMPOTENCY": str(captured_policy_idempotency),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
+            result = _run_authz_grants_generator(
+                temporary_directory,
+                extra_env={
+                    "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(configured_rules)
+                },
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            policy_payload = json.loads(captured_policy.read_text(encoding="utf-8"))
-            policy_idempotency = captured_policy_idempotency.read_text(encoding="utf-8")
+            policy_payload = json.loads(
+                (temporary_directory / "authz-grants" / "runtime-key-safety-policy.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            policy_idempotency = _read_github_outputs(temporary_directory)[
+                "runtime_key_safety_idempotency_key"
+            ]
 
         self.assertEqual(policy_payload["product"], "launchplane")
         self.assertEqual(policy_payload["source_label"], "deploy:runtime-key-safety-rules")
         self.assertRegex(
             policy_idempotency,
-            r"Idempotency-Key: launchplane-runtime-key-safety-rules:test-sha:[0-9a-f]{64}",
+            r"launchplane-runtime-key-safety-rules:test-sha:[0-9a-f]{64}",
         )
         self.assertNotIn("EXAMPLE_API_TOKEN", policy_idempotency)
         self.assertEqual(policy_payload["rules"][0]["binding_key"], "EXAMPLE_API_TOKEN")
@@ -2175,52 +2089,13 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_deploy_authz_grants_reject_incomplete_runtime_key_safety_rules(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      if [ "$1" = "-o" ]; then shift; output_file="$1"; fi\n'
-                "      shift || true\n"
-                "    done\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-
-            result = subprocess.run(
-                ["bash", "scripts/deploy/ensure-authz-grants.sh"],
-                check=False,
-                cwd=Path.cwd(),
-                env={
-                    **os.environ,
-                    **OWNER_AUTHZ_ENV,
-                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                    "GITHUB_SHA": "test-sha",
-                    "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                    "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+            result = _run_authz_grants_generator(
+                temporary_directory,
+                extra_env={
                     "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(
                         [{"binding_key": "EXAMPLE_API_TOKEN"}]
-                    ),
-                    "CAPTURED_RESPONSE_FILE": str(temporary_directory / "response.json"),
-                    "PATH": f"{captured_bin_directory}:{os.environ['PATH']}",
+                    )
                 },
-                capture_output=True,
-                text=True,
             )
 
         self.assertNotEqual(result.returncode, 0)
@@ -2231,52 +2106,13 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      if [ "$1" = "-o" ]; then shift; output_file="$1"; fi\n'
-                "      shift || true\n"
-                "    done\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-
-            result = subprocess.run(
-                ["bash", "scripts/deploy/ensure-authz-grants.sh"],
-                check=False,
-                cwd=Path.cwd(),
-                env={
-                    **os.environ,
-                    **OWNER_AUTHZ_ENV,
-                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                    "GITHUB_SHA": "test-sha",
-                    "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                    "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+            result = _run_authz_grants_generator(
+                temporary_directory,
+                extra_env={
                     "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(
                         [{"binding_key": "EXAMPLE_API_TOKEN", "secret_class": "production"}]
-                    ),
-                    "CAPTURED_RESPONSE_FILE": str(temporary_directory / "response.json"),
-                    "PATH": f"{captured_bin_directory}:{os.environ['PATH']}",
+                    )
                 },
-                capture_output=True,
-                text=True,
             )
 
         self.assertNotEqual(result.returncode, 0)
@@ -2305,84 +2141,21 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_deploy_authz_grants_scope_public_ingress_monitor_to_launchplane(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                '        --data) shift; request_payload="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                "    if printf '%s' \"$request_payload\" | grep -q 'public-ingress-monitor.yml'; then\n"
-                "      printf '%s\\n%s\\n' \"$request_payload\" '---END-GRANT---' >> \"$CAPTURED_GRANTS\"\n"
-                "    fi\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_grants = temporary_directory / "grants.jsonl"
-            captured_grants.touch()
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                **OWNER_AUTHZ_ENV,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
-                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
-                "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
-                "ODOO_OPW_TESTING_DOKPLOY_TARGET_ID": "compose-opw-testing",
-                "ODOO_OPW_PROD_DOKPLOY_TARGET_ID": "compose-opw-prod",
-                "CAPTURED_GRANTS": str(captured_grants),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
+            result = _run_authz_grants_generator(temporary_directory)
 
             self.assertEqual(result.returncode, 0, result.stderr)
             grants = [
-                json.loads(grant_text)["grant"]
-                for grant_text in captured_grants.read_text().split("---END-GRANT---")
-                if grant_text.strip()
+                grant
+                for grant in _read_authz_grants(temporary_directory, "github-actions-grants.json")
+                if _grant_string_list(grant, "workflow_refs")[0].endswith(
+                    "/.github/workflows/public-ingress-monitor.yml@refs/heads/main"
+                )
             ]
 
         self.assertEqual(len(grants), 2)
-        grant_index = {grant["event_names"][0]: grant for grant in grants}
+        grant_index = {_grant_string_list(grant, "event_names")[0]: grant for grant in grants}
         self.assertEqual(set(grant_index), {"schedule", "workflow_dispatch"})
         for grant in grants:
             self.assertEqual(grant["repository"], "cbusillo/launchplane")
@@ -2491,88 +2264,24 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_deploy_authz_grants_skip_local_operator_product_config_without_scopes(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                '        --data) shift; request_payload="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                "    if printf '%s' \"$request_payload\" | grep -q '\"grant\"'; then\n"
-                "      printf '%s\\n%s\\n' \"$request_payload\" '---END-GRANT---' >> \"$CAPTURED_GRANTS\"\n"
-                "    fi\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_grants = temporary_directory / "grants.jsonl"
-            captured_grants.touch()
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                **OWNER_AUTHZ_ENV,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "CAPTURED_GRANTS": str(captured_grants),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
+            result = _run_authz_grants_generator(temporary_directory)
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            grants = [
-                json.loads(grant_text)["grant"]
-                for grant_text in captured_grants.read_text().split("---END-GRANT---")
-                if grant_text.strip()
-            ]
+            grants = _read_authz_grants(temporary_directory, "local-operators-grants.json")
 
         product_config_grants = [
             grant
             for grant in grants
-            if grant["actions"][0].startswith("product_config.")
+            if _grant_string_list(grant, "actions")[0].startswith("product_config.")
             and "subjects" in grant
             and "token_labels" in grant
         ]
         private_health_endpoint_grants = [
             grant
             for grant in grants
-            if grant["actions"][0].startswith("private_health_endpoint.")
+            if _grant_string_list(grant, "actions")[0].startswith("private_health_endpoint.")
             and "subjects" in grant
             and "token_labels" in grant
         ]
@@ -2598,61 +2307,13 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_deploy_authz_grants_fail_on_malformed_local_operator_product_config_scopes(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                **OWNER_AUTHZ_ENV,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+            result = _run_authz_grants_generator(
+                temporary_directory,
+                extra_env={
                 "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": "not-json",
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
+                },
             )
 
         self.assertNotEqual(result.returncode, 0)
@@ -2661,61 +2322,13 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_deploy_authz_grants_fail_on_malformed_private_health_endpoint_scopes(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                **OWNER_AUTHZ_ENV,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+            result = _run_authz_grants_generator(
+                temporary_directory,
+                extra_env={
                 "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": "not-json",
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
+                },
             )
 
         self.assertNotEqual(result.returncode, 0)
@@ -2724,63 +2337,15 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_deploy_authz_grants_reject_private_health_endpoint_wildcard_scopes(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                **OWNER_AUTHZ_ENV,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+            result = _run_authz_grants_generator(
+                temporary_directory,
+                extra_env={
                 "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": json.dumps(
                     [{"product": "*", "context": "*"}]
                 ),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
+                },
             )
 
         self.assertNotEqual(result.returncode, 0)
@@ -2792,114 +2357,62 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_deploy_authz_grants_scope_configured_local_operator_product_config(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                '        --data) shift; request_payload="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                "    if printf '%s' \"$request_payload\" | grep -q '\"grant\"'; then\n"
-                "      printf '%s\\n%s\\n' \"$request_payload\" '---END-GRANT---' >> \"$CAPTURED_GRANTS\"\n"
-                "    fi\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_grants = temporary_directory / "grants.jsonl"
-            captured_grants.touch()
-            captured_response_file = temporary_directory / "response.json"
             configured_scopes = json.dumps(
                 [
                     {"product": "discord-blue", "context": "discord-blue"},
                     {"product": "verireel", "context": "verireel"},
                 ]
             )
-            env = {
-                **os.environ,
-                **OWNER_AUTHZ_ENV,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON": configured_scopes,
-                "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": configured_scopes,
-                "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": configured_scopes,
-                "CAPTURED_GRANTS": str(captured_grants),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
+            result = _run_authz_grants_generator(
+                temporary_directory,
+                extra_env={
+                    "LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON": configured_scopes,
+                    "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": configured_scopes,
+                    "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": configured_scopes,
+                },
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            grants = [
-                json.loads(grant_text)["grant"]
-                for grant_text in captured_grants.read_text().split("---END-GRANT---")
-                if grant_text.strip()
-            ]
+            grants = _read_authz_grants(
+                temporary_directory,
+                "local-operators-grants.json",
+            ) + _read_authz_grants(temporary_directory, "github-actions-grants.json")
 
         product_config_grants = [
             grant
             for grant in grants
-            if grant["actions"][0].startswith("product_config.")
+            if _grant_string_list(grant, "actions")[0].startswith("product_config.")
             and "subjects" in grant
             and "token_labels" in grant
         ]
         private_health_endpoint_grants = [
             grant
             for grant in grants
-            if grant["actions"][0].startswith("private_health_endpoint.")
+            if _grant_string_list(grant, "actions")[0].startswith("private_health_endpoint.")
             and "subjects" in grant
             and "token_labels" in grant
         ]
         scoped_grants = {
-            (grant["products"][0], grant["contexts"][0], grant["actions"][0])
+            (
+                _grant_string_list(grant, "products")[0],
+                _grant_string_list(grant, "contexts")[0],
+                _grant_string_list(grant, "actions")[0],
+            )
             for grant in product_config_grants + private_health_endpoint_grants
         }
         canary_workflow_grants = [
             grant
             for grant in grants
-            if grant["actions"] == ["ingress_route.apply"]
-            and grant["workflow_refs"][0].endswith(
+            if _grant_string_list(grant, "actions") == ["ingress_route.apply"]
+            and _grant_string_list(grant, "workflow_refs")[0].endswith(
                 "/.github/workflows/ingress-route-canary-apply.yml@refs/heads/main"
             )
         ]
         canary_scoped_grants = {
-            (grant["products"][0], grant["contexts"][0]) for grant in canary_workflow_grants
+            (_grant_string_list(grant, "products")[0], _grant_string_list(grant, "contexts")[0])
+            for grant in canary_workflow_grants
         }
         expected_scopes = {
             ("discord-blue", "discord-blue"),
@@ -2924,19 +2437,23 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             self.assertNotEqual(grant["products"], ["*"])
             self.assertNotEqual(grant["contexts"], ["*"])
             self.assertTrue(
-                grant["source_label"].startswith("deploy:local-operator-product-config-")
+                _grant_string(grant, "source_label").startswith("deploy:local-operator-product-config-")
             )
         for grant in private_health_endpoint_grants:
             self.assertNotEqual(grant["products"], ["*"])
             self.assertNotEqual(grant["contexts"], ["*"])
             self.assertTrue(
-                grant["source_label"].startswith("deploy:local-operator-private-health-endpoint-")
+                _grant_string(grant, "source_label").startswith(
+                    "deploy:local-operator-private-health-endpoint-"
+                )
             )
         for grant in canary_workflow_grants:
             self.assertNotEqual(grant["products"], ["*"])
             self.assertNotEqual(grant["contexts"], ["*"])
             self.assertTrue(
-                grant["source_label"].startswith("deploy:ingress-route-canary-apply-workflow-")
+                _grant_string(grant, "source_label").startswith(
+                    "deploy:ingress-route-canary-apply-workflow-"
+                )
             )
 
     def test_apply_product_onboarding_manifest_writes_canonical_records(self) -> None:
