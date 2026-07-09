@@ -740,7 +740,16 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "context": frozenset((".",)),
         "password": frozenset(("${{ github.token }}",)),
     },
-    ".github/workflows/deploy-launchplane.yml": {"context": frozenset((".",))},
+    ".github/workflows/deploy-launchplane.yml": {
+        "audience": frozenset(("${{ steps.service.outputs.service_audience }}",)),
+        "context": frozenset((".",)),
+        "expected-status": frozenset(('"200"',)),
+        "log-response-body": frozenset(('"false"',)),
+        "method": frozenset(("GET",)),
+        "response-output-file": frozenset(("${{ runner.temp }}/launchplane-runtime-smoke.json",)),
+        "route-path": frozenset(("/v1/service/runtime",)),
+        "timeout-ms": frozenset(('"30000"',)),
+    },
     ".github/workflows/launchplane-config-authority.yml": {
         "uses": frozenset(
             (

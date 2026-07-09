@@ -2911,6 +2911,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
             ("idempotency-key", "${{ steps.onboarding.outputs.idempotency_key }}"),
             ("log-response-body", '"false"'),
+            ("method", "GET"),
             ("response-output-file", "dokploy-target-inspect-response.json"),
             ("response-output-file", "ingress-route-audit-read-raw.json"),
             ("response-output-file", "launchplane-context-cutover-audit.json"),
@@ -2925,6 +2926,24 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         value=value,
                     ),
                     "",
+                )
+
+        for key, value in (
+            ("audience", "${{ steps.service.outputs.service_audience }}"),
+            ("expected-status", '"200"'),
+            ("method", "GET"),
+            ("response-output-file", "${{ runner.temp }}/launchplane-runtime-smoke.json"),
+            ("route-path", "/v1/service/runtime"),
+            ("timeout-ms", '"30000"'),
+        ):
+            with self.subTest(deploy_runtime_smoke_mechanic=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/deploy-launchplane.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
                 )
         self.assertEqual(
             _allow_reason(
