@@ -422,8 +422,11 @@ reference, a dated owner, and a delete condition.
 Generic-web product repos should prefer Launchplane-owned reusable workflows
 before calling raw driver routes. The reusable workflow owns the Launchplane
 route path, request JSON shape, response-output mapping, and run-scoped
-idempotency key. The product repo supplies only primitive facts: immutable
-artifact identity and tested source git ref. The stable deploy workflow derives
+idempotency key. The product repo supplies only primitive facts. Product repos
+may calculate product-specific semantic release tags, but Launchplane owns
+source-inventory lookup and validation, promotion request shaping, provider
+mutation, health verification, and release creation or verification. The
+stable deploy workflow derives
 the product key from the caller repository name by default and uses the
 `testing` stable lane unless the caller supplies a narrower operator override.
 
@@ -446,9 +449,15 @@ jobs:
     uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-prod-promotion.yml@main
     with:
       product: ${{ vars.LAUNCHPLANE_PRODUCT }}
-      artifact_id: ${{ needs.build.outputs.image_digest }}
-      source_git_ref: ${{ github.sha }}
+      dry_run: ${{ inputs.dry_run }}
+      release_tag: ${{ needs.release.outputs.release_tag }}
 ```
+
+The promotion workflow defaults artifact identity and source revision from the
+Launchplane-owned source-lane inventory. Optional explicit artifact and source
+revision inputs are validation overrides: they must match that stored inventory.
+Dry run is the fail-closed default and returns pending evidence without mutating
+prod or creating a release. Live callers must explicitly set `dry_run: false`.
 
 Production rollback uses stored Launchplane deployment evidence rather than
 product-provided provider targets:

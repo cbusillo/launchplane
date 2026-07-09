@@ -5,16 +5,22 @@ name: Reusable Generic Web Prod Promotion
   workflow_call:
     inputs:
       product:
-        description: Launchplane product key.
-        required: true
+        description: >-
+          Launchplane product key. Defaults to the caller repository name.
+        required: false
+        default: ""
         type: string
       artifact_id:
-        description: Immutable image or Launchplane-resolvable artifact identity.
-        required: true
+        description: >-
+          Optional immutable artifact override. Defaults to source inventory.
+        required: false
+        default: ""
         type: string
       source_git_ref:
-        description: Source git ref attached to promotion evidence.
-        required: true
+        description: >-
+          Optional source revision override. Defaults to source inventory.
+        required: false
+        default: ""
         type: string
       from_instance:
         description: Source stable lane instance.
@@ -26,11 +32,41 @@ name: Reusable Generic Web Prod Promotion
         required: false
         default: prod
         type: string
+      dry_run:
+        description: Validate promotion without mutating prod or creating a release.
+        required: false
+        default: true
+        type: boolean
+      release_tag:
+        description: Optional product-computed GitHub release tag for live promotion.
+        required: false
+        default: ""
+        type: string
+      timeout-seconds:
+        description: Deploy timeout in seconds supplied to Launchplane.
+        required: false
+        default: 300
+        type: number
+      health-timeout-seconds:
+        description: Source and destination health timeout in seconds.
+        required: false
+        default: 120
+        type: number
+      verify_health:
+        description: Whether Launchplane verifies source and destination health.
+        required: false
+        default: true
+        type: boolean
+      no_cache:
+        description: Whether the destination deploy bypasses provider cache.
+        required: false
+        default: false
+        type: boolean
       timeout-ms:
         description: Launchplane request timeout in milliseconds.
         required: false
-        default: "2700000"
-        type: string
+        default: 2700000
+        type: number
       launchplane_url:
         description: >-
           Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
@@ -44,12 +80,18 @@ name: Reusable Generic Web Prod Promotion
         default: ""
         type: string
     outputs:
+      trace_id:
+        description: Launchplane request trace ID.
+        value: ${{ jobs.prod-promotion.outputs.trace_id }}
       promotion_record_id:
         description: Launchplane promotion record ID.
         value: ${{ jobs.prod-promotion.outputs.promotion_record_id }}
       deployment_record_id:
         description: Launchplane deployment record ID.
         value: ${{ jobs.prod-promotion.outputs.deployment_record_id }}
+      inventory_record_id:
+        description: Launchplane destination inventory record ID.
+        value: ${{ jobs.prod-promotion.outputs.inventory_record_id }}
       promotion_status:
         description: Generic-web promotion status.
         value: ${{ jobs.prod-promotion.outputs.promotion_status }}
@@ -62,6 +104,24 @@ name: Reusable Generic Web Prod Promotion
       destination_health_status:
         description: Destination lane health status.
         value: ${{ jobs.prod-promotion.outputs.destination_health_status }}
+      release_status:
+        description: GitHub release status.
+        value: ${{ jobs.prod-promotion.outputs.release_status }}
+      release_tag:
+        description: GitHub release tag returned by Launchplane.
+        value: ${{ jobs.prod-promotion.outputs.release_tag }}
+      release_url:
+        description: GitHub release URL returned by Launchplane.
+        value: ${{ jobs.prod-promotion.outputs.release_url }}
+      dry_run:
+        description: Whether Launchplane handled the request as a dry run.
+        value: ${{ jobs.prod-promotion.outputs.dry_run }}
+      artifact_id:
+        description: Promoted immutable artifact identity.
+        value: ${{ jobs.prod-promotion.outputs.artifact_id }}
+      source_git_ref:
+        description: Promoted source revision.
+        value: ${{ jobs.prod-promotion.outputs.source_git_ref }}
       error_message:
         description: Launchplane driver error message, when present.
         value: ${{ jobs.prod-promotion.outputs.error_message }}
@@ -70,29 +130,43 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: >-
+    launchplane-generic-web-prod-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   prod-promotion:
     outputs:
+      trace_id: ${{ steps.lp.outputs.trace_id }}
       promotion_record_id: ${{ steps.lp.outputs.promotion_record_id }}
       deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
+      inventory_record_id: ${{ steps.lp.outputs.inventory_record_id }}
       promotion_status: ${{ steps.lp.outputs.promotion_status }}
       deployment_status: ${{ steps.lp.outputs.deployment_status }}
       source_health_status: ${{ steps.lp.outputs.source_health_status }}
       destination_health_status: ${{ steps.lp.outputs.destination_health_status }}
+      release_status: ${{ steps.lp.outputs.release_status }}
+      release_tag: ${{ steps.lp.outputs.release_tag }}
+      release_url: ${{ steps.lp.outputs.release_url }}
+      dry_run: ${{ steps.lp.outputs.dry_run }}
+      artifact_id: ${{ steps.lp.outputs.artifact_id }}
+      source_git_ref: ${{ steps.lp.outputs.source_git_ref }}
       error_message: ${{ steps.lp.outputs.error_message }}
     runs-on: ubuntu-latest
     steps:
       - name: Resolve Launchplane promotion request
         id: request
         env:
-          ARTIFACT_ID: ${{ inputs.artifact_id }}
           FROM_INSTANCE: ${{ inputs.from_instance }}
           PRODUCT: ${{ inputs.product }}
-          SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
           TO_INSTANCE: ${{ inputs.to_instance }}
         run: |
           set -euo pipefail
-          for required in PRODUCT FROM_INSTANCE TO_INSTANCE ARTIFACT_ID SOURCE_GIT_REF; do
+          if [ -z "$PRODUCT" ]; then
+            PRODUCT="${GITHUB_REPOSITORY#*/}"
+          fi
+          for required in PRODUCT FROM_INSTANCE TO_INSTANCE; do
             if [ -z "${!required}" ]; then
               echo "${required} is required." >&2
               exit 1
@@ -112,6 +186,96 @@ jobs:
               "$run_scope"
           } >>"$GITHUB_OUTPUT"
 
+      - name: Write Launchplane generic-web promotion payload
+        id: payload
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FROM_INSTANCE: ${{ steps.request.outputs.from_instance }}
+          HEALTH_TIMEOUT_SECONDS: ${{ inputs['health-timeout-seconds'] }}
+          NO_CACHE: ${{ inputs.no_cache }}
+          PRODUCT: ${{ steps.request.outputs.product }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+          TIMEOUT_SECONDS: ${{ inputs['timeout-seconds'] }}
+          TO_INSTANCE: ${{ steps.request.outputs.to_instance }}
+          VERIFY_HEALTH: ${{ inputs.verify_health }}
+        run: |
+          set -euo pipefail
+          mkdir -p .launchplane
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          function booleanInput(name) {
+            const value = String(process.env[name] ?? '').trim().toLowerCase();
+            if (value === 'true') return true;
+            if (value === 'false') return false;
+            throw new Error(`${name} must be true or false.`);
+          }
+
+          function positiveIntegerInput(name) {
+            const value = String(process.env[name] ?? '').trim();
+            const parsed = Number(value);
+            if (!Number.isInteger(parsed) || parsed < 1) {
+              throw new Error(`${name} must be a positive integer.`);
+            }
+            return parsed;
+          }
+
+          const requestedArtifact = String(process.env.ARTIFACT_ID ?? '').trim();
+          const requestedSource = String(process.env.SOURCE_GIT_REF ?? '').trim();
+
+          const dryRun = booleanInput('DRY_RUN');
+          const releaseTag = String(process.env.RELEASE_TAG ?? '').trim();
+          const promotion = {
+            schema_version: 1,
+            product: process.env.PRODUCT,
+            artifact_id: requestedArtifact,
+            source_git_ref: requestedSource,
+            from_instance: process.env.FROM_INSTANCE,
+            to_instance: process.env.TO_INSTANCE,
+            wait: true,
+            timeout_seconds: positiveIntegerInput('TIMEOUT_SECONDS'),
+            verify_health: booleanInput('VERIFY_HEALTH'),
+            health_timeout_seconds: positiveIntegerInput('HEALTH_TIMEOUT_SECONDS'),
+            dry_run: dryRun,
+            no_cache: booleanInput('NO_CACHE'),
+          };
+          if (!dryRun && releaseTag) promotion.release_tag = releaseTag;
+
+          const payload = {
+            schema_version: 1,
+            product: process.env.PRODUCT,
+            promotion,
+          };
+          fs.writeFileSync(
+            '.launchplane/generic-web-prod-promotion-payload.json',
+            `${JSON.stringify(payload)}\n`,
+            'utf8',
+          );
+          NODE
+
+      - name: Verify release tag is unused
+        if: ${{ !inputs.dry_run && inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          encoded_tag="$(RELEASE_TAG_VALUE="$RELEASE_TAG" node -p \
+            'encodeURIComponent(process.env.RELEASE_TAG_VALUE)')"
+          error_file="$(mktemp)"
+          if gh api \
+            "/repos/$GITHUB_REPOSITORY/releases/tags/$encoded_tag" \
+            >/dev/null 2>"$error_file"; then
+            echo "GitHub release '$RELEASE_TAG' already exists." >&2
+            exit 1
+          fi
+          if ! grep -q 'HTTP 404' "$error_file"; then
+            cat "$error_file" >&2
+            exit 1
+          fi
+
       - name: Request Launchplane generic-web prod promotion
         id: lp
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
@@ -120,21 +284,7 @@ jobs:
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
           audience: ${{ inputs.launchplane_audience }}
           route-path: /v1/drivers/generic-web/prod-promotion
-          payload: |-
-            {
-              "schema_version": 1,
-              "promotion": {
-                "schema_version": 1,
-                "wait": true
-              }
-            }
-          payload-fields: |-
-            product=${{ steps.request.outputs.product }}
-            promotion.product=${{ steps.request.outputs.product }}
-            promotion.from_instance=${{ steps.request.outputs.from_instance }}
-            promotion.to_instance=${{ steps.request.outputs.to_instance }}
-            promotion.artifact_id=${{ inputs.artifact_id }}
-            promotion.source_git_ref=${{ inputs.source_git_ref }}
+          payload-file: .launchplane/generic-web-prod-promotion-payload.json
           idempotency-key: >-
             ${{ steps.request.outputs.idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
@@ -146,25 +296,82 @@ jobs:
             trace_id=trace_id,
             promotion_record_id=records.promotion_record_id,
             deployment_record_id=records.deployment_record_id,
+            inventory_record_id=records.inventory_record_id,
             promotion_status=result.promotion_status,
             deployment_status=result.deployment_status,
             source_health_status=result.source_health_status,
             destination_health_status=result.destination_health_status,
+            release_status=result.release_status,
+            release_tag=result.release_tag,
+            release_url=result.release_url,
+            dry_run=result.dry_run,
+            artifact_id=result.artifact_id,
+            source_git_ref=result.source_git_ref,
             error_message=result.error_message
 
-      - name: Report result
+      - name: Validate Launchplane promotion result
         env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          PROMOTION_STATUS: ${{ steps.lp.outputs.promotion_status }}
+          RELEASE_STATUS: ${{ steps.lp.outputs.release_status }}
+          RELEASE_TAG: ${{ steps.lp.outputs.release_tag }}
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+          RESULT_DRY_RUN: ${{ steps.lp.outputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            if [ "$PROMOTION_STATUS" != "pending" ] || [ "$RESULT_DRY_RUN" != "true" ]; then
+              echo "Launchplane dry-run promotion did not return pending dry-run evidence." >&2
+              exit 1
+            fi
+          elif [ "$PROMOTION_STATUS" != "pass" ]; then
+            echo "Launchplane live promotion did not pass." >&2
+            exit 1
+          fi
+          if [ "$DRY_RUN" != "true" ] && [ -n "$REQUESTED_RELEASE_TAG" ]; then
+            if [ "$RELEASE_STATUS" != "pass" ] || [ "$RELEASE_TAG" != "$REQUESTED_RELEASE_TAG" ]; then
+              echo "Launchplane release result did not match the requested release tag." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Report result
+        if: ${{ always() && steps.lp.outcome != 'skipped' }}
+        env:
+          INVENTORY_RECORD_ID: ${{ steps.lp.outputs.inventory_record_id }}
           DEPLOYMENT_RECORD_ID: ${{ steps.lp.outputs.deployment_record_id }}
           DEPLOYMENT_STATUS: ${{ steps.lp.outputs.deployment_status }}
           DESTINATION_HEALTH_STATUS: >-
             ${{ steps.lp.outputs.destination_health_status }}
           PROMOTION_RECORD_ID: ${{ steps.lp.outputs.promotion_record_id }}
           PROMOTION_STATUS: ${{ steps.lp.outputs.promotion_status }}
+          RELEASE_STATUS: ${{ steps.lp.outputs.release_status }}
+          RELEASE_TAG: ${{ steps.lp.outputs.release_tag }}
+          RELEASE_URL: ${{ steps.lp.outputs.release_url }}
+          DRY_RUN: ${{ steps.lp.outputs.dry_run }}
+          ARTIFACT_ID: ${{ steps.lp.outputs.artifact_id }}
+          SOURCE_GIT_REF: ${{ steps.lp.outputs.source_git_ref }}
           SOURCE_HEALTH_STATUS: ${{ steps.lp.outputs.source_health_status }}
         run: |
-          echo "promotion_record_id=$PROMOTION_RECORD_ID"
-          echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
-          echo "promotion_status=$PROMOTION_STATUS"
-          echo "deployment_status=$DEPLOYMENT_STATUS"
-          echo "source_health_status=$SOURCE_HEALTH_STATUS"
-          echo "destination_health_status=$DESTINATION_HEALTH_STATUS"
+          {
+            echo "## Launchplane prod promotion"
+            echo
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "- Release: not created (dry run)"
+            elif [ -n "$RELEASE_URL" ]; then
+              echo "- Release: [$RELEASE_TAG]($RELEASE_URL)"
+            else
+              echo "- Release: \`${RELEASE_TAG:-not requested}\`"
+            fi
+            echo "- Dry run: \`$DRY_RUN\`"
+            echo "- Artifact: \`$ARTIFACT_ID\`"
+            echo "- Source git ref: \`$SOURCE_GIT_REF\`"
+            echo "- Promotion status: \`$PROMOTION_STATUS\`"
+            echo "- Deployment status: \`$DEPLOYMENT_STATUS\`"
+            echo "- Source health: \`$SOURCE_HEALTH_STATUS\`"
+            echo "- Destination health: \`$DESTINATION_HEALTH_STATUS\`"
+            echo "- Release status: \`${RELEASE_STATUS:-skipped}\`"
+            echo "- Promotion record: \`$PROMOTION_RECORD_ID\`"
+            echo "- Deployment record: \`$DEPLOYMENT_RECORD_ID\`"
+            echo "- Inventory record: \`$INVENTORY_RECORD_ID\`"
+          } >>"$GITHUB_STEP_SUMMARY"

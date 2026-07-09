@@ -31,7 +31,7 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     execute_generic_web_deploy,
     normalize_generic_web_artifact_id,
-    resolve_generic_web_profile_lane,
+    product_profile_uses_generic_web_base,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.launchplane import (
@@ -69,8 +69,8 @@ class GenericWebProdPromotionRequest(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     product: str
-    artifact_id: str
-    source_git_ref: str
+    artifact_id: str = ""
+    source_git_ref: str = ""
     from_instance: str = "testing"
     to_instance: str = "prod"
     backup_record_id: str = ""
@@ -94,10 +94,6 @@ class GenericWebProdPromotionRequest(BaseModel):
         self.release_tag = self.release_tag.strip()
         if not self.product:
             raise ValueError("generic web prod promotion requires product")
-        if not self.artifact_id:
-            raise ValueError("generic web prod promotion requires artifact_id")
-        if not self.source_git_ref:
-            raise ValueError("generic web prod promotion requires source_git_ref")
         if self.from_instance == self.to_instance:
             raise ValueError("generic web prod promotion source and destination must differ")
         if self.from_instance != "testing" or self.to_instance != "prod":
@@ -119,6 +115,7 @@ class GenericWebProdPromotionResult(BaseModel):
     from_instance: str
     to_instance: str
     artifact_id: str
+    source_git_ref: str = ""
     backup_record_id: str = ""
     promotion_record_id: str
     deployment_record_id: str = ""
@@ -167,26 +164,30 @@ class GenericWebProdPromotionTargetResultFields(BaseModel):
 def resolve_generic_web_promotion_lanes(
     *, record_store: GenericWebPromotionStore, request: GenericWebProdPromotionRequest
 ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile, ProductLaneProfile]:
-    source_profile, source_lane = resolve_generic_web_profile_lane(
-        record_store=record_store,
-        request=GenericWebDeployRequest(
-            product=request.product,
-            instance=request.from_instance,
-            artifact_id=request.artifact_id,
-            source_git_ref=request.source_git_ref,
-        ),
+    profile = record_store.read_product_profile_record(request.product)
+    if not product_profile_uses_generic_web_base(profile):
+        raise click.ClickException(
+            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
+            "not generic-web or a generic-web based driver."
+        )
+    source_lane = next(
+        (lane for lane in profile.lanes if lane.instance == request.from_instance),
+        None,
     )
-    destination_profile, destination_lane = resolve_generic_web_profile_lane(
-        record_store=record_store,
-        request=GenericWebDeployRequest(
-            product=request.product,
-            instance=request.to_instance,
-            artifact_id=request.artifact_id,
-            source_git_ref=request.source_git_ref,
-        ),
+    destination_lane = next(
+        (lane for lane in profile.lanes if lane.instance == request.to_instance),
+        None,
     )
-    if source_profile.product != destination_profile.product:
-        raise click.ClickException("Generic web promotion resolved inconsistent product profiles.")
+    if source_lane is None:
+        raise click.ClickException(
+            f"Product {profile.product!r} has no generic-web lane for instance "
+            f"{request.from_instance!r}."
+        )
+    if destination_lane is None:
+        raise click.ClickException(
+            f"Product {profile.product!r} has no generic-web lane for instance "
+            f"{request.to_instance!r}."
+        )
     source_lane = source_lane.model_copy(
         update={"context": source_lane.context.strip(), "instance": source_lane.instance.strip()}
     )
@@ -201,7 +202,7 @@ def resolve_generic_web_promotion_lanes(
             "Generic web promotion currently requires source and destination lanes to share a context. "
             f"Resolved source={source_lane.context} destination={destination_lane.context}."
         )
-    return source_profile, source_lane, destination_lane
+    return profile, source_lane, destination_lane
 
 
 def execute_generic_web_prod_promotion(
@@ -214,19 +215,19 @@ def execute_generic_web_prod_promotion(
         record_store=record_store,
         request=request,
     )
-    request = request.model_copy(
-        update={
-            "artifact_id": normalize_generic_web_artifact_id(
-                profile=profile,
-                artifact_id=request.artifact_id,
-            )
-        }
-    )
-    _validate_source_inventory_matches_request(
+    request = _resolve_source_inventory_inputs(
         record_store=record_store,
+        profile=profile,
         request=request,
         source_lane=source_lane,
     )
+    if request.release_tag and not request.dry_run:
+        _preflight_github_release(
+            control_plane_root=control_plane_root,
+            profile=profile,
+            context=destination_lane.context,
+            request=request,
+        )
     promotion_record_id = generate_promotion_record_id(
         context_name=destination_lane.context,
         from_instance_name=source_lane.instance,
@@ -257,6 +258,7 @@ def execute_generic_web_prod_promotion(
             from_instance=source_lane.instance,
             to_instance=destination_lane.instance,
             artifact_id=request.artifact_id,
+            source_git_ref=request.source_git_ref,
             backup_record_id=request.backup_record_id,
             promotion_record_id=promotion_record_id,
             promotion_status="pending",
@@ -470,12 +472,13 @@ def _resolve_backup_gate(
     )
 
 
-def _validate_source_inventory_matches_request(
+def _resolve_source_inventory_inputs(
     *,
     record_store: GenericWebPromotionStore,
+    profile: LaunchplaneProductProfileRecord,
     request: GenericWebProdPromotionRequest,
     source_lane: ProductLaneProfile,
-) -> None:
+) -> GenericWebProdPromotionRequest:
     try:
         source_inventory = record_store.read_environment_inventory(
             context_name=source_lane.context,
@@ -489,16 +492,43 @@ def _validate_source_inventory_matches_request(
     inventory_artifact_id = ""
     if source_inventory.artifact_identity is not None:
         inventory_artifact_id = source_inventory.artifact_identity.artifact_id.strip()
-    if (
-        inventory_artifact_id != request.artifact_id
-        or source_inventory.source_git_ref != request.source_git_ref
-    ):
+    inventory_source_git_ref = source_inventory.source_git_ref.strip()
+    if not inventory_artifact_id or not inventory_source_git_ref:
+        raise click.ClickException(
+            "Generic web prod promotion requires source inventory with artifact identity "
+            "and source git ref."
+        )
+    normalized_inventory_artifact_id = normalize_generic_web_artifact_id(
+        profile=profile,
+        artifact_id=inventory_artifact_id,
+    )
+    requested_artifact_id = ""
+    if request.artifact_id:
+        requested_artifact_id = normalize_generic_web_artifact_id(
+            profile=profile,
+            artifact_id=request.artifact_id,
+        )
+    artifact_matches = not requested_artifact_id or (
+        requested_artifact_id == normalized_inventory_artifact_id
+    )
+    source_matches = not request.source_git_ref or _revisions_match(
+        request.source_git_ref,
+        inventory_source_git_ref,
+    )
+    if not artifact_matches or not source_matches:
         raise click.ClickException(
             "Generic web prod promotion request does not match current source inventory. "
-            f"Inventory artifact={inventory_artifact_id or '<missing>'} "
-            f"source_ref={source_inventory.source_git_ref}; "
-            f"request artifact={request.artifact_id} source_ref={request.source_git_ref}."
+            f"Inventory artifact={normalized_inventory_artifact_id} "
+            f"source_ref={inventory_source_git_ref}; "
+            f"request artifact={requested_artifact_id or '<default>'} "
+            f"source_ref={request.source_git_ref or '<default>'}."
         )
+    return request.model_copy(
+        update={
+            "artifact_id": normalized_inventory_artifact_id,
+            "source_git_ref": inventory_source_git_ref,
+        }
+    )
 
 
 def _health_url_for_lane(*, lane: ProductLaneProfile, health_path: str) -> str:
@@ -840,6 +870,42 @@ def _create_or_verify_github_release(
     return _release_html_url(release_payload)
 
 
+def _preflight_github_release(
+    *,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    request: GenericWebProdPromotionRequest,
+) -> None:
+    owner, repo = _repository_parts(profile.repository)
+    token = resolve_launchplane_github_token(
+        control_plane_root=control_plane_root,
+        context_name=context,
+    )
+    if not token:
+        raise click.ClickException(
+            f"Generic web prod promotion requires GitHub token for context '{context}' "
+            f"to validate release '{request.release_tag}'."
+        )
+    tag_target_sha = _github_tag_target_sha(
+        owner=owner,
+        repo=repo,
+        release_tag=request.release_tag,
+        token=token,
+    )
+    if tag_target_sha and not _revisions_match(tag_target_sha, request.source_git_ref):
+        raise click.ClickException(
+            f"GitHub tag '{request.release_tag}' points at '{tag_target_sha}', "
+            f"not promoted revision '{request.source_git_ref}'."
+        )
+    _github_release_for_tag(
+        owner=owner,
+        repo=repo,
+        release_tag=request.release_tag,
+        token=token,
+    )
+
+
 def _repository_parts(repository: str) -> tuple[str, str]:
     owner, separator, repo = repository.strip().partition("/")
     if not owner or separator != "/" or not repo:
@@ -977,6 +1043,7 @@ def _result_from_record(
         from_instance=record.from_instance,
         to_instance=record.to_instance,
         artifact_id=record.artifact_identity.artifact_id,
+        source_git_ref=request.source_git_ref,
         backup_record_id=record.backup_record_id,
         promotion_record_id=record.record_id,
         deployment_record_id=deployment_record.record_id if deployment_record is not None else "",
