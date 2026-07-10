@@ -87,7 +87,7 @@ jobs:
       INSTANCE: ${{ inputs.instance }}
       SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Check public route registration
         env:
