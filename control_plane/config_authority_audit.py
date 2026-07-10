@@ -230,6 +230,7 @@ WORKFLOW_RESPONSE_SUMMARY_PATH_VALUES = {
     },
 }
 WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
+    ".github/workflows/cleanup-ghcr.yml": {"GITHUB_TOKEN": frozenset(("${{ github.token }}",))},
     ".github/workflows/deploy-launchplane.yml": {
         "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY": frozenset(('"true"', "true"))
     },
