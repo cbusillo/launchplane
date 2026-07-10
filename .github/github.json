@@ -123,7 +123,14 @@
     "Work Graph Snapshot Validate",
     "Dependency Graph"
   ],
-  "requiredStatusChecks": ["test"],
+  "requiredStatusChecks": [
+    "test",
+    "static_checks",
+    "container_scan",
+    "frontend_validate",
+    "workflow_lint",
+    "secret_scan"
+  ],
   "codeScanningMergeProtection": {
     "ruleset": "Require code scanning results",
     "tool": "CodeQL",
