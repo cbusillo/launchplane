@@ -1316,6 +1316,32 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "",
         )
 
+    def test_cleanup_ghcr_delete_token_is_thin_connector_input(self) -> None:
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/cleanup-ghcr.yml",
+                key="GITHUB_DELETE_TOKEN",
+                value="${{ secrets.ODOO_GHCR_CLEANUP_TOKEN }}",
+            ),
+            "thin_connector_input",
+        )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/cleanup-ghcr.yml",
+                key="GITHUB_DELETE_TOKEN",
+                value="${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",
+            ),
+            "",
+        )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/other.yml",
+                key="GITHUB_DELETE_TOKEN",
+                value="${{ secrets.ODOO_GHCR_CLEANUP_TOKEN }}",
+            ),
+            "",
+        )
+
     def test_workflow_block_scalar_runtime_values_are_scanned(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
