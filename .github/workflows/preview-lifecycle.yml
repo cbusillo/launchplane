@@ -22,7 +22,9 @@ concurrency:
 
 jobs:
   preview_lifecycle:
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
       APPLY: ${{ github.event_name == 'workflow_dispatch' && inputs.apply || false }}
       LAUNCHPLANE_AUDIENCE: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_AUDIENCE }}

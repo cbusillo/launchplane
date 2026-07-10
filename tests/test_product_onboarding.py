@@ -1250,8 +1250,14 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("expected-status: 202,403,503", workflow_text)
         self.assertIn('expected-status: "202"', workflow_text)
         self.assertEqual(workflow_text.count('timeout-ms: "30000"'), 3)
-        self.assertIn("response-output-file: ${{ steps.route_probes.outputs.preview_apply_response }}", workflow_text)
-        self.assertIn("PREVIEW_APPLY_STATUS: ${{ steps.preview_apply_probe.outputs.status-code }}", workflow_text)
+        self.assertIn(
+            "response-output-file: ${{ steps.route_probes.outputs.preview_apply_response }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "PREVIEW_APPLY_STATUS: ${{ steps.preview_apply_probe.outputs.status-code }}",
+            workflow_text,
+        )
         self.assertIn("dry_run: true", workflow_text)
         self.assertIn("'.result.preview_pr_feedback // \"\"'", workflow_text)
         self.assertIn("authorized", workflow_text)
@@ -1576,7 +1582,8 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_preview_lifecycle_uses_launchplane_request(self) -> None:
         workflow_text = Path(".github/workflows/preview-lifecycle.yml").read_text(encoding="utf-8")
 
-        self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn("- self-hosted", workflow_text)
+        self.assertIn("- ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}", workflow_text)
         self.assertIn(
             "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
             workflow_text,
@@ -1601,7 +1608,6 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
         self.assertNotIn("Authorization: Bearer", workflow_text)
-        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
         self.assertNotIn("curl ", workflow_text)
 
     def test_product_legacy_context_cleanup_uses_launchplane_request(self) -> None:
@@ -1762,7 +1768,9 @@ class ProductOnboardingTests(unittest.TestCase):
         removal_lines = removals_block.splitlines()
         start = next(index for index, line in enumerate(removal_lines) if line.strip() == "'(")
         end = next(
-            index for index, line in enumerate(removal_lines[start + 1 :], start + 1) if line.strip() == ")'"
+            index
+            for index, line in enumerate(removal_lines[start + 1 :], start + 1)
+            if line.strip() == ")'"
         )
         removal_lines[start] = removal_lines[start].split("'", 1)[1]
         removal_lines[end] = removal_lines[end].rsplit("'", 1)[0]
@@ -1876,13 +1884,34 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("id: authz_grants", workflow_text)
         self.assertIn("LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON", workflow_text)
         self.assertIn("vars.LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON", workflow_text)
-        self.assertIn("payload-list-file: ${{ steps.authz_grants.outputs.github_actions_grants_file }}", workflow_text)
-        self.assertIn("payload-list-file: ${{ steps.authz_grants.outputs.terminal_agents_grants_file }}", workflow_text)
-        self.assertIn("payload-list-file: ${{ steps.authz_grants.outputs.local_operators_grants_file }}", workflow_text)
-        self.assertIn("payload-list-file: ${{ steps.authz_grants.outputs.local_admins_grants_file }}", workflow_text)
-        self.assertIn("payload-list-file: ${{ steps.authz_grants.outputs.github_humans_grants_file }}", workflow_text)
-        self.assertIn("payload-file: ${{ steps.authz_grants.outputs.runtime_key_safety_policy_file }}", workflow_text)
-        self.assertIn("idempotency-key: ${{ steps.authz_grants.outputs.runtime_key_safety_idempotency_key }}", workflow_text)
+        self.assertIn(
+            "payload-list-file: ${{ steps.authz_grants.outputs.github_actions_grants_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-list-file: ${{ steps.authz_grants.outputs.terminal_agents_grants_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-list-file: ${{ steps.authz_grants.outputs.local_operators_grants_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-list-file: ${{ steps.authz_grants.outputs.local_admins_grants_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-list-file: ${{ steps.authz_grants.outputs.github_humans_grants_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "payload-file: ${{ steps.authz_grants.outputs.runtime_key_safety_policy_file }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.authz_grants.outputs.runtime_key_safety_idempotency_key }}",
+            workflow_text,
+        )
         self.assertIn("route-path: /v1/authz-policies/github-actions/grants", workflow_text)
         self.assertIn("route-path: /v1/runtime-key-safety/policies/apply", workflow_text)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", script_text)
@@ -1913,14 +1942,14 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
         self.assertIn("RUNTIME_OUTCOME: ${{ steps.deployed_runtime.outcome }}", workflow_text)
-        self.assertIn("runtime_status_code=\"action_failed\"", workflow_text)
+        self.assertIn('runtime_status_code="action_failed"', workflow_text)
         self.assertIn("Launchplane runtime smoke failed.", workflow_text)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
 
-        deployed_smoke_step = workflow_text.split(
-            "- name: Capture v2 deployed smoke evidence", 1
-        )[1].split("- name: Upload v2 deployed smoke evidence", 1)[0]
+        deployed_smoke_step = workflow_text.split("- name: Capture v2 deployed smoke evidence", 1)[
+            1
+        ].split("- name: Upload v2 deployed smoke evidence", 1)[0]
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", deployed_smoke_step)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", deployed_smoke_step)
         self.assertNotIn("Authorization: Bearer", deployed_smoke_step)
@@ -1965,7 +1994,7 @@ class ProductOnboardingTests(unittest.TestCase):
             "SELF_DEPLOY_OUTCOME: ${{ steps.self_deploy_request.outcome }}",
             workflow_text,
         )
-        self.assertIn("status_code=\"action_failed\"", workflow_text)
+        self.assertIn('status_code="action_failed"', workflow_text)
         self.assertIn("Launchplane self deploy request failed with HTTP", workflow_text)
         self.assertIn("Resolve Launchplane deploy wait timeout", workflow_text)
         self.assertIn("id: deploy_wait_timeout", workflow_text)
@@ -2006,9 +2035,9 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
 
-        self_deploy_block = workflow_text.split(
-            "- name: Read previous Launchplane runtime", 1
-        )[1].split("- name: Capture failed Launchplane deploy diagnostics", 1)[0]
+        self_deploy_block = workflow_text.split("- name: Read previous Launchplane runtime", 1)[
+            1
+        ].split("- name: Capture failed Launchplane deploy diagnostics", 1)[0]
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", self_deploy_block)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", self_deploy_block)
         self.assertNotIn("Authorization: Bearer", self_deploy_block)
@@ -2051,7 +2080,7 @@ class ProductOnboardingTests(unittest.TestCase):
             "ROLLBACK_OUTCOME: ${{ steps.rollback_request_action.outcome }}",
             workflow_text,
         )
-        self.assertIn("rollback_status=\"action_failed\"", workflow_text)
+        self.assertIn('rollback_status="action_failed"', workflow_text)
         self.assertIn("Launchplane rollback failed", workflow_text)
         self.assertIn("Launchplane rollback requested", workflow_text)
         self.assertIn("Launchplane rollback timed out", workflow_text)
@@ -2538,7 +2567,7 @@ class ProductOnboardingTests(unittest.TestCase):
             result = _run_authz_grants_generator(
                 temporary_directory,
                 extra_env={
-                "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": "not-json",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": "not-json",
                 },
             )
 
@@ -2553,7 +2582,7 @@ class ProductOnboardingTests(unittest.TestCase):
             result = _run_authz_grants_generator(
                 temporary_directory,
                 extra_env={
-                "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": "not-json",
+                    "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": "not-json",
                 },
             )
 
@@ -2568,9 +2597,9 @@ class ProductOnboardingTests(unittest.TestCase):
             result = _run_authz_grants_generator(
                 temporary_directory,
                 extra_env={
-                "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": json.dumps(
-                    [{"product": "*", "context": "*"}]
-                ),
+                    "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": json.dumps(
+                        [{"product": "*", "context": "*"}]
+                    ),
                 },
             )
 
@@ -2663,7 +2692,9 @@ class ProductOnboardingTests(unittest.TestCase):
             self.assertNotEqual(grant["products"], ["*"])
             self.assertNotEqual(grant["contexts"], ["*"])
             self.assertTrue(
-                _grant_string(grant, "source_label").startswith("deploy:local-operator-product-config-")
+                _grant_string(grant, "source_label").startswith(
+                    "deploy:local-operator-product-config-"
+                )
             )
         for grant in private_health_endpoint_grants:
             self.assertNotEqual(grant["products"], ["*"])

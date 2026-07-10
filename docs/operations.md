@@ -1172,7 +1172,9 @@ returned URL with generation status and cleanup outcome.
 
 Launchplane now owns the preview lifecycle planning boundary. The scheduled
 Launchplane `Preview Lifecycle` workflow calls `POST /v1/previews/lifecycle-sweep`;
-the service derives the participating products from product profiles where
+it runs on the operator-configured `LAUNCHPLANE_RUNNER_LABEL` self-hosted lane
+instead of depending on hosted-runner capacity.
+The service derives the participating products from product profiles where
 `preview.enabled=true`, refreshes provider inventory, discovers desired preview
 anchors from GitHub PR label state, writes lifecycle plans, and records cleanup
 results. Cleanup defaults to report-only and destructive provider cleanup still
