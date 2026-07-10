@@ -1294,7 +1294,10 @@ class ProductOnboardingTests(unittest.TestCase):
             "(needs.preview-destroy.result == 'success' || needs.preview-destroy.result == 'failure')",
             workflow_text,
         )
-        self.assertIn("uses: actions/checkout@v6", workflow_text)
+        self.assertRegex(
+            workflow_text,
+            r"uses: actions/checkout@(?:v\d+(?:\.\d+){0,2}|[0-9a-f]{40})(?:\s|$)",
+        )
         self.assertIn("source_git_ref is required for Odoo preview destroy.", workflow_text)
         self.assertIn("timeout-ms: ${{ inputs['timeout-ms'] }}", workflow_text)
         self.assertIn("failure_summary=\"${failure_summary//$'\\r'/ }\"", workflow_text)
@@ -1336,7 +1339,10 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("--max-time 30", workflow_text)
         self.assertIn("${GITHUB_RUN_ID}", workflow_text)
         self.assertIn("${GITHUB_RUN_ATTEMPT}", workflow_text)
-        self.assertIn("uses: actions/checkout@v6", workflow_text)
+        self.assertRegex(
+            workflow_text,
+            r"uses: actions/checkout@(?:v\d+(?:\.\d+){0,2}|[0-9a-f]{40})(?:\s|$)",
+        )
         self.assertIn("uses: ./.github/actions/launchplane-request", workflow_text)
         self.assertIn("route-path: /v1/drivers/odoo/artifact-publish-inputs", workflow_text)
         self.assertIn("Render authenticated Odoo route probe payloads", workflow_text)
@@ -1438,7 +1444,10 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('default: ""', inputs_section)
         self.assertNotIn("identity_access_provider:", inputs_section)
         self.assertNotIn("identity_access_send_basic_auth:", inputs_section)
-        self.assertIn("uses: actions/checkout@v6", workflow_text)
+        self.assertRegex(
+            workflow_text,
+            r"uses: actions/checkout@(?:v\d+(?:\.\d+){0,2}|[0-9a-f]{40})(?:\s|$)",
+        )
         self.assertIn("uses: ./.github/actions/launchplane-request", workflow_text)
         self.assertIn("PRODUCT: ${{ inputs.product }}", workflow_text)
         self.assertIn("CONTEXT: ${{ inputs.context }}", workflow_text)

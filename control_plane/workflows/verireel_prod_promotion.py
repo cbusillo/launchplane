@@ -267,10 +267,14 @@ def _prefer_fresh_provider_metadata(
 def _legacy_dokploy_target_type(
     deployment_result: VeriReelStableDeployResult,
 ) -> DokployTargetType:
-    if deployment_result.target_category in {"application", "compose"}:
-        return cast(DokployTargetType, deployment_result.target_category)
-    if deployment_result.provider_target_type in {"application", "compose"}:
-        return cast(DokployTargetType, deployment_result.provider_target_type)
+    if deployment_result.target_category == "application":
+        return "application"
+    if deployment_result.target_category == "compose":
+        return "compose"
+    if deployment_result.provider_target_type == "application":
+        return "application"
+    if deployment_result.provider_target_type == "compose":
+        return "compose"
     return _default_target_type()
 
 

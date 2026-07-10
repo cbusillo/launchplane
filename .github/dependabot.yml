@@ -4,34 +4,36 @@ version: 2
 updates:
   - package-ecosystem: github-actions
     directory: "/"
-    open-pull-requests-limit: 2
+    open-pull-requests-limit: 5
     schedule:
       interval: weekly
+    cooldown:
+      semver-major-days: 30
     labels:
       - dependencies
       - github-actions
     groups:
-      all-version-updates:
+      routine-version-updates:
         patterns:
           - "*"
-      all-security-updates:
-        applies-to: security-updates
-        patterns:
-          - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: uv
     directory: "/"
-    open-pull-requests-limit: 2
+    open-pull-requests-limit: 5
     schedule:
       interval: weekly
+    cooldown:
+      semver-major-days: 30
     labels:
       - dependencies
       - python:uv
     groups:
-      all-version-updates:
+      routine-version-updates:
         patterns:
           - "*"
-      all-security-updates:
-        applies-to: security-updates
-        patterns:
-          - "*"
+        update-types:
+          - minor
+          - patch

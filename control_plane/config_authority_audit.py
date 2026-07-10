@@ -230,7 +230,10 @@ WORKFLOW_RESPONSE_SUMMARY_PATH_VALUES = {
     },
 }
 WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
-    ".github/workflows/cleanup-ghcr.yml": {"GITHUB_TOKEN": frozenset(("${{ github.token }}",))},
+    ".github/workflows/cleanup-ghcr.yml": {
+        "GITHUB_DELETE_TOKEN": frozenset(("${{ secrets.ODOO_GHCR_CLEANUP_TOKEN }}",)),
+        "GITHUB_TOKEN": frozenset(("${{ github.token }}",)),
+    },
     ".github/workflows/deploy-launchplane.yml": {
         "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY": frozenset(('"true"', "true"))
     },
@@ -2131,7 +2134,7 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
             if list_scalar is not None:
                 yaml_key = _unquote(list_scalar.group("key"))
                 scalar_value = _unquote(_strip_inline_comment(list_scalar.group("value")).strip())
-                if yaml_key == "uses" and scalar_value == "actions/checkout@v6":
+                if yaml_key == "uses" and _is_github_checkout_action_reference(scalar_value):
                     checkout_uses_indent = indent + 2
             else:
                 list_key = _yaml_list_candidate_key(context_stack)
@@ -2187,7 +2190,7 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
             continue
         if value:
             scalar_value = _unquote(value)
-            if yaml_key == "uses" and scalar_value == "actions/checkout@v6":
+            if yaml_key == "uses" and _is_github_checkout_action_reference(scalar_value):
                 checkout_uses_indent = indent
             if yaml_key in IGNORED_YAML_SCALAR_KEYS and not _is_yaml_reusable_workflow_reference(
                 scalar_value
@@ -2224,6 +2227,14 @@ def _yaml_list_candidate_key(context_stack: Sequence[tuple[int, str]]) -> str:
     if context_stack and context_stack[-1][1] == "runs-on":
         return "runs-on"
     return ""
+
+
+def _is_github_checkout_action_reference(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("actions/checkout@")
+        and value != "actions/checkout@"
+    )
 
 
 def _is_yaml_reusable_workflow_reference(value: object) -> bool:
