@@ -623,7 +623,7 @@ def odoo_ownership_check(workspace_root: Path | None, output_format: str) -> Non
     required=True,
     help="Postgres connection string for Launchplane Odoo target records.",
 )
-@click.option("--product", default="odoo-tenant-cm", show_default=True)
+@click.option("--product", required=True)
 @click.option("--instance", "instance_name", required=True)
 @click.option(
     "--strategy",

@@ -41,9 +41,7 @@ def _allow_direct_db_mutation_argument() -> list[str]:
     return ["--allow-direct-db-mutation"]
 
 
-def _assert_direct_db_mutation_rejected(
-    test_case: unittest.TestCase, result: Result
-) -> None:
+def _assert_direct_db_mutation_rejected(test_case: unittest.TestCase, result: Result) -> None:
     test_case.assertNotEqual(result.exit_code, 0)
     test_case.assertIn("Direct local DB mutation is restricted", result.output)
     test_case.assertIn("--allow-direct-db-mutation", result.output)
@@ -140,6 +138,22 @@ class _FakeDokployTargetStore:
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_odoo_target_replacement_plan_cli_requires_product(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            [
+                "odoo-targets",
+                "replacement-plan",
+                "--database-url",
+                "postgresql://launchplane.example/launchplane",
+                "--instance",
+                "testing",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("Missing option '--product'", result.output)
+
     def test_load_optional_source_of_truth_uses_structural_store_boundary(self) -> None:
         target = control_plane_dokploy.DokployTargetDefinition(
             context="verireel",
