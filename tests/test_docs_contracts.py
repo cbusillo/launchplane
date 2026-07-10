@@ -22,6 +22,24 @@ class DocsContractsTests(TestCase):
         self.assertIn("WORKFLOW_LINT_FORK_RESULT", security_workflow)
         self.assertIn("SECRET_SCAN_FORK_RESULT", security_workflow)
 
+    def test_ci_shards_share_one_unittest_timing_snapshot(self) -> None:
+        ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("  test_timing_snapshot:", ci_workflow)
+        self.assertIn("name: unittest-timing-snapshot", ci_workflow)
+        self.assertEqual(1, ci_workflow.count("name: Restore unittest timings"))
+        self.assertEqual(2, ci_workflow.count("name: Download unittest timing snapshot"))
+        self.assertEqual(2, ci_workflow.count("overwrite: true"))
+        self.assertEqual(2, ci_workflow.count("retention-days: 30"))
+        self.assertIn("needs: test_timing_snapshot", ci_workflow)
+        self.assertIn("needs: [test_timing_snapshot, test_shards]", ci_workflow)
+        self.assertEqual(
+            3,
+            ci_workflow.count(
+                '--timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"'
+            ),
+        )
+
     def test_post_v2_transition_plans_are_issue_backed(self) -> None:
         docs_index = Path("docs/README.md").read_text(encoding="utf-8")
         service_boundary = Path("docs/service-boundary.md").read_text(encoding="utf-8")
