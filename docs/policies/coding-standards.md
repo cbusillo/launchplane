@@ -25,13 +25,16 @@ title: Coding Standards
   needed to reach DB-backed records and managed secrets.
 - Preserve minimal diffs and readable history.
 - Update docs whenever behavior or repo ownership changes.
+- Protect pull-request merges with stable aggregate status checks that fail
+  closed over the validation path selected for same-repository or fork work.
+  Do not rely on skipped conditional jobs as proof that an alternate path ran.
 
 ## Dependency Updates
 
 - Group routine minor and patch updates when they share a validation surface.
-- Keep semantic-version major updates independently reviewable and delay them
-  with a bounded cooldown so newly released majors do not poison routine groups
-  before adjacent tools declare compatibility.
+- Keep semantic-version major updates independently reviewable. Where the
+  package ecosystem supports cooldowns, delay newly released majors so they do
+  not poison routine groups before adjacent tools declare compatibility.
 - Keep security updates ungrouped and independently mergeable; version-update
   grouping and cooldown policy must not delay them.
 - Fix compatibility findings in code or dependency constraints. Do not weaken
