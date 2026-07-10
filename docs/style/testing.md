@@ -35,7 +35,12 @@ of truth.
 
 Same-repo CI currently uses 12 unittest shards with a 20-test/30-second split
 threshold to keep large app and service targets under the tool wall-clock
-ceiling. The shard plan includes per-target timing-source diagnostics:
+ceiling. CI restores timing history once per workflow run and distributes that
+immutable snapshot to every shard and the aggregate job. Shards must not restore
+timing caches independently because timing-dependent target splitting requires
+one shared plan input. Snapshot and shard artifacts remain available for the
+full workflow rerun window and may be overwritten safely by rerun jobs. The
+shard plan includes per-target timing-source diagnostics:
 
 - `exact`: the timing file has a direct record for that unittest target.
 - `parent`: the estimate is derived from the parent module timing and spread
