@@ -1032,7 +1032,8 @@ behind pre-existing DNS/nginx routing and are intended to make the client-visibl
 Odoo system usable before full ephemeral preview infrastructure exists.
 
 For stable Odoo target replacement planning, use the read-only dry-run command
-before considering any provider mutation:
+before considering any provider mutation. Product identity is always explicit;
+the CLI does not select a tenant default:
 
 ```sh
 uv run launchplane odoo-targets replacement-plan \
