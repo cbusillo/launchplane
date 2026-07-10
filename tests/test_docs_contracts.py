@@ -1,8 +1,27 @@
+import json
 from pathlib import Path
 from unittest import TestCase
 
 
 class DocsContractsTests(TestCase):
+    def test_required_status_checks_use_fork_aware_aggregate_gates(self) -> None:
+        metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
+        ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        security_workflow = Path(".github/workflows/security.yml").read_text(encoding="utf-8")
+
+        self.assertEqual(["ci-gate", "security-gate"], metadata["requiredStatusChecks"])
+        self.assertIn("  container_scan_fork:", ci_workflow)
+        self.assertIn("  ci_gate:\n    name: ci-gate", ci_workflow)
+        self.assertIn("STATIC_CHECKS_FORK_RESULT", ci_workflow)
+        self.assertIn("CONTAINER_SCAN_FORK_RESULT", ci_workflow)
+        self.assertIn("FRONTEND_VALIDATE_FORK_RESULT", ci_workflow)
+        self.assertIn("TEST_FORK_RESULT", ci_workflow)
+        self.assertIn("  workflow_lint_fork:", security_workflow)
+        self.assertIn("  secret_scan_fork:", security_workflow)
+        self.assertIn("  security_gate:\n    name: security-gate", security_workflow)
+        self.assertIn("WORKFLOW_LINT_FORK_RESULT", security_workflow)
+        self.assertIn("SECRET_SCAN_FORK_RESULT", security_workflow)
+
     def test_post_v2_transition_plans_are_issue_backed(self) -> None:
         docs_index = Path("docs/README.md").read_text(encoding="utf-8")
         service_boundary = Path("docs/service-boundary.md").read_text(encoding="utf-8")

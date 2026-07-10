@@ -142,6 +142,64 @@ jobs:
         if: always()
         run: docker image rm "$LAUNCHPLANE_CI_IMAGE_TAG" || true
 
+  container_scan_fork:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      LAUNCHPLANE_CI_IMAGE_TAG: >-
+        launchplane-ci:${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          name: launchplane-ci-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Build runtime image
+        uses: docker/build-push-action@v7
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          load: true
+          tags: ${{ env.LAUNCHPLANE_CI_IMAGE_TAG }}
+          cache-from: >-
+            type=gha,scope=launchplane-ci
+
+      - name: Restore Trivy cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/trivy-cache
+          key: ${{ runner.os }}-trivy-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-trivy-
+
+      - name: Scan runtime image
+        env:
+          LAUNCHPLANE_TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          mkdir -p "$LAUNCHPLANE_TRIVY_CACHE_DIR"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${LAUNCHPLANE_TRIVY_CACHE_DIR}:/root/.cache" \
+            ghcr.io/aquasecurity/trivy:0.70.0 \
+            image \
+            --scanners vulnerability \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            "$LAUNCHPLANE_CI_IMAGE_TAG"
+
+      - name: Remove scanned runtime image
+        if: always()
+        run: docker image rm "$LAUNCHPLANE_CI_IMAGE_TAG" || true
+
   frontend_validate:
     if: >-
       github.event_name != 'pull_request' ||
@@ -378,3 +436,55 @@ jobs:
 
       - name: Run unit tests
         run: uv run python -m unittest
+
+  ci_gate:
+    name: ci-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - static_checks
+      - static_checks_fork
+      - container_scan
+      - container_scan_fork
+      - frontend_validate
+      - frontend_validate_fork
+      - test
+      - test_fork
+    if: always() && github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    steps:
+      - name: Require successful CI path
+        env:
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          STATIC_CHECKS_RESULT: ${{ needs.static_checks.result }}
+          STATIC_CHECKS_FORK_RESULT: ${{ needs.static_checks_fork.result }}
+          CONTAINER_SCAN_RESULT: ${{ needs.container_scan.result }}
+          CONTAINER_SCAN_FORK_RESULT: ${{ needs.container_scan_fork.result }}
+          FRONTEND_VALIDATE_RESULT: ${{ needs.frontend_validate.result }}
+          FRONTEND_VALIDATE_FORK_RESULT: ${{ needs.frontend_validate_fork.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          TEST_FORK_RESULT: ${{ needs.test_fork.result }}
+        run: |
+          set -euo pipefail
+          require_success() {
+            check_name="$1"
+            check_result="$2"
+            if [ "${check_result}" != "success" ]; then
+              echo "${check_name} concluded with: ${check_result}" >&2
+              exit 1
+            fi
+          }
+
+          if [ "${HEAD_REPOSITORY}" = "${BASE_REPOSITORY}" ]; then
+            require_success static_checks "${STATIC_CHECKS_RESULT}"
+            require_success container_scan "${CONTAINER_SCAN_RESULT}"
+            require_success frontend_validate "${FRONTEND_VALIDATE_RESULT}"
+            require_success test "${TEST_RESULT}"
+          else
+            require_success static_checks_fork "${STATIC_CHECKS_FORK_RESULT}"
+            require_success container_scan_fork "${CONTAINER_SCAN_FORK_RESULT}"
+            require_success frontend_validate_fork "${FRONTEND_VALIDATE_FORK_RESULT}"
+            require_success test_fork "${TEST_FORK_RESULT}"
+          fi

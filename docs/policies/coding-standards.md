@@ -25,6 +25,9 @@ title: Coding Standards
   needed to reach DB-backed records and managed secrets.
 - Preserve minimal diffs and readable history.
 - Update docs whenever behavior or repo ownership changes.
+- Protect pull-request merges with stable aggregate status checks that fail
+  closed over the validation path selected for same-repository or fork work.
+  Do not rely on skipped conditional jobs as proof that an alternate path ran.
 
 ## Dependency Updates
 
