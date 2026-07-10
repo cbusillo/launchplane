@@ -115,7 +115,7 @@ jobs:
             type=gha,scope=launchplane-ci,mode=max
 
       - name: Restore Trivy cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/trivy-cache
           key: ${{ runner.os }}-trivy-${{ github.run_id }}
@@ -173,7 +173,7 @@ jobs:
             type=gha,scope=launchplane-ci
 
       - name: Restore Trivy cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/trivy-cache
           key: ${{ runner.os }}-trivy-${{ github.run_id }}
@@ -226,7 +226,7 @@ jobs:
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
       - name: Restore pnpm store
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: >-
@@ -264,7 +264,7 @@ jobs:
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
       - name: Restore pnpm store
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: >-
@@ -289,7 +289,7 @@ jobs:
       UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
     steps:
       - name: Restore unittest timings
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ${{ env.UNITTEST_TIMINGS_CACHE }}
           key: >-
@@ -446,7 +446,7 @@ jobs:
 
       - name: Save unittest timings
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ${{ env.UNITTEST_TIMINGS_CACHE }}
           key: >-
