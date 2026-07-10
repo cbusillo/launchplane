@@ -123,6 +123,13 @@
     "Work Graph Snapshot Validate",
     "Dependency Graph"
   ],
+  "requiredStatusChecks": ["test"],
+  "codeScanningMergeProtection": {
+    "ruleset": "Require code scanning results",
+    "tool": "CodeQL",
+    "alertsThreshold": "errors",
+    "securityAlertsThreshold": "high_or_higher"
+  },
   "qaLabels": [],
   "deployLabels": [],
   "relatedRepos": [
