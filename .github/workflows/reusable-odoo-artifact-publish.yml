@@ -201,7 +201,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - name: Checkout tenant repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ steps.source.outputs.repository }}
           ref: ${{ steps.source.outputs.source_git_ref }}
@@ -285,7 +285,7 @@ jobs:
           fi
 
       - name: Checkout devkit repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ steps.publish_inputs.outputs.devkit_repository }}
           path: odoo-devkit
@@ -293,7 +293,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout shared addons repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ steps.publish_inputs.outputs.shared_addons_repository }}
           path: odoo-shared-addons
