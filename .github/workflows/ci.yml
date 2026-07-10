@@ -392,7 +392,7 @@ jobs:
           fi
 
       - name: Download unittest timings
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: unittest-timings-*
           path: ${{ runner.temp }}/unittest-timings
