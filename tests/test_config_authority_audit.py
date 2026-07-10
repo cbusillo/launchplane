@@ -1298,6 +1298,24 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "",
         )
 
+    def test_cleanup_ghcr_repository_token_is_thin_connector_input(self) -> None:
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/cleanup-ghcr.yml",
+                key="GITHUB_TOKEN",
+                value="${{ github.token }}",
+            ),
+            "thin_connector_input",
+        )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/other.yml",
+                key="GITHUB_TOKEN",
+                value="${{ github.token }}",
+            ),
+            "",
+        )
+
     def test_workflow_block_scalar_runtime_values_are_scanned(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
