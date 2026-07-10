@@ -245,7 +245,10 @@ class PreviewWorkflowContractTests(unittest.TestCase):
 
         self.assertIn("pull_request_target", workflow)
         self.assertIn("context.eventName !== 'pull_request_target'", workflow)
-        self.assertIn("uses: actions/github-script@v8", workflow)
+        self.assertRegex(
+            workflow,
+            r"uses: actions/github-script@(?:v\d+(?:\.\d+){0,2}|[0-9a-f]{40})(?:\s|$)",
+        )
         self.assertIn(
             "uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main",
             workflow,

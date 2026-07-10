@@ -1316,6 +1316,32 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "",
         )
 
+    def test_cleanup_ghcr_delete_token_is_thin_connector_input(self) -> None:
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/cleanup-ghcr.yml",
+                key="GITHUB_DELETE_TOKEN",
+                value="${{ secrets.ODOO_GHCR_CLEANUP_TOKEN }}",
+            ),
+            "thin_connector_input",
+        )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/cleanup-ghcr.yml",
+                key="GITHUB_DELETE_TOKEN",
+                value="${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",
+            ),
+            "",
+        )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/other.yml",
+                key="GITHUB_DELETE_TOKEN",
+                value="${{ secrets.ODOO_GHCR_CLEANUP_TOKEN }}",
+            ),
+            "",
+        )
+
     def test_workflow_block_scalar_runtime_values_are_scanned(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4213,12 +4239,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "    runs-on: ubuntu-latest\n\n"
                 "    steps:\n"
                 "      - name: Check out repository\n"
-                "        uses: actions/checkout@v6\n"
+                "        uses: actions/checkout@v7\n"
                 "        with:\n"
                 "          path: product-repo\n"
                 "          fetch-depth: 0\n\n"
                 "      - name: Check out Launchplane\n"
-                "        uses: actions/checkout@v6\n"
+                "        uses: actions/checkout@v7\n"
                 "        id: launchplane\n"
                 "        with:\n"
                 "          repository: ${{ github.repository_owner }}/launchplane\n"
@@ -4374,7 +4400,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "  deploy:\n"
                 "    runs-on: ubuntu-latest\n"
                 "    steps:\n"
-                "      - uses: actions/checkout@v6\n"
+                "      - uses: actions/checkout@v7\n"
                 "        with:\n"
                 "          ref: ${{ github.event.workflow_run.head_sha }}\n"
                 "      - name: Prepare image metadata\n"
