@@ -278,13 +278,54 @@ jobs:
       - name: Validate frontend
         run: pnpm --dir frontend validate
 
+  test_timing_snapshot:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
+    steps:
+      - name: Restore unittest timings
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.UNITTEST_TIMINGS_CACHE }}
+          key: >-
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-
+            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-
+            ${{ runner.os }}-python-3.13-unittest-timings-
+
+      - name: Freeze unittest timing snapshot
+        run: |
+          set -euo pipefail
+          snapshot_directory="${RUNNER_TEMP}/unittest-timing-snapshot"
+          mkdir -p "${snapshot_directory}"
+          if [ -f "${UNITTEST_TIMINGS_CACHE}" ]; then
+            cp "${UNITTEST_TIMINGS_CACHE}" "${snapshot_directory}/history.json"
+          fi
+          printf '%s:%s\n' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
+            > "${snapshot_directory}/snapshot-id"
+
+      - name: Upload unittest timing snapshot
+        uses: actions/upload-artifact@v7
+        with:
+          name: unittest-timing-snapshot
+          path: ${{ runner.temp }}/unittest-timing-snapshot
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
   test_shards:
+    needs: test_timing_snapshot
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     name: test_shard (${{ matrix.shard_index }})
     env:
-      UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
       UNITTEST_SHARD_COUNT: "12"
       UNITTEST_MAX_TESTS_PER_TARGET: "20"
       UNITTEST_MAX_SECONDS_PER_TARGET: "30"
@@ -308,22 +349,17 @@ jobs:
       - name: Install Python
         run: uv python install 3.13
 
-      - name: Restore unittest timings
-        uses: actions/cache/restore@v4
+      - name: Download unittest timing snapshot
+        uses: actions/download-artifact@v7
         with:
-          path: ${{ env.UNITTEST_TIMINGS_CACHE }}
-          key: >-
-            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-
-            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-
-            ${{ runner.os }}-python-3.13-unittest-timings-
+          name: unittest-timing-snapshot
+          path: ${{ runner.temp }}/unittest-timing-snapshot
 
       - name: Show unit test shard plan
         run: >-
           uv run launchplane ci unittest-shard plan
           --shard-count "${UNITTEST_SHARD_COUNT}"
-          --timings-file "${UNITTEST_TIMINGS_CACHE}"
+          --timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"
           --max-tests-per-target "${UNITTEST_MAX_TESTS_PER_TARGET}"
           --max-seconds-per-target "${UNITTEST_MAX_SECONDS_PER_TARGET}"
 
@@ -332,7 +368,7 @@ jobs:
           uv run launchplane ci unittest-shard run
           --shard-count "${UNITTEST_SHARD_COUNT}"
           --shard-index ${{ matrix.shard_index }}
-          --timings-file "${UNITTEST_TIMINGS_CACHE}"
+          --timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"
           --max-tests-per-target "${UNITTEST_MAX_TESTS_PER_TARGET}"
           --max-seconds-per-target "${UNITTEST_MAX_SECONDS_PER_TARGET}"
           --timings-output "${RUNNER_TEMP}/unittest-timings/shard-${{ matrix.shard_index }}.json"
@@ -344,10 +380,11 @@ jobs:
           name: unittest-timings-${{ matrix.shard_index }}
           path: ${{ runner.temp }}/unittest-timings/shard-${{ matrix.shard_index }}.json
           if-no-files-found: error
-          retention-days: 7
+          overwrite: true
+          retention-days: 30
 
   test:
-    needs: test_shards
+    needs: [test_timing_snapshot, test_shards]
     if: >-
       always() &&
       (github.event_name != 'pull_request' ||
@@ -373,23 +410,22 @@ jobs:
       - name: Install Python
         run: uv python install 3.13
 
-      - name: Restore unittest timings
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.UNITTEST_TIMINGS_CACHE }}
-          key: >-
-            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-
-            ${{ runner.os }}-python-3.13-unittest-timings-${{ github.ref_name }}-
-            ${{ runner.os }}-python-3.13-unittest-timings-
-
       - name: Require successful test shards
         run: |
+          if [ "${{ needs.test_timing_snapshot.result }}" != "success" ]; then
+            echo "test_timing_snapshot result: ${{ needs.test_timing_snapshot.result }}" >&2
+            exit 1
+          fi
           if [ "${{ needs.test_shards.result }}" != "success" ]; then
             echo "test_shards result: ${{ needs.test_shards.result }}" >&2
             exit 1
           fi
+
+      - name: Download unittest timing snapshot
+        uses: actions/download-artifact@v7
+        with:
+          name: unittest-timing-snapshot
+          path: ${{ runner.temp }}/unittest-timing-snapshot
 
       - name: Download unittest timings
         uses: actions/download-artifact@v7
@@ -403,7 +439,7 @@ jobs:
           uv run launchplane ci unittest-shard aggregate
           --shard-count "${UNITTEST_SHARD_COUNT}"
           --results-dir "${RUNNER_TEMP}/unittest-timings"
-          --timings-file "${UNITTEST_TIMINGS_CACHE}"
+          --timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"
           --max-tests-per-target "${UNITTEST_MAX_TESTS_PER_TARGET}"
           --max-seconds-per-target "${UNITTEST_MAX_SECONDS_PER_TARGET}"
           --timings-output "${UNITTEST_TIMINGS_CACHE}"
