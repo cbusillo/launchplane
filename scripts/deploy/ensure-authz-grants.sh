@@ -4,6 +4,40 @@ set -euo pipefail
 : "${GITHUB_REPOSITORY:?Missing GitHub repository.}"
 : "${GITHUB_SHA:?Missing GitHub SHA.}"
 
+authz_grant_mode="${LAUNCHPLANE_AUTHZ_GRANT_MODE:-apply}"
+configured_grants_only="${LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY:-false}"
+authz_grant_reason="${LAUNCHPLANE_AUTHZ_GRANT_REASON:-}"
+
+case "$authz_grant_mode" in
+	dry_run | apply) ;;
+	*)
+		echo "LAUNCHPLANE_AUTHZ_GRANT_MODE must be dry_run or apply." >&2
+		exit 1
+		;;
+esac
+case "$configured_grants_only" in
+	true | false) ;;
+	*)
+		echo "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY must be true or false." >&2
+		exit 1
+		;;
+esac
+if [ "$authz_grant_mode" = "dry_run" ] && [ "$configured_grants_only" != "true" ]; then
+	echo "Dry-run authz reconciliation requires configured-only mode." >&2
+	exit 1
+fi
+if [ "$configured_grants_only" = "true" ]; then
+	if [ "$authz_grant_mode" = "apply" ] && [[ -z "${authz_grant_reason//[[:space:]]/}" ]]; then
+		echo "Configured-only authz apply requires LAUNCHPLANE_AUTHZ_GRANT_REASON." >&2
+		exit 1
+	fi
+	if [[ -z "${authz_grant_reason//[[:space:]]/}" ]]; then
+		authz_grant_reason="Grant-only workflow reviewing authz grant"
+	fi
+elif [[ -z "${authz_grant_reason//[[:space:]]/}" ]]; then
+	authz_grant_reason="Deploy workflow ensuring authz grant"
+fi
+
 authz_grants_output_dir="${LAUNCHPLANE_AUTHZ_GRANTS_OUTPUT_DIR:-${RUNNER_TEMP:-.}/launchplane-authz-grants}"
 github_actions_grants_file="${authz_grants_output_dir}/github-actions-grants.json"
 terminal_agents_grants_file="${authz_grants_output_dir}/terminal-agents-grants.json"
@@ -12,6 +46,7 @@ local_admins_grants_file="${authz_grants_output_dir}/local-admins-grants.json"
 github_humans_grants_file="${authz_grants_output_dir}/github-humans-grants.json"
 runtime_key_safety_policy_file="${authz_grants_output_dir}/runtime-key-safety-policy.json"
 runtime_key_safety_idempotency_key=""
+configured_grants_sha256=""
 
 mkdir -p "$authz_grants_output_dir"
 printf '[]\n' >"$github_actions_grants_file"
@@ -128,12 +163,14 @@ post_grant() {
 			--arg context_name "$context_name" \
 			--arg action_name "$action_name" \
 			--arg source_label "$source_label" \
+			--arg mode "$authz_grant_mode" \
+			--arg reason "$authz_grant_reason" \
 			--arg job_workflow_ref "$job_workflow_ref" \
 			'{
         schema_version: 1,
         product: "launchplane",
-        mode: "apply",
-        reason: ("Deploy workflow ensuring authz grant " + $source_label),
+        mode: $mode,
+        reason: ($reason + " " + $source_label),
         related_issue: "cbusillo/launchplane#83",
         grant: {
           repository: $repository,
@@ -459,6 +496,23 @@ configured_github_action_grants_json() {
 		return 1
 }
 
+configured_github_action_grants_sha256() {
+	configured_github_action_grants_json |
+		jq -cS 'sort_by([
+      .repository,
+      .workflow_file,
+      .product,
+      .context,
+      .action,
+      .source_label,
+      .idempotency_suffix,
+      .event_name,
+      .workflow_ref_suffix,
+      .job_workflow_ref
+    ])' |
+		sha256_stdin
+}
+
 post_configured_github_action_grants() {
 	local grants_json grant_count grant_json repository workflow_file product_name
 	local context_name action_name source_label idempotency_suffix event_name
@@ -580,7 +634,11 @@ post_runtime_key_safety_rules() {
 		"Launchplane runtime key-safety policy request failed with"
 }
 
-preflight_owner_authz_env
+if [ "$configured_grants_only" = "true" ]; then
+	post_configured_github_action_grants
+	configured_grants_sha256="$(configured_github_action_grants_sha256)"
+else
+	preflight_owner_authz_env
 
 post_launchplane_service_grant \
 	public-ingress-monitor.yml \
@@ -863,6 +921,7 @@ post_product_config_human_grant \
 	product-config-human-apply
 post_configured_github_action_grants
 post_runtime_key_safety_rules
+fi
 
 github_actions_grant_count="$(jq 'length' "$github_actions_grants_file")"
 terminal_agents_grant_count="$(jq 'length' "$terminal_agents_grants_file")"
@@ -870,10 +929,16 @@ local_operators_grant_count="$(jq 'length' "$local_operators_grants_file")"
 local_admins_grant_count="$(jq 'length' "$local_admins_grants_file")"
 github_humans_grant_count="$(jq 'length' "$github_humans_grants_file")"
 
+if [ "$configured_grants_only" = "true" ] && [ "$github_actions_grant_count" = "0" ]; then
+	echo "Configured-only authz reconciliation requires at least one GitHub Actions grant." >&2
+	exit 1
+fi
+
 write_output authz_grants_output_dir "$authz_grants_output_dir"
 write_output github_actions_grants_file "$github_actions_grants_file"
 write_output github_actions_grant_count "$github_actions_grant_count"
 write_output has_github_actions_grants "$([ "$github_actions_grant_count" -gt 0 ] && echo true || echo false)"
+write_output configured_grants_sha256 "$configured_grants_sha256"
 write_output terminal_agents_grants_file "$terminal_agents_grants_file"
 write_output terminal_agents_grant_count "$terminal_agents_grant_count"
 write_output has_terminal_agents_grants "$([ "$terminal_agents_grant_count" -gt 0 ] && echo true || echo false)"
