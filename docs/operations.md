@@ -255,6 +255,28 @@ must not become the live workflow grant catalog. Prefer the operator UI or
 service-backed authz policy
 management routes for steady-state shared and production grant changes.
 
+For grant maintenance that must use the deploy workflow's existing
+`authz_policy_grant.write` authority, manually dispatch `Deploy Launchplane`
+with `authz_grants_mode=dry_run`. Stage only the candidate batch in the temporary
+`LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON` repository variable; the normal deploy
+continues to reconcile the separate durable `LAUNCHPLANE_AUTHZ_GRANTS_JSON`
+catalog and cannot apply the maintenance batch. The grant-only path validates
+the operator-managed JSON,
+renders only its configured GitHub Actions grants, submits stateless service
+dry-runs, and reports changed versus already-present rules without building or
+deploying an image or reconciling any other runtime records. The summary includes
+a canonical SHA-256 of the normalized grant set. Review the dry-run changes, then
+dispatch `authz_grants_mode=apply` with that SHA-256, an operator reason, and the
+identical repository-variable value; apply fails before mutation when the current
+grant set no longer matches the reviewed digest. Grant-only mode rejects deploy,
+compatibility, and break-glass rollback inputs, and the rollback path independently
+rejects grant mode. The request honors `LAUNCHPLANE_SERVICE_AUDIENCE` when set and
+otherwise uses the public URL host. The default `none` mode preserves the normal
+deploy workflow. After a successful apply, merge the reviewed entries into the
+durable grant variable and remove the temporary maintenance variable. Keep real
+grant identities in operator-managed variables or service records rather than
+copying them into this workflow or the render script.
+
 The deploy workflow also reconciles its own `authz_policy_grant.write` grants
 for product/context `launchplane`, covering both manual dispatches and automatic
 CI-success deploys. Those grants keep future grant reconciliation separate from

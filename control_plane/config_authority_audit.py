@@ -201,6 +201,7 @@ WORKFLOW_OPERATOR_INPUT_VALUE_KEYS = frozenset(
 )
 WORKFLOW_LAUNCHPLANE_OPERATOR_VAR_KEYS = frozenset(
     (
+        "LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON",
         "LAUNCHPLANE_CONTEXT",
         "LAUNCHPLANE_INSTANCE",
         "LAUNCHPLANE_PRODUCT",
@@ -229,6 +230,9 @@ WORKFLOW_RESPONSE_SUMMARY_PATH_VALUES = {
     },
 }
 WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
+    ".github/workflows/deploy-launchplane.yml": {
+        "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY": frozenset(('"true"', "true"))
+    },
     ".github/workflows/odoo-driver-route-smoke.yml": {
         "ROUTE_PATHS": frozenset(
             (
@@ -252,6 +256,7 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
 }
 WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
+        "inputs.authz_grants_mode.default": frozenset(("none",)),
         "inputs.omit_every_code_env.default": frozenset(("false",)),
         "inputs.omit_npmplus_env.default": frozenset(("false",)),
         "inputs.omit_owner_agent_env.default": frozenset(("false",)),
@@ -587,6 +592,7 @@ WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
             ("${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS }}",)
         ),
         "LAUNCHPLANE_PUBLIC_URL": frozenset(("${{ vars.LAUNCHPLANE_PUBLIC_URL }}",)),
+        "LAUNCHPLANE_SERVICE_AUDIENCE": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
         "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN": frozenset(
             ("${{ secrets.LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN }}",)
         ),
@@ -604,6 +610,21 @@ WORKFLOW_JQ_OPERATOR_FIELD_PATH_KEYS = {
     ),
 }
 WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
+    ".github/workflows/deploy-launchplane.yml": {
+        "AUTHZ_GRANTS_MODE": frozenset(("${{ inputs.authz_grants_mode }}",)),
+        "BREAK_GLASS_CONFIRM": frozenset(("${{ inputs.break_glass_confirm }}",)),
+        "BREAK_GLASS_IMAGE_REFERENCE": frozenset(("${{ inputs.break_glass_image_reference }}",)),
+        "BREAK_GLASS_REASON": frozenset(("${{ inputs.break_glass_reason }}",)),
+        "DEPLOY_GIT_REF": frozenset(("${{ inputs.git_ref }}",)),
+        "DEPLOY_IMAGE_REFERENCE": frozenset(("${{ inputs.image_reference }}",)),
+        "LAUNCHPLANE_AUTHZ_GRANT_MODE": frozenset(("${{ inputs.authz_grants_mode }}",)),
+        "LAUNCHPLANE_AUTHZ_GRANT_REASON": frozenset(("${{ inputs.authz_grants_reason }}",)),
+        "OMIT_EVERY_CODE_ENV": frozenset(("${{ inputs.omit_every_code_env }}",)),
+        "OMIT_NPMPLUS_ENV": frozenset(("${{ inputs.omit_npmplus_env }}",)),
+        "OMIT_OWNER_AGENT_ENV": frozenset(("${{ inputs.omit_owner_agent_env }}",)),
+        "OMIT_TERMINAL_AGENT_ENV": frozenset(("${{ inputs.omit_terminal_agent_env }}",)),
+        "REVIEWED_GRANTS_SHA256": frozenset(("${{ inputs.authz_grants_expected_sha256 }}",)),
+    },
     ".github/workflows/edge-endpoint-apply.yml": {
         "ENDPOINT_KEY": frozenset(("${{ inputs.endpoint_key }}",)),
         "IDEMPOTENCY_KEY": frozenset(("${{ inputs.idempotency_key }}",)),
@@ -741,7 +762,18 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "password": frozenset(("${{ github.token }}",)),
     },
     ".github/workflows/deploy-launchplane.yml": {
-        "audience": frozenset(("${{ steps.service.outputs.service_audience }}",)),
+        "LAUNCHPLANE_AUTHZ_GRANTS_JSON": frozenset(
+            ("${{ env.LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON }}",)
+        ),
+        "RENDERED_GRANTS_SHA256": frozenset(
+            ("${{ steps.authz_grants.outputs.configured_grants_sha256 }}",)
+        ),
+        "audience": frozenset(
+            (
+                "${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}",
+                "${{ steps.service.outputs.service_audience }}",
+            )
+        ),
         "context": frozenset((".",)),
         "expected-status": frozenset(('"200"', '"200,202"')),
         "fail-result-paths": frozenset(('""',)),
@@ -754,6 +786,10 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "github.run_id }}:${{ github.run_attempt }}",
             )
         ),
+        "idempotency-key-prefix": frozenset(
+            ("launchplane-operator-authz-grant:${{ github.run_id }}:${{ github.run_attempt }}",)
+        ),
+        "launchplane-url": frozenset(("${{ env.LAUNCHPLANE_PUBLIC_URL }}",)),
         "log-response-body": frozenset(('"false"',)),
         "method": frozenset(("GET",)),
         "payload-file": frozenset(
@@ -761,6 +797,9 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "${{ steps.self_deploy.outputs.payload_file }}",
                 "${{ steps.rollback_request.outputs.payload_file }}",
             )
+        ),
+        "payload-list-file": frozenset(
+            ("${{ steps.authz_grants.outputs.github_actions_grants_file }}",)
         ),
         "poll-interval-ms": frozenset(('"1000"', '"5000"')),
         "poll-retry-on-request-error": frozenset(('"true"',)),
@@ -790,11 +829,11 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "${{ runner.temp }}/launchplane-runtime-smoke.json",
                 "${{ runner.temp }}/launchplane-self-deploy-response.json",
                 "${{ runner.temp }}/launchplane-self-deploy-rollback-response.json",
+                "${{ steps.authz_grants.outputs.authz_grants_output_dir }}/"
+                "github-actions-grants-responses.json",
             )
         ),
-        "route-path": frozenset(
-            ("/v1/service/runtime", "/v1/drivers/launchplane/self-deploy")
-        ),
+        "route-path": frozenset(("/v1/service/runtime", "/v1/drivers/launchplane/self-deploy")),
         "timeout-ms": frozenset(('"30000"',)),
     },
     ".github/workflows/launchplane-config-authority.yml": {

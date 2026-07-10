@@ -1859,14 +1859,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     ),
                     "",
                 )
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/deploy-launchplane.yml",
-                        key=key,
-                        value="$unexpected_source,",
-                    ),
-                    "",
-                )
 
         thin_connectors = (
             (
@@ -2323,6 +2315,75 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             "",
         )
+
+    def test_deploy_authz_grant_workflow_mechanics_are_classified(self) -> None:
+        cases = (
+            (
+                "inputs.authz_grants_mode.default",
+                "none",
+                "thin_connector_input",
+            ),
+            (
+                "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY",
+                "true",
+                "thin_connector_input",
+            ),
+            (
+                "LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON",
+                "${{ vars.LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON }}",
+                "operator_supplied_runtime_input",
+            ),
+            (
+                "LAUNCHPLANE_AUTHZ_GRANTS_JSON",
+                "${{ env.LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON }}",
+                "thin_connector_input",
+            ),
+            (
+                "LAUNCHPLANE_SERVICE_AUDIENCE",
+                "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",
+                "launchplane_self_bootstrap",
+            ),
+            (
+                "LAUNCHPLANE_AUTHZ_GRANT_MODE",
+                "${{ inputs.authz_grants_mode }}",
+                "operator_supplied_runtime_input",
+            ),
+            (
+                "LAUNCHPLANE_AUTHZ_GRANT_REASON",
+                "${{ inputs.authz_grants_reason }}",
+                "operator_supplied_runtime_input",
+            ),
+            (
+                "REVIEWED_GRANTS_SHA256",
+                "${{ inputs.authz_grants_expected_sha256 }}",
+                "operator_supplied_runtime_input",
+            ),
+            (
+                "audience",
+                "${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}",
+                "thin_connector_input",
+            ),
+            (
+                "idempotency-key-prefix",
+                "launchplane-operator-authz-grant:${{ github.run_id }}:${{ github.run_attempt }}",
+                "thin_connector_input",
+            ),
+            (
+                "payload-list-file",
+                "${{ steps.authz_grants.outputs.github_actions_grants_file }}",
+                "thin_connector_input",
+            ),
+        )
+        for key, value, expected_reason in cases:
+            with self.subTest(key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/deploy-launchplane.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    expected_reason,
+                )
 
     def test_reusable_odoo_workflow_aliases_are_path_scoped(self) -> None:
         reusable_workflow_cases = (
@@ -3033,8 +3094,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "github.run_id }}:${{ github.run_attempt }}"
         )
         preview_apply_key = (
-            "odoo-driver-route-smoke:preview-apply:${{ "
-            "github.run_id }}:${{ github.run_attempt }}"
+            "odoo-driver-route-smoke:preview-apply:${{ github.run_id }}:${{ github.run_attempt }}"
         )
         preview_pr_feedback_key = (
             "odoo-driver-route-smoke:preview-pr-feedback:${{ "
