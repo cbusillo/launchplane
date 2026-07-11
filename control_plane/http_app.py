@@ -10532,6 +10532,15 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message=str(error),
             ) from error
+        except control_plane_tracked_target_logs.TrackedTargetLogsProviderError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="target_logs_unavailable",
+                message=(
+                    f"Tracked target logs are unavailable during {error.operation}: {error.detail}"
+                ),
+            ) from error
         except click.ClickException as error:
             raise _launchplane_http_error(
                 status_code=503,

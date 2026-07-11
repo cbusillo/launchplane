@@ -1917,8 +1917,9 @@ deployment log, validates source-specific query parameters before provider
 access, and redacts likely secret values before returning lines. Deployment-log
 reads use `source=deployment`, require `since=all`, and reject search text.
 Launchplane verifies the selected deployment belongs to the requested tracked
-target before reading its detached log id, and provider failures remain
-public-safe.
+target before reading its detached log id. Provider failures expose only a
+bounded redacted operation label/detail, and the manual workflow preserves the
+redacted response artifact before reporting failure.
 
 The preview driver cut stays intentionally narrow but keeps topology in
 Launchplane: Launchplane owns preview URL derivation from the
