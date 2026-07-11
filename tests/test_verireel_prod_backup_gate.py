@@ -7,13 +7,13 @@ from unittest.mock import patch
 import click
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretClass,
     RuntimeSecretSafetyRule,
 )
-from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.verireel_prod_backup_gate import (
     VeriReelProdBackupGateRequest,
     VeriReelProdBackupGateWorkerRequest,
@@ -37,6 +37,12 @@ from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
     reconcile_stale_verireel_prod_backup_gate_operation_records,
     run_verireel_prod_backup_gate_operation_worker_loop,
     run_verireel_prod_backup_gate_operation_worker_once,
+)
+
+
+PROD_WORKER_SECRET_BINDING_KEYS = (
+    "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS",
+    "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY",
 )
 
 
@@ -83,39 +89,47 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                 payload["error_message"] = error_message
         return VeriReelProdBackupGateOperationRecord.model_validate(payload)
 
-    def _write_prod_worker_secret_binding(
+    def _write_prod_worker_secret_bindings(
         self,
         store: PostgresRecordStore,
         *,
         secret_class: RuntimeSecretClass = "prod_only",
+        classified_binding_keys: tuple[str, ...] = PROD_WORKER_SECRET_BINDING_KEYS,
     ) -> None:
-        binding_key = "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"
-        store.write_secret_binding(
-            SecretBinding(
-                binding_id="secret-verireel-prod-proxmox-ssh-private-key-binding",
-                secret_id="secret-verireel-prod-proxmox-ssh-private-key",
-                integration="runtime_environment",
-                binding_key=binding_key,
-                context="verireel",
-                instance="prod",
-                status="configured",
-                created_at="2026-05-05T22:30:00Z",
-                updated_at="2026-05-05T22:30:00Z",
-            )
-        )
+        plaintext_values = {
+            "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "runtime-known-hosts",
+            "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "runtime-private-key",
+        }
+        with patch.dict(
+            "os.environ",
+            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+        ):
+            for binding_key, plaintext_value in plaintext_values.items():
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    name=binding_key,
+                    plaintext_value=plaintext_value,
+                    binding_key=binding_key,
+                    context_name="verireel",
+                    instance_name="prod",
+                    actor="test",
+                )
         store.write_runtime_key_safety_policy_record(
             RuntimeKeySafetyPolicyRecord(
                 record_id="runtime-key-safety-policy-test",
                 status="active",
                 source="test",
                 updated_at="2026-05-05T22:30:00Z",
-                rules=(
+                rules=tuple(
                     RuntimeSecretSafetyRule(
                         binding_key=binding_key,
                         secret_class=secret_class,
                         allowed_contexts=("verireel",),
                         allowed_instances=("prod",),
-                    ),
+                    )
+                    for binding_key in classified_binding_keys
                 ),
             )
         )
@@ -140,8 +154,6 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                                             "LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND": "uv run python -m control_plane.workflows.verireel_prod_backup_gate_worker",
                                             "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
                                             "VERIREEL_PROD_PROXMOX_USER": "runtime-user",
-                                            "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "runtime-private-key",
-                                            "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "runtime-known-hosts",
                                             "VERIREEL_PROD_CT_ID": "211",
                                             "VERIREEL_PROD_BACKUP_STORAGE": "pbs-runtime",
                                             "VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS": "25000",
@@ -155,6 +167,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                     source_label="test",
                 ):
                     store.write_runtime_environment_record(record)
+                self._write_prod_worker_secret_bindings(store)
             finally:
                 store.close()
 
@@ -183,6 +196,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                     "os.environ",
                     {
                         "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
                         "LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND": "legacy worker",
                         "VERIREEL_PROD_PROXMOX_HOST": "legacy.example",
                         "VERIREEL_PROD_PROXMOX_USER": "legacy-user",
@@ -228,7 +242,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             try:
-                self._write_prod_worker_secret_binding(store, secret_class="testing")
+                self._write_prod_worker_secret_bindings(store, secret_class="testing")
             finally:
                 store.close()
 
@@ -246,6 +260,41 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                         ),
                     )
 
+        run.assert_not_called()
+
+    def test_run_delegated_worker_names_unclassified_managed_runtime_secret(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = self._sqlite_database_url(root)
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                self._write_prod_worker_secret_bindings(
+                    store,
+                    classified_binding_keys=("VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY",),
+                )
+            finally:
+                store.close()
+
+            with (
+                patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
+                patch("control_plane.workflows.verireel_prod_backup_gate.subprocess.run") as run,
+            ):
+                with self.assertRaises(click.ClickException) as caught:
+                    _run_delegated_worker(
+                        control_plane_root=root,
+                        request=VeriReelProdBackupGateWorkerRequest(
+                            context="verireel",
+                            instance="prod",
+                            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                        ),
+                    )
+
+        self.assertIn(
+            "unclassified_binding[VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS]",
+            str(caught.exception),
+        )
+        self.assertIn("runtime-key-safety-policy-test", str(caught.exception))
         run.assert_not_called()
 
     def test_run_delegated_worker_requires_database_for_runtime_key_safety(self) -> None:
@@ -450,9 +499,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             record_store = self._record_store(root)
-            record_store.write_verireel_prod_backup_gate_operation_record(
-                self._operation_record()
-            )
+            record_store.write_verireel_prod_backup_gate_operation_record(self._operation_record())
 
             with patch(
                 "control_plane.workflows.verireel_prod_backup_gate_operation_worker._run_delegated_worker",
@@ -490,9 +537,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             record_store = self._record_store(root)
-            record_store.write_verireel_prod_backup_gate_operation_record(
-                self._operation_record()
-            )
+            record_store.write_verireel_prod_backup_gate_operation_record(self._operation_record())
 
             with patch(
                 "control_plane.workflows.verireel_prod_backup_gate_operation_worker._run_delegated_worker",
@@ -522,9 +567,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             record_store = self._record_store(root)
-            record_store.write_verireel_prod_backup_gate_operation_record(
-                self._operation_record()
-            )
+            record_store.write_verireel_prod_backup_gate_operation_record(self._operation_record())
 
             with patch(
                 "control_plane.workflows.verireel_prod_backup_gate_operation_worker._run_delegated_worker",
@@ -625,9 +668,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             self.assertEqual(failed.status, "fail")
             self.assertEqual(failed.phase, "failed")
             self.assertIn("unsafe to retry", failed.error_message)
-            failed_backup_gate = record_store.read_backup_gate_record(
-                "backup-gate-side-effect"
-            )
+            failed_backup_gate = record_store.read_backup_gate_record("backup-gate-side-effect")
             self.assertEqual(failed_backup_gate.status, "fail")
             self.assertIn("unsafe to retry", failed_backup_gate.evidence["error_message"])
 
@@ -667,9 +708,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             record_store = self._record_store(root)
-            record_store.write_verireel_prod_backup_gate_operation_record(
-                self._operation_record()
-            )
+            record_store.write_verireel_prod_backup_gate_operation_record(self._operation_record())
             claimed = record_store.claim_next_verireel_prod_backup_gate_operation_record(
                 lease_owner="worker-a",
                 lease_expires_at="2026-04-25T00:05:00Z",

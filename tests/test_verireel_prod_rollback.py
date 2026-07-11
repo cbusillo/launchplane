@@ -7,6 +7,7 @@ from unittest.mock import patch
 import click
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -18,7 +19,6 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeSecretClass,
     RuntimeSecretSafetyRule,
 )
-from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows import verireel_prod_rollback_worker
@@ -33,6 +33,12 @@ from control_plane.workflows.verireel_prod_rollback import (
 from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
 
 
+PROD_WORKER_SECRET_BINDING_KEYS = (
+    "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS",
+    "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY",
+)
+
+
 class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
     def _sqlite_database_url(self, root: Path) -> str:
         return f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
@@ -40,39 +46,46 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
     def _record_store(self, root: Path) -> FilesystemRecordStore:
         return FilesystemRecordStore(root / "state")
 
-    def _write_prod_worker_secret_binding(
+    def _write_prod_worker_secret_bindings(
         self,
         store: PostgresRecordStore,
         *,
         secret_class: RuntimeSecretClass = "prod_only",
     ) -> None:
-        binding_key = "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"
-        store.write_secret_binding(
-            SecretBinding(
-                binding_id="secret-verireel-prod-proxmox-ssh-private-key-binding",
-                secret_id="secret-verireel-prod-proxmox-ssh-private-key",
-                integration="runtime_environment",
-                binding_key=binding_key,
-                context="verireel",
-                instance="prod",
-                status="configured",
-                created_at="2026-05-05T22:30:00Z",
-                updated_at="2026-05-05T22:30:00Z",
-            )
-        )
+        plaintext_values = {
+            "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "runtime-known-hosts",
+            "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "runtime-private-key",
+        }
+        with patch.dict(
+            "os.environ",
+            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+        ):
+            for binding_key, plaintext_value in plaintext_values.items():
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    name=binding_key,
+                    plaintext_value=plaintext_value,
+                    binding_key=binding_key,
+                    context_name="verireel",
+                    instance_name="prod",
+                    actor="test",
+                )
         store.write_runtime_key_safety_policy_record(
             RuntimeKeySafetyPolicyRecord(
                 record_id="runtime-key-safety-policy-test",
                 status="active",
                 source="test",
                 updated_at="2026-05-05T22:30:00Z",
-                rules=(
+                rules=tuple(
                     RuntimeSecretSafetyRule(
                         binding_key=binding_key,
                         secret_class=secret_class,
                         allowed_contexts=("verireel",),
                         allowed_instances=("prod",),
-                    ),
+                    )
+                    for binding_key in PROD_WORKER_SECRET_BINDING_KEYS
                 ),
             )
         )
@@ -135,8 +148,6 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
                                             "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND": "uv run python -m control_plane.workflows.verireel_prod_rollback_worker",
                                             "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
                                             "VERIREEL_PROD_PROXMOX_USER": "runtime-user",
-                                            "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "runtime-private-key",
-                                            "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "runtime-known-hosts",
                                             "VERIREEL_PROD_CT_ID": "211",
                                         }
                                     )
@@ -148,6 +159,7 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
                     source_label="test",
                 ):
                     store.write_runtime_environment_record(record)
+                self._write_prod_worker_secret_bindings(store)
             finally:
                 store.close()
 
@@ -176,6 +188,7 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
                     "os.environ",
                     {
                         "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
                         "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND": "legacy worker",
                         "VERIREEL_PROD_PROXMOX_HOST": "legacy.example",
                         "VERIREEL_PROD_PROXMOX_USER": "legacy-user",
@@ -215,7 +228,7 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             try:
-                self._write_prod_worker_secret_binding(store, secret_class="testing")
+                self._write_prod_worker_secret_bindings(store, secret_class="testing")
             finally:
                 store.close()
 

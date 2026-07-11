@@ -66,6 +66,12 @@ def latest_active_runtime_key_safety_policy(
     return records[0]
 
 
+def runtime_secret_binding_matches_target(
+    *, binding: SecretBinding, target: RuntimeKeySafetyTarget
+) -> bool:
+    return _binding_route_rank(binding=binding, target=target) > 0
+
+
 def evaluate_runtime_key_safety_from_store(
     *,
     record_store: RuntimeKeySafetyPolicyReadStore,
@@ -212,11 +218,7 @@ def _effective_bindings_for_target(
     highest_rank = max(rank for _, rank in ranked_bindings)
     if highest_rank == 0:
         return ()
-    return tuple(
-        binding
-        for binding, rank in ranked_bindings
-        if rank == highest_rank
-    )
+    return tuple(binding for binding, rank in ranked_bindings if rank == highest_rank)
 
 
 def _binding_route_rank(*, binding: SecretBinding, target: RuntimeKeySafetyTarget) -> int:
@@ -268,9 +270,7 @@ def _evaluate_binding_rule(
                 ),
             )
         )
-    if not target_allowed and not _instance_allowed_for_diagnostics(
-        target=target, rule=rule
-    ):
+    if not target_allowed and not _instance_allowed_for_diagnostics(target=target, rule=rule):
         findings.append(
             RuntimeKeySafetyFinding(
                 code="instance_not_allowed",
@@ -296,19 +296,14 @@ def _target_allowed(*, target: RuntimeKeySafetyTarget, rule: RuntimeSecretSafety
         return True
     if legacy_restricted and _legacy_scope_allowed(target=target, rule=rule):
         return True
-    return any(
-        _target_scope_allowed(target=target, scope=scope)
-        for scope in rule.allowed_targets
-    )
+    return any(_target_scope_allowed(target=target, scope=scope) for scope in rule.allowed_targets)
 
 
 def _context_allowed(*, target: RuntimeKeySafetyTarget, rule: RuntimeSecretSafetyRule) -> bool:
     legacy_restricted = bool(
         rule.allowed_contexts or rule.allowed_instances or rule.allowed_instance_patterns
     )
-    if legacy_restricted and (
-        not rule.allowed_contexts or target.context in rule.allowed_contexts
-    ):
+    if legacy_restricted and (not rule.allowed_contexts or target.context in rule.allowed_contexts):
         return True
     return any(scope.context == target.context for scope in rule.allowed_targets)
 
@@ -335,9 +330,7 @@ def _instance_allowed_for_diagnostics(
     return True
 
 
-def _legacy_scope_allowed(
-    *, target: RuntimeKeySafetyTarget, rule: RuntimeSecretSafetyRule
-) -> bool:
+def _legacy_scope_allowed(*, target: RuntimeKeySafetyTarget, rule: RuntimeSecretSafetyRule) -> bool:
     return _legacy_context_allowed(target=target, rule=rule) and _legacy_instance_allowed(
         target=target, rule=rule
     )
@@ -387,7 +380,4 @@ def _instance_allowed(
         return True
     if any(character in instance for character in ("/", "\\")):
         return False
-    return any(
-        fnmatchcase(instance, pattern)
-        for pattern in instance_patterns
-    )
+    return any(fnmatchcase(instance, pattern) for pattern in instance_patterns)

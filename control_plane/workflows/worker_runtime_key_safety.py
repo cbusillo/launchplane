@@ -8,6 +8,7 @@ from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
     runtime_key_safety_environment_class,
+    runtime_secret_binding_matches_target,
 )
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
@@ -29,15 +30,25 @@ def enforce_worker_runtime_key_safety(
     record_store = PostgresRecordStore(database_url=database_url)
     record_store.ensure_schema()
     try:
+        target = RuntimeKeySafetyTarget(
+            context=context_name,
+            instance=instance_name,
+            environment_class=runtime_key_safety_environment_class(instance_name),
+        )
         bindings = record_store.list_secret_bindings(
             integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-            context_name=context_name,
-            instance_name=instance_name,
             limit=None,
         )
         allowed_key_set = set(allowed_worker_keys)
         binding_keys = tuple(
-            binding.binding_key for binding in bindings if binding.binding_key in allowed_key_set
+            sorted(
+                {
+                    binding.binding_key
+                    for binding in bindings
+                    if binding.binding_key in allowed_key_set
+                    and runtime_secret_binding_matches_target(binding=binding, target=target)
+                }
+            )
         )
         if not binding_keys:
             return
@@ -46,11 +57,7 @@ def enforce_worker_runtime_key_safety(
             evaluation = evaluate_runtime_key_safety_from_store(
                 record_store=record_store,
                 policy_record=policy_record,
-                target=RuntimeKeySafetyTarget(
-                    context=context_name,
-                    instance=instance_name,
-                    environment_class=runtime_key_safety_environment_class(instance_name),
-                ),
+                target=target,
                 required_binding_keys=binding_keys,
             )
         except ValueError as exc:
@@ -59,8 +66,16 @@ def enforce_worker_runtime_key_safety(
             ) from exc
         if evaluation.status == "pass":
             return
-        finding_codes = sorted({finding.code for finding in evaluation.findings})
-        suffix = f": {', '.join(finding_codes)}" if finding_codes else ""
-        raise click.ClickException(f"Runtime key-safety gate failed for {operation_name}{suffix}.")
+        finding_labels = sorted(
+            {
+                (f"{finding.code}[{finding.binding_key}]" if finding.binding_key else finding.code)
+                for finding in evaluation.findings
+            }
+        )
+        suffix = f": {', '.join(finding_labels)}" if finding_labels else ""
+        raise click.ClickException(
+            f"Runtime key-safety gate failed for {operation_name} under policy "
+            f"{policy_record.record_id} ({policy_record.policy_sha256}){suffix}."
+        )
     finally:
         record_store.close()
