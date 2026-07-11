@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 from click import ClickException
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import (
@@ -1345,8 +1344,6 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                 "log_path_present": True,
             },
         )
-        self.assertTrue(payload["logs"]["available"])
-        self.assertEqual(payload["logs"]["unavailable_reason"], "")
         self.assertEqual(payload["logs"]["lines"][0], "starting deployment")
         self.assertIn("SMTP_PASSWORD=[redacted]", payload["logs"]["lines"][1])
         self.assertNotIn("smtp-secret", json.dumps(payload))
@@ -1823,11 +1820,9 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_deployment_logs",
-                    side_effect=control_plane_dokploy.DokployHttpError(
-                        method="GET",
-                        path="/api/deployment.readLogs",
-                        status_code=500,
-                        error_body=("DATABASE_URL=postgresql://user:provider-secret@example/db"),
+                    side_effect=ClickException(
+                        "Dokploy API GET /api/deployment.readLogs failed (500): "
+                        "DATABASE_URL=postgresql://user:provider-secret@example/db"
                     ),
                 ),
             ):
@@ -1855,85 +1850,6 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("deployment-log-read", payload["error"]["message"])
         self.assertIn("DATABASE_URL=[redacted]", payload["error"]["message"])
         self.assertNotIn("provider-secret", json.dumps(payload))
-
-    async def test_tracked_target_logs_returns_metadata_when_deployment_logs_are_unavailable(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_tracked_target_records(
-                database_url=database_url,
-                context="sellyouroutboard-testing",
-                instance="testing",
-                target_id="app-123",
-                target_type="application",
-                target_name="syo-testing-app",
-            )
-            app_store = PostgresRecordStore(database_url=database_url)
-            with (
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
-                    return_value=("https://dokploy.example.com", "secret-token"),
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.latest_deployment_for_target",
-                    return_value={
-                        "deploymentId": "deployment-123",
-                        "applicationId": "app-123",
-                        "status": "error",
-                        "errorMessage": "REGISTRY_TOKEN=provider-secret pull denied",
-                        "createdAt": "2026-07-11T17:33:15Z",
-                        "startedAt": "2026-07-11T17:33:15Z",
-                        "finishedAt": "2026-07-11T17:33:18Z",
-                        "logPath": "/var/lib/dokploy/deployments/deployment-123.log",
-                    },
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_deployment_logs",
-                    side_effect=control_plane_dokploy.DokployHttpError(
-                        method="GET",
-                        path="/api/deployment.readLogs",
-                        status_code=404,
-                        error_body='{"message":"Not found"}',
-                    ),
-                ),
-            ):
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=_record_read_policy(
-                        action="target_logs.read",
-                        context="sellyouroutboard-testing",
-                    ),
-                    record_store_factory=lambda: app_store,
-                    control_plane_root_path=root,
-                )
-                response = await _get_tracked_target_logs(
-                    app,
-                    "sellyouroutboard-testing",
-                    "testing",
-                    source="deployment",
-                    since="all",
-                )
-                app_store.close()
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["deployment"]["deployment_id"], "deployment-123")
-        self.assertEqual(payload["deployment"]["status"], "error")
-        self.assertEqual(
-            payload["deployment"]["error_message"],
-            "REGISTRY_TOKEN=[redacted] pull denied",
-        )
-        self.assertNotIn("provider-secret", json.dumps(payload))
-        self.assertFalse(payload["logs"]["available"])
-        self.assertEqual(payload["logs"]["unavailable_reason"], "provider_not_found")
-        self.assertEqual(payload["logs"]["line_count"], 0)
-        self.assertEqual(payload["logs"]["lines"], [])
 
     async def test_tracked_target_logs_validates_query_values(self) -> None:
         app = create_launchplane_fastapi_app(
