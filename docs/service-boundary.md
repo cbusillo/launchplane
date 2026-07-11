@@ -1920,6 +1920,10 @@ Launchplane verifies the selected deployment belongs to the requested tracked
 target before reading its detached log id. Provider failures expose only a
 bounded redacted operation label/detail, and the manual workflow preserves the
 redacted response artifact before reporting failure.
+Older Dokploy releases that do not expose deployment-log reads return a partial
+successful response with target-bound deployment metadata and
+`logs.available=false`; Launchplane does not treat missing log transport as
+missing deployment evidence.
 
 The preview driver cut stays intentionally narrow but keeps topology in
 Launchplane: Launchplane owns preview URL derivation from the

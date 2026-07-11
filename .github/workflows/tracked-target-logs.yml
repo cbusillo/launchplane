@@ -158,6 +158,8 @@ jobs:
                 request,
                 deployment,
                 logs: {
+                  available: .logs.available,
+                  unavailable_reason: .logs.unavailable_reason,
                   line_count: .logs.line_count,
                   redacted: .logs.redacted
                 }
@@ -171,7 +173,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: tracked-target-logs-${{ inputs.context }}-${{ inputs.instance }}-${{ inputs.source }}
+          name: tracked-target-logs-${{ inputs.context }}-${{ inputs.instance }}
           path: |
             tracked-target-logs-request.json
             tracked-target-logs.json
@@ -181,5 +183,6 @@ jobs:
         if: ${{ steps.request.outcome == 'failure' }}
         shell: bash
         run: |
-          echo 'Tracked target log request failed; inspect the uploaded redacted response.' >&2
+          echo 'Tracked target log request failed;' \
+            'inspect the uploaded redacted response.' >&2
           exit 1

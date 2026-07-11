@@ -1,13 +1,16 @@
 import base64
 import hashlib
+import io
 import json
 import os
 import tomllib
 import unittest
+from http.client import HTTPMessage
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import click
 from click.testing import CliRunner, Result
@@ -353,6 +356,31 @@ class DokployConfigTests(unittest.TestCase):
             )
 
         self.assertIn("deployment id", str(error_context.exception))
+
+    def test_dokploy_request_raises_structured_http_error(self) -> None:
+        error = HTTPError(
+            url="https://dokploy.example.com/api/deployment.readLogs",
+            code=404,
+            msg="Not Found",
+            hdrs=HTTPMessage(),
+            fp=io.BytesIO(b'{"message":"Not found"}'),
+        )
+
+        with (
+            patch("control_plane.dokploy.urlopen", side_effect=error),
+            self.assertRaises(control_plane_dokploy.DokployHttpError) as error_context,
+        ):
+            control_plane_dokploy.dokploy_request(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                path="/api/deployment.readLogs",
+                query={"deploymentId": "deploy-123"},
+            )
+
+        self.assertEqual(error_context.exception.method, "GET")
+        self.assertEqual(error_context.exception.path, "/api/deployment.readLogs")
+        self.assertEqual(error_context.exception.status_code, 404)
+        self.assertEqual(error_context.exception.error_body, '{"message":"Not found"}')
 
     def test_deployment_key_from_wait_result_reads_deployment_token(self) -> None:
         self.assertEqual(

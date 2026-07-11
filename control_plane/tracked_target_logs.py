@@ -19,6 +19,7 @@ TrackedTargetLogProviderOperation = Literal[
     "runtime-log-read",
 ]
 _MAX_PROVIDER_ERROR_DETAIL_LENGTH = 1000
+_DEPLOYMENT_LOG_PROVIDER_NOT_FOUND = "provider_not_found"
 
 
 class TrackedTargetLogsProviderError(RuntimeError):
@@ -103,6 +104,8 @@ def build_tracked_target_logs_payload(
     app_name = str(target_payload.get("appName") or "").strip()
     server_id = str(target_payload.get("serverId") or "").strip()
     deployment: dict[str, object] | None = None
+    logs_available = True
+    logs_unavailable_reason = ""
     if normalized_source == "deployment":
         try:
             latest_deployment = control_plane_dokploy.latest_deployment_for_target(
@@ -126,6 +129,10 @@ def build_tracked_target_logs_payload(
             raise ValueError(
                 "Latest Dokploy deployment is not bound to the requested tracked target."
             )
+        deployment = _deployment_metadata(
+            deployment=latest_deployment,
+            deployment_id=deployment_id,
+        )
         try:
             logs = control_plane_dokploy.fetch_dokploy_deployment_logs(
                 host=host,
@@ -133,9 +140,15 @@ def build_tracked_target_logs_payload(
                 deployment_id=deployment_id,
                 line_count=normalized_line_count,
             )
+        except control_plane_dokploy.DokployHttpError as error:
+            if error.status_code == 404 and error.path == "/api/deployment.readLogs":
+                logs = ()
+                logs_available = False
+                logs_unavailable_reason = _DEPLOYMENT_LOG_PROVIDER_NOT_FOUND
+            else:
+                raise _provider_error(operation="deployment-log-read", error=error) from error
         except click.ClickException as error:
             raise _provider_error(operation="deployment-log-read", error=error) from error
-        deployment = {"deployment_id": deployment_id}
     elif target_record.target_type == "application":
         try:
             logs = control_plane_dokploy.fetch_dokploy_application_logs(
@@ -184,6 +197,8 @@ def build_tracked_target_logs_payload(
             "search": normalized_search,
         },
         "logs": {
+            "available": logs_available,
+            "unavailable_reason": logs_unavailable_reason,
             "line_count": len(logs),
             "lines": list(logs),
             "redacted": True,
@@ -201,15 +216,48 @@ def normalize_tracked_target_log_source(value: str) -> TrackedTargetLogSource:
     return cast(TrackedTargetLogSource, normalized_value)
 
 
+def _deployment_metadata(
+    *,
+    deployment: dict[str, control_plane_dokploy.JsonValue],
+    deployment_id: str,
+) -> dict[str, object]:
+    return {
+        "deployment_id": deployment_id,
+        "status": _deployment_text(deployment, "status", "state", "deploymentStatus").lower(),
+        "error_message": _redacted_text(
+            _deployment_text(deployment, "errorMessage", "error_message")
+        ),
+        "created_at": _deployment_text(deployment, "createdAt", "created_at"),
+        "started_at": _deployment_text(deployment, "startedAt", "started_at"),
+        "finished_at": _deployment_text(deployment, "finishedAt", "finished_at"),
+        "log_path_present": bool(_deployment_text(deployment, "logPath", "log_path")),
+    }
+
+
+def _deployment_text(
+    deployment: dict[str, control_plane_dokploy.JsonValue],
+    *key_names: str,
+) -> str:
+    for key_name in key_names:
+        value = deployment.get(key_name)
+        if value is not None:
+            return str(value).strip()
+    return ""
+
+
 def _provider_error(
     *,
     operation: TrackedTargetLogProviderOperation,
     error: click.ClickException,
 ) -> TrackedTargetLogsProviderError:
-    redacted_detail = control_plane_dokploy.redact_dokploy_log_line(str(error)).strip()
-    if not redacted_detail:
-        redacted_detail = "Provider request failed."
+    redacted_detail = _redacted_text(str(error)) or "Provider request failed."
     return TrackedTargetLogsProviderError(
         operation=operation,
-        detail=redacted_detail[:_MAX_PROVIDER_ERROR_DETAIL_LENGTH],
+        detail=redacted_detail,
     )
+
+
+def _redacted_text(value: str) -> str:
+    return control_plane_dokploy.redact_dokploy_log_line(value).strip()[
+        :_MAX_PROVIDER_ERROR_DETAIL_LENGTH
+    ]
