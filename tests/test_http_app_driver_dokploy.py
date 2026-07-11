@@ -1739,7 +1739,9 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             with patch(
                 "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
-                side_effect=ClickException("API_TOKEN=provider-secret request failed."),
+                side_effect=ClickException(
+                    f"API_TOKEN=provider-secret request failed. {'x' * 2000}"
+                ),
             ):
                 app = create_launchplane_fastapi_app(
                     verifier=_StubVerifier(_identity()),
@@ -1761,11 +1763,13 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "target_logs_unavailable")
-        self.assertEqual(
-            payload["error"]["message"],
-            "Tracked target logs are unavailable during provider-config: "
-            "API_TOKEN=[redacted] request failed.",
+        self.assertTrue(
+            payload["error"]["message"].startswith(
+                "Tracked target logs are unavailable during provider-config: "
+                "API_TOKEN=[redacted] request failed."
+            )
         )
+        self.assertLessEqual(len(payload["error"]["message"]), 1060)
         self.assertNotIn("provider-secret", json.dumps(payload))
 
     async def test_tracked_target_logs_redacts_deployment_log_provider_error(self) -> None:
