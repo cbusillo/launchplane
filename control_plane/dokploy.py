@@ -113,22 +113,6 @@ type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
 
 
-class DokployHttpError(click.ClickException):
-    def __init__(
-        self,
-        *,
-        method: str,
-        path: str,
-        status_code: int,
-        error_body: str,
-    ) -> None:
-        self.method = method
-        self.path = path
-        self.status_code = status_code
-        self.error_body = error_body
-        super().__init__(f"Dokploy API {method} {path} failed ({status_code}): {error_body}")
-
-
 class DokployTargetRecordStore(Protocol):
     def list_dokploy_target_records(self) -> tuple[DokployTargetRecord, ...]: ...
 
@@ -2207,11 +2191,8 @@ def dokploy_request(
             raw_payload = response.read()
     except HTTPError as error:
         error_body = error.read().decode(errors="replace").strip()
-        raise DokployHttpError(
-            method=method,
-            path=normalized_path,
-            status_code=error.code,
-            error_body=error_body,
+        raise click.ClickException(
+            f"Dokploy API {method} {normalized_path} failed ({error.code}): {error_body}"
         ) from error
     except URLError as error:
         raise click.ClickException(

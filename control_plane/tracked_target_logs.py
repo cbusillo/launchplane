@@ -19,7 +19,6 @@ TrackedTargetLogProviderOperation = Literal[
     "runtime-log-read",
 ]
 _MAX_PROVIDER_ERROR_DETAIL_LENGTH = 1000
-_DEPLOYMENT_LOG_PROVIDER_NOT_FOUND = "provider_not_found"
 
 
 class TrackedTargetLogsProviderError(RuntimeError):
@@ -104,8 +103,6 @@ def build_tracked_target_logs_payload(
     app_name = str(target_payload.get("appName") or "").strip()
     server_id = str(target_payload.get("serverId") or "").strip()
     deployment: dict[str, object] | None = None
-    logs_available = True
-    logs_unavailable_reason = ""
     if normalized_source == "deployment":
         try:
             latest_deployment = control_plane_dokploy.latest_deployment_for_target(
@@ -140,13 +137,6 @@ def build_tracked_target_logs_payload(
                 deployment_id=deployment_id,
                 line_count=normalized_line_count,
             )
-        except control_plane_dokploy.DokployHttpError as error:
-            if error.status_code == 404 and error.path == "/api/deployment.readLogs":
-                logs = ()
-                logs_available = False
-                logs_unavailable_reason = _DEPLOYMENT_LOG_PROVIDER_NOT_FOUND
-            else:
-                raise _provider_error(operation="deployment-log-read", error=error) from error
         except click.ClickException as error:
             raise _provider_error(operation="deployment-log-read", error=error) from error
     elif target_record.target_type == "application":
@@ -197,8 +187,6 @@ def build_tracked_target_logs_payload(
             "search": normalized_search,
         },
         "logs": {
-            "available": logs_available,
-            "unavailable_reason": logs_unavailable_reason,
             "line_count": len(logs),
             "lines": list(logs),
             "redacted": True,

@@ -1395,8 +1395,6 @@ class TrackedTargetLogRequestResponse(BaseModel):
 class TrackedTargetLogLinesResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    available: bool
-    unavailable_reason: str
     line_count: int
     lines: tuple[str, ...]
     redacted: bool
