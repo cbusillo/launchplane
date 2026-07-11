@@ -1901,7 +1901,7 @@ read-model contract documented in [driver-descriptors.md](driver-descriptors.md)
 - `GET /v1/drivers/{driver_id}`
 - `GET /v1/contexts/{context}/driver-view`
 - `GET /v1/contexts/{context}/instances/{instance}/driver-view`
-- `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200`
+- `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200&source=runtime`
 
 The descriptor and driver-view routes use action `driver.read` and are native
 FastAPI routes. Descriptor discovery authorizes against context `launchplane`;
@@ -1912,8 +1912,13 @@ runtime-provider primitives.
 The logs route is the exception to the `driver.read` action because it reads live
 provider output. It is a native FastAPI route, uses action `target_logs.read`,
 resolves DB-backed tracked target records by context/instance, supports bounded
-Dokploy `application` and `compose` logs, validates log query parameters before
-provider access, and redacts likely secret values before returning lines.
+Dokploy `application` and `compose` runtime logs plus the latest tracked target
+deployment log, validates source-specific query parameters before provider
+access, and redacts likely secret values before returning lines. Deployment-log
+reads use `source=deployment`, require `since=all`, and reject search text.
+Launchplane verifies the selected deployment belongs to the requested tracked
+target before reading its detached log id, and provider failures remain
+public-safe.
 
 The preview driver cut stays intentionally narrow but keeps topology in
 Launchplane: Launchplane owns preview URL derivation from the

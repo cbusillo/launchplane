@@ -17,8 +17,16 @@ name: Tracked Target Logs
         required: true
         default: "200"
         type: string
+      source:
+        description: Read current runtime logs or the latest deployment logs.
+        required: true
+        default: runtime
+        type: choice
+        options:
+          - runtime
+          - deployment
       since:
-        description: Log duration window, such as all, 5m, 2h, or 1d.
+        description: Runtime log window; deployment mode always uses all.
         required: true
         default: 1h
         type: string
@@ -43,6 +51,7 @@ jobs:
       CONTEXT: ${{ inputs.context }}
       INSTANCE: ${{ inputs.instance }}
       LINES: ${{ inputs.lines }}
+      SOURCE: ${{ inputs.source }}
       SINCE: ${{ inputs.since }}
       SEARCH: ${{ inputs.search }}
     steps:
@@ -66,6 +75,14 @@ jobs:
             echo "since must be 'all' or a duration like 5m, 2h, or 1d." >&2
             exit 1
           fi
+          if [ "$SOURCE" != "runtime" ] && [ "$SOURCE" != "deployment" ]; then
+            echo "source must be runtime or deployment." >&2
+            exit 1
+          fi
+          if [ "$SOURCE" = "deployment" ] && [ -n "$SEARCH" ]; then
+            echo "deployment logs do not support search." >&2
+            exit 1
+          fi
           if ! [[ "$SEARCH" =~ ^[a-zA-Z0-9\ ._-]{0,500}$ ]]; then
             echo 'search may contain only safe plain-text characters.' >&2
             exit 1
@@ -76,16 +93,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          effective_since="$SINCE"
+          if [ "$SOURCE" = "deployment" ]; then
+            effective_since="all"
+          fi
           jq -n \
             --arg context "$CONTEXT" \
             --arg instance "$INSTANCE" \
             --arg lines "$LINES" \
-            --arg since "$SINCE" \
+            --arg source "$SOURCE" \
+            --arg since "$effective_since" \
             --arg search "$SEARCH" \
             '{
               context: $context,
               instance: $instance,
               lines: $lines,
+              source: $source,
               since: $since,
               search: $search
             }' \
@@ -94,7 +117,8 @@ jobs:
             jq -r \
               '"/v1/contexts/\(.context | @uri)" +
                "/instances/\(.instance | @uri)/logs" +
-               "?lines=\(.lines | @uri)&since=\(.since | @uri)" +
+               "?lines=\(.lines | @uri)&source=\(.source | @uri)" +
+               "&since=\(.since | @uri)" +
                "&search=\(.search | @uri)"' \
               tracked-target-logs-request.json
           })"
@@ -108,6 +132,7 @@ jobs:
           method: GET
           audience: ${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}
           response-output-file: tracked-target-logs.json
+          log-response-body: false
           output-paths: >-
             trace_id=trace_id
 
@@ -122,6 +147,7 @@ jobs:
             instance,
             target,
             request,
+            deployment,
             logs: {
               line_count: .logs.line_count,
               redacted: .logs.redacted

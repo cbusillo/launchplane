@@ -1386,6 +1386,7 @@ class TrackedTargetLogTargetResponse(BaseModel):
 class TrackedTargetLogRequestResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    source: Literal["runtime", "deployment"]
     line_count: int
     since: str
     search: str
@@ -1399,6 +1400,12 @@ class TrackedTargetLogLinesResponse(BaseModel):
     redacted: bool
 
 
+class TrackedTargetLogDeploymentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    deployment_id: str
+
+
 class TrackedTargetLogsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1409,6 +1416,7 @@ class TrackedTargetLogsResponse(BaseModel):
     target: TrackedTargetLogTargetResponse
     request: TrackedTargetLogRequestResponse
     logs: TrackedTargetLogLinesResponse
+    deployment: TrackedTargetLogDeploymentResponse | None = None
 
 
 class EdgeEndpointRecordResponse(BaseModel):
@@ -10450,6 +10458,7 @@ def create_launchplane_fastapi_app(
         lines: Annotated[str, Query()] = str(control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT),
         since: Annotated[str, Query()] = "all",
         search: Annotated[str, Query()] = "",
+        source: Annotated[str, Query()] = "runtime",
     ) -> TrackedTargetLogsResponse:
         trace_id = next_trace_id()
         if not resolved_authz_policy_runtime.policy.allows(
@@ -10483,7 +10492,14 @@ def create_launchplane_fastapi_app(
         try:
             normalized_since = control_plane_dokploy.normalize_dokploy_log_since(since)
             normalized_search = control_plane_dokploy.normalize_dokploy_log_search(search)
-        except click.ClickException as error:
+            normalized_source = (
+                control_plane_tracked_target_logs.normalize_tracked_target_log_source(source)
+            )
+            if normalized_source == "deployment" and normalized_since != "all":
+                raise ValueError("Tracked deployment logs require since='all'.")
+            if normalized_source == "deployment" and normalized_search:
+                raise ValueError("Tracked deployment logs do not support search.")
+        except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
@@ -10500,6 +10516,7 @@ def create_launchplane_fastapi_app(
                 line_count=line_count,
                 since=normalized_since,
                 search=normalized_search,
+                source=normalized_source,
             )
         except TypeError as error:
             raise _launchplane_http_error(
@@ -10520,7 +10537,7 @@ def create_launchplane_fastapi_app(
                 status_code=503,
                 trace_id=trace_id,
                 code="target_logs_unavailable",
-                message=str(error),
+                message="Tracked target logs are unavailable from the provider.",
             ) from error
         return TrackedTargetLogsResponse.model_validate(
             {"status": "ok", "trace_id": trace_id, **logs_payload}
