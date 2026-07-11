@@ -4,6 +4,8 @@ import logging
 import mimetypes
 import os
 import secrets
+from copy import deepcopy
+from functools import cache
 from urllib.parse import unquote
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -13,6 +15,7 @@ from typing import Annotated, Any, Literal, Protocol, cast
 from uuid import uuid4
 import click
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
+from fastapi.datastructures import DefaultPlaceholder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from jwt import InvalidTokenError
@@ -3726,6 +3729,90 @@ def _preview_pr_feedback_notification_policy_summary(
     }
 
 
+_DEFAULT_OPENAPI_REF_TEMPLATE = "#/$defs/{model}"
+_LAUNCHPLANE_ERROR_RESPONSE_REF = "#/components/schemas/LaunchplaneErrorResponse"
+
+
+@cache
+def _cached_openapi_model_schema(model: type[BaseModel], ref_template: str) -> dict[str, Any]:
+    return model.model_json_schema(ref_template=ref_template)
+
+
+def _openapi_model_schema(
+    model: type[BaseModel],
+    *,
+    ref_template: str = _DEFAULT_OPENAPI_REF_TEMPLATE,
+) -> dict[str, Any]:
+    return deepcopy(_cached_openapi_model_schema(model, ref_template))
+
+
+class _LaunchplaneFastAPI(FastAPI):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._launchplane_error_response_model_registered = False
+        super().__init__(*args, **kwargs)
+
+    def add_api_route(
+        self,
+        path: str,
+        endpoint: Callable[..., Any],
+        **kwargs: Any,
+    ) -> None:
+        responses = cast(
+            dict[int | str, dict[str, Any]] | None,
+            kwargs.get("responses"),
+        )
+        registers_error_response_model = False
+        if responses is not None:
+            normalized_responses, registers_error_response_model = (
+                self._deduplicate_error_response_models(
+                    responses,
+                    include_in_schema=bool(kwargs.get("include_in_schema", True)),
+                    response_media_type=self._response_media_type(kwargs),
+                )
+            )
+            kwargs["responses"] = normalized_responses
+        super().add_api_route(path, endpoint, **kwargs)
+        if registers_error_response_model:
+            self._launchplane_error_response_model_registered = True
+
+    def _response_media_type(self, kwargs: dict[str, Any]) -> str:
+        response_class = kwargs.get("response_class", self.router.default_response_class)
+        while isinstance(response_class, DefaultPlaceholder):
+            response_class = response_class.value
+        media_type = cast(type[Response], response_class).media_type
+        return media_type or "application/json"
+
+    def _deduplicate_error_response_models(
+        self,
+        responses: dict[int | str, dict[str, Any]],
+        *,
+        include_in_schema: bool,
+        response_media_type: str,
+    ) -> tuple[dict[int | str, dict[str, Any]], bool]:
+        normalized_responses = {
+            status_code: dict(response) for status_code, response in responses.items()
+        }
+        if not include_in_schema:
+            return normalized_responses, False
+
+        error_response_model_registered = self._launchplane_error_response_model_registered
+        registers_error_response_model = False
+        for normalized_response in normalized_responses.values():
+            if normalized_response.get("model") is not LaunchplaneErrorResponse:
+                continue
+            if not error_response_model_registered:
+                error_response_model_registered = True
+                registers_error_response_model = True
+                continue
+            if set(normalized_response) != {"model"}:
+                continue
+            normalized_response.pop("model")
+            normalized_response["content"] = {
+                response_media_type: {"schema": {"$ref": _LAUNCHPLANE_ERROR_RESPONSE_REF}}
+            }
+        return normalized_responses, registers_error_response_model
+
+
 class LaunchplaneAuthzPolicyRuntime:
     def __init__(
         self,
@@ -3889,7 +3976,7 @@ def create_launchplane_fastapi_app(
             if isinstance(shared_record_store, PostgresRecordStore):
                 shared_record_store.close()
 
-    app = FastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
+    app = _LaunchplaneFastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(EvidenceIngressRequestContractMiddleware)
     resolved_oauth_login_state_store = (
         oauth_login_state_store if oauth_login_state_store is not None else OAuthLoginStateStore()
@@ -17769,7 +17856,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": GenericWebPreviewInventoryEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(GenericWebPreviewInventoryEnvelope)
                     }
                 },
             }
@@ -17796,7 +17883,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": GenericWebPreviewReadinessEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(GenericWebPreviewReadinessEnvelope)
                     }
                 },
             }
@@ -17823,7 +17910,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": GenericWebPreviewRefreshEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(GenericWebPreviewRefreshEnvelope)
                     }
                 },
             }
@@ -17851,7 +17938,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": GenericWebPreviewDestroyEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(GenericWebPreviewDestroyEnvelope)
                     }
                 },
             }
@@ -17878,7 +17965,7 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": GenericWebDeployEnvelope.model_json_schema()}
+                    "application/json": {"schema": _openapi_model_schema(GenericWebDeployEnvelope)}
                 },
             }
         },
@@ -17906,7 +17993,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": GenericWebProdPromotionEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(GenericWebProdPromotionEnvelope)
                     }
                 },
             }
@@ -17935,7 +18022,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": GenericWebPromotionWorkflowEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(GenericWebPromotionWorkflowEnvelope)
                     }
                 },
             }
@@ -17964,7 +18051,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": GenericWebStableVerificationEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(GenericWebStableVerificationEnvelope)
                     }
                 },
             }
@@ -17992,7 +18079,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": GenericWebPreviewVerificationEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(GenericWebPreviewVerificationEnvelope)
                     }
                 },
             }
@@ -18020,7 +18107,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelTestingDeployEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelTestingDeployEnvelope)
                     }
                 },
             }
@@ -18048,7 +18135,9 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": VeriReelProdDeployEnvelope.model_json_schema()}
+                    "application/json": {
+                        "schema": _openapi_model_schema(VeriReelProdDeployEnvelope)
+                    }
                 },
             }
         },
@@ -18076,7 +18165,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelProdBackupGateEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelProdBackupGateEnvelope)
                     }
                 },
             }
@@ -18105,7 +18194,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelProdPromotionEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelProdPromotionEnvelope)
                     }
                 },
             }
@@ -18133,7 +18222,9 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": VeriReelProdRollbackEnvelope.model_json_schema()}
+                    "application/json": {
+                        "schema": _openapi_model_schema(VeriReelProdRollbackEnvelope)
+                    }
                 },
             }
         },
@@ -18161,7 +18252,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelTestingVerificationEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelTestingVerificationEnvelope)
                     }
                 },
             }
@@ -18190,7 +18281,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelStableEnvironmentEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelStableEnvironmentEnvelope)
                     }
                 },
             }
@@ -18218,7 +18309,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelRuntimeVerificationEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelRuntimeVerificationEnvelope)
                     }
                 },
             }
@@ -18246,7 +18337,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelPreviewInventoryEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelPreviewInventoryEnvelope)
                     }
                 },
             }
@@ -18274,7 +18365,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelPreviewRefreshEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelPreviewRefreshEnvelope)
                     }
                 },
             }
@@ -18304,7 +18395,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelPreviewDestroyEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelPreviewDestroyEnvelope)
                     }
                 },
             }
@@ -18333,7 +18424,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelAppMaintenanceEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelAppMaintenanceEnvelope)
                     }
                 },
             }
@@ -18362,7 +18453,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": VeriReelPreviewVerificationEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(VeriReelPreviewVerificationEnvelope)
                     }
                 },
             }
@@ -18417,7 +18508,9 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": OdooStableBootstrapEnvelope.model_json_schema()}
+                    "application/json": {
+                        "schema": _openapi_model_schema(OdooStableBootstrapEnvelope)
+                    }
                 },
             },
         },
@@ -18432,11 +18525,13 @@ def create_launchplane_fastapi_app(
                     "application/json": {
                         "schema": {
                             "anyOf": [
-                                LaunchplaneErrorResponse.model_json_schema(
-                                    ref_template="#/components/schemas/{model}"
+                                _openapi_model_schema(
+                                    LaunchplaneErrorResponse,
+                                    ref_template="#/components/schemas/{model}",
                                 ),
-                                OdooStableBootstrapOperationActiveResponse.model_json_schema(
-                                    ref_template="#/components/schemas/{model}"
+                                _openapi_model_schema(
+                                    OdooStableBootstrapOperationActiveResponse,
+                                    ref_template="#/components/schemas/{model}",
                                 ),
                             ]
                         }
@@ -18459,7 +18554,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": OdooTargetReplacementPlanEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(OdooTargetReplacementPlanEnvelope)
                     }
                 },
             },
@@ -18486,7 +18581,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": OdooTargetReplacementApplyEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(OdooTargetReplacementApplyEnvelope)
                     }
                 },
             },
@@ -18627,7 +18722,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": LaunchplaneSelfDeployEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(LaunchplaneSelfDeployEnvelope)
                     }
                 },
             }
@@ -18653,7 +18748,9 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": OdooArtifactPublishEnvelope.model_json_schema()}
+                    "application/json": {
+                        "schema": _openapi_model_schema(OdooArtifactPublishEnvelope)
+                    }
                 },
             }
         },
@@ -18681,7 +18778,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": OdooArtifactPublishInputsEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(OdooArtifactPublishInputsEnvelope)
                     }
                 },
             }
@@ -18710,7 +18807,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": OdooPreviewApplyInputsEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(OdooPreviewApplyInputsEnvelope)
                     }
                 },
             }
@@ -18738,7 +18835,7 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": OdooPreviewApplyEnvelope.model_json_schema()}
+                    "application/json": {"schema": _openapi_model_schema(OdooPreviewApplyEnvelope)}
                 },
             }
         },
@@ -18765,7 +18862,9 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": OdooProdBackupGateEnvelope.model_json_schema()}
+                    "application/json": {
+                        "schema": _openapi_model_schema(OdooProdBackupGateEnvelope)
+                    }
                 },
             }
         },
@@ -18793,7 +18892,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": GenericWebRollbackPlanEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(GenericWebRollbackPlanEnvelope)
                     }
                 },
             }
@@ -18821,7 +18920,9 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": GenericWebRollbackEnvelope.model_json_schema()}
+                    "application/json": {
+                        "schema": _openapi_model_schema(GenericWebRollbackEnvelope)
+                    }
                 },
             }
         },
@@ -18848,7 +18949,7 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": OdooProdRollbackEnvelope.model_json_schema()}
+                    "application/json": {"schema": _openapi_model_schema(OdooProdRollbackEnvelope)}
                 },
             }
         },
@@ -18875,7 +18976,7 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": OdooProdPromotionEnvelope.model_json_schema()}
+                    "application/json": {"schema": _openapi_model_schema(OdooProdPromotionEnvelope)}
                 },
             }
         },
@@ -18903,7 +19004,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": OdooProdPromotionInputsEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(OdooProdPromotionInputsEnvelope)
                     }
                 },
             }
@@ -18931,7 +19032,9 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": OdooProdPromotionRunEnvelope.model_json_schema()}
+                    "application/json": {
+                        "schema": _openapi_model_schema(OdooProdPromotionRunEnvelope)
+                    }
                 },
             }
         },
@@ -18958,7 +19061,7 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": OdooPostDeployEnvelope.model_json_schema()}
+                    "application/json": {"schema": _openapi_model_schema(OdooPostDeployEnvelope)}
                 },
             }
         },
@@ -18985,7 +19088,9 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": OdooAppMaintenanceEnvelope.model_json_schema()}
+                    "application/json": {
+                        "schema": _openapi_model_schema(OdooAppMaintenanceEnvelope)
+                    }
                 },
             }
         },
@@ -19013,7 +19118,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": OdooConfigParameterOverrideEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(OdooConfigParameterOverrideEnvelope)
                     }
                 },
             }
@@ -19042,7 +19147,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": OdooWebsiteBootstrapOverrideEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(OdooWebsiteBootstrapOverrideEnvelope)
                     }
                 },
             }
@@ -19610,7 +19715,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": MergeTrainBatchLandingRunOnceEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(MergeTrainBatchLandingRunOnceEnvelope)
                     }
                 },
             }
@@ -19639,7 +19744,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": MergeTrainBatchCandidateRunOnceEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(MergeTrainBatchCandidateRunOnceEnvelope)
                     }
                 },
             }
@@ -19668,7 +19773,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": MergeTrainControllerRunOnceEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(MergeTrainControllerRunOnceEnvelope)
                     }
                 },
             }
@@ -19697,7 +19802,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": MergeTrainStackCollapseRunOnceEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(MergeTrainStackCollapseRunOnceEnvelope)
                     }
                 },
             }
@@ -19725,7 +19830,7 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": MergeTrainRunOnceEnvelope.model_json_schema()}
+                    "application/json": {"schema": _openapi_model_schema(MergeTrainRunOnceEnvelope)}
                 },
             }
         },
@@ -19752,7 +19857,9 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": MergeTrainPrFeedbackEnvelope.model_json_schema()}
+                    "application/json": {
+                        "schema": _openapi_model_schema(MergeTrainPrFeedbackEnvelope)
+                    }
                 },
             }
         },
@@ -19853,7 +19960,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": EveryCodeWorkRequestStatusEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(EveryCodeWorkRequestStatusEnvelope)
                     }
                 },
             }
@@ -19875,7 +19982,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": EveryCodeWorkRequestRerunEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(EveryCodeWorkRequestRerunEnvelope)
                     }
                 },
             }
@@ -20063,7 +20170,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": ProductExpectedConfigApplyEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(ProductExpectedConfigApplyEnvelope)
                     }
                 },
             }
@@ -20106,7 +20213,9 @@ def create_launchplane_fastapi_app(
             "requestBody": {
                 "required": True,
                 "content": {
-                    "application/json": {"schema": ProductConfigApplyEnvelope.model_json_schema()}
+                    "application/json": {
+                        "schema": _openapi_model_schema(ProductConfigApplyEnvelope)
+                    }
                 },
             }
         },
@@ -20133,7 +20242,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": ProductOnboardingApplyEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(ProductOnboardingApplyEnvelope)
                     }
                 },
             }
@@ -20161,7 +20270,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": MergeTrainPolicyImportEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(MergeTrainPolicyImportEnvelope)
                     }
                 },
             }
@@ -20197,7 +20306,9 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(
+                            control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope
+                        )
                     }
                 },
             }
@@ -20219,7 +20330,9 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": control_plane_authz_grant_service.AuthzPolicyGitHubActionsRemovalEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(
+                            control_plane_authz_grant_service.AuthzPolicyGitHubActionsRemovalEnvelope
+                        )
                     }
                 },
             }
@@ -20241,7 +20354,9 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": control_plane_authz_grant_service.AuthzPolicyGitHubHumanGrantEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(
+                            control_plane_authz_grant_service.AuthzPolicyGitHubHumanGrantEnvelope
+                        )
                     }
                 },
             }
@@ -20263,7 +20378,9 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": control_plane_authz_grant_service.AuthzPolicyTerminalAgentGrantEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(
+                            control_plane_authz_grant_service.AuthzPolicyTerminalAgentGrantEnvelope
+                        )
                     }
                 },
             }
@@ -20285,7 +20402,9 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": control_plane_authz_grant_service.AuthzPolicyLocalOperatorGrantEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(
+                            control_plane_authz_grant_service.AuthzPolicyLocalOperatorGrantEnvelope
+                        )
                     }
                 },
             }
@@ -20307,7 +20426,9 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": control_plane_authz_grant_service.AuthzPolicyLocalAdminGrantEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(
+                            control_plane_authz_grant_service.AuthzPolicyLocalAdminGrantEnvelope
+                        )
                     }
                 },
             }
@@ -20329,7 +20450,9 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": control_plane_live_target_runtime.LiveTargetRuntimeApplyEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(
+                            control_plane_live_target_runtime.LiveTargetRuntimeApplyEnvelope
+                        )
                     }
                 },
             }
@@ -20357,7 +20480,7 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": ProviderTargetOperationEnvelope.model_json_schema()
+                        "schema": _openapi_model_schema(ProviderTargetOperationEnvelope)
                     }
                 },
             }
@@ -20385,7 +20508,9 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": control_plane_product_context_cutover.ProductContextCutoverRequest.model_json_schema()
+                        "schema": _openapi_model_schema(
+                            control_plane_product_context_cutover.ProductContextCutoverRequest
+                        )
                     }
                 },
             }
@@ -20414,7 +20539,9 @@ def create_launchplane_fastapi_app(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": control_plane_product_context_cutover.LegacyContextCleanupRequest.model_json_schema()
+                        "schema": _openapi_model_schema(
+                            control_plane_product_context_cutover.LegacyContextCleanupRequest
+                        )
                     }
                 },
             }
