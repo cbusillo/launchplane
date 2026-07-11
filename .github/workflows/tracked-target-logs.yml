@@ -46,7 +46,7 @@ jobs:
       SINCE: ${{ inputs.since }}
       SEARCH: ${{ inputs.search }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Validate inputs
         shell: bash
