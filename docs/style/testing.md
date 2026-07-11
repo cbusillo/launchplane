@@ -6,7 +6,8 @@ title: Testing Style
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
 - Test fail-closed behavior explicitly.
 - Keep fixtures small and inline unless they are reused heavily.
-- Default test entrypoint is `uv run python -m unittest`.
+- Default local full-suite entrypoint is
+  `uv run launchplane ci unittest-shard local`.
 
 ## Local test loop
 
@@ -17,8 +18,23 @@ uv run python -m unittest tests.test_module_name
 uv run python -m unittest tests.test_module_name.TestCaseName.test_behavior
 ```
 
-CI may shard same-repo unittest runs through Launchplane's helper while keeping
-the canonical framework as stdlib `unittest`:
+Before review, run the official local full-suite gate:
+
+```bash
+uv run launchplane ci unittest-shard local
+```
+
+The local gate computes one deterministic plan, runs every shard in an isolated
+Python subprocess, reports all failing shard indexes in one result, and writes
+the next local timing history only after every shard passes. Its defaults match
+same-repo CI: 12 shards with a 20-test/30-second split threshold. `--jobs`
+controls only local concurrency and defaults to the detected CPU count capped at
+12; it does not change the shard topology. Local timing history is stored under
+the ignored `.ci-cache/` directory and remains a balancing hint rather than test
+authority. A failed run leaves the previous timing history unchanged instead of
+learning from a partial suite.
+
+The lower-level CI shard commands remain available for diagnosis:
 
 ```bash
 uv run launchplane ci unittest-shard plan --shard-count 12 --timings-file .ci-cache/unittest-timings/history.json --max-tests-per-target 20 --max-seconds-per-target 30
@@ -47,3 +63,7 @@ shard plan includes per-target timing-source diagnostics:
   across discovered child targets.
 - `default`: no timing history exists yet, so the planner uses the conservative
   default estimate until a shard timing artifact teaches it better.
+
+GitHub Actions remains the source of truth for required pull-request gates. The
+local command is the official pre-review full-suite proof; it does not replace
+CI's runner isolation, artifact retention, or required status checks.
