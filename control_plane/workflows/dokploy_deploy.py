@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import click
 
 from control_plane import dokploy as control_plane_dokploy
@@ -24,6 +26,12 @@ def update_dokploy_target_artifact(
         target_id=target_id,
     )
     if target_type == "application":
+        _prepare_saved_registry_login(
+            host=host,
+            token=token,
+            artifact_id=artifact_id,
+            target_payload=target_payload,
+        )
         if runtime_identity is not None:
             env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
                 str(target_payload.get("env") or ""),
@@ -71,6 +79,86 @@ def update_dokploy_target_artifact(
         return
 
     raise click.ClickException(f"Unsupported Dokploy target type: {target_type}")
+
+
+def _prepare_saved_registry_login(
+    *,
+    host: str,
+    token: str,
+    artifact_id: str,
+    target_payload: control_plane_dokploy.JsonObject,
+) -> None:
+    username = str(target_payload.get("username") or "").strip()
+    password = str(target_payload.get("password") or "").strip()
+    if username and password:
+        return
+
+    registry_id = str(target_payload.get("registryId") or "").strip()
+    if not registry_id:
+        return
+    try:
+        registry_payload = control_plane_dokploy.as_json_object(
+            control_plane_dokploy.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/registry.one",
+                query={"registryId": registry_id},
+            )
+        )
+    except click.ClickException:
+        raise click.ClickException("Dokploy saved registry lookup failed.") from None
+    if registry_payload is None:
+        raise click.ClickException("Dokploy saved registry lookup returned an invalid payload.")
+    returned_registry_id = str(registry_payload.get("registryId") or "").strip()
+    if returned_registry_id != registry_id:
+        raise click.ClickException("Dokploy saved registry lookup returned the wrong registry.")
+
+    registry_host = _canonical_registry_host(str(registry_payload.get("registryUrl") or ""))
+    if registry_host != _docker_image_registry_host(artifact_id):
+        raise click.ClickException(
+            "Dokploy saved registry does not match the Docker image registry."
+        )
+
+    server_id = str(
+        target_payload.get("buildServerId") or target_payload.get("serverId") or ""
+    ).strip()
+    login_payload: control_plane_dokploy.JsonObject = {"registryId": registry_id}
+    if server_id:
+        login_payload["serverId"] = server_id
+    try:
+        control_plane_dokploy.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/registry.testRegistryById",
+            method="POST",
+            payload=login_payload,
+        )
+    except click.ClickException:
+        raise click.ClickException(
+            "Dokploy saved registry login failed for the target server."
+        ) from None
+
+
+def _docker_image_registry_host(image_reference: str) -> str:
+    normalized_reference = image_reference.strip()
+    first_component = normalized_reference.split("/", 1)[0]
+    if "/" not in normalized_reference or not (
+        "." in first_component or ":" in first_component or first_component == "localhost"
+    ):
+        return "docker.io"
+    return _canonical_registry_host(first_component)
+
+
+def _canonical_registry_host(registry_url: str) -> str:
+    normalized_url = registry_url.strip()
+    if not normalized_url:
+        return "docker.io"
+    parsed_url = urlsplit(normalized_url if "://" in normalized_url else f"//{normalized_url}")
+    registry_host = (parsed_url.netloc or parsed_url.path.split("/", 1)[0]).lower()
+    registry_host = registry_host.rsplit("@", 1)[-1]
+    if registry_host in {"index.docker.io", "registry-1.docker.io"}:
+        return "docker.io"
+    return registry_host
 
 
 def execute_dokploy_artifact_deploy(
