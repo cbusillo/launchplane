@@ -708,6 +708,10 @@ Current derived-state behavior:
   selected deployment is bound to the requested tracked target before reading
   its detached log id. Provider failures return a bounded redacted operation
   label/detail instead of raw credentials or unrestricted provider output.
+  When an older Dokploy release returns `404` for the deployment-log endpoint,
+  Launchplane returns the target-bound deployment status, timestamps, redacted
+  provider error, and `logs.available=false` rather than discarding the
+  diagnostic metadata.
 - The manual Tracked Target Logs workflow calls that service route with GitHub
   OIDC and uploads the redacted JSON result, so operators can inspect runtime or
   deployment failures without local Dokploy credentials. Tenant contexts need a
