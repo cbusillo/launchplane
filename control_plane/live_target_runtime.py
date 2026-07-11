@@ -19,6 +19,7 @@ from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
     runtime_key_safety_environment_class,
+    runtime_secret_binding_matches_target,
 )
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
@@ -131,6 +132,11 @@ def evaluate_runtime_key_safety_for_live_target_sync(
     require_policy: bool = True,
     required_binding_keys: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
+    target = RuntimeKeySafetyTarget(
+        context=context_name,
+        instance=instance_name,
+        environment_class=runtime_key_safety_environment_class(instance_name),
+    )
     all_runtime_bindings = record_store.list_secret_bindings(
         integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
         limit=None,
@@ -138,12 +144,7 @@ def evaluate_runtime_key_safety_for_live_target_sync(
     bindings = tuple(
         binding
         for binding in all_runtime_bindings
-        if _runtime_secret_binding_matches_target(
-            binding_context=binding.context,
-            binding_instance=binding.instance,
-            context_name=context_name,
-            instance_name=instance_name,
-        )
+        if runtime_secret_binding_matches_target(binding=binding, target=target)
     )
     binding_keys = (
         required_binding_keys
@@ -154,11 +155,6 @@ def evaluate_runtime_key_safety_for_live_target_sync(
         return {"required": False, "status": "skipped", "checked_binding_keys": []}
     try:
         policy_record = latest_active_runtime_key_safety_policy(record_store)
-        target = RuntimeKeySafetyTarget(
-            context=context_name,
-            instance=instance_name,
-            environment_class=runtime_key_safety_environment_class(instance_name),
-        )
         if required_binding_keys is not None:
             evaluation = evaluate_runtime_key_safety(
                 target=target,
@@ -206,18 +202,6 @@ def evaluate_runtime_key_safety_for_live_target_sync(
 
 def skipped_runtime_key_safety_summary() -> dict[str, object]:
     return {"required": False, "status": "skipped", "checked_binding_keys": []}
-
-
-def _runtime_secret_binding_matches_target(
-    *, binding_context: str, binding_instance: str, context_name: str, instance_name: str
-) -> bool:
-    if not binding_context:
-        return True
-    if binding_context != context_name:
-        return False
-    if not binding_instance:
-        return True
-    return binding_instance == instance_name
 
 
 def _require_product_profile_runtime_keys(

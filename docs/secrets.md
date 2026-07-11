@@ -204,6 +204,13 @@ decryption key state denies the reveal or resolution.
   must evaluate the managed bindings for the worker target before the worker
   process starts. The worker receives plaintext only after the metadata gate has
   confirmed the active policy allows those bindings for that runtime class.
+- Worker gates must evaluate every effective managed binding scope accepted by
+  runtime secret resolution: global, context, and context-instance. A narrower
+  binding query must not let an inherited managed secret bypass classification.
+- A denied worker gate may report non-secret binding keys plus the active policy
+  record id and policy digest so operators can repair the classification without
+  exposing secret values. Validate the repaired metadata with a read-only target
+  dry run or scoped write-intent preflight before retrying the side effect.
 - Product-specific workflows that sync resolved runtime environment values into
   live Dokploy targets, such as Odoo prod rollback target env updates, must
   evaluate managed runtime secret bindings before writing the live env payload.
