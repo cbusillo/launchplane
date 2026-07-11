@@ -1763,8 +1763,72 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "target_logs_unavailable")
         self.assertEqual(
             payload["error"]["message"],
-            "Tracked target logs are unavailable from the provider.",
+            "Tracked target logs are unavailable during provider-config: "
+            "API_TOKEN=[redacted] request failed.",
         )
+        self.assertNotIn("provider-secret", json.dumps(payload))
+
+    async def test_tracked_target_logs_redacts_deployment_log_provider_error(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-123",
+                target_type="application",
+                target_name="syo-testing-app",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.latest_deployment_for_target",
+                    return_value={
+                        "deploymentId": "deployment-123",
+                        "applicationId": "app-123",
+                        "status": "error",
+                    },
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_deployment_logs",
+                    side_effect=ClickException(
+                        "Dokploy API GET /api/deployment.readLogs failed (500): "
+                        "DATABASE_URL=postgresql://user:provider-secret@example/db"
+                    ),
+                ),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="target_logs.read",
+                        context="sellyouroutboard-testing",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                response = await _get_tracked_target_logs(
+                    app,
+                    "sellyouroutboard-testing",
+                    "testing",
+                    source="deployment",
+                    since="all",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "target_logs_unavailable")
+        self.assertIn("deployment-log-read", payload["error"]["message"])
+        self.assertIn("DATABASE_URL=[redacted]", payload["error"]["message"])
         self.assertNotIn("provider-secret", json.dumps(payload))
 
     async def test_tracked_target_logs_validates_query_values(self) -> None:

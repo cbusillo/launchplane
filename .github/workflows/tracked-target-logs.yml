@@ -125,6 +125,8 @@ jobs:
           echo "route_path=${route_path}" >>"$GITHUB_OUTPUT"
 
       - name: Read tracked target logs
+        id: request
+        continue-on-error: true
         uses: ./.github/actions/launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_SERVICE_URL }}
@@ -137,29 +139,47 @@ jobs:
             trace_id=trace_id
 
       - name: Show redacted log summary
+        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
-          jq '{
-            status,
-            trace_id,
-            context,
-            instance,
-            target,
-            request,
-            deployment,
-            logs: {
-              line_count: .logs.line_count,
-              redacted: .logs.redacted
-            }
-          }' \
-            tracked-target-logs.json
+          if [ ! -f tracked-target-logs.json ]; then
+            echo 'Tracked target log response file was not created.'
+            exit 0
+          fi
+          jq '
+            if .status == "ok" then
+              {
+                status,
+                trace_id,
+                context,
+                instance,
+                target,
+                request,
+                deployment,
+                logs: {
+                  line_count: .logs.line_count,
+                  redacted: .logs.redacted
+                }
+              }
+            else
+              {status, trace_id, error}
+            end
+          ' tracked-target-logs.json
 
       - name: Upload tracked target logs
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: tracked-target-logs-${{ inputs.context }}-${{ inputs.instance }}
+          name: tracked-target-logs-${{ inputs.context }}-${{ inputs.instance }}-${{ inputs.source }}
           path: |
             tracked-target-logs-request.json
             tracked-target-logs.json
           if-no-files-found: error
+
+      - name: Fail when tracked target log read failed
+        if: ${{ steps.request.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo 'Tracked target log request failed; inspect the uploaded redacted response.' >&2
+          exit 1
