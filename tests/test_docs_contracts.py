@@ -23,9 +23,25 @@ class DocsContractsTests(TestCase):
         self.assertIn("SECRET_SCAN_FORK_RESULT", security_workflow)
 
     def test_ci_shards_share_one_unittest_timing_snapshot(self) -> None:
+        metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
         ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        testing_docs = Path("docs/style/testing.md").read_text(encoding="utf-8")
 
+        self.assertEqual(
+            "uv run launchplane ci unittest-shard local",
+            metadata["qualityGate"]["test"]["default"],
+        )
+        self.assertEqual(
+            "uv run python -m unittest {modules}",
+            metadata["qualityGate"]["test"]["targeted"],
+        )
+        self.assertIn("uv run launchplane ci unittest-shard local", testing_docs)
+        self.assertIn("12 shards with a 20-test/30-second split threshold", testing_docs)
+        self.assertIn("GitHub Actions remains the source of truth", testing_docs)
         self.assertIn("  test_timing_snapshot:", ci_workflow)
+        self.assertIn('UNITTEST_SHARD_COUNT: "12"', ci_workflow)
+        self.assertIn('UNITTEST_MAX_TESTS_PER_TARGET: "20"', ci_workflow)
+        self.assertIn('UNITTEST_MAX_SECONDS_PER_TARGET: "30"', ci_workflow)
         self.assertIn("name: unittest-timing-snapshot", ci_workflow)
         self.assertEqual(1, ci_workflow.count("name: Restore unittest timings"))
         self.assertEqual(2, ci_workflow.count("name: Download unittest timing snapshot"))
