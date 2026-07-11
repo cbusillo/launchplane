@@ -15,8 +15,15 @@ from urllib.parse import (
     urlparse,
 )
 
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
+from fastapi.routing import APIRoute
+
 from control_plane.http_app import (
+    LaunchplaneErrorResponse,
     LaunchplaneAuthzPolicyRuntime,
+    _LaunchplaneFastAPI,
+    _openapi_model_schema,
     create_launchplane_fastapi_app,
 )
 from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateRequest
@@ -64,6 +71,150 @@ from tests.test_service import (
     _sqlite_database_url,
     _StubVerifier,
 )
+
+
+class FastApiConstructionMetadataTests(unittest.TestCase):
+    def test_openapi_model_schema_cache_returns_independent_payloads(self) -> None:
+        first_schema = _openapi_model_schema(VeriReelProdBackupGateRequest)
+        second_schema = _openapi_model_schema(VeriReelProdBackupGateRequest)
+
+        self.assertEqual(first_schema, second_schema)
+        self.assertIsNot(first_schema, second_schema)
+        first_schema["properties"].clear()
+        self.assertNotEqual(first_schema, second_schema)
+
+    def test_error_response_metadata_matches_fastapi_variants(self) -> None:
+        def read_example() -> dict[str, str]:
+            return {"status": "ok"}
+
+        baseline_app = FastAPI()
+        optimized_app = _LaunchplaneFastAPI()
+        for app in (baseline_app, optimized_app):
+            app.add_api_route(
+                "/hidden",
+                read_example,
+                methods=["GET"],
+                include_in_schema=False,
+                responses={400: {"model": LaunchplaneErrorResponse}},
+            )
+            app.add_api_route(
+                "/anchor",
+                read_example,
+                methods=["GET"],
+                responses={400: {"model": LaunchplaneErrorResponse}},
+            )
+            app.add_api_route(
+                "/overlay",
+                read_example,
+                methods=["GET"],
+                responses={
+                    409: {
+                        "model": LaunchplaneErrorResponse,
+                        "content": {
+                            "application/json": {"schema": {"description": "retained overlay"}}
+                        },
+                    }
+                },
+            )
+            app.add_api_route(
+                "/plain-text",
+                read_example,
+                methods=["GET"],
+                response_class=PlainTextResponse,
+                responses={503: {"model": LaunchplaneErrorResponse}},
+            )
+
+        baseline_openapi = baseline_app.openapi()
+        optimized_openapi = optimized_app.openapi()
+
+        self.assertEqual(optimized_openapi, baseline_openapi)
+        overlay_schema = optimized_openapi["paths"]["/overlay"]["get"]["responses"]["409"][
+            "content"
+        ]["application/json"]["schema"]
+        self.assertEqual(overlay_schema["description"], "retained overlay")
+        self.assertEqual(
+            optimized_openapi["paths"]["/plain-text"]["get"]["responses"]["503"]["content"][
+                "text/plain"
+            ]["schema"]["$ref"],
+            "#/components/schemas/LaunchplaneErrorResponse",
+        )
+
+    def test_error_response_anchor_commits_after_route_registration(self) -> None:
+        def read_example() -> dict[str, str]:
+            return {"status": "ok"}
+
+        app = _LaunchplaneFastAPI()
+        with patch.object(FastAPI, "add_api_route", side_effect=RuntimeError("failed route")):
+            with self.assertRaisesRegex(RuntimeError, "failed route"):
+                app.add_api_route(
+                    "/failed",
+                    read_example,
+                    methods=["GET"],
+                    responses={400: {"model": LaunchplaneErrorResponse}},
+                )
+
+        app.add_api_route(
+            "/valid",
+            read_example,
+            methods=["GET"],
+            responses={400: {"model": LaunchplaneErrorResponse}},
+        )
+        openapi = app.openapi()
+
+        self.assertEqual(
+            openapi["paths"]["/valid"]["get"]["responses"]["400"]["content"]["application/json"][
+                "schema"
+            ]["$ref"],
+            "#/components/schemas/LaunchplaneErrorResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", openapi["components"]["schemas"])
+
+    def test_error_response_metadata_reuses_one_model_field(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        model_response_count = 0
+        referenced_response_count = 0
+        for route in app.routes:
+            if not isinstance(route, APIRoute) or not route.include_in_schema:
+                continue
+            for response in route.responses.values():
+                if response.get("model") is LaunchplaneErrorResponse:
+                    model_response_count += 1
+                response_schema = (
+                    response.get("content", {}).get("application/json", {}).get("schema", {})
+                )
+                if response_schema.get("$ref") == ("#/components/schemas/LaunchplaneErrorResponse"):
+                    referenced_response_count += 1
+
+        openapi = app.openapi()
+        openapi_reference_count = 0
+        for path_item in openapi["paths"].values():
+            for operation in path_item.values():
+                if not isinstance(operation, dict):
+                    continue
+                for response in operation.get("responses", {}).values():
+                    response_schema = (
+                        response.get("content", {}).get("application/json", {}).get("schema", {})
+                    )
+                    if response_schema.get("$ref") == (
+                        "#/components/schemas/LaunchplaneErrorResponse"
+                    ):
+                        openapi_reference_count += 1
+
+        self.assertEqual(model_response_count, 1)
+        self.assertGreater(referenced_response_count, 500)
+        self.assertEqual(
+            openapi_reference_count,
+            model_response_count + referenced_response_count,
+        )
+        self.assertIn(
+            "LaunchplaneErrorResponse",
+            openapi["components"]["schemas"],
+        )
 
 
 class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
