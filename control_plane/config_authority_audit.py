@@ -386,6 +386,7 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     },
     ".github/workflows/tracked-target-logs.yml": {
         "inputs.lines.default": frozenset(("200",)),
+        "inputs.source.default": frozenset(("runtime",)),
         "inputs.since.default": frozenset(("1h",)),
     },
 }

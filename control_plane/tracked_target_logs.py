@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol, cast
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+
+
+TrackedTargetLogSource = Literal["runtime", "deployment"]
 
 
 class TrackedTargetLogsStore(Protocol):
@@ -27,6 +30,7 @@ def build_tracked_target_logs_payload(
     line_count: int,
     since: str = "all",
     search: str = "",
+    source: str = "runtime",
 ) -> dict[str, object]:
     normalized_context = context_name.strip().lower()
     normalized_instance = instance_name.strip().lower()
@@ -54,6 +58,11 @@ def build_tracked_target_logs_payload(
     normalized_line_count = control_plane_dokploy.normalize_dokploy_log_line_count(line_count)
     normalized_since = control_plane_dokploy.normalize_dokploy_log_since(since)
     normalized_search = control_plane_dokploy.normalize_dokploy_log_search(search)
+    normalized_source = normalize_tracked_target_log_source(source)
+    if normalized_source == "deployment" and normalized_since != "all":
+        raise ValueError("Tracked deployment logs require since='all'.")
+    if normalized_source == "deployment" and normalized_search:
+        raise ValueError("Tracked deployment logs do not support search.")
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
     target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
         host=host,
@@ -63,7 +72,35 @@ def build_tracked_target_logs_payload(
     )
     app_name = str(target_payload.get("appName") or "").strip()
     server_id = str(target_payload.get("serverId") or "").strip()
-    if target_record.target_type == "application":
+    deployment: dict[str, object] | None = None
+    if normalized_source == "deployment":
+        latest_deployment = control_plane_dokploy.latest_deployment_for_target(
+            host=host,
+            token=token,
+            target_type=target_record.target_type,
+            target_id=target_id_record.target_id,
+        )
+        if latest_deployment is None:
+            raise ValueError("No Dokploy deployment is available for the requested target.")
+        deployment_id = control_plane_dokploy.deployment_log_id(latest_deployment)
+        if not deployment_id:
+            raise ValueError("No Dokploy deployment is available for the requested target.")
+        deployment_target_key = (
+            "applicationId" if target_record.target_type == "application" else "composeId"
+        )
+        deployment_target_id = str(latest_deployment.get(deployment_target_key) or "").strip()
+        if deployment_target_id != target_id_record.target_id:
+            raise ValueError(
+                "Latest Dokploy deployment is not bound to the requested tracked target."
+            )
+        logs = control_plane_dokploy.fetch_dokploy_deployment_logs(
+            host=host,
+            token=token,
+            deployment_id=deployment_id,
+            line_count=normalized_line_count,
+        )
+        deployment = {"deployment_id": deployment_id}
+    elif target_record.target_type == "application":
         logs = control_plane_dokploy.fetch_dokploy_application_logs(
             host=host,
             token=token,
@@ -87,7 +124,7 @@ def build_tracked_target_logs_payload(
         control_plane_dokploy.redact_dokploy_log_line(line)
         for line in logs[-normalized_line_count:]
     )
-    return {
+    result: dict[str, object] = {
         "context": normalized_context,
         "instance": normalized_instance,
         "target": {
@@ -99,6 +136,7 @@ def build_tracked_target_logs_payload(
             "source_label": target_record.source_label,
         },
         "request": {
+            "source": normalized_source,
             "line_count": normalized_line_count,
             "since": normalized_since,
             "search": normalized_search,
@@ -109,3 +147,13 @@ def build_tracked_target_logs_payload(
             "redacted": True,
         },
     }
+    if deployment is not None:
+        result["deployment"] = deployment
+    return result
+
+
+def normalize_tracked_target_log_source(value: str) -> TrackedTargetLogSource:
+    normalized_value = value.strip().lower()
+    if normalized_value not in {"runtime", "deployment"}:
+        raise ValueError("Tracked target log source must be 'runtime' or 'deployment'.")
+    return cast(TrackedTargetLogSource, normalized_value)

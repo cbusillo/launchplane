@@ -701,10 +701,15 @@ Current derived-state behavior:
   `--search`, and redacts likely secret values from returned log lines.
 - `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200` exposes the
   same tracked-target log reader through a native FastAPI service route using
-  action `target_logs.read`.
+  action `target_logs.read`. The default `source=runtime` reads current
+  application or compose logs. `source=deployment` reads the latest tracked
+  target deployment log with the same line bound and redaction contract; it
+  requires `since=all` and does not accept search text. Launchplane verifies the
+  selected deployment is bound to the requested tracked target before reading
+  its detached log id, and provider failures return public-safe errors.
 - The manual Tracked Target Logs workflow calls that service route with GitHub
-  OIDC and uploads the redacted JSON result, so operators can inspect compose
-  target boot failures without local Dokploy credentials. Tenant contexts need a
+  OIDC and uploads the redacted JSON result, so operators can inspect runtime or
+  deployment failures without local Dokploy credentials. Tenant contexts need a
   matching `target_logs.read` GitHub Actions grant in
   `LAUNCHPLANE_AUTHZ_GRANTS_JSON`; do not broaden this workflow to read all
   contexts by default.

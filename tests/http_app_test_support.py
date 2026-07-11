@@ -3965,6 +3965,7 @@ async def _get_tracked_target_logs(
     instance: str,
     *,
     lines: str = "",
+    source: str = "",
     since: str = "",
     search: str = "",
     authorization: str = "Bearer valid-token",
@@ -3976,6 +3977,8 @@ async def _get_tracked_target_logs(
     params = {}
     if lines:
         params["lines"] = lines
+    if source:
+        params["source"] = source
     if since:
         params["since"] = since
     if search:
