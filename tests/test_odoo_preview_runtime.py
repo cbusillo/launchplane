@@ -1473,6 +1473,48 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         self.assertTrue(request.smoke_check)
 
+    def test_apply_rejects_caller_supplied_compose_file(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=_endpoint_spec(),
+                environment_id="env-cm-preview",
+                template_compose_id="compose-template",
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "compose_file"):
+            OdooPreviewDokployApplyRequest.model_validate(
+                {
+                    "dry_run_plan": dry_run,
+                    "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    "environment_values": _environment_values(),
+                    "compose_file": "services: {}",
+                }
+            )
+
+    def test_apply_rejects_unsafe_image_references(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=_endpoint_spec(),
+                environment_id="env-cm-preview",
+                template_compose_id="compose-template",
+            )
+        )
+
+        for image_reference in (
+            "ghcr.io/cbusillo/odoo-tenant-cm:latest",
+            "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123\n  privileged: true",
+        ):
+            with self.subTest(image_reference=image_reference):
+                with self.assertRaisesRegex(ValueError, "single-line immutable image reference"):
+                    OdooPreviewDokployApplyRequest(
+                        dry_run_plan=dry_run,
+                        image_reference=image_reference,
+                        environment_values=_environment_values(),
+                    )
+
     def test_refresh_existing_runtime_does_not_plan_delete_rollback(self) -> None:
         plan = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
@@ -1631,6 +1673,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertNotIn("ODOO_WEB_HOST_PORT", sync_kwargs["compose_file"])
         self.assertNotIn("ODOO_LONGPOLL_HOST_PORT", sync_kwargs["compose_file"])
         self.assertIn("traefik.enable=true", sync_kwargs["compose_file"])
+        self.assertIn(".tls.certresolver=letsencrypt", sync_kwargs["compose_file"])
         update_env.assert_called_once()
         trigger_deployment.assert_called_once_with(
             host="https://dokploy.example",

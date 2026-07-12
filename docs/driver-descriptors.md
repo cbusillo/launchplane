@@ -335,14 +335,17 @@ leaving orphaned runtime state.
 that contract. It accepts only a ready dry-run plan plus explicit runtime env
 values, blocks before reading Dokploy credentials when required Odoo env keys are
 missing, stamps per-preview `ODOO_PROJECT_NAME` and `ODOO_STACK_NAME` values so
-the raw compose does not inherit the template runtime identity, renders
-Launchplane-owned raw compose source without publishing shared host ports,
+the raw compose does not inherit the template runtime identity, rejects
+caller-supplied compose source, renders Launchplane-owned raw compose without
+publishing shared host ports, accepts only single-line immutable image
+references, safely serializes that image as a YAML scalar,
 renders explicit HTTP and HTTPS Traefik routers in the raw compose while also
 reconciling the preview domain record for Dokploy UI/provider state. Preview
 domain certificate management is profile-backed: `none` preserves external
 wildcard-certificate ownership, while `letsencrypt` asks Dokploy to provision a
-trusted certificate for the preview hostname. The default remains `none` so
-existing products keep their current TLS ownership model.
+trusted certificate for the preview hostname and binds the Launchplane-rendered
+HTTPS router to Traefik's `letsencrypt` certificate resolver. The default
+remains `none` so existing products keep their current TLS ownership model.
 Fresh-create dry-runs must carry the template compose id; apply creates new
 preview composes on that template compose's Dokploy server, deploys the compose,
 and returns redacted step evidence. Destroy looks up domains for the matching
