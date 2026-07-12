@@ -19,6 +19,10 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _generic_web_preview_anchor_pr_number,
     _write_preview_inventory_scan_if_supported,
 )
+from control_plane.drivers.generic_web_preview_extensions import (
+    apply_generic_web_preview_driver_destroy,
+    apply_generic_web_preview_driver_refresh,
+)
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyResult,
@@ -151,6 +155,15 @@ def apply_generic_web_preview_refresh_result(
     request: GenericWebPreviewRefreshEnvelope,
     profile: LaunchplaneProductProfileRecord,
 ) -> tuple[dict[str, object], dict[str, object]]:
+    driver_extension_result = apply_generic_web_preview_driver_refresh(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        request=request.refresh,
+        profile=profile,
+    )
+    if driver_extension_result is not None:
+        return driver_extension_result
+
     _generic_web_preview_anchor_pr_number(request=request.refresh, profile=profile)
     driver_result = execute_generic_web_preview_refresh(
         control_plane_root=control_plane_root,
@@ -176,6 +189,15 @@ def apply_generic_web_preview_destroy_result(
     request: GenericWebPreviewDestroyEnvelope,
     profile: LaunchplaneProductProfileRecord,
 ) -> tuple[dict[str, object], dict[str, object]]:
+    driver_extension_result = apply_generic_web_preview_driver_destroy(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        request=request.destroy,
+        profile=profile,
+    )
+    if driver_extension_result is not None:
+        return driver_extension_result
+
     driver_result = execute_generic_web_preview_destroy(
         control_plane_root=control_plane_root,
         record_store=cast(GenericWebPreviewProfileStore, record_store),
