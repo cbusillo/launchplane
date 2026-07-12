@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -3992,6 +3993,7 @@ def create_launchplane_fastapi_app(
 
     app = _LaunchplaneFastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(EvidenceIngressRequestContractMiddleware)
+    odoo_preview_apply_lock = asyncio.Lock()
     resolved_oauth_login_state_store = (
         oauth_login_state_store if oauth_login_state_store is not None else OAuthLoginStateStore()
     )
@@ -6541,78 +6543,99 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
-        (
-            normalized_idempotency_key,
-            payload_fingerprint,
-            replay_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_ODOO_PREVIEW_APPLY_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replay_response is not None:
-            return replay_response
-
-        try:
-            driver_result = execute_odoo_preview_apply_result(
-                control_plane_root_path=resolved_control_plane_root,
-                record_store=record_store,
-                profile=product_profile,
-                request=apply_request,
-                database_url=getattr(record_store, "database_url", None),
-            )
-        except OdooPreviewApplyConfigError as error:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "rejected",
-                    "trace_id": trace_id,
-                    "error": {
-                        "code": "odoo_preview_runtime_config_incomplete",
-                        "message": "Odoo preview apply runtime environment is incomplete.",
-                    },
-                    "details": {
-                        "context": error.context,
-                        "instance": error.instance,
-                        "missing_keys": list(error.missing_keys),
-                    },
-                },
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=f"No Launchplane route for {_ODOO_PREVIEW_APPLY_ROUTE}.",
-            ) from error
-        except (ValueError, click.ClickException) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={},
-            result=driver_result,
-        )
-        if not driver_result_contains_status(driver_result, "blocked"):
-            store_apply_idempotency(
+        async with odoo_preview_apply_lock:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
                 record_store=record_store,
                 identity=identity,
                 route_path=_ODOO_PREVIEW_APPLY_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
+                idempotency_key=idempotency_key,
                 trace_id=trace_id,
-                response=response,
+                check_replay=bool(idempotency_key.strip()),
             )
-        return response
+            if replay_response is not None:
+                return replay_response
+
+            async def execute_apply_and_store() -> AcceptedEvidenceResponse:
+                driver_result = await asyncio.to_thread(
+                    execute_odoo_preview_apply_result,
+                    control_plane_root_path=resolved_control_plane_root,
+                    record_store=record_store,
+                    profile=product_profile,
+                    request=apply_request,
+                    database_url=getattr(record_store, "database_url", None),
+                )
+                response = accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={},
+                    result=driver_result,
+                )
+                if not driver_result_contains_status(driver_result, "blocked"):
+                    store_apply_idempotency(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=_ODOO_PREVIEW_APPLY_ROUTE,
+                        idempotency_key=normalized_idempotency_key,
+                        request_fingerprint_value=payload_fingerprint,
+                        trace_id=trace_id,
+                        response=response,
+                    )
+                return response
+
+            apply_task = asyncio.create_task(
+                execute_apply_and_store(),
+                name=f"odoo-preview-apply:{trace_id}",
+            )
+            try:
+                return await asyncio.shield(apply_task)
+            except asyncio.CancelledError as cancellation:
+                while not apply_task.done():
+                    try:
+                        await asyncio.shield(apply_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        _LOGGER.exception(
+                            "Odoo preview apply failed after request cancellation",
+                            extra={"trace_id": trace_id},
+                        )
+                        break
+                raise cancellation
+            except OdooPreviewApplyConfigError as error:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "status": "rejected",
+                        "trace_id": trace_id,
+                        "error": {
+                            "code": "odoo_preview_runtime_config_incomplete",
+                            "message": "Odoo preview apply runtime environment is incomplete.",
+                        },
+                        "details": {
+                            "context": error.context,
+                            "instance": error.instance,
+                            "missing_keys": list(error.missing_keys),
+                        },
+                    },
+                )
+            except FileNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message=f"No Launchplane route for {_ODOO_PREVIEW_APPLY_ROUTE}.",
+                ) from error
+            except (ValueError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_request",
+                    message="Request could not be completed.",
+                ) from error
 
     async def write_odoo_post_deploy(
         request: Request,
