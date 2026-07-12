@@ -119,24 +119,28 @@ def _prepare_saved_registry_login(
             "Dokploy saved registry does not match the Docker image registry."
         )
 
-    server_id = str(
-        target_payload.get("buildServerId") or target_payload.get("serverId") or ""
-    ).strip()
-    login_payload: control_plane_dokploy.JsonObject = {"registryId": registry_id}
-    if server_id:
-        login_payload["serverId"] = server_id
-    try:
-        control_plane_dokploy.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/registry.testRegistryById",
-            method="POST",
-            payload=login_payload,
-        )
-    except click.ClickException:
-        raise click.ClickException(
-            "Dokploy saved registry login failed for the target server."
-        ) from None
+    deployment_server_id = str(target_payload.get("serverId") or "").strip()
+    build_server_id = str(target_payload.get("buildServerId") or "").strip()
+    login_server_ids: list[str | None] = [deployment_server_id or None]
+    if build_server_id and build_server_id != deployment_server_id:
+        login_server_ids.append(build_server_id)
+
+    for server_id in login_server_ids:
+        login_payload: control_plane_dokploy.JsonObject = {"registryId": registry_id}
+        if server_id is not None:
+            login_payload["serverId"] = server_id
+        try:
+            control_plane_dokploy.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/registry.testRegistryById",
+                method="POST",
+                payload=login_payload,
+            )
+        except click.ClickException:
+            raise click.ClickException(
+                "Dokploy saved registry login failed for the target server."
+            ) from None
 
 
 def _docker_image_registry_host(image_reference: str) -> str:

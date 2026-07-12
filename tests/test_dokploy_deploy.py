@@ -77,6 +77,93 @@ class DokployDeployRegistryTests(unittest.TestCase):
             {"registryId": "registry-123", "serverId": "server-123"},
         )
 
+    def test_saved_matching_registry_logs_in_on_each_distinct_required_server(self) -> None:
+        cases: tuple[
+            tuple[str, dict[str, object], list[dict[str, str]]],
+            ...,
+        ] = (
+            (
+                "distinct servers",
+                {
+                    "serverId": "deploy-server-123",
+                    "buildServerId": "build-server-123",
+                },
+                [
+                    {"registryId": "registry-123", "serverId": "deploy-server-123"},
+                    {"registryId": "registry-123", "serverId": "build-server-123"},
+                ],
+            ),
+            (
+                "shared server",
+                {"serverId": "server-123", "buildServerId": "server-123"},
+                [{"registryId": "registry-123", "serverId": "server-123"}],
+            ),
+            (
+                "default deployment and remote build servers",
+                {"serverId": None, "buildServerId": "build-server-123"},
+                [
+                    {"registryId": "registry-123"},
+                    {"registryId": "registry-123", "serverId": "build-server-123"},
+                ],
+            ),
+            (
+                "default server only",
+                {"serverId": None, "buildServerId": None},
+                [{"registryId": "registry-123"}],
+            ),
+        )
+
+        for case_name, server_fields, expected_login_payloads in cases:
+            with self.subTest(case=case_name):
+                requests: list[dict[str, object]] = []
+
+                def request(**kwargs: object) -> object:
+                    requests.append(kwargs)
+                    if kwargs["path"] == "/api/registry.one":
+                        return {
+                            "registryId": "registry-123",
+                            "registryUrl": "https://ghcr.io",
+                            "username": "every",
+                        }
+                    return True
+
+                with (
+                    patch(
+                        "control_plane.workflows.dokploy_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                        return_value={
+                            "applicationId": "app-123",
+                            "dockerImage": "ghcr.io/every/example:old",
+                            "username": None,
+                            "password": None,
+                            "registryUrl": None,
+                            "registryId": "registry-123",
+                            **server_fields,
+                        },
+                    ),
+                    patch(
+                        "control_plane.workflows.dokploy_deploy.control_plane_dokploy.dokploy_request",
+                        side_effect=request,
+                    ),
+                ):
+                    update_dokploy_target_artifact(
+                        host="https://dokploy.example.com",
+                        token="secret-token",
+                        target_type="application",
+                        target_id="app-123",
+                        artifact_id="ghcr.io/every/example:new",
+                    )
+
+                self.assertEqual(
+                    [request["path"] for request in requests],
+                    ["/api/registry.one"]
+                    + ["/api/registry.testRegistryById"] * len(expected_login_payloads)
+                    + ["/api/application.saveDockerProvider"],
+                )
+                self.assertEqual(
+                    [request["payload"] for request in requests[1:-1]],
+                    expected_login_payloads,
+                )
+
     def test_saved_mismatched_registry_blocks_provider_update(self) -> None:
         requests: list[dict[str, object]] = []
 
@@ -127,6 +214,11 @@ class DokployDeployRegistryTests(unittest.TestCase):
             requests.append(kwargs)
             if kwargs["path"] == "/api/registry.one":
                 return {"registryId": "registry-123", "registryUrl": "ghcr.io"}
+            if kwargs["payload"] == {
+                "registryId": "registry-123",
+                "serverId": "deploy-server-123",
+            }:
+                return True
             raise click.ClickException("Registry login failed with provider-secret.")
 
         with (
@@ -135,7 +227,8 @@ class DokployDeployRegistryTests(unittest.TestCase):
                 return_value={
                     "applicationId": "app-123",
                     "registryId": "registry-123",
-                    "serverId": "server-123",
+                    "serverId": "deploy-server-123",
+                    "buildServerId": "build-server-123",
                 },
             ),
             patch(
@@ -160,7 +253,11 @@ class DokployDeployRegistryTests(unittest.TestCase):
         self.assertTrue(error_context.exception.__suppress_context__)
         self.assertEqual(
             [request["path"] for request in requests],
-            ["/api/registry.one", "/api/registry.testRegistryById"],
+            [
+                "/api/registry.one",
+                "/api/registry.testRegistryById",
+                "/api/registry.testRegistryById",
+            ],
         )
 
     def test_inline_credentials_skip_saved_registry_login(self) -> None:
