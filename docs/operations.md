@@ -642,9 +642,10 @@ Current derived-state behavior:
   publish mutable prod tags as the promotion authority.
 - Docker-provider application deploys without inline pull credentials verify
   that the target's saved registry host matches the artifact host, then ask
-  Dokploy to authenticate that provider-held credential on the target server
-  before mutating the image. Registry mismatch, lookup failure, or login failure
-  blocks deployment without exposing the saved password.
+  Dokploy to authenticate that provider-held credential on every distinct
+  deployment and build server before mutating the image. Registry mismatch,
+  lookup failure, or login failure blocks deployment without exposing the saved
+  password.
 - Direct `ship` and `promote` execution fail closed when the referenced
   artifact manifest is missing.
 - Direct artifact-backed execution also fails closed when the Dokploy target
