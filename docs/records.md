@@ -432,6 +432,21 @@ the target product in the Launchplane service context, product-specific workflow
 grants must come from explicit operator-supplied authz grant input such as
 `LAUNCHPLANE_AUTHZ_GRANTS_JSON`, not a checked-in product catalog.
 
+Odoo preview certificate-policy changes use
+`POST /v1/product-profiles/preview-tls/apply`. The route reads the current
+DB-backed profile and can change only `preview.domain_certificate_type`; all
+other profile fields are preserved from the service-owned record. Dry-run
+always reads fresh state and returns the current value, requested value, profile
+timestamp, and a canonical plan SHA-256 without storing idempotency evidence.
+Apply requires that reviewed SHA-256 plus an idempotency key and fails stale if
+the reviewed TLS plan inputs changed or the profile row changes during apply.
+Apply serializes the profile row and commits idempotency evidence in the same
+transaction, including no-op applies. The manual `Product Preview TLS` workflow
+is the audited operator surface for both modes and supplies the target product
+and requested `none` or `letsencrypt` value as runtime input. Its
+`product_profile.preview_tls.apply` grant is target-product scoped and must come
+from operator-supplied authz input rather than a checked-in product catalog.
+
 For initial seed or repair work, operators can write the same DB-backed record
 directly with
 `uv run launchplane product-profiles upsert --database-url ... --allow-direct-db-mutation`.

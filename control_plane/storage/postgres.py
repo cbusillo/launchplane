@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
-from typing import Any, Literal, Protocol, TypeVar, cast
+from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast
 
 from pydantic import BaseModel
 from sqlalchemy import (
@@ -122,7 +122,19 @@ PayloadDict = dict[str, Any]
 PayloadJsonType = JSON().with_variant(JSONB(), "postgresql")
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
 CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
+ProductProfileCompareWriteStatus = Literal[
+    "written",
+    "missing",
+    "changed",
+    "replayed",
+    "idempotency_conflict",
+]
 ProviderTargetCreateStatus = Literal["created", "exists"]
+
+
+class ProductProfileCompareWriteResult(NamedTuple):
+    status: ProductProfileCompareWriteStatus
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
 def _utc_now_timestamp() -> str:
@@ -4256,6 +4268,108 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=self._payload_dict(record),
             )
         )
+
+    def compare_and_write_product_profile_record(
+        self,
+        *,
+        expected_record: LaunchplaneProductProfileRecord,
+        replacement_record: LaunchplaneProductProfileRecord,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> ProductProfileCompareWriteResult:
+        if expected_record.product != replacement_record.product:
+            raise ValueError("Product profile compare-and-write requires matching products.")
+        statement = (
+            select(LaunchplaneProductProfileRow)
+            .where(LaunchplaneProductProfileRow.product == expected_record.product)
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        with self._session_factory() as session:
+            if self.database_url.startswith("sqlite"):
+                session.execute(text("BEGIN IMMEDIATE"))
+            row = session.scalar(statement)
+            if idempotency_record is not None:
+                idempotency_statement = (
+                    select(LaunchplaneIdempotencyRow)
+                    .where(
+                        LaunchplaneIdempotencyRow.scope == idempotency_record.scope,
+                        LaunchplaneIdempotencyRow.route_path == idempotency_record.route_path,
+                        LaunchplaneIdempotencyRow.idempotency_key
+                        == idempotency_record.idempotency_key,
+                    )
+                    .limit(1)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    idempotency_statement = idempotency_statement.with_for_update()
+                existing_idempotency_row = session.scalar(idempotency_statement)
+                if existing_idempotency_row is not None:
+                    existing_idempotency_record = self._read_payload(
+                        model_type=LaunchplaneIdempotencyRecord,
+                        payload=existing_idempotency_row.payload,
+                    )
+                    if (
+                        existing_idempotency_record.request_fingerprint
+                        == idempotency_record.request_fingerprint
+                    ):
+                        return ProductProfileCompareWriteResult(
+                            status="replayed",
+                            idempotency_record=existing_idempotency_record,
+                        )
+                    return ProductProfileCompareWriteResult(
+                        status="idempotency_conflict",
+                        idempotency_record=existing_idempotency_record,
+                    )
+            if row is None:
+                return ProductProfileCompareWriteResult(status="missing")
+            current_record = self._read_product_profile_payload(row.payload)
+            if self._payload_dict(current_record) != self._payload_dict(expected_record):
+                return ProductProfileCompareWriteResult(status="changed")
+            row.display_name = replacement_record.display_name
+            row.repository = replacement_record.repository
+            row.driver_id = replacement_record.driver_id
+            row.updated_at = replacement_record.updated_at
+            row.payload = self._payload_dict(replacement_record)
+            if idempotency_record is not None:
+                session.add(
+                    LaunchplaneIdempotencyRow(
+                        record_id=idempotency_record.record_id,
+                        scope=idempotency_record.scope,
+                        route_path=idempotency_record.route_path,
+                        idempotency_key=idempotency_record.idempotency_key,
+                        request_fingerprint=idempotency_record.request_fingerprint,
+                        response_status_code=idempotency_record.response_status_code,
+                        response_trace_id=idempotency_record.response_trace_id,
+                        recorded_at=idempotency_record.recorded_at,
+                        payload=self._payload_dict(idempotency_record),
+                    )
+                )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                if idempotency_record is None:
+                    raise
+                recovered_idempotency_record = self.read_idempotency_record(
+                    scope=idempotency_record.scope,
+                    route_path=idempotency_record.route_path,
+                    idempotency_key=idempotency_record.idempotency_key,
+                )
+                if recovered_idempotency_record is None:
+                    raise
+                if (
+                    recovered_idempotency_record.request_fingerprint
+                    == idempotency_record.request_fingerprint
+                ):
+                    return ProductProfileCompareWriteResult(
+                        status="replayed",
+                        idempotency_record=recovered_idempotency_record,
+                    )
+                return ProductProfileCompareWriteResult(
+                    status="idempotency_conflict",
+                    idempotency_record=recovered_idempotency_record,
+                )
+            return ProductProfileCompareWriteResult(status="written")
 
     def _read_product_profile_payload(
         self, payload: PayloadDict
