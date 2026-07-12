@@ -1,8 +1,10 @@
+import asyncio
 import json
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane import secrets as control_plane_secrets
@@ -20,7 +22,10 @@ from control_plane.service_human_auth import (
     InMemoryHumanSessionStore,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import (
+    PostgresRecordStore,
+    ProductProfileCompareWriteResult,
+)
 from control_plane.work_graph_issue_inbox import (
     GitHubIssueInboxReadModel,
     GitHubIssueInboxReconcileResult,
@@ -53,11 +58,13 @@ from tests.http_app_test_support import (
     _MissingProductReadStore,
     _post_product_expected_config,
     _post_product_profile,
+    _post_product_preview_tls,
     _post_work_graph_issue_inbox_reconcile,
     _post_work_graph_rank,
     _product_environment_read_policy,
     _product_expected_config_policy,
     _product_profile_read_policy,
+    _product_preview_tls_policy,
     _product_profile_write_policy,
     _ProductProfileReplayOnlyStore,
     _RejectingVerifier,
@@ -101,6 +108,33 @@ def _product_expected_config_payload() -> dict[str, object]:
 def _product_expected_config_identity() -> GitHubActionsIdentity:
     return _identity(
         workflow_ref="every/verireel/.github/workflows/product-expected-config.yml@refs/heads/main",
+        event_name="workflow_dispatch",
+    )
+
+
+def _product_preview_tls_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "odoo-product",
+        "mode": "dry-run",
+        "domain_certificate_type": "letsencrypt",
+        "reason": "Enable trusted preview TLS.",
+        "reviewed_plan_sha256": "",
+    }
+
+
+def _product_preview_tls_profile() -> LaunchplaneProductProfileRecord:
+    payload = _product_profile_payload()
+    payload["product"] = "odoo-product"
+    payload["driver_id"] = "odoo"
+    preview = cast(dict[str, object], payload["preview"])
+    preview["domain_certificate_type"] = "none"
+    return LaunchplaneProductProfileRecord.model_validate(payload)
+
+
+def _product_preview_tls_identity() -> GitHubActionsIdentity:
+    return _identity(
+        workflow_ref="every/verireel/.github/workflows/product-preview-tls.yml@refs/heads/main",
         event_name="workflow_dispatch",
     )
 
@@ -2053,6 +2087,571 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_apply_product_preview_tls_dry_run_preserves_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_preview_tls_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            stored_profile = store.read_product_profile_record("odoo-product")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"], {"product_profile": "odoo-product"})
+        self.assertEqual(payload["result"]["current_value"], "none")
+        self.assertEqual(payload["result"]["requested_value"], "letsencrypt")
+        self.assertTrue(payload["result"]["changed"])
+        self.assertRegex(payload["result"]["plan_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(stored_profile.preview.domain_certificate_type, "none")
+
+    async def test_apply_product_preview_tls_dry_run_always_reads_fresh_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            original_profile = _product_preview_tls_profile()
+            store.write_product_profile_record(original_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            first_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+                idempotency_key="ignored-dry-run-key",
+            )
+            store.write_product_profile_record(
+                original_profile.model_copy(
+                    update={
+                        "updated_at": "2026-07-12T02:00:00Z",
+                        "source": "service:concurrent-update",
+                    }
+                )
+            )
+            second_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+                idempotency_key="ignored-dry-run-key",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        self.assertNotEqual(
+            first_response.json()["result"]["plan_sha256"],
+            second_response.json()["result"]["plan_sha256"],
+        )
+        self.assertNotIn("replayed", second_response.json())
+
+    async def test_apply_product_preview_tls_persists_reviewed_plan(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            original_profile = _product_preview_tls_profile()
+            store.write_product_profile_record(original_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            plan_sha256 = dry_run_response.json()["result"]["plan_sha256"]
+            apply_response = await _post_product_preview_tls(
+                app,
+                {
+                    **_product_preview_tls_payload(),
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan_sha256,
+                },
+                idempotency_key="product-preview-tls-apply",
+            )
+            stored_profile = store.read_product_profile_record("odoo-product")
+
+        self.assertEqual(apply_response.status_code, 202)
+        self.assertEqual(stored_profile.preview.domain_certificate_type, "letsencrypt")
+        self.assertEqual(stored_profile.source, "service:product-preview-tls")
+        self.assertEqual(stored_profile.repository, original_profile.repository)
+        self.assertEqual(stored_profile.lanes, original_profile.lanes)
+
+    async def test_apply_product_preview_tls_no_change_preserves_audit_fields(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            original_profile = _product_preview_tls_profile()
+            original_profile = original_profile.model_copy(
+                update={
+                    "preview": original_profile.preview.model_copy(
+                        update={"domain_certificate_type": "letsencrypt"}
+                    )
+                }
+            )
+            store.write_product_profile_record(original_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            plan_sha256 = dry_run_response.json()["result"]["plan_sha256"]
+            apply_payload = {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": plan_sha256,
+            }
+            apply_response = await _post_product_preview_tls(
+                app,
+                apply_payload,
+                idempotency_key="product-preview-tls-no-change-apply",
+            )
+            replay_response = await _post_product_preview_tls(
+                app,
+                apply_payload,
+                idempotency_key="product-preview-tls-no-change-apply",
+            )
+            stored_profile = store.read_product_profile_record("odoo-product")
+
+        self.assertEqual(apply_response.status_code, 202)
+        self.assertFalse(apply_response.json()["result"]["changed"])
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(stored_profile.updated_at, original_profile.updated_at)
+        self.assertEqual(stored_profile.source, original_profile.source)
+
+    async def test_apply_product_preview_tls_serializes_concurrent_noop_retries(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            original_profile = _product_preview_tls_profile()
+            original_profile = original_profile.model_copy(
+                update={
+                    "preview": original_profile.preview.model_copy(
+                        update={"domain_certificate_type": "letsencrypt"}
+                    )
+                }
+            )
+            store.write_product_profile_record(original_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            apply_payload = {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+
+            def apply_request() -> Any:
+                return asyncio.run(
+                    _post_product_preview_tls(
+                        app,
+                        apply_payload,
+                        idempotency_key="product-preview-tls-concurrent-noop",
+                    )
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                responses = tuple(executor.map(lambda _: apply_request(), range(2)))
+
+        self.assertEqual([response.status_code for response in responses], [202, 202])
+        self.assertEqual(
+            sorted(bool(response.json().get("replayed")) for response in responses),
+            [False, True],
+        )
+
+    async def test_apply_product_preview_tls_replays_idempotent_apply(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_preview_tls_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            apply_payload = {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+            first_response = await _post_product_preview_tls(
+                app,
+                apply_payload,
+                idempotency_key="product-preview-tls-replay-apply",
+            )
+            second_response = await _post_product_preview_tls(
+                app,
+                apply_payload,
+                idempotency_key="product-preview-tls-replay-apply",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        self.assertTrue(second_response.json()["replayed"])
+        self.assertEqual(
+            second_response.json()["original_trace_id"],
+            first_response.json()["trace_id"],
+        )
+
+    async def test_apply_product_preview_tls_replays_after_initial_race_miss(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_preview_tls_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            apply_payload = {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+            first_response = await _post_product_preview_tls(
+                app,
+                apply_payload,
+                idempotency_key="product-preview-tls-race-apply",
+            )
+            read_idempotency_record = store.read_idempotency_record
+            read_count = 0
+
+            def miss_first_idempotency_read(**kwargs: str) -> object:
+                nonlocal read_count
+                read_count += 1
+                if read_count == 1:
+                    return None
+                return read_idempotency_record(**kwargs)
+
+            with patch.object(
+                store,
+                "read_idempotency_record",
+                side_effect=miss_first_idempotency_read,
+            ):
+                second_response = await _post_product_preview_tls(
+                    app,
+                    apply_payload,
+                    idempotency_key="product-preview-tls-race-apply",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        self.assertTrue(second_response.json()["replayed"])
+        self.assertEqual(
+            second_response.json()["original_trace_id"],
+            first_response.json()["trace_id"],
+        )
+
+    async def test_apply_product_preview_tls_rejects_stale_plan(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            original_profile = _product_preview_tls_profile()
+            store.write_product_profile_record(original_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            plan_sha256 = dry_run_response.json()["result"]["plan_sha256"]
+            store.write_product_profile_record(
+                original_profile.model_copy(
+                    update={
+                        "updated_at": "2026-07-12T02:00:00Z",
+                        "source": "concurrent-profile-update",
+                    }
+                )
+            )
+            apply_response = await _post_product_preview_tls(
+                app,
+                {
+                    **_product_preview_tls_payload(),
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan_sha256,
+                },
+                idempotency_key="product-preview-tls-stale-apply",
+            )
+            stored_profile = store.read_product_profile_record("odoo-product")
+
+        self.assertEqual(apply_response.status_code, 409)
+        self.assertEqual(apply_response.json()["error"]["code"], "stale")
+        self.assertEqual(stored_profile.preview.domain_certificate_type, "none")
+
+    async def test_apply_product_preview_tls_requires_idempotency_key(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_preview_tls_identity()),
+            authz_policy=_product_preview_tls_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_preview_tls(
+            app,
+            {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": "a" * 64,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
+
+    async def test_apply_product_preview_tls_rejects_unauthorized_workflow(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_preview_tls_identity()),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_preview_tls(app, _product_preview_tls_payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_apply_product_preview_tls_rejects_cross_product_target(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_preview_tls_identity()),
+            authz_policy=_product_preview_tls_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_preview_tls(
+            app,
+            {
+                **_product_preview_tls_payload(),
+                "product": "different-product",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_apply_product_preview_tls_rejects_concurrent_profile_change(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_preview_tls_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+
+            with patch.object(
+                store,
+                "compare_and_write_product_profile_record",
+                return_value=ProductProfileCompareWriteResult(status="changed"),
+            ):
+                apply_response = await _post_product_preview_tls(
+                    app,
+                    {
+                        **_product_preview_tls_payload(),
+                        "mode": "apply",
+                        "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+                    },
+                    idempotency_key="product-preview-tls-concurrent-apply",
+                )
+            stored_profile = store.read_product_profile_record("odoo-product")
+
+        self.assertEqual(apply_response.status_code, 409)
+        self.assertEqual(apply_response.json()["error"]["code"], "stale")
+        self.assertEqual(stored_profile.preview.domain_certificate_type, "none")
+
+    async def test_apply_product_preview_tls_reports_missing_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_preview_tls(app, _product_preview_tls_payload())
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_apply_product_preview_tls_rejects_non_odoo_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            profile = _product_preview_tls_profile().model_copy(update={"driver_id": "generic-web"})
+            store.write_product_profile_record(profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_preview_tls(app, _product_preview_tls_payload())
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "unsupported_product_driver")
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "Product preview TLS policy requires the Odoo driver.",
+        )
+
+    async def test_apply_product_preview_tls_reports_profile_removed_during_apply(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_preview_tls_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_preview_tls_identity()),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+
+            with patch.object(
+                store,
+                "compare_and_write_product_profile_record",
+                return_value=ProductProfileCompareWriteResult(status="missing"),
+            ):
+                apply_response = await _post_product_preview_tls(
+                    app,
+                    {
+                        **_product_preview_tls_payload(),
+                        "mode": "apply",
+                        "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+                    },
+                    idempotency_key="product-preview-tls-missing-apply",
+                )
+
+        self.assertEqual(apply_response.status_code, 404)
+        self.assertEqual(apply_response.json()["error"]["code"], "not_found")
+
+    async def test_apply_product_preview_tls_requires_database_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_preview_tls_identity()),
+            authz_policy=_product_preview_tls_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_preview_tls(app, _product_preview_tls_payload())
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_required")
+
+    async def test_openapi_includes_product_preview_tls_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_preview_tls_identity()),
+            authz_policy=_product_preview_tls_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/product-profiles/preview-tls/apply"]["post"]
+        self.assertEqual(route["operationId"], "apply_product_preview_tls")
+        self.assertEqual(
+            route["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "ProductPreviewTlsApplyRequest",
+        )
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "404", "409", "503"):
+            self.assertIn(status_code, route["responses"])
 
     async def test_list_product_profiles_accepts_every_code_worker_token(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

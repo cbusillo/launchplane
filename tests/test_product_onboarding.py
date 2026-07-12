@@ -2416,12 +2416,42 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("github.run_attempt", workflow_text)
         self.assertIn("product-expected-config-result", workflow_text)
 
+    def test_product_preview_tls_workflow_requires_reviewed_plan_for_apply(self) -> None:
+        workflow_text = Path(".github/workflows/product-preview-tls.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("/v1/product-profiles/preview-tls/apply", workflow_text)
+        self.assertIn("APPLY PRODUCT PREVIEW TLS", workflow_text)
+        self.assertIn("reviewed_plan_sha256", workflow_text)
+        self.assertIn("dry-run", workflow_text)
+        self.assertIn("letsencrypt", workflow_text)
+        self.assertIn(
+            "product-preview-tls:${PRODUCT}:apply:${GITHUB_RUN_ID}",
+            workflow_text,
+        )
+        self.assertIn('if [ "$MODE" = "apply" ]; then', workflow_text)
+        self.assertNotIn("github.run_attempt", workflow_text)
+        self.assertIn("product-preview-tls-result", workflow_text)
+        self.assertNotIn("actions/checkout", workflow_text)
+        self.assertNotIn("Authorization: Bearer", workflow_text)
+        self.assertNotIn("curl ", workflow_text)
+        self.assertNotIn("| xargs", workflow_text)
+
     def test_deploy_authz_grants_include_product_onboarding_apply(self) -> None:
         script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
         self.assertIn("product-onboarding.yml", script_text)
         self.assertIn("product_onboarding.apply", script_text)
         self.assertIn("deploy:product-onboarding-grant", script_text)
+
+    def test_deploy_authz_grants_do_not_hard_code_product_preview_tls_apply(self) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn("product-preview-tls.yml", script_text)
+        self.assertNotIn("product_profile.preview_tls.apply", script_text)
+        self.assertNotIn("deploy:product-preview-tls-grant", script_text)
+        self.assertIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", script_text)
 
     def test_deploy_authz_grants_do_not_hard_code_product_expected_config_apply(
         self,

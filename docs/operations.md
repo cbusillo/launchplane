@@ -344,6 +344,19 @@ local `gh` authentication. Verify the configured actor with a token-scoped
 GitHub `/user` API read outside Launchplane, and never print or paste the token
 itself into logs, issues, or records.
 
+Use the manual Product Preview TLS workflow for a bounded change to an
+Odoo-driver product profile's preview certificate policy. Run `mode=dry-run`
+first with the target product, requested `none` or `letsencrypt` value, and an
+operator reason. The workflow requires a target-product-scoped
+`product_profile.preview_tls.apply` grant from operator-supplied authz config;
+do not add product grants to checked-in workflow defaults. Review the artifact's
+current/requested values, profile timestamp, and plan SHA-256.
+Apply only by starting a second run with `mode=apply`, the same target/value/
+reason, the reviewed plan SHA-256, and the exact confirmation text. Launchplane
+re-reads the current DB-backed profile, rejects stale plans, and preserves every
+unrelated profile field. Do not replace this workflow with whole-profile API,
+direct DB, or direct provider mutation.
+
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. The workflow
 does not carry product/context defaults; operators must provide the product,

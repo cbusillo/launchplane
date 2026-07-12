@@ -1,4 +1,5 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -194,6 +195,22 @@ def _product_profile_record(
         ),
         updated_at="2026-04-30T20:00:00Z",
         source="operator:test",
+    )
+
+
+def _product_profile_idempotency_record(
+    *, request_fingerprint: str = "fingerprint-a"
+) -> LaunchplaneIdempotencyRecord:
+    return LaunchplaneIdempotencyRecord(
+        record_id="idempotency-product-preview-tls",
+        scope="github-actions:example",
+        route_path="/v1/product-profiles/preview-tls/apply",
+        idempotency_key="product-preview-tls:test:apply:1",
+        request_fingerprint=request_fingerprint,
+        response_status_code=202,
+        response_trace_id="trace-product-preview-tls",
+        recorded_at="2026-07-12T01:00:00Z",
+        response_payload={"status": "accepted", "trace_id": "trace-product-preview-tls"},
     )
 
 
@@ -2815,6 +2832,166 @@ env_var = "GH_TOKEN"
         self.assertEqual(
             [record.product for record in listed_records], ["internal-tool", "sellyouroutboard"]
         )
+
+    def test_product_profile_compare_and_write_replaces_matching_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            expected_record = _product_profile_record()
+            replacement_record = expected_record.model_copy(
+                update={
+                    "display_name": "Updated Product",
+                    "updated_at": "2026-07-12T01:00:00Z",
+                    "source": "service:test-compare-write",
+                }
+            )
+            store.write_product_profile_record(expected_record)
+
+            result = store.compare_and_write_product_profile_record(
+                expected_record=expected_record,
+                replacement_record=replacement_record,
+            )
+            loaded_record = store.read_product_profile_record(expected_record.product)
+            store.close()
+
+        self.assertEqual(result.status, "written")
+        self.assertEqual(loaded_record, replacement_record)
+
+    def test_product_profile_compare_and_write_rejects_changed_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            expected_record = _product_profile_record()
+            concurrent_record = expected_record.model_copy(
+                update={
+                    "display_name": "Concurrent Update",
+                    "updated_at": "2026-07-12T01:00:00Z",
+                    "source": "service:concurrent-update",
+                }
+            )
+            replacement_record = expected_record.model_copy(
+                update={
+                    "updated_at": "2026-07-12T02:00:00Z",
+                    "source": "service:test-compare-write",
+                }
+            )
+            store.write_product_profile_record(concurrent_record)
+
+            result = store.compare_and_write_product_profile_record(
+                expected_record=expected_record,
+                replacement_record=replacement_record,
+            )
+            loaded_record = store.read_product_profile_record(expected_record.product)
+            store.close()
+
+        self.assertEqual(result.status, "changed")
+        self.assertEqual(loaded_record, concurrent_record)
+
+    def test_product_profile_compare_and_write_serializes_sqlite_writers(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            expected_record = _product_profile_record()
+            store.write_product_profile_record(expected_record)
+
+            def write_replacement(display_name: str) -> str:
+                replacement_record = expected_record.model_copy(
+                    update={
+                        "display_name": display_name,
+                        "updated_at": "2026-07-12T01:00:00Z",
+                        "source": f"service:{display_name}",
+                    }
+                )
+                return store.compare_and_write_product_profile_record(
+                    expected_record=expected_record,
+                    replacement_record=replacement_record,
+                ).status
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                statuses = tuple(executor.map(write_replacement, ("first", "second")))
+            loaded_record = store.read_product_profile_record(expected_record.product)
+            store.close()
+
+        self.assertEqual(sorted(statuses), ["changed", "written"])
+        self.assertIn(loaded_record.display_name, {"first", "second"})
+
+    def test_product_profile_compare_and_write_reports_missing_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            expected_record = _product_profile_record()
+
+            result = store.compare_and_write_product_profile_record(
+                expected_record=expected_record,
+                replacement_record=expected_record,
+            )
+            store.close()
+
+        self.assertEqual(result.status, "missing")
+
+    def test_product_profile_compare_and_write_commits_idempotency_atomically(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            expected_record = _product_profile_record()
+            replacement_record = expected_record.model_copy(
+                update={
+                    "updated_at": "2026-07-12T01:00:00Z",
+                    "source": "service:test-compare-write",
+                }
+            )
+            idempotency_record = _product_profile_idempotency_record()
+            store.write_product_profile_record(expected_record)
+
+            first_result = store.compare_and_write_product_profile_record(
+                expected_record=expected_record,
+                replacement_record=replacement_record,
+                idempotency_record=idempotency_record,
+            )
+            replay_result = store.compare_and_write_product_profile_record(
+                expected_record=expected_record,
+                replacement_record=replacement_record,
+                idempotency_record=idempotency_record,
+            )
+            conflict_result = store.compare_and_write_product_profile_record(
+                expected_record=expected_record,
+                replacement_record=replacement_record,
+                idempotency_record=_product_profile_idempotency_record(
+                    request_fingerprint="fingerprint-b"
+                ),
+            )
+            stored_idempotency = store.read_idempotency_record(
+                scope=idempotency_record.scope,
+                route_path=idempotency_record.route_path,
+                idempotency_key=idempotency_record.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(first_result.status, "written")
+        self.assertEqual(replay_result.status, "replayed")
+        self.assertEqual(replay_result.idempotency_record, idempotency_record)
+        self.assertEqual(conflict_result.status, "idempotency_conflict")
+        self.assertEqual(stored_idempotency, idempotency_record)
 
     def test_product_profile_reads_migrate_legacy_alert_issue_url(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

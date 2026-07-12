@@ -161,6 +161,9 @@ VeriReel product paths:
   - `POST /v1/product-profiles` (native FastAPI for bearer-token callers,
     product-profile write-contract validation, record storage, and optional
     `Idempotency-Key` replay/conflict handling)
+  - `POST /v1/product-profiles/preview-tls/apply` (native FastAPI for
+    Launchplane-operator workflow callers, DB-backed dry-run/apply planning,
+    reviewed-plan continuity, and apply-only idempotency enforcement)
 - product config write route:
   - `POST /v1/product-config/apply` (native FastAPI for GitHub Actions OIDC,
     signed-in GitHub human sessions, and local-operator bearer callers, with
@@ -1193,6 +1196,7 @@ refresh/destroy flow.
 - `GET /v1/product-profiles/{product}`
 - `POST /v1/product-profiles`
 - `POST /v1/product-profiles/expected-config/apply`
+- `POST /v1/product-profiles/preview-tls/apply`
 
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through native FastAPI authenticated service ingress and stored in Launchplane
@@ -1212,6 +1216,22 @@ writing. Apply updates only the profile `expected_config`, `updated_at`, and
 sync live provider environment. The route does not accept secret plaintext,
 runtime values, or checked-in product catalogs, and workflow authority for real
 products must be granted through operator-supplied authz input.
+
+Preview TLS apply is a field-bounded mutation for Odoo-driver profiles and
+`preview.domain_certificate_type`. It requires
+`product_profile.preview_tls.apply` for the target product in the Launchplane
+service context, loads the profile from DB-backed storage, and returns a fresh,
+stateless dry-run plan containing only the current/requested certificate values,
+the profile timestamp, and a canonical plan SHA-256. Apply requires the reviewed
+SHA-256 and an `Idempotency-Key`; changed reviewed inputs or a profile-row change
+during apply make the operation stale. A successful apply uses an atomic
+compare-and-write, rebuilds from the current stored record, and changes only the
+preview certificate value plus `updated_at` and server-owned `source`;
+profile-row serialization and idempotency evidence commit in the same
+transaction even when the requested value is already current. The operator
+workflow receives the real target product as dispatch input, and its
+product-specific authz grant comes from operator-supplied configuration rather
+than checked-in runtime authority.
 
 Public ingress notification policy writes use
 `POST /v1/public-ingress/notification-policies/apply`. The request carries

@@ -39,6 +39,7 @@ from control_plane import product_config_service as control_plane_product_config
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
+from control_plane import product_preview_tls as control_plane_product_preview_tls
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
@@ -695,6 +696,7 @@ _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/ap
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
+_PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
 _PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
@@ -11630,6 +11632,231 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_product_preview_tls(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product preview TLS request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product preview TLS request failed validation.",
+            )
+        try:
+            preview_tls_request = (
+                control_plane_product_preview_tls.ProductPreviewTlsApplyRequest.model_validate(
+                    raw_payload
+                )
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product preview TLS request failed validation.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.preview_tls.apply",
+            product=preview_tls_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply product preview TLS policy.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if preview_tls_request.mode == "apply" and not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Product preview TLS apply requests require an Idempotency-Key header.",
+            )
+        database_store = require_product_preview_tls_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        payload_fingerprint = ""
+        if preview_tls_request.mode == "apply":
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=database_store,
+                identity=identity,
+                route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+        try:
+            profile = database_store.read_product_profile_record(preview_tls_request.product)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        try:
+            plan = control_plane_product_preview_tls.build_product_preview_tls_plan(
+                profile=profile,
+                request=preview_tls_request,
+            )
+        except control_plane_product_preview_tls.ProductPreviewTlsDriverError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="unsupported_product_driver",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product preview TLS request does not match the stored profile.",
+            ) from error
+        if (
+            preview_tls_request.mode == "apply"
+            and preview_tls_request.reviewed_plan_sha256 != plan.plan_sha256
+        ):
+            stored_idempotency_record = database_store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+            )
+            if stored_idempotency_record is not None:
+                if stored_idempotency_record.request_fingerprint != payload_fingerprint:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=stored_idempotency_record,
+                    route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                )
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="Reviewed product preview TLS plan no longer matches the stored profile.",
+            )
+        if preview_tls_request.mode == "apply":
+            replacement_profile = profile
+            profile_updated_at_after = profile.updated_at
+            if plan.changed:
+                try:
+                    replacement_profile = (
+                        control_plane_product_preview_tls.updated_product_preview_tls_profile(
+                            profile=profile,
+                            request=preview_tls_request,
+                            updated_at=utc_now_timestamp(),
+                        )
+                    )
+                except ValueError as error:
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="invalid_product_profile",
+                        message="Updated product profile failed validation.",
+                    ) from error
+                profile_updated_at_after = replacement_profile.updated_at
+            result_plan = plan.model_copy(
+                update={
+                    "applied": True,
+                    "profile_updated_at_after": profile_updated_at_after,
+                }
+            )
+            response = accepted_evidence_response(
+                trace_id=trace_id,
+                records={"product_profile": preview_tls_request.product},
+                result=result_plan.model_dump(mode="json"),
+            )
+            atomic_idempotency_record = build_apply_idempotency_record(
+                identity=identity,
+                route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+            write_result = database_store.compare_and_write_product_profile_record(
+                expected_record=profile,
+                replacement_record=replacement_profile,
+                idempotency_record=atomic_idempotency_record,
+            )
+            if write_result.status == "replayed":
+                if write_result.idempotency_record is None:
+                    raise RuntimeError("Replayed product profile write requires evidence.")
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=write_result.idempotency_record,
+                    route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                )
+            if write_result.status == "idempotency_conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if write_result.status == "missing":
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message=(
+                        "Product profile disappeared before the preview TLS change could be applied."
+                    ),
+                )
+            if write_result.status == "changed":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="stale",
+                    message=(
+                        "Product profile changed while applying the reviewed preview TLS plan."
+                    ),
+                )
+            return response
+        result_plan = plan
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"product_profile": preview_tls_request.product},
+            result=result_plan.model_dump(mode="json"),
+        )
+        return response
+
     def read_product_context_cutover_audit(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
@@ -11938,6 +12165,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_product_preview_tls_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Product preview TLS writes require Launchplane database storage.",
+            )
+        return record_store
+
     def require_merge_train_policy_database_store(
         *, record_store: object, trace_id: str
     ) -> PostgresRecordStore:
@@ -12112,6 +12351,27 @@ def create_launchplane_fastapi_app(
                 )
         return normalized_idempotency_key, payload_fingerprint, None
 
+    def build_apply_idempotency_record(
+        *,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint_value: str,
+        trace_id: str,
+        response: AcceptedEvidenceResponse,
+    ) -> LaunchplaneIdempotencyRecord:
+        return LaunchplaneIdempotencyRecord(
+            record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
+            scope=idempotency_scope(identity),
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint_value,
+            response_status_code=202,
+            response_trace_id=trace_id,
+            recorded_at=utc_now_timestamp(),
+            response_payload=response.model_dump(mode="json", exclude_none=True),
+        )
+
     def store_apply_idempotency(
         *,
         record_store: object,
@@ -12126,16 +12386,13 @@ def create_launchplane_fastapi_app(
         if idempotency_store is None or not idempotency_key:
             return
         idempotency_store.write_idempotency_record(
-            LaunchplaneIdempotencyRecord(
-                record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
-                scope=idempotency_scope(identity),
+            build_apply_idempotency_record(
+                identity=identity,
                 route_path=route_path,
                 idempotency_key=idempotency_key,
-                request_fingerprint=request_fingerprint_value,
-                response_status_code=202,
-                response_trace_id=trace_id,
-                recorded_at=utc_now_timestamp(),
-                response_payload=response.model_dump(mode="json", exclude_none=True),
+                request_fingerprint_value=request_fingerprint_value,
+                trace_id=trace_id,
+                response=response,
             )
         )
 
@@ -20232,6 +20489,37 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_product_expected_config",
         summary="Add product expected config metadata",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+        apply_product_preview_tls,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            control_plane_product_preview_tls.ProductPreviewTlsApplyRequest
+                        )
+                    }
+                },
+            }
+        },
+        operation_id="apply_product_preview_tls",
+        summary="Plan or apply product preview TLS policy",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
