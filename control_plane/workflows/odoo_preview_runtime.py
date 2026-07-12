@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -43,6 +44,11 @@ from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALT
 
 OdooPreviewDokployDryRunStatus = OdooPreviewRuntimePlanStatus
 OdooPreviewDomainCertificateType = Literal["none", "letsencrypt"]
+
+
+_IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[A-Za-z0-9._-]+$"
+)
 OdooPreviewDokployDryRunBlockerCode = Literal[
     "endpoint_path_missing",
     "environment_id_missing",
@@ -1012,7 +1018,6 @@ class OdooPreviewDokployApplyRequest(BaseModel):
     image_reference: str = ""
     manifest: ArtifactIdentityManifest | None = None
     environment_values: dict[str, str] = Field(default_factory=dict)
-    compose_file: str = ""
     health_path: str = DEFAULT_ODOO_RUNTIME_HEALTH_PATH
     timeout_seconds: int = Field(default=300, ge=1)
     wait_for_deploy: bool = True
@@ -1031,7 +1036,6 @@ class OdooPreviewDokployApplyRequest(BaseModel):
                 manifest=self.manifest,
                 label="Odoo preview apply",
             )
-        self.compose_file = self.compose_file.strip()
         self.health_path = self.health_path.strip() or DEFAULT_ODOO_RUNTIME_HEALTH_PATH
         if not self.health_path.startswith("/"):
             self.health_path = f"/{self.health_path}"
@@ -1264,11 +1268,12 @@ def _execute_refresh(
                 target_type="compose",
                 target_id=compose_id,
             )
-        compose_file = request.compose_file or control_plane_dokploy.render_odoo_raw_compose_file(
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
             image_reference=request.image_reference,
             domain_hosts=(plan.domain_host,),
             runtime_port=plan.runtime_port,
             publish_host_ports=False,
+            domain_certificate_type=plan.domain_certificate_type,
         )
         control_plane_dokploy.sync_dokploy_compose_raw_source(
             host=host,
@@ -1755,9 +1760,12 @@ def _resolve_manifest_image_reference(
 ) -> str:
     normalized_image_reference = image_reference.strip()
     if manifest is None:
-        return _required_text(
-            normalized_image_reference,
-            f"{label} requires image_reference or manifest.",
+        return _validated_immutable_image_reference(
+            _required_text(
+                normalized_image_reference,
+                f"{label} requires image_reference or manifest.",
+            ),
+            label=label,
         )
     manifest_image_reference = _artifact_image_reference(manifest)
     if normalized_image_reference and normalized_image_reference != manifest_image_reference:
@@ -1765,7 +1773,14 @@ def _resolve_manifest_image_reference(
             f"{label} image_reference does not match manifest image reference. "
             f"Request={normalized_image_reference} manifest={manifest_image_reference}."
         )
-    return manifest_image_reference
+    return _validated_immutable_image_reference(manifest_image_reference, label=label)
+
+
+def _validated_immutable_image_reference(value: str, *, label: str) -> str:
+    normalized_value = value.strip()
+    if not _IMMUTABLE_IMAGE_REFERENCE_PATTERN.fullmatch(normalized_value):
+        raise ValueError(f"{label} requires a single-line immutable image reference.")
+    return normalized_value
 
 
 def _normalized_unique_texts(values: tuple[str, ...]) -> tuple[str, ...]:

@@ -128,7 +128,12 @@ def _traefik_route_name(*, domain_host: str) -> str:
     return f"launchplane-odoo-web-{host_slug[:48]}-{host_hash}"
 
 
-def _render_odoo_web_traefik_labels(*, domain_hosts: tuple[str, ...], runtime_port: int) -> str:
+def _render_odoo_web_traefik_labels(
+    *,
+    domain_hosts: tuple[str, ...],
+    runtime_port: int,
+    domain_certificate_type: Literal["none", "letsencrypt"],
+) -> str:
     if not domain_hosts:
         return ""
     if runtime_port <= 0:
@@ -163,8 +168,14 @@ def _render_odoo_web_traefik_labels(*, domain_hosts: tuple[str, ...], runtime_po
                 f'      - "traefik.http.routers.{route_name}-websecure.entrypoints=websecure"',
                 f'      - "traefik.http.routers.{route_name}-websecure.service={route_name}-websecure"',
                 f'      - "traefik.http.routers.{route_name}-websecure.tls=true"',
-                f'      - "traefik.http.services.{route_name}-websecure.loadbalancer.server.port={runtime_port}"',
             ]
+        )
+        if domain_certificate_type == "letsencrypt":
+            lines.append(
+                f'      - "traefik.http.routers.{route_name}-websecure.tls.certresolver=letsencrypt"'
+            )
+        lines.append(
+            f'      - "traefik.http.services.{route_name}-websecure.loadbalancer.server.port={runtime_port}"'
         )
     return "\n".join(lines) + "\n"
 
@@ -175,14 +186,18 @@ def render_odoo_raw_compose_file(
     domain_hosts: tuple[str, ...] = (),
     runtime_port: int = 8069,
     publish_host_ports: bool = True,
+    domain_certificate_type: Literal["none", "letsencrypt"] = "none",
 ) -> str:
     normalized_image_reference = image_reference.strip()
     if not normalized_image_reference:
         raise click.ClickException(
             "Odoo raw compose rendering requires a non-empty image reference."
         )
+    rendered_image_reference = json.dumps(normalized_image_reference)
     web_route_labels = _render_odoo_web_traefik_labels(
-        domain_hosts=domain_hosts, runtime_port=runtime_port
+        domain_hosts=domain_hosts,
+        runtime_port=runtime_port,
+        domain_certificate_type=domain_certificate_type,
     )
     web_host_ports = ""
     if publish_host_ports:
@@ -194,7 +209,7 @@ def render_odoo_raw_compose_file(
     # renders the image reference directly so Dokploy git checkout state cannot
     # decide what Odoo artifact is deployed.
     return f"""x-odoo-base: &odoo-base
-  image: {normalized_image_reference}
+  image: {rendered_image_reference}
   pull_policy: always
   restart: unless-stopped
   env_file:

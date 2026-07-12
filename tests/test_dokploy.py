@@ -3061,7 +3061,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
             runtime_port=8069,
         )
 
-        self.assertIn("image: ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123", compose_file)
+        self.assertIn('image: "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123"', compose_file)
         self.assertIn("\n  web:", compose_file)
         self.assertIn(
             "${ODOO_WEB_COMMAND:-python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf}",
@@ -3125,10 +3125,34 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
             "traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-websecure.tls=true",
             compose_file,
         )
+        self.assertNotIn(".tls.certresolver=", compose_file)
         self.assertIn(
             "traefik.http.services.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-websecure.loadbalancer.server.port=8069",
             compose_file,
         )
+
+    def test_render_odoo_raw_compose_file_adds_letsencrypt_resolver(self) -> None:
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            domain_hosts=("pr-45.cm-preview.example.test",),
+            domain_certificate_type="letsencrypt",
+        )
+
+        self.assertIn(
+            "traefik.http.routers.launchplane-odoo-web-pr-45-cm-preview-example-test-a09f0256-websecure.tls.certresolver=letsencrypt",
+            compose_file,
+        )
+
+    def test_render_odoo_raw_compose_file_serializes_image_as_yaml_scalar(self) -> None:
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference=("ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123\n  privileged: true")
+        )
+
+        self.assertIn(
+            'image: "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123\\n  privileged: true"',
+            compose_file,
+        )
+        self.assertNotIn("\n  privileged: true\n", compose_file)
 
     def test_render_odoo_raw_compose_file_omits_traefik_labels_without_domains(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
