@@ -42,6 +42,7 @@ from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALT
 
 
 OdooPreviewDokployDryRunStatus = OdooPreviewRuntimePlanStatus
+OdooPreviewDomainCertificateType = Literal["none", "letsencrypt"]
 OdooPreviewDokployDryRunBlockerCode = Literal[
     "endpoint_path_missing",
     "environment_id_missing",
@@ -455,6 +456,7 @@ def build_odoo_preview_apply_inputs(
             runtime_plan=runtime_plan,
             no_cache=request.no_cache,
             runtime_port=profile.runtime_port,
+            domain_certificate_type=preview_profile.domain_certificate_type,
             compose_name=compose_name,
             environment_id=environment_id,
             template_compose_id=template_compose_id,
@@ -886,6 +888,7 @@ class OdooPreviewDokployDryRunRequest(BaseModel):
     no_cache: bool = False
     delete_volumes: bool = True
     runtime_port: int = Field(default=8069, ge=1)
+    domain_certificate_type: OdooPreviewDomainCertificateType = "none"
     smoke_check: bool = True
     compose_name: str = ""
     environment_id: str = ""
@@ -951,6 +954,7 @@ class OdooPreviewDokployDryRunPlan(BaseModel):
     no_cache: bool = False
     delete_volumes: bool = True
     runtime_port: int = Field(default=8069, ge=1)
+    domain_certificate_type: OdooPreviewDomainCertificateType = "none"
     blockers: tuple[OdooPreviewDokployDryRunBlocker, ...] = ()
     operations: tuple[OdooPreviewDokployOperation, ...] = ()
     rollback_operations: tuple[OdooPreviewDokployOperation, ...] = ()
@@ -1145,6 +1149,7 @@ def build_odoo_preview_dokploy_dry_run(
         no_cache=request.no_cache,
         delete_volumes=request.delete_volumes,
         runtime_port=request.runtime_port,
+        domain_certificate_type=request.domain_certificate_type,
         blockers=tuple(blockers),
         operations=operations,
         rollback_operations=rollback_operations,
@@ -1292,6 +1297,7 @@ def _execute_refresh(
             compose_id=compose_id,
             domain_host=plan.domain_host,
             runtime_port=plan.runtime_port,
+            certificate_type=plan.domain_certificate_type,
         )
         steps.append(_step("domain_create_or_update", plan.domain_host))
 
@@ -1500,6 +1506,7 @@ def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds
     )
     deadline = time.monotonic() + timeout_seconds
     last_http_status: int | None = None
+    last_transport_error = ""
     while True:
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
@@ -1512,8 +1519,16 @@ def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds
                 return
         except HTTPError as exc:
             last_http_status = exc.code
-        except (TimeoutError, URLError, ValueError):
-            pass
+            last_transport_error = ""
+        except TimeoutError as exc:
+            last_http_status = None
+            last_transport_error = str(exc).strip() or "request timed out"
+        except URLError as exc:
+            last_http_status = None
+            last_transport_error = str(exc.reason).strip() or str(exc).strip()
+        except ValueError as exc:
+            last_http_status = None
+            last_transport_error = str(exc).strip()
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
             break
@@ -1521,6 +1536,11 @@ def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds
         time.sleep(sleep_seconds)
     if last_http_status is not None:
         raise click.ClickException(f"Odoo preview smoke check returned HTTP {last_http_status}.")
+    if last_transport_error:
+        raise click.ClickException(
+            f"Timed out waiting for Odoo preview smoke check {smoke_url}. "
+            f"Last transport error: {last_transport_error}."
+        )
     raise click.ClickException(f"Timed out waiting for Odoo preview smoke check {smoke_url}.")
 
 
@@ -1638,7 +1658,14 @@ def _operations(
                 path=spec.domain_create_path,
                 alternate_paths=(spec.domain_update_path,),
                 target=domain_host,
-                payload_keys=("host", "port", "composeId", "serviceName", "domainType"),
+                payload_keys=(
+                    "host",
+                    "port",
+                    "certificateType",
+                    "composeId",
+                    "serviceName",
+                    "domainType",
+                ),
             ),
             OdooPreviewDokployOperation(
                 name="compose_deploy",

@@ -213,6 +213,12 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             actions["stable_bootstrap"].route_path,
             "/v1/drivers/odoo/stable-bootstrap",
         )
+        setting_groups = {group.group_id: group for group in descriptor.setting_groups}
+        self.assertIn("preview_domain_tls", setting_groups)
+        self.assertIn(
+            "preview.domain_certificate_type",
+            setting_groups["preview_domain_tls"].fields,
+        )
 
     def test_effective_odoo_actions_inherit_generic_web_preview_routes(self) -> None:
         descriptor = read_driver_descriptor("odoo")

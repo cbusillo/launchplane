@@ -814,11 +814,19 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             event_name="workflow_dispatch",
         )
 
-    def _profile_store(self, database_url: str) -> PostgresRecordStore:
+    def _profile_store(
+        self,
+        database_url: str,
+        *,
+        domain_certificate_type: Literal["none", "letsencrypt"] = "none",
+    ) -> PostgresRecordStore:
         store = PostgresRecordStore(database_url=database_url)
         store.ensure_schema()
+        profile_payload = _odoo_preview_profile_payload()
+        preview_payload = cast(dict[str, object], profile_payload["preview"])
+        preview_payload["domain_certificate_type"] = domain_certificate_type
         store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            LaunchplaneProductProfileRecord.model_validate(profile_payload)
         )
         return store
 
@@ -826,7 +834,10 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = self._profile_store(database_url)
+            store = self._profile_store(
+                database_url,
+                domain_certificate_type="letsencrypt",
+            )
             store.write_runtime_environment_record(
                 RuntimeEnvironmentRecord(
                     scope="context",
@@ -921,6 +932,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["runtime_plan"]["status"], "ready")
         self.assertEqual(result["dry_run_plan"]["status"], "ready")
         self.assertEqual(result["dry_run_plan"]["environment_id"], "env-cm-preview")
+        self.assertEqual(result["dry_run_plan"]["domain_certificate_type"], "letsencrypt")
         self.assertNotIn("template-db-secret", json.dumps(response.json()))
 
     async def test_odoo_preview_apply_inputs_builds_destroy_for_discovered_target(
@@ -1211,7 +1223,10 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = self._profile_store(database_url)
+            store = self._profile_store(
+                database_url,
+                domain_certificate_type="letsencrypt",
+            )
             _write_odoo_preview_template_runtime_environment(store=store)
             store.write_runtime_environment_record(
                 RuntimeEnvironmentRecord(
@@ -1325,6 +1340,10 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
         )
         self.assertEqual(applied_request.dry_run_plan.environment_id, "env-cm-preview")
+        self.assertEqual(
+            applied_request.dry_run_plan.domain_certificate_type,
+            "letsencrypt",
+        )
         self.assertEqual(applied_request.environment_values["ODOO_DB_USER"], "odoo")
         self.assertEqual(
             applied_request.environment_values["ODOO_DB_PASSWORD"], "template-db-secret"

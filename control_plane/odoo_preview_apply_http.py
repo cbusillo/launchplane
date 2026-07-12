@@ -139,8 +139,16 @@ def execute_odoo_preview_apply_result(
         apply_request=request.apply,
         database_url=database_url,
     )
+    service_dry_run_plan = request.apply.dry_run_plan.model_copy(
+        update={
+            "domain_certificate_type": profile.preview.domain_certificate_type,
+        }
+    )
     service_apply_request = request.apply.model_copy(
-        update={"environment_values": resolved_environment_values}
+        update={
+            "dry_run_plan": service_dry_run_plan,
+            "environment_values": resolved_environment_values,
+        }
     )
     driver_result = execute_odoo_preview_dokploy_apply(
         control_plane_root=control_plane_root_path,

@@ -309,8 +309,11 @@ driver id, image repository, runtime port, health path, stable lane bindings,
 preview context policy, and the pull-request label that enables previews for the
 product. Generic-web preview policy can also name the source template lane,
 required template env keys, copied or omitted settings, preview URL/domain env
-keys, required provider fields, and the declared data transport mode so
-readiness can fail before Launchplane mutates a provider.
+keys, preview domain certificate policy, required provider fields, and the
+declared data transport mode so readiness can fail before Launchplane mutates a
+provider. `preview.domain_certificate_type` defaults to `none` for externally
+managed wildcard TLS; `letsencrypt` delegates per-host certificate provisioning
+to Dokploy.
 
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and

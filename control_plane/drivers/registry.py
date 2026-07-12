@@ -694,6 +694,13 @@ ODOO_DRIVER = DriverDescriptor(
     ),
     setting_groups=(
         DriverSettingGroupDescriptor(
+            group_id="preview_domain_tls",
+            label="Preview domain TLS",
+            description="Product-profile certificate policy used by Odoo preview domain routes.",
+            scope="context",
+            fields=("preview.domain_certificate_type",),
+        ),
+        DriverSettingGroupDescriptor(
             group_id="runtime_environment",
             label="Runtime environment",
             description="DB-backed runtime settings used by Odoo driver actions.",
