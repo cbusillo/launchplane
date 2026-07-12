@@ -223,6 +223,14 @@ existing Odoo publish secrets; they should not copy Odoo preview route paths,
 JSON request bodies, JSON-file binding paths, fail paths, or idempotency key
 templates back into the tenant repo.
 
+The tenant caller also owns the reusable workflow's permission ceiling. Refresh
+callers grant `contents: read`, `id-token: write`, and `packages: write` because
+they publish the preview artifact. Destroy callers grant only `contents: read`
+and `id-token: write`. The reusable refresh job inherits that caller scope
+instead of declaring `packages: write` itself; a nested reusable workflow cannot
+elevate a least-privilege destroy caller, even when the refresh job would be
+skipped for that operation.
+
 Odoo CM is the exception where Launchplane now owns both the isolated provider
 apply planning inputs and the stage-preview smoke contract after refresh. Product
 workflows should call `POST /v1/drivers/odoo/preview-apply-inputs` with PR,

@@ -1323,6 +1323,17 @@ class ProductOnboardingTests(unittest.TestCase):
             "INPUT_SOURCE_GIT_REF: ${{ inputs.source_git_ref || github.sha }}", workflow_text
         )
 
+    def test_reusable_odoo_preview_inherits_refresh_permissions_from_caller(self) -> None:
+        workflow_text = Path(".github/workflows/reusable-odoo-preview.yml").read_text(
+            encoding="utf-8"
+        )
+        refresh_job = workflow_text.split("\n  preview-refresh:\n", 1)[1].split(
+            "\n  preview-refresh-feedback:\n", 1
+        )[0]
+
+        self.assertNotIn("\n    permissions:\n", refresh_job)
+        self.assertNotIn("packages: write", refresh_job)
+
     def test_odoo_driver_route_smoke_proves_public_and_oidc_paths(self) -> None:
         workflow_text = Path(".github/workflows/odoo-driver-route-smoke.yml").read_text(
             encoding="utf-8"
