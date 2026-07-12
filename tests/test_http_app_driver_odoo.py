@@ -1,7 +1,9 @@
+import asyncio
 import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 from typing import Literal, cast
 from unittest.mock import patch
 
@@ -59,6 +61,32 @@ from tests.test_service import (
     _StubVerifier,
     _write_odoo_preview_template_runtime_environment,
 )
+
+
+def _ready_odoo_preview_apply_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "odoo-tenant-cm",
+        "apply": {
+            "dry_run_plan": {
+                "status": "ready",
+                "operation": "refresh",
+                "product": "odoo-tenant-cm",
+                "repository": "cbusillo/odoo-tenant-cm",
+                "preview_slug": "pr-42",
+                "preview_url": "https://pr-42.cm-preview.example.test",
+                "domain_host": "pr-42.cm-preview.example.test",
+                "compose_ref": "${created.composeId:cm-odoo-preview-pr-42}",
+                "compose_name": "cm-odoo-preview-pr-42",
+                "environment_id": "env-cm-preview",
+                "template_compose_id": "compose-cm-testing",
+                "summary": "ready isolated Odoo preview apply",
+            },
+            "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            "wait_for_deploy": True,
+            "smoke_check": True,
+        },
+    }
 
 
 class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
@@ -1329,6 +1357,170 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             applied_request.environment_values["ODOO_DB_PASSWORD"],
             "caller-secret-must-not-win",
         )
+
+    async def test_odoo_preview_apply_keeps_health_responsive_during_provider_wait(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=self._policy(
+                    actions=("odoo_preview_apply.execute",),
+                    repository="cbusillo/launchplane",
+                    workflow_ref=(
+                        "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                        "@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            apply_started = Event()
+            release_apply = Event()
+            apply_wait_timed_out = Event()
+
+            def blocking_apply(**_: object) -> dict[str, object]:
+                apply_started.set()
+                if not release_apply.wait(timeout=5):
+                    apply_wait_timed_out.set()
+                return {
+                    "status": "pass",
+                    "operation": "refresh",
+                    "product": "odoo-tenant-cm",
+                    "repository": "cbusillo/odoo-tenant-cm",
+                    "preview_slug": "pr-42",
+                    "preview_url": "https://pr-42.cm-preview.example.test",
+                    "domain_host": "pr-42.cm-preview.example.test",
+                    "compose_name": "cm-odoo-preview-pr-42",
+                }
+
+            with patch(
+                "control_plane.http_app.execute_odoo_preview_apply_result",
+                side_effect=blocking_apply,
+            ):
+                apply_task = asyncio.create_task(
+                    _post_odoo_preview_apply(app, _ready_odoo_preview_apply_payload())
+                )
+                try:
+                    self.assertTrue(await asyncio.to_thread(apply_started.wait, 5))
+                    health_response = await asyncio.wait_for(
+                        _asgi_get(app, "/v1/health"), timeout=5
+                    )
+                    self.assertEqual(health_response.status_code, 200)
+                    self.assertFalse(apply_wait_timed_out.is_set())
+                    self.assertFalse(apply_task.done())
+                finally:
+                    release_apply.set()
+                    apply_response = await asyncio.wait_for(apply_task, timeout=5)
+
+        self.assertEqual(apply_response.status_code, 202)
+        self.assertEqual(apply_response.json()["result"]["status"], "pass")
+
+    async def test_odoo_preview_apply_records_result_after_caller_cancellation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=self._policy(
+                    actions=("odoo_preview_apply.execute",),
+                    repository="cbusillo/launchplane",
+                    workflow_ref=(
+                        "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                        "@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            apply_started = Event()
+            release_apply = Event()
+            apply_wait_timed_out = Event()
+
+            def blocking_apply(**_: object) -> dict[str, object]:
+                apply_started.set()
+                if not release_apply.wait(timeout=5):
+                    apply_wait_timed_out.set()
+                return {
+                    "status": "pass",
+                    "operation": "refresh",
+                    "product": "odoo-tenant-cm",
+                    "repository": "cbusillo/odoo-tenant-cm",
+                    "preview_slug": "pr-42",
+                    "preview_url": "https://pr-42.cm-preview.example.test",
+                    "domain_host": "pr-42.cm-preview.example.test",
+                    "compose_name": "cm-odoo-preview-pr-42",
+                }
+
+            idempotency_key = "odoo-preview-apply:odoo-tenant-cm:pr-42:refresh:abc123"
+            with patch(
+                "control_plane.http_app.execute_odoo_preview_apply_result",
+                side_effect=blocking_apply,
+            ) as apply_driver:
+                first_apply_task = asyncio.create_task(
+                    _post_odoo_preview_apply(
+                        app,
+                        _ready_odoo_preview_apply_payload(),
+                        idempotency_key=idempotency_key,
+                    )
+                )
+                self.assertTrue(await asyncio.to_thread(apply_started.wait, 5))
+                first_apply_task.cancel()
+                await asyncio.sleep(0.1)
+                self.assertFalse(first_apply_task.done())
+                first_apply_task.cancel()
+                second_apply_task = asyncio.create_task(
+                    _post_odoo_preview_apply(
+                        app,
+                        _ready_odoo_preview_apply_payload(),
+                        idempotency_key=idempotency_key,
+                    )
+                )
+                try:
+                    await asyncio.sleep(0.1)
+                    self.assertFalse(first_apply_task.done())
+                    self.assertFalse(second_apply_task.done())
+                    self.assertEqual(apply_driver.call_count, 1)
+                finally:
+                    release_apply.set()
+
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(first_apply_task, timeout=5)
+                second_response = await asyncio.wait_for(second_apply_task, timeout=5)
+                replay_response = await _post_odoo_preview_apply(
+                    app,
+                    _ready_odoo_preview_apply_payload(),
+                    idempotency_key=idempotency_key,
+                )
+
+        self.assertFalse(apply_wait_timed_out.is_set())
+        self.assertEqual(apply_driver.call_count, 1)
+        self.assertEqual(second_response.status_code, 202)
+        self.assertTrue(second_response.json()["replayed"])
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
 
     async def test_odoo_preview_destroy_apply_allows_missing_image_reference(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
