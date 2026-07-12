@@ -426,6 +426,7 @@ export interface ProductProfileRecord {
     enabled: boolean;
     context: string;
     slug_template: string;
+    domain_certificate_type: "none" | "letsencrypt";
   };
   promotion_workflow: {
     workflow_id: string;

@@ -338,9 +338,11 @@ missing, stamps per-preview `ODOO_PROJECT_NAME` and `ODOO_STACK_NAME` values so
 the raw compose does not inherit the template runtime identity, renders
 Launchplane-owned raw compose source without publishing shared host ports,
 renders explicit HTTP and HTTPS Traefik routers in the raw compose while also
-reconciling the preview domain record for Dokploy UI/provider state, and defaults
-preview domain certificate management to `none` so public TLS is owned by the
-external edge wildcard certificate rather than Dokploy ACME.
+reconciling the preview domain record for Dokploy UI/provider state. Preview
+domain certificate management is profile-backed: `none` preserves external
+wildcard-certificate ownership, while `letsencrypt` asks Dokploy to provision a
+trusted certificate for the preview hostname. The default remains `none` so
+existing products keep their current TLS ownership model.
 Fresh-create dry-runs must carry the template compose id; apply creates new
 preview composes on that template compose's Dokploy server, deploys the compose,
 and returns redacted step evidence. Destroy looks up domains for the matching

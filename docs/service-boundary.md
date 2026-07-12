@@ -2042,6 +2042,10 @@ workflows then call `POST /v1/drivers/odoo/preview-apply` with the ready plan.
 Launchplane serializes preview provider mutations and runs the blocking apply
 and deployment wait outside the ASGI event loop so health and other service
 routes remain responsive while a preview deployment is in progress.
+The product profile also owns the preview domain certificate mode. Existing
+external-wildcard deployments use `none`; products without that wildcard may
+select `letsencrypt`, which Launchplane carries through the dry-run plan and
+enforces again from the current profile before provider mutation.
 
 `POST /v1/drivers/odoo/preview-apply-inputs` is the Launchplane-owned handoff
 between thin tenant preview workflows and isolated Odoo provider apply. The

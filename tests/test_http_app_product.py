@@ -2,6 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import patch
 
 from control_plane import secrets as control_plane_secrets
@@ -1608,10 +1609,13 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                 authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
                 record_store_factory=lambda: record_store,
             )
+            profile_payload = _product_profile_payload()
+            preview_payload = cast(dict[str, object], profile_payload["preview"])
+            preview_payload["domain_certificate_type"] = "letsencrypt"
 
             response = await _post_product_profile(
                 app,
-                _product_profile_payload(),
+                profile_payload,
                 idempotency_key="profile-sellyouroutboard",
             )
             stored_profile = record_store.read_product_profile_record("sellyouroutboard")
@@ -1622,6 +1626,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("result", payload)
         self.assertEqual(stored_profile.driver_id, "generic-web")
         self.assertEqual(stored_profile.preview.slug_template, "pr-{number}")
+        self.assertEqual(stored_profile.preview.domain_certificate_type, "letsencrypt")
 
     async def test_write_product_profile_replays_idempotent_request(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

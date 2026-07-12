@@ -258,6 +258,7 @@ class ProductPreviewProfile(BaseModel):
     override_env: dict[str, str] = Field(default_factory=dict)
     preview_url_env_keys: tuple[str, ...] = ()
     preview_domain_env_keys: tuple[str, ...] = ()
+    domain_certificate_type: Literal["none", "letsencrypt"] = "none"
     required_provider_fields: tuple[str, ...] = ()
     data_transport_mode: Literal["none", "clone", "bootstrap", "migrate_seed", "driver"] = "none"
     migration_command: str = ""

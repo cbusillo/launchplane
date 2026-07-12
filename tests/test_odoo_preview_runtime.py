@@ -235,7 +235,9 @@ def _workflow_facts(
     )
 
 
-def _profile() -> LaunchplaneProductProfileRecord:
+def _profile(
+    *, domain_certificate_type: Literal["none", "letsencrypt"] = "none"
+) -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
         product="odoo-tenant-cm",
         display_name="CM Odoo",
@@ -256,6 +258,7 @@ def _profile() -> LaunchplaneProductProfileRecord:
             enabled=True,
             context="cm-preview",
             app_name_prefix="cm-odoo-preview",
+            domain_certificate_type=domain_certificate_type,
         ),
         updated_at="2026-05-10T05:00:00Z",
         source="test",
@@ -591,7 +594,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             result = build_odoo_preview_apply_inputs(
                 control_plane_root=Path("."),
                 record_store=_OdooApplyInputsStore(),
-                profile=_profile(),
+                profile=_profile(domain_certificate_type="letsencrypt"),
                 request=OdooPreviewApplyInputsRequest(
                     product="odoo-tenant-cm",
                     pr_number=45,
@@ -607,6 +610,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.runtime_plan.target.target_id, "compose-cm-pr-45")
         self.assertEqual(result.dry_run_plan.compose_ref, "compose-cm-pr-45")
         self.assertEqual(result.dry_run_plan.template_compose_id, "compose-template")
+        self.assertEqual(result.dry_run_plan.domain_certificate_type, "letsencrypt")
         self.assertNotIn(
             "compose_create",
             {operation.name for operation in result.dry_run_plan.operations},
@@ -1375,6 +1379,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(plan.status, "ready")
         self.assertEqual(plan.domain_host, "pr-45.cm-preview.example.test")
         self.assertEqual(plan.template_compose_id, "compose-template")
+        self.assertEqual(plan.domain_certificate_type, "none")
         self.assertEqual(plan.operations[0].path, "/api/compose.create")
         self.assertEqual(
             plan.operations[0].payload_keys,
@@ -1399,6 +1404,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         self.assertEqual(domain_operation.path, "/api/domain.create")
         self.assertEqual(domain_operation.alternate_paths, ("/api/domain.update",))
+        self.assertIn("certificateType", domain_operation.payload_keys)
         self.assertEqual(
             [operation.name for operation in plan.rollback_operations],
             ["domain_delete", "compose_delete"],
@@ -1541,6 +1547,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 endpoint_spec=_endpoint_spec(),
                 environment_id="env-cm-preview",
                 template_compose_id="compose-template",
+                domain_certificate_type="letsencrypt",
             )
         )
         requests: list[dict[str, object]] = []
@@ -1638,6 +1645,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             compose_id="compose-cm-pr-45",
             domain_host="pr-45.cm-preview.example.test",
             runtime_port=8069,
+            certificate_type="letsencrypt",
         )
         wait_deploy.assert_called_once()
         smoke_check.assert_called_once()
@@ -2022,7 +2030,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 side_effect=clock.monotonic,
             ),
             patch("control_plane.workflows.odoo_preview_runtime.time.sleep") as sleep,
-            self.assertRaisesRegex(click.ClickException, "Timed out waiting"),
+            self.assertRaisesRegex(
+                click.ClickException,
+                "Timed out waiting.*Last transport error: not ready",
+            ),
         ):
             sleep.side_effect = clock.sleep
             _wait_for_smoke_check(
