@@ -108,6 +108,12 @@ destroy status, or feedback status as job outputs. Callers should omit preview
 context so Launchplane can derive it from the product profile before
 authorization and recording. It does not accept `preview_slug`, `preview_url`,
 provider target ids, feedback markdown, or idempotency keys as caller inputs.
+When the stored product profile declares `preview.data_transport_mode="driver"`,
+the generic-web lifecycle route delegates refresh and destroy execution to the
+registered product-driver extension. This keeps product-specific database,
+secret, migration, seed, and cleanup behavior inside Launchplane while the
+product workflow remains a thin reusable-workflow caller. Missing driver
+extensions fail closed instead of falling back to generic environment copying.
 
 Preview comment updates that are not part of the lifecycle workflow use
 `cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main`.
