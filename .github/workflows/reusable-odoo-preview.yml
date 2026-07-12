@@ -203,10 +203,6 @@ jobs:
       refresh_image_reference: ${{ steps.refresh_feedback.outputs.refresh_image_reference }}
       verification_result: ${{ steps.refresh_feedback.outputs.verification_result }}
     runs-on: ${{ fromJSON(inputs.runs_on) }}
-    permissions:
-      contents: read
-      id-token: write
-      packages: write
     steps:
       - name: Resolve refresh facts
         id: facts
