@@ -247,6 +247,10 @@ class FastApiConstructionMetadataTests(unittest.TestCase):
             ],
             "read_product_environment_config_status",
         )
+        self.assertEqual(
+            first_payload["x-launchplane-ui-write-operations"]["/v1/product-config/apply"],
+            "apply_product_config",
+        )
 
 
 class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):

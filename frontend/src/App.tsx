@@ -69,6 +69,7 @@ import type {
   GitHubIssueInbox,
   GitHubIssueInboxIssue,
   GitHubIssueInboxReconcileMode,
+  GitHubIssueInboxReconcilePayload,
   GitHubIssueInboxReconcileSummary,
   GenericWebProdPromotionPayload,
   GenericWebPromotionWorkflowPayload,
@@ -1754,7 +1755,7 @@ function fixtureInboxIssue({
 
 function fixtureReconcileIssueInbox(
   mode: GitHubIssueInboxReconcileMode,
-): Promise<{ result: { reconcile: GitHubIssueInboxReconcileSummary } }> {
+): Promise<GitHubIssueInboxReconcilePayload> {
   const summary: GitHubIssueInboxReconcileSummary = {
     schema_version: 1,
     generated_at: "2026-05-21T12:32:00Z",
@@ -1775,6 +1776,8 @@ function fixtureReconcileIssueInbox(
         url: "https://github.com/cbusillo/launchplane/issues/698",
         action: mode === "dry_run" ? "would_add" : "added",
         detail: "",
+        error_code: "",
+        error_correlation_id: "",
       },
       {
         key: "cbusillo/private-repo#44",
@@ -1784,10 +1787,17 @@ function fixtureReconcileIssueInbox(
         url: "https://github.com/cbusillo/private-repo/issues/44",
         action: mode === "dry_run" ? "would_add" : "failed",
         detail: mode === "apply" ? "GitHub CLI returned 403." : "",
+        error_code: mode === "apply" ? "authorization_denied" : "",
+        error_correlation_id: "",
       },
     ],
   };
-  return Promise.resolve({ result: { reconcile: summary } });
+  return Promise.resolve({
+    status: "accepted",
+    trace_id: "fixture-trace-issue-inbox-reconcile",
+    records: {},
+    result: { reconcile: summary },
+  });
 }
 
 function fixtureMergeTrainPolicyTargets() {
@@ -1828,18 +1838,49 @@ function fixtureGenericWebPromotionDryRun(): Promise<GenericWebProdPromotionPayl
   return Promise.resolve({
     status: "accepted",
     trace_id: "fixture-trace-generic-web-promote",
-    records: {},
-    result: {
+    replayed: false,
+    original_trace_id: "",
+    records: {
       promotion_record_id: "",
       deployment_record_id: "",
       backup_record_id: "",
       inventory_record_id: "",
       promotion_status: "pending",
       deployment_status: "skipped",
+      backup_status: "skipped",
+      source_health_status: "pass",
+      destination_health_status: "skipped",
+      release_status: "skipped",
+      release_tag: "",
+      release_url: "",
+      dry_run: "True",
+    },
+    result: {
+      product: "fixture-product",
+      context: "fixture-testing",
+      from_instance: "testing",
+      to_instance: "prod",
+      artifact_id: "fixture-artifact",
+      source_git_ref: "fixture-sha",
+      backup_record_id: "",
+      promotion_record_id: "",
+      deployment_record_id: "",
+      inventory_record_id: "",
+      promotion_status: "pending",
+      deployment_status: "skipped",
       source_health_status: "pass",
       destination_health_status: "skipped",
       backup_status: "skipped",
+      release_status: "skipped",
+      release_tag: "",
+      release_url: "",
+      target_name: "",
+      target_id: "",
+      target_category: "unknown",
+      provider_id: "",
+      provider_target_type: "",
       dry_run: true,
+      error_message: "",
     },
   });
 }
@@ -1850,6 +1891,8 @@ function fixtureGenericWebPromotionWorkflow(
   return Promise.resolve({
     status: "accepted",
     trace_id: "fixture-trace-generic-web-workflow",
+    replayed: false,
+    original_trace_id: "",
     records: {},
     result: {
       product: payload.product,
@@ -1857,7 +1900,7 @@ function fixtureGenericWebPromotionWorkflow(
       repository: "cbusillo/sellyouroutboard",
       workflow_id: "promote-prod.yml",
       ref: "main",
-      dry_run: payload.workflow.dry_run,
+      dry_run: payload.workflow.dry_run ?? true,
       bump: payload.workflow.bump ?? "patch",
       dispatch_status: "dispatched",
       run_id: 25237186636,
@@ -1872,44 +1915,55 @@ function fixtureGenericWebPromotionWorkflow(
 function fixtureProductConfigApply(
   payload: ProductConfigApplyRequest,
 ): Promise<ProductConfigApplyPayload> {
+  const context = payload.context ?? "";
+  const instance = payload.instance ?? "";
   const runtimeKeys = Object.keys(payload.runtime_env?.env ?? {});
   const response = {
     status: "ok",
     mode: payload.mode,
     product: payload.product,
-    context: payload.context,
-    instance: payload.instance,
+    context,
+    instance,
     actor: "fixture-operator",
     source_label: payload.source_label ?? "product-config-ui",
     runtime_environment: {
       action: "updated",
       scope:
         payload.runtime_env?.scope ??
-        runtimeScopeForTarget(payload.context, payload.instance),
-      context: payload.context,
-      instance: payload.instance,
+        runtimeScopeForTarget(context, instance),
+      context,
+      instance,
       keys: runtimeKeys,
       changed_keys: runtimeKeys,
       unchanged_keys: [],
       env_value_count_after: runtimeKeys.length,
+      record: null,
+    },
+    runtime_key_safety: {
+      required: false,
+      status: "skipped",
+      policy_record_id: "",
+      policy_sha256: "",
+      target: null,
+      checked_binding_keys: [],
+      findings: [],
     },
     secrets: (payload.secrets ?? []).map((secret, index) => ({
       action: "rotated",
       scope:
-        secret.scope ?? secretScopeForTarget(payload.context, payload.instance),
-      context: payload.context,
-      instance: payload.instance,
+        secret.scope ?? secretScopeForTarget(context, instance),
+      context,
+      instance,
       integration: secret.integration ?? "runtime_environment",
       name: secret.name,
       binding_key: secret.binding_key,
       secret_id: `fixture-secret-${index + 1}`,
-      description: secret.description ?? "",
-      value_present: true,
     })),
     summary: {
       runtime_changed_key_count: runtimeKeys.length,
       secret_change_count: (payload.secrets ?? []).length,
     },
+    next_actions: [],
   } satisfies ProductConfigApplyPayload;
   return Promise.resolve(response);
 }

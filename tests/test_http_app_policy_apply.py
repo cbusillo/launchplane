@@ -17,6 +17,7 @@ from control_plane.http_app import (
     create_launchplane_fastapi_app,
     store_product_config_dry_run_record,
 )
+from control_plane.product_config_http import ProductConfigApplyResponse
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -2435,6 +2436,8 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first_response.status_code, 202)
         self.assertEqual(replay_response.status_code, 202)
+        ProductConfigApplyResponse.model_validate(first_response.json())
+        ProductConfigApplyResponse.model_validate(replay_response.json())
         self.assertTrue(replay_response.json()["replayed"])
         self.assertEqual(
             replay_response.json()["original_trace_id"], first_response.json()["trace_id"]
@@ -2497,7 +2500,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route["operationId"], "apply_product_config")
         self.assertEqual(
             route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
+            "#/components/schemas/ProductConfigApplyResponse",
         )
         self.assertEqual(
             route["requestBody"]["content"]["application/json"]["schema"]["title"],

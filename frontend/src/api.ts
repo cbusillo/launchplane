@@ -27,6 +27,13 @@ import type {
   WorkGraphSnapshot,
   WorkGraphSnapshotPayload,
 } from "./types";
+import type {
+  ApplyGenericWebProdPromotionData,
+  ApplyProductConfigData,
+  DispatchGenericWebProdPromotionWorkflowData,
+  RankWorkGraphSnapshotData,
+  ReconcileWorkGraphIssueInboxData,
+} from "./generated/openapi.ts";
 
 export class LaunchplaneApiError extends Error {
   statusCode: number;
@@ -77,6 +84,16 @@ async function requestJson<T>(
     );
   }
   return payload as T;
+}
+
+function requestGeneratedPost<
+  T,
+  TRequest extends { body: unknown; url: string } = { body: unknown; url: string },
+>(
+  request: TRequest,
+  signal?: AbortSignal,
+): Promise<T> {
+  return requestJson<T>(request.url, "POST", request.body, signal);
 }
 
 export function readAuthSession(): Promise<AuthSessionPayload> {
@@ -166,10 +183,14 @@ export function rankWorkGraphSnapshot(
   snapshot: WorkGraphSnapshot,
   limit = 12,
 ): Promise<WorkGraphRankPayload> {
-  return requestJson<WorkGraphRankPayload>("/v1/work-graph/rank", "POST", {
-    snapshot,
-    limit,
-  });
+  const request: RankWorkGraphSnapshotData = {
+    url: "/v1/work-graph/rank",
+    body: {
+      snapshot: snapshot as unknown as RankWorkGraphSnapshotData["body"]["snapshot"],
+      limit,
+    },
+  };
+  return requestGeneratedPost<WorkGraphRankPayload>(request);
 }
 
 export function readGitHubIssueInbox(
@@ -187,12 +208,11 @@ export function reconcileGitHubIssueInbox(
   mode: GitHubIssueInboxReconcileMode,
   signal?: AbortSignal,
 ): Promise<GitHubIssueInboxReconcilePayload> {
-  return requestJson<GitHubIssueInboxReconcilePayload>(
-    "/v1/work-graph/github/issues/reconcile",
-    "POST",
-    { mode },
-    signal,
-  );
+  const request: ReconcileWorkGraphIssueInboxData = {
+    url: "/v1/work-graph/github/issues/reconcile",
+    body: { mode },
+  };
+  return requestGeneratedPost<GitHubIssueInboxReconcilePayload>(request, signal);
 }
 
 export function readMergeTrainControllerStatus(
@@ -227,30 +247,31 @@ export function applyProductConfig(
   payload: ProductConfigApplyRequest,
   signal?: AbortSignal,
 ): Promise<ProductConfigApplyPayload> {
-  return requestJson<ProductConfigApplyResponsePayload>(
-    "/v1/product-config/apply",
-    "POST",
-    payload,
-    signal,
-  ).then((response) => response.result);
+  const request: ApplyProductConfigData = {
+    url: "/v1/product-config/apply",
+    body: payload,
+  };
+  return requestGeneratedPost<ProductConfigApplyResponsePayload>(request, signal).then(
+    (response) => response.result,
+  );
 }
 
 export function dryRunGenericWebProdPromotion(
   payload: GenericWebProdPromotionRequest,
 ): Promise<GenericWebProdPromotionPayload> {
-  return requestJson<GenericWebProdPromotionPayload>(
-    "/v1/drivers/generic-web/prod-promotion",
-    "POST",
-    payload,
-  );
+  const request: ApplyGenericWebProdPromotionData = {
+    url: "/v1/drivers/generic-web/prod-promotion",
+    body: payload,
+  };
+  return requestGeneratedPost<GenericWebProdPromotionPayload>(request);
 }
 
 export function dispatchGenericWebPromotionWorkflow(
   payload: GenericWebPromotionWorkflowRequest,
 ): Promise<GenericWebPromotionWorkflowPayload> {
-  return requestJson<GenericWebPromotionWorkflowPayload>(
-    "/v1/drivers/generic-web/prod-promotion-workflow",
-    "POST",
-    payload,
-  );
+  const request: DispatchGenericWebProdPromotionWorkflowData = {
+    url: "/v1/drivers/generic-web/prod-promotion-workflow",
+    body: payload,
+  };
+  return requestGeneratedPost<GenericWebPromotionWorkflowPayload>(request);
 }

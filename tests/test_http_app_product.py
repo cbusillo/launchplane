@@ -30,6 +30,10 @@ from control_plane.work_graph_issue_inbox import (
     GitHubIssueInboxReadModel,
     GitHubIssueInboxReconcileResult,
 )
+from control_plane.work_graph_service import (
+    WorkGraphIssueInboxReconcileResponse,
+    WorkGraphRankResponse,
+)
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -703,6 +707,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["status"], "accepted")
         self.assertEqual(payload["records"], {})
+        WorkGraphRankResponse.model_validate(payload)
         queue = payload["result"]["queue"]
         self.assertEqual(len(queue["items"]), 1)
         self.assertEqual(queue["hidden_count"], 1)
@@ -941,6 +946,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 202)
         payload = response.json()
+        WorkGraphIssueInboxReconcileResponse.model_validate(payload)
         reconcile = payload["result"]["reconcile"]
         self.assertEqual(reconcile["mode"], "dry_run")
         self.assertEqual(reconcile["would_add_count"], 1)
@@ -1242,7 +1248,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rank_route["operationId"], "rank_work_graph_snapshot")
         self.assertEqual(
             rank_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
+            "#/components/schemas/WorkGraphRankResponse",
         )
         for status_code in ("400", "401", "403"):
             self.assertIn(
@@ -1255,13 +1261,50 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             reconcile_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
+            "#/components/schemas/WorkGraphIssueInboxReconcileResponse",
         )
         for status_code in ("400", "401", "403"):
             self.assertIn(
                 "LaunchplaneErrorResponse",
                 json.dumps(reconcile_route["responses"][status_code]),
             )
+
+        expected_write_routes = {
+            "/v1/product-config/apply": (
+                "apply_product_config",
+                "ProductConfigApplyResponse",
+                ("400", "401", "403", "409", "503"),
+            ),
+            "/v1/drivers/generic-web/prod-promotion": (
+                "apply_generic_web_prod_promotion",
+                "GenericWebProdPromotionResponse",
+                ("400", "401", "403", "404", "409", "503"),
+            ),
+            "/v1/drivers/generic-web/prod-promotion-workflow": (
+                "dispatch_generic_web_prod_promotion_workflow",
+                "GenericWebPromotionWorkflowResponse",
+                ("400", "401", "403", "404", "409", "503"),
+            ),
+        }
+        for path, (
+            operation_id,
+            response_model_name,
+            error_statuses,
+        ) in expected_write_routes.items():
+            route = openapi["paths"][path]["post"]
+            self.assertEqual(route["operationId"], operation_id)
+            self.assertEqual(
+                route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+                f"#/components/schemas/{response_model_name}",
+            )
+            self.assertFalse(
+                openapi["components"]["schemas"][response_model_name]["additionalProperties"]
+            )
+            for status_code in error_statuses:
+                self.assertIn(
+                    "LaunchplaneErrorResponse",
+                    json.dumps(route["responses"][status_code]),
+                )
 
     async def test_list_products_returns_db_backed_overviews(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

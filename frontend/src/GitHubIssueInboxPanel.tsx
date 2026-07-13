@@ -7,6 +7,7 @@ import type {
   GitHubIssueInbox,
   GitHubIssueInboxProjectStatus,
   GitHubIssueInboxReconcileMode,
+  GitHubIssueInboxReconcilePayload,
   GitHubIssueInboxReconcileSummary,
   Status,
 } from "./types";
@@ -14,7 +15,7 @@ import type {
 type ReconcileReader = (
   mode: GitHubIssueInboxReconcileMode,
   signal?: AbortSignal,
-) => Promise<{ result: { reconcile: GitHubIssueInboxReconcileSummary } }>;
+) => Promise<GitHubIssueInboxReconcilePayload>;
 
 export function GitHubIssueInboxPanel({
   inbox,

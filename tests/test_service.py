@@ -111,6 +111,10 @@ from control_plane.service import (
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_app import idempotency_request_fingerprint
+from control_plane.generic_web_promotion_http import (
+    GenericWebProdPromotionResponse,
+    GenericWebPromotionWorkflowResponse,
+)
 from control_plane.drivers import generic_web_preview_dispatch
 from control_plane.service_auth import (
     BearerIdentityConfig,
@@ -9765,6 +9769,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["provider_id"], "dokploy")
         self.assertEqual(payload["result"]["provider_target_type"], "application")
         self.assertNotIn("target_type", payload["result"])
+        GenericWebProdPromotionResponse.model_validate(payload)
         execute_mock.assert_called_once()
 
     def test_generic_web_prod_promotion_route_replays_idempotent_response(self) -> None:
@@ -10613,6 +10618,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertFalse(payload["result"]["dry_run"])
         self.assertEqual(payload["result"]["run_id"], 25237186636)
         self.assertEqual(payload["records"], {})
+        GenericWebPromotionWorkflowResponse.model_validate(payload)
         dispatch_mock.assert_called_once()
 
     def test_human_session_dispatches_generic_web_promotion_workflow_with_padded_lane_context(
