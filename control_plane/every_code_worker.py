@@ -840,9 +840,42 @@ class EveryCodeCleanupReconciliationResult:
 
 def every_code_tmux_session_name(request_id: str, *, fencing_token: int = 0) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
-    suffix = f"-f{fencing_token}" if fencing_token > 0 else ""
     prefix = f"every-code-{normalized or 'request'}"
-    return f"{prefix[: 80 - len(suffix)]}{suffix}"
+    if fencing_token < 1:
+        return prefix[:80]
+    fenced_prefix = prefix[:60].rstrip("-._:")
+    suffix = f"-f{fencing_token}"
+    if len(fenced_prefix) + len(suffix) > 80:
+        suffix = f"-f{hashlib.sha256(str(fencing_token).encode('utf-8')).hexdigest()[:16]}"
+    return f"{fenced_prefix}{suffix}"
+
+
+def _every_code_tmux_session_names(
+    *,
+    tmux_binary: str,
+    request_id: str,
+    runner: Runner,
+) -> tuple[str, ...] | None:
+    try:
+        result = runner((tmux_binary, "list-sessions", "-F", "#{session_name}"), None)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        detail = f"{result.stdout}\n{result.stderr}".lower()
+        if any(
+            marker in detail for marker in ("no server running", "failed to connect", "no sessions")
+        ):
+            return ()
+        return None
+    legacy_name = every_code_tmux_session_name(request_id)
+    fenced_name = every_code_tmux_session_name(request_id, fencing_token=1)
+    fenced_prefix = fenced_name.rsplit("-f1", 1)[0] + "-f"
+    names = []
+    for line in result.stdout.splitlines():
+        session_name = line.strip()
+        if session_name == legacy_name or session_name.startswith(fenced_prefix):
+            names.append(session_name)
+    return tuple(dict.fromkeys(names))
 
 
 def every_code_session_state_path(*, state_dir: Path, request_id: str) -> Path:
@@ -1462,24 +1495,22 @@ def run_every_code_worker_once(
             checkout_root=prepared_checkout.source_checkout_root,
         )
 
-    for stale_session_name in dict.fromkeys(
-        (every_code_tmux_session_name(claimed_record.request_id), session_name)
-    ):
-        existing_session = _tmux_session_exists(
-            tmux_binary=tmux_binary,
-            session_name=stale_session_name,
-            runner=run,
+    stale_session_names = _every_code_tmux_session_names(
+        tmux_binary=tmux_binary,
+        request_id=claimed_record.request_id,
+        runner=run,
+    )
+    if stale_session_names is None:
+        return _block_every_code_request(
+            record_store=record_store,
+            record=claimed_record,
+            host=normalized_host,
+            detail="Could not inspect existing Every Code tmux sessions.",
+            session_name=session_name,
+            checkout_root=prepared_checkout.source_checkout_root,
         )
-        if existing_session is None:
-            return _block_every_code_request(
-                record_store=record_store,
-                record=claimed_record,
-                host=normalized_host,
-                detail=f"Could not inspect tmux session {stale_session_name!r}.",
-                session_name=session_name,
-                checkout_root=prepared_checkout.source_checkout_root,
-            )
-        if existing_session and not _terminate_every_code_tmux_session(
+    for stale_session_name in stale_session_names:
+        if not _terminate_every_code_tmux_session(
             tmux_binary=tmux_binary,
             session_name=stale_session_name,
             runner=run,

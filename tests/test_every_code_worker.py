@@ -2092,17 +2092,17 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
     def test_run_once_terminates_stale_session_before_relaunch(self) -> None:
         class StaleSessionRunner(_Runner):
-            stale_session_seen = False
+            stale_session_name = every_code_tmux_session_name(
+                _queued_record().request_id,
+                fencing_token=1,
+            )
 
             def __call__(
                 self, args: Sequence[str], env: Mapping[str, str] | None = None
             ) -> subprocess.CompletedProcess[str]:
-                if args[0] == "tmux" and args[1] == "has-session":
+                if args[0] == "tmux" and args[1] == "list-sessions":
                     self.calls.append(tuple(args))
-                    if not self.stale_session_seen:
-                        self.stale_session_seen = True
-                        return subprocess.CompletedProcess(args, 0, "", "")
-                    return subprocess.CompletedProcess(args, 1, "", "no session")
+                    return subprocess.CompletedProcess(args, 0, self.stale_session_name + "\n", "")
                 if args[0] == "tmux" and args[1] == "display-message":
                     self.calls.append(tuple(args))
                     return subprocess.CompletedProcess(args, 0, "4242\n", "")
@@ -2114,7 +2114,9 @@ class EveryCodeWorkerTests(unittest.TestCase):
             checkout_root.mkdir(parents=True)
             (checkout_root / ".git").mkdir()
             store = FilesystemRecordStore(state_dir=temporary_root / "state")
-            store.write_every_code_work_request_record(_queued_record())
+            store.write_every_code_work_request_record(
+                _queued_record().model_copy(update={"attempt": 1})
+            )
             runner = StaleSessionRunner()
 
             with patch("control_plane.every_code_worker.os.killpg") as killpg:
@@ -2135,6 +2137,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
             index for index, call in enumerate(runner.calls) if call[1] == "new-session"
         )
         self.assertLess(kill_index, launch_index)
+        self.assertEqual(runner.calls[kill_index][-1], StaleSessionRunner.stale_session_name)
+        self.assertTrue(runner.calls[launch_index][4].endswith("-f2"))
 
     def test_apply_feedback_sends_prompt_to_active_session(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
