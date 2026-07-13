@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 from typing import Protocol, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 import json
 import os
@@ -17,6 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.outbox_delivery import (
+    OutboxDeliveryRecord,
+    build_outbox_dedupe_key,
+    build_outbox_delivery_id,
+)
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
@@ -354,20 +359,47 @@ def run_public_ingress_monitor_once(
             timeout_seconds=timeout_seconds,
             http_get=(private_get if target.check_kind == "private_http" else public_get),
         )
-        record_store.write_public_ingress_observation_record(record)
         records.append(record)
         incident_records = reconcile_public_ingress_incident(
             record_store=record_store,
             record=record,
             previous_record=previous_record,
+            write_records=False,
         )
+        outbox_deliveries = (
+            _public_ingress_notification_outbox_deliveries(
+                record_store=record_store,
+                incident_records=incident_records,
+                observation=record,
+                previous_record=previous_record,
+            )
+            if notify
+            else ()
+        )
+        transition_writer = getattr(
+            record_store, "write_public_ingress_transition_with_outbox", None
+        )
+        if callable(transition_writer) and outbox_deliveries:
+            transition_writer(
+                observation=record,
+                incidents=incident_records,
+                outbox_deliveries=outbox_deliveries,
+            )
+        else:
+            record_store.write_public_ingress_observation_record(record)
+            for incident in incident_records:
+                record_store.write_public_ingress_incident_record(incident)
         incidents.extend(incident_records)
         open_incident_count += sum(1 for incident in incident_records if incident.status == "open")
         resolved_incident_count += sum(
             1 for incident in incident_records if incident.status == "resolved"
         )
         for incident in incident_records:
-            if notify and notification_drivers is not None:
+            if (
+                notify
+                and notification_drivers is not None
+                and not (callable(transition_writer) and outbox_deliveries)
+            ):
                 delivery_attempts.extend(
                     deliver_public_ingress_incident_notifications(
                         record_store=record_store,
@@ -456,11 +488,90 @@ def deliver_public_ingress_incident_notifications(
     return tuple(attempts)
 
 
+def _public_ingress_notification_outbox_deliveries(
+    *,
+    record_store: PublicIngressMonitorStore,
+    incident_records: tuple[PublicIngressIncidentRecord, ...],
+    observation: PublicIngressObservationRecord,
+    previous_record: PublicIngressObservationRecord | None,
+) -> tuple[OutboxDeliveryRecord, ...]:
+    deliveries: list[OutboxDeliveryRecord] = []
+    for incident in incident_records:
+        event = _incident_event(incident=incident, previous_record=previous_record)
+        for policy in _matching_notification_policies(record_store=record_store, incident=incident):
+            for destination in policy.destinations:
+                if destination.kind != "github_issue" or destination.status != "enabled":
+                    continue
+                attempt_id = build_public_ingress_notification_attempt_id(
+                    incident_id=incident.incident_id,
+                    event=event,
+                    policy_id=policy.policy_id,
+                    destination_id=destination.destination_id,
+                    observation_id=observation.record_id,
+                )
+                existing_attempt = _notification_attempt(
+                    record_store=record_store,
+                    attempt_id=attempt_id,
+                    incident_id=incident.incident_id,
+                    event=event,
+                )
+                if existing_attempt is not None:
+                    continue
+                previous_attempts = record_store.list_public_ingress_notification_attempt_records(
+                    incident_id=incident.incident_id,
+                    destination_kind="github_issue",
+                )
+                body = public_ingress_incident_notification_body(
+                    event=event,
+                    incident=incident,
+                    observation=observation,
+                    marker=attempt_id,
+                )
+                dedupe_key = build_outbox_dedupe_key(
+                    kind="public_ingress_notification",
+                    parts=(attempt_id,),
+                )
+                created_at = observation.observed_at
+                deliveries.append(
+                    OutboxDeliveryRecord(
+                        delivery_id=build_outbox_delivery_id(
+                            kind="public_ingress_notification",
+                            dedupe_key=dedupe_key,
+                        ),
+                        kind="public_ingress_notification",
+                        aggregate_type="public_ingress_incident",
+                        aggregate_id=incident.incident_id,
+                        dedupe_key=dedupe_key,
+                        created_at=created_at,
+                        updated_at=created_at,
+                        next_attempt_at=created_at,
+                        payload={
+                            "attempt": {
+                                "attempt_id": attempt_id,
+                                "incident_id": incident.incident_id,
+                                "event": event,
+                                "policy_id": policy.policy_id,
+                                "destination_id": destination.destination_id,
+                                "destination_kind": destination.kind,
+                                "attempted_at": observation.observed_at,
+                                "observation_id": observation.record_id,
+                            },
+                            "destination": _github_notification_destination_payload(destination),
+                            "body": body,
+                            "existing_issue_url": _latest_external_url(previous_attempts),
+                            "marker": attempt_id,
+                        },
+                    )
+                )
+    return tuple(deliveries)
+
+
 def reconcile_public_ingress_incident(
     *,
     record_store: PublicIngressMonitorStore,
     record: PublicIngressObservationRecord,
     previous_record: PublicIngressObservationRecord | None,
+    write_records: bool = True,
 ) -> tuple[PublicIngressIncidentRecord, ...]:
     open_incidents = _open_incidents(record_store=record_store, record=record)
     if record.status == "fail":
@@ -500,7 +611,8 @@ def reconcile_public_ingress_incident(
                 failure_code=record.failure_code or "unknown_error",
                 summary=record.summary,
             )
-        record_store.write_public_ingress_incident_record(incident)
+        if write_records:
+            record_store.write_public_ingress_incident_record(incident)
         return (incident,)
     if record.status == "pass" and open_incidents:
         resolved_incidents: list[PublicIngressIncidentRecord] = []
@@ -515,7 +627,8 @@ def reconcile_public_ingress_incident(
                     "summary": record.summary,
                 }
             )
-            record_store.write_public_ingress_incident_record(incident)
+            if write_records:
+                record_store.write_public_ingress_incident_record(incident)
             resolved_incidents.append(incident)
         return tuple(resolved_incidents)
     return ()
@@ -1153,6 +1266,89 @@ def public_ingress_notification_drivers(
     )
 
 
+def deliver_public_ingress_notification_outbox_delivery(
+    *,
+    record: OutboxDeliveryRecord,
+    drivers: PublicIngressNotificationDriverSet,
+    mark_provider_started: Callable[[str, str], None],
+) -> OutboxDeliveryRecord:
+    delivery_record = record
+    try:
+        payload = record.payload
+        attempt_payload = _dict_payload(payload.get("attempt"))
+        destination = PublicIngressNotificationDestination.model_validate(
+            _dict_payload(payload.get("destination"))
+        )
+        body = _required_payload_text(payload, "body")
+        marker = _required_payload_text(payload, "marker")
+        existing_issue_url = _optional_payload_text(payload, "existing_issue_url")
+        action = "create" if not existing_issue_url else "comment"
+        if attempt_payload.get("event") == "resolved" and existing_issue_url:
+            action = "close"
+        provider_operation_key = ":".join(
+            (
+                "public_ingress_notification",
+                str(attempt_payload.get("attempt_id") or "").strip(),
+                action,
+            )
+        )
+        delivery_record = record.model_copy(
+            update={
+                "provider_operation_key": provider_operation_key,
+                "provider_id": "github",
+            }
+        )
+        if record.provider_operation_key:
+            reconciled_response = drivers.github_client(
+                "find_marker",
+                {
+                    "repository": destination.github_repository,
+                    "issue_number": destination.github_issue_number,
+                    "issue_url": existing_issue_url,
+                    "marker": marker,
+                },
+            )
+            if reconciled_response:
+                return _delivered_public_ingress_outbox_delivery(
+                    record=delivery_record,
+                    payload=payload,
+                    attempt_payload=attempt_payload,
+                    action=action,
+                    marker=marker,
+                    response=reconciled_response,
+                )
+        else:
+            mark_provider_started(provider_operation_key, "github")
+        response = drivers.github_client(
+            action,
+            {
+                "repository": destination.github_repository,
+                "title": f"Public ingress incident: {attempt_payload.get('incident_id', '')}",
+                "body": body,
+                "labels": [destination.github_label] if destination.github_label else [],
+                "issue_number": destination.github_issue_number,
+                "issue_url": existing_issue_url,
+            },
+        )
+        return _delivered_public_ingress_outbox_delivery(
+            record=delivery_record,
+            payload=payload,
+            attempt_payload=attempt_payload,
+            action=action,
+            marker=marker,
+            response=response,
+        )
+    except Exception as error:  # noqa: BLE001 - worker stores bounded provider-safe errors.
+        return delivery_record.model_copy(
+            update={
+                "state": "failed",
+                "error_code": _public_ingress_provider_safe_error_code(error),
+                "lease_owner": "",
+                "lease_expires_at": "",
+            }
+        )
+
+
 def _deliver_github_issue_notification(
     *,
     destination: PublicIngressNotificationDestination,
@@ -1210,6 +1406,99 @@ def _deliver_github_issue_notification(
         external_url=str(response.get("url", issue_url)).strip(),
         external_id=str(response.get("id", "")).strip(),
     )
+
+
+def _github_notification_action_name(action: str) -> str:
+    if action == "create":
+        return "created_issue"
+    if action == "close":
+        return "closed_issue"
+    return "commented_issue"
+
+
+def _delivered_public_ingress_outbox_delivery(
+    *,
+    record: OutboxDeliveryRecord,
+    payload: dict[str, object],
+    attempt_payload: dict[str, object],
+    action: str,
+    marker: str,
+    response: dict[str, object],
+) -> OutboxDeliveryRecord:
+    attempt = PublicIngressNotificationAttemptRecord(
+        attempt_id=str(attempt_payload["attempt_id"]),
+        incident_id=str(attempt_payload["incident_id"]),
+        event=_public_ingress_event_value(attempt_payload.get("event")),
+        policy_id=str(attempt_payload["policy_id"]),
+        destination_id=str(attempt_payload["destination_id"]),
+        destination_kind="github_issue",
+        delivery_status="delivered",
+        attempted_at=str(attempt_payload["attempted_at"]),
+        observation_id=str(attempt_payload["observation_id"]),
+        external_url=str(response.get("url", "")).strip(),
+        external_id=str(response.get("id", "")).strip() or marker,
+        action=_github_notification_action_name(action),
+    )
+    return record.model_copy(
+        update={
+            "state": "delivered",
+            "provider_id": "github",
+            "external_id": attempt.external_id,
+            "external_url": attempt.external_url,
+            "action": attempt.action,
+            "error_code": "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+            "payload": {**payload, "attempt_result": attempt.model_dump(mode="json")},
+        }
+    )
+
+
+def _github_notification_destination_payload(
+    destination: PublicIngressNotificationDestination,
+) -> dict[str, object]:
+    return {
+        "destination_id": destination.destination_id,
+        "kind": destination.kind,
+        "status": destination.status,
+        "github_repository": destination.github_repository,
+        "github_issue_number": destination.github_issue_number,
+        "github_label": destination.github_label,
+    }
+
+
+def _dict_payload(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError("outbox public ingress payload is malformed")
+    return {str(key): item for key, item in value.items()}
+
+
+def _required_payload_text(payload: dict[str, object], key: str) -> str:
+    value = _optional_payload_text(payload, key)
+    if not value:
+        raise ValueError(f"outbox public ingress payload missing {key}")
+    return value
+
+
+def _optional_payload_text(payload: dict[str, object], key: str) -> str:
+    value = payload.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _public_ingress_provider_safe_error_code(error: Exception) -> str:
+    if isinstance(error, (ValueError, KeyError)):
+        return "invalid_outbox_payload"
+    return "github_provider_error"
+
+
+def _public_ingress_event_value(value: object) -> PublicIngressIncidentEvent:
+    if value == "opened":
+        return "opened"
+    if value == "updated":
+        return "updated"
+    if value == "resolved":
+        return "resolved"
+    raise ValueError("outbox public ingress payload has invalid event")
 
 
 def _deliver_email_notification(
@@ -1292,6 +1581,7 @@ def public_ingress_incident_notification_body(
     event: PublicIngressIncidentEvent,
     incident: PublicIngressIncidentRecord,
     observation: PublicIngressObservationRecord,
+    marker: str = "",
 ) -> str:
     lines = [
         f"Launchplane public ingress incident {event}: {incident.product}/{incident.instance}",
@@ -1306,6 +1596,9 @@ def public_ingress_incident_notification_body(
     ]
     for target in observation.targets:
         lines.append(f"- {target.target}: {target.status} {target.summary}")
+    if marker.strip():
+        lines.append("")
+        lines.append(f"<!-- launchplane-public-ingress-notification:{marker.strip()} -->")
     return "\n".join(lines)
 
 
@@ -1324,6 +1617,11 @@ def _gh_issue_client(
     action: str, payload: dict[str, object], *, token: str | None = None
 ) -> dict[str, object]:
     resolved_token = _public_ingress_github_token(token)
+    if action == "find_marker":
+        return _find_github_issue_notification_marker(
+            payload=payload,
+            token=resolved_token,
+        )
     if action == "create":
         repository = _github_repository_path(str(payload["repository"]))
         body: dict[str, object] = {
@@ -1368,6 +1666,63 @@ def _gh_issue_client(
     return {
         "url": str(response.get("html_url") or response.get("url") or "").strip(),
         "id": str(response.get("node_id") or response.get("id") or "").strip(),
+    }
+
+
+def _find_github_issue_notification_marker(
+    *, payload: dict[str, object], token: str
+) -> dict[str, object]:
+    repository = _github_repository_path(str(payload["repository"]))
+    marker = str(payload.get("marker", "")).strip()
+    if not marker:
+        raise ValueError("GitHub issue marker lookup requires marker.")
+    issue_number = payload.get("issue_number")
+    issue_url = str(payload.get("issue_url", "")).strip()
+    if issue_number is not None or issue_url:
+        issue_repository, resolved_issue_number = _github_issue_reference(payload)
+        if issue_repository != repository:
+            raise ValueError("GitHub issue marker repository must match notification repository.")
+        issue = _github_api_request(
+            method="GET",
+            path=f"/repos/{repository}/issues/{resolved_issue_number}",
+            token=token,
+        )
+        if isinstance(issue, dict) and _github_payload_contains_marker(issue, marker):
+            return _github_issue_marker_response(issue)
+        comments = _github_api_request(
+            method="GET",
+            path=f"/repos/{repository}/issues/{resolved_issue_number}/comments?per_page=100",
+            token=token,
+        )
+        if isinstance(comments, list):
+            for comment in comments:
+                if isinstance(comment, dict) and _github_payload_contains_marker(comment, marker):
+                    return _github_issue_marker_response(comment)
+        return {}
+    query = quote(f'repo:{repository} type:issue in:body "{marker}"', safe="")
+    search = _github_api_request(
+        method="GET",
+        path=f"/search/issues?q={query}&per_page=10",
+        token=token,
+    )
+    if isinstance(search, dict):
+        items = search.get("items")
+        if isinstance(items, list):
+            for issue in items:
+                if isinstance(issue, dict) and _github_payload_contains_marker(issue, marker):
+                    return _github_issue_marker_response(issue)
+    return {}
+
+
+def _github_payload_contains_marker(payload: dict[str, object], marker: str) -> bool:
+    body = payload.get("body")
+    return isinstance(body, str) and marker in body
+
+
+def _github_issue_marker_response(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "url": str(payload.get("html_url") or payload.get("url") or "").strip(),
+        "id": str(payload.get("node_id") or payload.get("id") or "").strip(),
     }
 
 

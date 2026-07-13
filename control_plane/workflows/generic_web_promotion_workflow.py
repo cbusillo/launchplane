@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 import time
+from collections.abc import Callable
 from typing import Literal
 from urllib.parse import quote, urlencode
 
@@ -10,6 +11,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
 
@@ -47,7 +49,7 @@ class GenericWebPromotionWorkflowResult(BaseModel):
     ref: str
     dry_run: bool
     bump: BumpLevel
-    dispatch_status: Literal["dispatched"] = "dispatched"
+    dispatch_status: Literal["pending", "dispatched"] = "dispatched"
     run_id: int = 0
     run_url: str = ""
     run_status: str = "pending"
@@ -128,6 +130,93 @@ def dispatch_generic_web_promotion_workflow(
         run_status=_string_value(run.get("status")) if run else "pending",
         run_conclusion=_string_value(run.get("conclusion")) if run else "",
     )
+
+
+def dispatch_generic_web_promotion_workflow_delivery(
+    *,
+    record: OutboxDeliveryRecord,
+    control_plane_root: Path,
+    mark_provider_started: Callable[[str, str], None],
+) -> OutboxDeliveryRecord:
+    delivery_record = record
+    payload = record.payload
+    try:
+        owner, repo = _repository_parts(_required_payload_text(payload, "repository"))
+        workflow_id = _required_payload_text(payload, "workflow_id")
+        ref = _required_payload_text(payload, "ref")
+        credential_context = _required_payload_text(payload, "credential_context")
+        inputs = _string_dict(payload.get("inputs"))
+        previous_run_ids = _int_set(payload.get("previous_run_ids"))
+        min_created_at = _datetime_value(payload.get("dispatch_started_at"))
+        if min_created_at is None:
+            min_created_at = datetime.now(UTC)
+        token = resolve_launchplane_github_token(
+            control_plane_root=control_plane_root,
+            context_name=credential_context,
+        )
+        if not token:
+            return _failed_outbox_delivery(record, "missing_managed_github_token")
+        provider_operation_key = _workflow_provider_operation_key(
+            repository=f"{owner}/{repo}",
+            workflow_id=workflow_id,
+            ref=ref,
+            dispatch_started_at=_github_timestamp_precision(min_created_at)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            inputs=inputs,
+        )
+        if (
+            record.provider_operation_key
+            and record.provider_operation_key != provider_operation_key
+        ):
+            return _failed_outbox_delivery(record, "provider_marker_mismatch")
+        delivery_record = record.model_copy(
+            update={
+                "provider_operation_key": provider_operation_key,
+                "provider_id": "github",
+            }
+        )
+        if not record.provider_operation_key:
+            mark_provider_started(provider_operation_key, "github")
+        existing_run = _latest_workflow_dispatch_run(
+            owner=owner,
+            repo=repo,
+            workflow_id=workflow_id,
+            ref=ref,
+            token=token,
+            previous_run_ids=previous_run_ids,
+            min_created_at=min_created_at,
+        )
+        if existing_run:
+            return _delivered_workflow_outbox_delivery(delivery_record, existing_run)
+        github_api_request(
+            path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
+            token=token,
+            method="POST",
+            body={"ref": ref, "inputs": inputs},
+        )
+        run = _wait_for_workflow_run(
+            owner=owner,
+            repo=repo,
+            workflow_id=workflow_id,
+            ref=ref,
+            token=token,
+            previous_run_ids=previous_run_ids,
+            min_created_at=min_created_at,
+            timeout_seconds=_bounded_observe_timeout(payload.get("observe_timeout_seconds")),
+        )
+        if run:
+            return _delivered_workflow_outbox_delivery(delivery_record, run)
+        return delivery_record.model_copy(
+            update={
+                "state": "reconcile_required",
+                "provider_operation_key": provider_operation_key,
+                "provider_id": "github",
+                "action": "workflow_dispatch_sent",
+            }
+        )
+    except Exception as error:  # noqa: BLE001 - worker stores bounded provider-safe errors.
+        return _failed_outbox_delivery(delivery_record, _provider_safe_error_code(error))
 
 
 def _normalize_bump(value: str) -> BumpLevel:
@@ -273,3 +362,90 @@ def _datetime_value(value: object) -> datetime | None:
 
 def _github_timestamp_precision(value: datetime) -> datetime:
     return value.astimezone(UTC).replace(microsecond=0)
+
+
+def _workflow_provider_operation_key(
+    *,
+    repository: str,
+    workflow_id: str,
+    ref: str,
+    dispatch_started_at: str,
+    inputs: dict[str, str],
+) -> str:
+    input_fingerprint = "|".join(f"{key}={inputs[key]}" for key in sorted(inputs))
+    return ":".join(
+        (
+            "github_workflow_dispatch",
+            repository.strip(),
+            workflow_id.strip(),
+            ref.strip(),
+            dispatch_started_at.strip(),
+            input_fingerprint,
+        )
+    )
+
+
+def _delivered_workflow_outbox_delivery(
+    record: OutboxDeliveryRecord,
+    run: dict[str, object],
+) -> OutboxDeliveryRecord:
+    return record.model_copy(
+        update={
+            "state": "delivered",
+            "provider_id": "github",
+            "external_id": str(_int_value(run.get("id")) or ""),
+            "external_url": _string_value(run.get("html_url")),
+            "action": "dispatched_workflow",
+            "error_code": "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+        }
+    )
+
+
+def _failed_outbox_delivery(record: OutboxDeliveryRecord, error_code: str) -> OutboxDeliveryRecord:
+    return record.model_copy(
+        update={
+            "state": "failed",
+            "error_code": error_code.strip() or "provider_error",
+            "action": "",
+            "external_id": "",
+            "external_url": "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+        }
+    )
+
+
+def _provider_safe_error_code(error: Exception) -> str:
+    if isinstance(error, click.ClickException):
+        return "github_dispatch_invalid_request"
+    return "github_provider_error"
+
+
+def _required_payload_text(payload: dict[str, object], key: str) -> str:
+    value = _optional_payload_text(payload, key)
+    if not value:
+        raise click.ClickException(f"outbox workflow dispatch payload missing {key}")
+    return value
+
+
+def _optional_payload_text(payload: dict[str, object], key: str) -> str:
+    value = payload.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _string_dict(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item) for key, item in value.items()}
+
+
+def _int_set(value: object) -> set[int]:
+    if not isinstance(value, list):
+        return set()
+    return {item for item in value if isinstance(item, int)}
+
+
+def _bounded_observe_timeout(value: object) -> int:
+    return value if isinstance(value, int) and 0 <= value <= 60 else 0

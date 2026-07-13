@@ -31,6 +31,9 @@ checkout.
 - `release-tuples`: inspect state-backed tuple records and explicitly export a
   TOML catalog from minted state.
 - `service`: run the first local Launchplane HTTP ingress slice.
+  `service outbox-workers run-once` and `service outbox-workers run` operate
+  PostgreSQL transactional outbox deliveries for external workflow dispatch and
+  notification effects.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 - `storage provider-target-audit`: run the read-only provider-target parity
   preflight before backfill or provider-target authority cutover.
@@ -151,6 +154,43 @@ still produces replay evidence. Before planning, the route uses the database
 clock to reject active claims, replay completed claims, transition bound expired
 claims to reconciliation, and release only expired unbound orphan claims that
 cannot have committed the atomic profile write.
+
+## Transactional Outbox Workers
+
+External deliveries now use PostgreSQL outbox rows instead of request-thread
+provider calls when the business transition must commit before the effect. Run
+outbox workers only against Launchplane shared storage:
+
+```bash
+uv run launchplane service outbox-workers run \
+  --database-url "$LAUNCHPLANE_DATABASE_URL"
+```
+
+For a bounded operational probe or smoke check, run one claim/delivery step:
+
+```bash
+uv run launchplane service outbox-workers run-once \
+  --database-url "$LAUNCHPLANE_DATABASE_URL"
+```
+
+Outbox workers claim due rows with leases and PostgreSQL row locks. Multiple
+workers may run concurrently; the claim query uses `FOR UPDATE SKIP LOCKED` so
+one locked row does not block unrelated pending deliveries. A worker records a
+provider operation marker before the external call. If it crashes after the
+marker is recorded, the next worker reconciles provider state before resending.
+Do not update outbox rows manually or clear provider markers to force a retry.
+
+Generic-web promotion workflow dispatches are queued by
+`POST /v1/drivers/generic-web/prod-promotion-workflow`; the HTTP response shows
+`dispatch_status=pending` and includes `records.outbox_delivery_id`. The worker
+resolves the managed GitHub token from Launchplane runtime records, sends the
+dispatch, then marks the outbox delivery delivered when the corresponding run is
+observed.
+
+Public-ingress monitor GitHub issue notifications are also queued when the
+record store supports the transactional outbox. Observation, incident, and
+pending notification rows commit atomically. Email and Discord notification
+paths remain direct-delivery until they are explicitly migrated.
 
 ## Target Launchplane Ingress
 

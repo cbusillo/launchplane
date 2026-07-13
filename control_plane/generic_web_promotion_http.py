@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -8,6 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
+)
+from control_plane.contracts.outbox_delivery import (
+    OutboxDeliveryRecord,
+    build_outbox_dedupe_key,
+    build_outbox_delivery_id,
 )
 from control_plane.drivers.generic_web_dispatch import (
     GenericWebProdPromotionEnvelope,
@@ -24,8 +30,12 @@ from control_plane.workflows.generic_web_promotion import (
 )
 from control_plane.workflows.generic_web_promotion_workflow import (
     GenericWebPromotionWorkflowResult,
-    dispatch_generic_web_promotion_workflow,
+    _github_timestamp_precision,
+    _normalize_bump,
+    _workflow_dispatch_run_ids,
 )
+from control_plane.workflows.launchplane import resolve_launchplane_github_token
+from control_plane.workflows.ship import utc_now_timestamp
 
 
 GENERIC_WEB_PROD_PROMOTION_ROUTE = _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path
@@ -47,6 +57,7 @@ __all__ = [
     "GenericWebPromotionWorkflowResponse",
     "GenericWebPromotionWorkflowResponseResult",
     "dispatch_generic_web_promotion_workflow_result",
+    "build_generic_web_promotion_workflow_outbox_delivery",
     "execute_generic_web_prod_promotion_result",
     "resolve_generic_web_promotion_destination_lane",
     "resolve_generic_web_promotion_workflow_lane",
@@ -140,7 +151,7 @@ class GenericWebPromotionWorkflowResponseResult(BaseModel):
     ref: str = ""
     dry_run: bool = False
     bump: Literal["patch", "minor", "major"] = "patch"
-    dispatch_status: Literal["dispatched"] = "dispatched"
+    dispatch_status: Literal["pending", "dispatched"] = "pending"
     run_id: int = 0
     run_url: str = ""
     run_status: str = "pending"
@@ -229,13 +240,112 @@ def dispatch_generic_web_promotion_workflow_result(
     control_plane_root: Path,
     request: GenericWebPromotionWorkflowEnvelope,
     profile: LaunchplaneProductProfileRecord,
-) -> tuple[dict[str, str], GenericWebPromotionWorkflowResult]:
-    driver_result = dispatch_generic_web_promotion_workflow(
+) -> tuple[dict[str, str], GenericWebPromotionWorkflowResult, OutboxDeliveryRecord]:
+    delivery = build_generic_web_promotion_workflow_outbox_delivery(
         control_plane_root=control_plane_root,
+        request=request,
         profile=profile,
-        request=request.workflow,
     )
-    return {}, driver_result
+    workflow = profile.promotion_workflow
+    bump = _normalize_bump(
+        request.workflow.bump if request.workflow.bump is not None else workflow.default_bump
+    )
+    result = GenericWebPromotionWorkflowResult(
+        product=profile.product,
+        context=request.workflow.context,
+        repository=profile.repository,
+        workflow_id=workflow.workflow_id.strip(),
+        ref=workflow.ref.strip(),
+        dry_run=request.workflow.dry_run,
+        bump=bump,
+        dispatch_status="pending",
+    )
+    return {"outbox_delivery_id": delivery.delivery_id}, result, delivery
+
+
+def build_generic_web_promotion_workflow_outbox_delivery(
+    *,
+    control_plane_root: Path,
+    request: GenericWebPromotionWorkflowEnvelope,
+    profile: LaunchplaneProductProfileRecord,
+) -> OutboxDeliveryRecord:
+    owner, repo = _repository_parts(profile.repository)
+    workflow = profile.promotion_workflow
+    workflow_id = workflow.workflow_id.strip()
+    ref = workflow.ref.strip()
+    bump = _normalize_bump(
+        request.workflow.bump if request.workflow.bump is not None else workflow.default_bump
+    )
+    token = resolve_launchplane_github_token(
+        control_plane_root=control_plane_root,
+        context_name=request.workflow.context,
+    )
+    if not token:
+        raise GenericWebPromotionRouteDependencyError(
+            "Launchplane runtime records do not expose GITHUB_TOKEN for this context."
+        )
+    previous_run_ids = _workflow_dispatch_run_ids(
+        owner=owner,
+        repo=repo,
+        workflow_id=workflow_id,
+        ref=ref,
+        token=token,
+    )
+    created_at = utc_now_timestamp()
+    dispatch_started_at = (
+        _github_timestamp_precision(datetime.fromisoformat(created_at.replace("Z", "+00:00")))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    inputs = {
+        workflow.dry_run_input.strip(): str(request.workflow.dry_run).lower(),
+        workflow.bump_input.strip(): bump,
+    }
+    dedupe_key = build_outbox_dedupe_key(
+        kind="github_workflow_dispatch",
+        parts=(
+            profile.product,
+            request.workflow.context,
+            workflow_id,
+            ref,
+            str(request.workflow.dry_run),
+            bump,
+        ),
+    )
+    return OutboxDeliveryRecord(
+        delivery_id=build_outbox_delivery_id(
+            kind="github_workflow_dispatch",
+            dedupe_key=dedupe_key,
+        ),
+        kind="github_workflow_dispatch",
+        aggregate_type="generic_web_promotion_workflow",
+        aggregate_id=f"{profile.product}:{request.workflow.context}",
+        dedupe_key=dedupe_key,
+        created_at=created_at,
+        updated_at=created_at,
+        next_attempt_at=created_at,
+        payload={
+            "repository": profile.repository,
+            "workflow_id": workflow_id,
+            "ref": ref,
+            "inputs": inputs,
+            "previous_run_ids": sorted(previous_run_ids),
+            "dispatch_started_at": dispatch_started_at,
+            "credential_context": request.workflow.context,
+            "observe_timeout_seconds": request.workflow.observe_timeout_seconds,
+        },
+    )
+
+
+def _repository_parts(repository: str) -> tuple[str, str]:
+    owner, separator, repo = repository.strip().partition("/")
+    owner = owner.strip()
+    repo = repo.strip()
+    if not separator or not owner or not repo or "/" in repo:
+        raise GenericWebPromotionRouteDependencyError(
+            "GitHub repository must use owner/repo format."
+        )
+    return owner, repo
 
 
 def should_store_generic_web_promotion_idempotency(

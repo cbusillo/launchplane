@@ -178,6 +178,38 @@ operation or reconciliation key before invoking the provider, and complete only
 after durable local evidence is ready. A crash or timeout after key binding is
 an unknown outcome, not permission to retry the provider mutation.
 
+## Transactional Outbox
+
+External deliveries that are not safe to perform inside the request transaction
+use `launchplane_outbox_deliveries`. Business state and the pending outbox row
+must commit in the same PostgreSQL transaction, so a crash before a worker runs
+leaves durable intent instead of a lost notification or workflow dispatch. The
+first migrated paths are generic-web promotion workflow dispatches and GitHub
+public-ingress incident notifications.
+
+Outbox rows are intentionally provider-neutral and secret-free. Payloads may
+carry stable routing facts, bounded provider inputs, prior observation IDs,
+hidden reconciliation markers, and safe credential context names, but they must
+not carry bearer tokens, webhook URLs, encrypted secret blobs, cookies,
+passwords, raw provider error bodies, or other secret-bearing fields. Validation
+rejects sensitive payload key names so delivery records remain durable evidence,
+not a secret store.
+
+Workers claim due rows with bounded leases. PostgreSQL claims use `FOR UPDATE
+SKIP LOCKED` over pending or expired work so multiple service instances can
+claim independently without blocking on the same row. Completion remains
+lease-owner fenced; stale owners cannot record terminal state after another
+worker reclaims the delivery. Attempts are bounded by `max_attempts`.
+
+Provider calls record a stable `provider_operation_key` and `provider_id` before
+the external send. If a worker crashes after recording that marker, a later
+worker reclaims the row and reconciles before resending. GitHub workflow
+dispatch reconciliation checks for a new workflow run not present before the
+original dispatch; public-ingress GitHub notifications include a hidden marker
+in issue/comment bodies and search for that marker before posting again. Unknown
+provider failures are stored only as bounded `error_code` values such as
+`github_provider_error` or `invalid_outbox_payload`.
+
 ## ORM Query Boundary
 
 Launchplane's Postgres storage layer should expose GUI and driver reads through

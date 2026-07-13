@@ -1687,10 +1687,14 @@ provider-target authority when an explicit row is missing.
 Generic web prod promotion uses native FastAPI. It can be exercised directly
 with `POST /v1/drivers/generic-web/prod-promotion`; browser sessions may only
 use this route with `dry_run=true`. The operator UI then uses the native
-`POST /v1/drivers/generic-web/prod-promotion-workflow` route to dispatch the
-product-owned GitHub workflow configured by the DB-backed product profile. That
+`POST /v1/drivers/generic-web/prod-promotion-workflow` route to queue a
+transactional outbox dispatch for the product-owned GitHub workflow configured
+by the DB-backed product profile. The HTTP response reports
+`dispatch_status=pending` and `records.outbox_delivery_id`; Launchplane outbox
+workers later resolve the managed `GITHUB_TOKEN`, reconcile any prior dispatch
+marker, send the workflow dispatch, and record the observed workflow run. That
 workflow remains responsible for product release/tag behavior while Launchplane
-supplies authz, managed `GITHUB_TOKEN` lookup, dispatch inputs, and workflow-run
+supplies authz, managed token lookup, dispatch inputs, and workflow-run
 observation. Native FastAPI owns both paths while descriptor discovery remains
 available.
 

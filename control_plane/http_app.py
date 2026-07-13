@@ -599,6 +599,7 @@ from control_plane.storage.postgres import (
     DbOnlyMutationRequest,
     MutationReservationResult,
     MutationReservationUpdateResult,
+    OutboxWithIdempotencyRequest,
     PostgresRecordStore,
     RouteBindingMutationResult,
 )
@@ -16657,7 +16658,7 @@ def create_launchplane_fastapi_app(
                 replayed_response.model_dump(mode="json")
             )
         try:
-            records, result = dispatch_generic_web_promotion_workflow_result(
+            records, result, outbox_delivery = dispatch_generic_web_promotion_workflow_result(
                 control_plane_root=resolved_control_plane_root,
                 request=workflow_request,
                 profile=profile,
@@ -16683,9 +16684,16 @@ def create_launchplane_fastapi_app(
                 result.model_dump(mode="json")
             ),
         )
-        if should_store_generic_web_promotion_idempotency(result):
-            store_apply_idempotency(
-                record_store=record_store,
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="outbox_requires_postgres",
+                message="Workflow dispatch requires PostgreSQL transactional outbox storage.",
+            )
+        idempotency_record = None
+        if normalized_key and should_store_generic_web_promotion_idempotency(result):
+            idempotency_record = build_apply_idempotency_record(
                 identity=identity,
                 route_path=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
                 idempotency_key=normalized_key,
@@ -16693,6 +16701,12 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=response,
             )
+        record_store.enqueue_outbox_delivery_with_idempotency(
+            OutboxWithIdempotencyRequest(
+                delivery=outbox_delivery,
+                idempotency_record=idempotency_record,
+            )
+        )
         return response
 
     def resolve_verireel_route_authorization(

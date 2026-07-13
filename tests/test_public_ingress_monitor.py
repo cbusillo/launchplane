@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from typing import Literal
 from unittest.mock import patch
@@ -39,6 +41,8 @@ from control_plane.workflows.public_ingress_monitor import (
     run_public_ingress_monitor_once,
 )
 from control_plane.outbound_http import PublicHttpDestinationError
+from control_plane.storage.postgres import PostgresRecordStore
+from tests.support.stores import _sqlite_database_url
 
 
 def _public_health_monitoring(
@@ -1120,6 +1124,64 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(github_calls[0][0], "create")
         self.assertEqual(email_subjects, ["[Launchplane] Public ingress opened: example-site/prod"])
         self.assertEqual(discord_posts[0][0], "https://discord.com/api/webhooks/test/webhook")
+
+    def test_postgres_monitor_writes_github_notifications_to_outbox(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            store.write_public_ingress_notification_policy_record(
+                _notification_policy(
+                    PublicIngressNotificationDestination(
+                        destination_id="github-main",
+                        kind="github_issue",
+                        github_repository="cbusillo/launchplane",
+                        github_label="public-ingress",
+                    )
+                )
+            )
+
+            result = run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at="2026-05-29T12:25:00Z",
+                http_get=lambda _url, _timeout: HttpObservation(
+                    status_code=503,
+                    final_url="https://example.test",
+                    redirect_count=0,
+                ),
+            )
+            outbox_rows = store.list_outbox_delivery_records(
+                states=("pending",), kind="public_ingress_notification"
+            )
+            attempts = store.list_public_ingress_notification_attempt_records()
+            observations = store.list_public_ingress_observation_records()
+            incidents = store.list_public_ingress_incident_records()
+            store.close()
+
+        self.assertEqual(result.open_incident_count, 1)
+        self.assertEqual(result.delivery_attempt_count, 0)
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(attempts, ())
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].aggregate_id, incidents[0].incident_id)
+        self.assertIn(
+            "launchplane-public-ingress-notification", str(outbox_rows[0].payload["body"])
+        )
+        self.assertEqual(
+            outbox_rows[0].payload["destination"],
+            {
+                "destination_id": "github-main",
+                "kind": "github_issue",
+                "status": "enabled",
+                "github_repository": "cbusillo/launchplane",
+                "github_issue_number": None,
+                "github_label": "public-ingress",
+            },
+        )
 
     def test_notification_policies_can_scope_to_health_check_kind(self) -> None:
         lane = ProductLaneProfile(

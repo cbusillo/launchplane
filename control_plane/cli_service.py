@@ -11,6 +11,15 @@ import uuid
 import click
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.outbox_worker import (
+    DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS,
+    DEFAULT_OUTBOX_WORKER_LEASE_SECONDS,
+    DEFAULT_OUTBOX_WORKER_MAX_CONSECUTIVE_ERRORS,
+    DEFAULT_OUTBOX_WORKER_POLL_SECONDS,
+    OutboxWorkerStore,
+    run_outbox_worker_loop,
+    run_outbox_worker_once,
+)
 from control_plane.openapi_export import write_canonical_openapi
 from control_plane.contracts.driver_descriptor import DriverContextView
 from control_plane.drivers.registry import build_driver_context_view
@@ -41,6 +50,7 @@ from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
     run_verireel_prod_backup_gate_operation_worker_loop,
     run_verireel_prod_backup_gate_operation_worker_once,
 )
+from control_plane.workflows.public_ingress_monitor import public_ingress_notification_drivers
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
@@ -265,6 +275,151 @@ def service_serve(
         audience=audience,
         database_url=database_url,
     )
+
+
+@service.group("outbox-workers")
+def service_outbox_workers() -> None:
+    """Run Launchplane-owned transactional outbox delivery workers."""
+
+
+@service_outbox_workers.command("run-once")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used by outbox delivery workflows.",
+)
+@click.option(
+    "--lease-owner",
+    default="",
+    help="Worker lease owner id. Defaults to a generated process-local id.",
+)
+@click.option(
+    "--lease-seconds",
+    type=int,
+    default=DEFAULT_OUTBOX_WORKER_LEASE_SECONDS,
+    show_default=True,
+)
+def service_outbox_workers_run_once(
+    state_dir: Path,
+    database_url: str,
+    control_plane_root: Path | None,
+    lease_owner: str,
+    lease_seconds: int,
+) -> None:
+    if not database_url.strip():
+        raise click.ClickException(
+            "Outbox workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    generated_lease_owner = (
+        f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
+    )
+    record_store = _store(state_dir=state_dir, database_url=database_url)
+    result = run_outbox_worker_once(
+        record_store=cast(OutboxWorkerStore, record_store),
+        control_plane_root=control_plane_root or _control_plane_root(),
+        lease_owner=generated_lease_owner,
+        lease_seconds=lease_seconds,
+        notification_drivers=public_ingress_notification_drivers(record_store=record_store),
+    )
+    click.echo(json.dumps(asdict(result), indent=2, sort_keys=True))
+
+
+@service_outbox_workers.command("run")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used by outbox delivery workflows.",
+)
+@click.option(
+    "--lease-owner",
+    default="",
+    help="Worker lease owner id. Defaults to a generated process-local id.",
+)
+@click.option(
+    "--lease-seconds",
+    type=int,
+    default=DEFAULT_OUTBOX_WORKER_LEASE_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--poll-seconds",
+    type=int,
+    default=DEFAULT_OUTBOX_WORKER_POLL_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--error-backoff-seconds",
+    type=int,
+    default=DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--max-consecutive-errors",
+    type=int,
+    default=DEFAULT_OUTBOX_WORKER_MAX_CONSECUTIVE_ERRORS,
+    show_default=True,
+)
+def service_outbox_workers_run(
+    state_dir: Path,
+    database_url: str,
+    control_plane_root: Path | None,
+    lease_owner: str,
+    lease_seconds: int,
+    poll_seconds: int,
+    error_backoff_seconds: int,
+    max_consecutive_errors: int,
+) -> None:
+    if not database_url.strip():
+        raise click.ClickException(
+            "Outbox workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    generated_lease_owner = (
+        f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
+    )
+    record_store = _store(state_dir=state_dir, database_url=database_url)
+    stop_event = Event()
+
+    def _request_stop(_signum: int, _frame: object) -> None:
+        stop_event.set()
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _request_stop)
+    previous_sigint = signal.signal(signal.SIGINT, _request_stop)
+    try:
+        run_outbox_worker_loop(
+            record_store=cast(OutboxWorkerStore, record_store),
+            control_plane_root=control_plane_root or _control_plane_root(),
+            lease_owner=generated_lease_owner,
+            should_stop=stop_event.is_set,
+            lease_seconds=lease_seconds,
+            poll_seconds=poll_seconds,
+            error_backoff_seconds=error_backoff_seconds,
+            max_consecutive_errors=max_consecutive_errors,
+            notification_drivers=public_ingress_notification_drivers(record_store=record_store),
+        )
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
+    click.echo(json.dumps({"status": "stopped"}, indent=2, sort_keys=True))
 
 
 @service.group("odoo-workers")
