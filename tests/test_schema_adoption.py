@@ -15,18 +15,31 @@ class FakeInspector:
         self,
         columns_by_table: dict[str, set[str]],
         indexes_by_table: dict[str, list[dict[str, object]]] | None = None,
+        primary_keys_by_table: dict[str, tuple[str, ...]] | None = None,
+        column_types_by_table: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self.columns_by_table = columns_by_table
         self.indexes_by_table = indexes_by_table or {}
+        self.primary_keys_by_table = primary_keys_by_table or {}
+        self.column_types_by_table = column_types_by_table or {}
 
     def get_table_names(self) -> list[str]:
         return list(self.columns_by_table)
 
     def get_columns(self, table_name: str) -> list[dict[str, object]]:
-        return [{"name": column_name} for column_name in self.columns_by_table[table_name]]
+        return [
+            {
+                "name": column_name,
+                "type": self.column_types_by_table.get(table_name, {}).get(column_name, ""),
+            }
+            for column_name in self.columns_by_table[table_name]
+        ]
 
     def get_indexes(self, table_name: str) -> list[dict[str, object]]:
         return self.indexes_by_table.get(table_name, [])
+
+    def get_pk_constraint(self, table_name: str) -> dict[str, object]:
+        return {"constrained_columns": list(self.primary_keys_by_table.get(table_name, ()))}
 
 
 class SchemaAdoptionTests(unittest.TestCase):
@@ -225,6 +238,105 @@ class SchemaAdoptionTests(unittest.TestCase):
                     **LEGACY_CURRENT_SCHEMA,
                     table_name: frozenset(columns_by_table[table_name]),
                 },
+            )
+
+    def test_rejects_route_binding_table_without_composite_primary_key(self) -> None:
+        table_name = "launchplane_route_bindings"
+        route_binding_columns = {
+            "product",
+            "context",
+            "instance",
+            "provider_id",
+            "target_category",
+            "ingress_provider",
+            "ingress_endpoint_key",
+            "termination_kind",
+            "tls_owner",
+            "primary_domain",
+            "status",
+            "freshness_status",
+            "updated_at",
+            "payload",
+        }
+        inspector = FakeInspector(
+            {**self._baseline_columns_by_table(), table_name: route_binding_columns},
+            indexes_by_table={
+                table_name: [
+                    {
+                        "name": "launchplane_route_bindings_lookup_idx",
+                        "unique": False,
+                        "column_names": ["product", "context", "status", "instance"],
+                    },
+                    {
+                        "name": "launchplane_route_bindings_updated_idx",
+                        "unique": False,
+                        "column_names": ["updated_at"],
+                    },
+                ]
+            },
+        )
+
+        with self.assertRaisesRegex(
+            SchemaAdoptionError,
+            r"launchplane_route_bindings has primary key \(<none>\)",
+        ):
+            verify_existing_schema_for_stamp(
+                inspector=inspector,
+                expected_schema={
+                    **LEGACY_BASELINE_SCHEMA,
+                    table_name: frozenset(route_binding_columns),
+                },
+            )
+
+    def test_rejects_route_binding_payload_that_is_not_jsonb(self) -> None:
+        table_name = "launchplane_route_bindings"
+        route_binding_columns = {
+            "product",
+            "context",
+            "instance",
+            "provider_id",
+            "target_category",
+            "ingress_provider",
+            "ingress_endpoint_key",
+            "termination_kind",
+            "tls_owner",
+            "primary_domain",
+            "status",
+            "freshness_status",
+            "updated_at",
+            "payload",
+        }
+        inspector = FakeInspector(
+            {**self._baseline_columns_by_table(), table_name: route_binding_columns},
+            indexes_by_table={
+                table_name: [
+                    {
+                        "name": "launchplane_route_bindings_lookup_idx",
+                        "unique": False,
+                        "column_names": ["product", "context", "status", "instance"],
+                    },
+                    {
+                        "name": "launchplane_route_bindings_updated_idx",
+                        "unique": False,
+                        "column_names": ["updated_at"],
+                    },
+                ]
+            },
+            primary_keys_by_table={table_name: ("product", "context", "instance")},
+            column_types_by_table={table_name: {"payload": "JSON"}},
+        )
+
+        with self.assertRaisesRegex(
+            SchemaAdoptionError,
+            "launchplane_route_bindings.payload has type json",
+        ):
+            verify_existing_schema_for_stamp(
+                inspector=inspector,
+                expected_schema={
+                    **LEGACY_BASELINE_SCHEMA,
+                    table_name: frozenset(route_binding_columns),
+                },
+                verify_column_types=True,
             )
 
 

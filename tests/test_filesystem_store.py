@@ -30,6 +30,14 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditRecord,
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+    RouteBindingIngress,
+    RouteBindingProviderTarget,
+    RouteBindingSource,
+    RouteBindingTls,
+)
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -2248,3 +2256,61 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(
                 [(record.context, record.instance) for record in listed_records], [("opw", "prod")]
             )
+
+    def test_write_and_read_route_binding_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            record = EnvironmentRouteBindingRecord(
+                product="example-product",
+                context="example-testing",
+                instance="web",
+                provider_target=RouteBindingProviderTarget(
+                    provider_id="dokploy",
+                    target_category="compose",
+                    provider_target_type="compose",
+                    target_name="example-target",
+                    provider_evidence={"target_record": "example-testing:web"},
+                ),
+                ingress=RouteBindingIngress(
+                    provider="npmplus",
+                    endpoint_key="example-edge",
+                    termination_kind="edge",
+                    provider_evidence={"audit_record": "audit-example"},
+                ),
+                domains=(RouteBindingDomain(domain_name="app.example.test", role="primary"),),
+                tls=RouteBindingTls(
+                    owner="launchplane",
+                    provider_evidence={"audit_record": "audit-example"},
+                ),
+                source=RouteBindingSource(
+                    source_kind="operator",
+                    source_label="test",
+                    source_record_ids=("operator:test",),
+                    refreshed_at="2026-07-12T00:00:00Z",
+                    freshness_status="recorded",
+                ),
+                updated_at="2026-07-12T00:00:00Z",
+            )
+
+            written_path = store.write_route_binding_record(record)
+            loaded_record = store.read_route_binding_record(
+                product="example-product",
+                context_name="example-testing",
+                instance_name="web",
+            )
+            listed_records = store.list_route_binding_records(
+                product="example-product",
+                context_name="example-testing",
+            )
+
+            self.assertEqual(
+                written_path.relative_to(state_dir).as_posix(),
+                "launchplane_route_bindings/"
+                "d968f05a8e4bd614c094b00f8765c5b59d33b3c1baf0a26f2db258eeeb465a46.json",
+            )
+            self.assertEqual(
+                loaded_record.binding_key,
+                '["example-product","example-testing","web"]',
+            )
+            self.assertEqual(listed_records, (record,))

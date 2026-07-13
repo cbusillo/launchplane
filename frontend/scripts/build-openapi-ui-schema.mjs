@@ -41,59 +41,145 @@ function requireResponseProperties(value) {
     return;
   }
   if (isObject(value.properties)) {
-    value.required = Object.keys(value.properties).sort();
+    value.required = Object.entries(value.properties)
+      .filter(
+        ([, propertySchema]) =>
+          !isObject(propertySchema) ||
+          propertySchema["x-launchplane-optional-response"] !== true,
+      )
+      .map(([propertyName]) => propertyName)
+      .sort();
   }
   Object.values(value).forEach(requireResponseProperties);
 }
 
-function buildUiSchema(openapi) {
-  const readOperations = openapi["x-launchplane-ui-read-operations"];
-  if (!isObject(readOperations)) {
-    throw new Error("Canonical OpenAPI is missing x-launchplane-ui-read-operations.");
+function selectUiOperations(openapi, manifestKey, method, selectedPaths) {
+  const operations = openapi[manifestKey];
+  if (!isObject(operations)) {
+    throw new Error(`Canonical OpenAPI is missing ${manifestKey}.`);
   }
-  const selectedPaths = {};
-  for (const [routePath, operationId] of Object.entries(readOperations)) {
+  for (const [routePath, operationId] of Object.entries(operations)) {
     if (typeof operationId !== "string") {
       throw new Error(`Canonical OpenAPI has an invalid UI operation id for ${routePath}.`);
     }
     const pathItem = openapi.paths?.[routePath];
-    if (!pathItem?.get) {
-      throw new Error(`Canonical OpenAPI is missing required UI GET route: ${routePath}`);
+    if (!pathItem?.[method]) {
+      throw new Error(`Canonical OpenAPI is missing required UI ${method.toUpperCase()} route: ${routePath}`);
     }
-    if (pathItem.get.operationId !== operationId) {
+    if (pathItem[method].operationId !== operationId) {
       throw new Error(
-        `Canonical OpenAPI operation id drift for ${routePath}: expected ${operationId}, got ${pathItem.get.operationId ?? "missing"}.`,
+        `Canonical OpenAPI operation id drift for ${routePath}: expected ${operationId}, got ${pathItem[method].operationId ?? "missing"}.`,
       );
+    }
+    if (Object.hasOwn(selectedPaths, routePath)) {
+      throw new Error(`Canonical OpenAPI selects the UI route more than once: ${routePath}`);
     }
     selectedPaths[routePath] = {
       ...(pathItem.parameters ? { parameters: pathItem.parameters } : {}),
-      get: pathItem.get,
+      [method]: pathItem[method],
     };
   }
+}
 
-  const selectedSchemaNames = new Set();
-  collectSchemaReferences(selectedPaths, selectedSchemaNames);
-  const queue = [...selectedSchemaNames];
+function collectResponseSchemaReferences(selectedPaths) {
+  const found = new Set();
+  for (const pathItem of Object.values(selectedPaths)) {
+    if (!isObject(pathItem)) {
+      continue;
+    }
+    for (const operation of Object.values(pathItem)) {
+      if (!isObject(operation) || !isObject(operation.responses)) {
+        continue;
+      }
+      for (const response of Object.values(operation.responses)) {
+        collectSchemaReferences(response, found);
+      }
+    }
+  }
+  return found;
+}
+
+function hoistInlineSchemaDefinitions(value, inlineSchemas) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => hoistInlineSchemaDefinitions(item, inlineSchemas));
+    return;
+  }
+  if (!isObject(value)) {
+    return;
+  }
+  if (isObject(value.$defs)) {
+    for (const [schemaName, schema] of Object.entries(value.$defs)) {
+      const existingSchema = inlineSchemas[schemaName];
+      if (existingSchema && JSON.stringify(existingSchema) !== JSON.stringify(schema)) {
+        throw new Error(`Canonical OpenAPI defines conflicting inline schema: ${schemaName}`);
+      }
+      inlineSchemas[schemaName] = schema;
+      hoistInlineSchemaDefinitions(schema, inlineSchemas);
+    }
+    delete value.$defs;
+  }
+  if (typeof value.$ref === "string" && value.$ref.startsWith("#/$defs/")) {
+    value.$ref = `#/components/schemas/${value.$ref.slice("#/$defs/".length)}`;
+  }
+  Object.values(value).forEach((nestedValue) =>
+    hoistInlineSchemaDefinitions(nestedValue, inlineSchemas),
+  );
+}
+
+function schemaForName(openapi, inlineSchemas, schemaName) {
+  return openapi.components?.schemas?.[schemaName] ?? inlineSchemas[schemaName];
+}
+
+function collectReferencedSchemas(openapi, inlineSchemas, schemaNames) {
+  const queue = [...schemaNames];
   while (queue.length > 0) {
     const schemaName = queue.pop();
-    const schema = openapi.components?.schemas?.[schemaName];
+    const schema = schemaForName(openapi, inlineSchemas, schemaName);
     if (!schema) {
       throw new Error(`Canonical OpenAPI is missing referenced schema: ${schemaName}`);
     }
     const nestedReferences = collectSchemaReferences(schema);
     for (const nestedName of nestedReferences) {
-      if (!selectedSchemaNames.has(nestedName)) {
-        selectedSchemaNames.add(nestedName);
+      if (!schemaNames.has(nestedName)) {
+        schemaNames.add(nestedName);
         queue.push(nestedName);
       }
     }
   }
+}
+
+function buildUiSchema(openapi) {
+  const selectedPaths = {};
+  selectUiOperations(
+    openapi,
+    "x-launchplane-ui-read-operations",
+    "get",
+    selectedPaths,
+  );
+  selectUiOperations(
+    openapi,
+    "x-launchplane-ui-write-operations",
+    "post",
+    selectedPaths,
+  );
+  const inlineSchemas = {};
+  hoistInlineSchemaDefinitions(selectedPaths, inlineSchemas);
+
+  const selectedSchemaNames = new Set();
+  collectSchemaReferences(selectedPaths, selectedSchemaNames);
+  collectReferencedSchemas(openapi, inlineSchemas, selectedSchemaNames);
 
   const selectedSchemas = {};
   for (const schemaName of Array.from(selectedSchemaNames).sort()) {
-    selectedSchemas[schemaName] = openapi.components.schemas[schemaName];
+    selectedSchemas[schemaName] = schemaForName(openapi, inlineSchemas, schemaName);
   }
-  requireResponseProperties(selectedSchemas);
+  const responseSchemaNames = collectResponseSchemaReferences(selectedPaths);
+  collectReferencedSchemas(openapi, inlineSchemas, responseSchemaNames);
+  const responseSchemas = {};
+  for (const schemaName of responseSchemaNames) {
+    responseSchemas[schemaName] = schemaForName(openapi, inlineSchemas, schemaName);
+  }
+  requireResponseProperties(responseSchemas);
 
   return {
     openapi: openapi.openapi,

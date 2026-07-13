@@ -40,16 +40,6 @@
               }
             },
             "description": "Unauthorized"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read human auth session"
@@ -121,16 +111,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read Launchplane driver view for a context"
@@ -213,16 +193,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read Launchplane driver view for one context instance"
@@ -283,16 +253,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read Launchplane driver descriptors"
@@ -424,16 +384,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -563,16 +513,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -714,16 +654,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -803,16 +733,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -903,16 +823,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -1015,16 +925,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1126,16 +1026,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1236,16 +1126,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -1359,16 +1239,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1481,16 +1351,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1561,16 +1421,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1640,16 +1490,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -1751,16 +1591,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1841,16 +1671,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1921,16 +1741,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1943,6 +1753,593 @@
           }
         },
         "summary": "Read Launchplane work graph snapshot"
+      }
+    },
+    "/v1/drivers/generic-web/prod-promotion": {
+      "post": {
+        "operationId": "apply_generic_web_prod_promotion",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWebProdPromotionEnvelope",
+                "additionalProperties": false,
+                "properties": {
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "promotion": {
+                    "$ref": "#/components/schemas/GenericWebProdPromotionRequest"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "promotion"
+                ],
+                "title": "GenericWebProdPromotionEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericWebProdPromotionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Execute generic web prod promotion"
+      }
+    },
+    "/v1/drivers/generic-web/prod-promotion-workflow": {
+      "post": {
+        "operationId": "dispatch_generic_web_prod_promotion_workflow",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWebPromotionWorkflowEnvelope",
+                "additionalProperties": false,
+                "properties": {
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  },
+                  "workflow": {
+                    "$ref": "#/components/schemas/GenericWebPromotionWorkflowRequest"
+                  }
+                },
+                "required": [
+                  "product",
+                  "workflow"
+                ],
+                "title": "GenericWebPromotionWorkflowEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericWebPromotionWorkflowResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dispatch generic web prod promotion workflow"
+      }
+    },
+    "/v1/product-config/apply": {
+      "post": {
+        "operationId": "apply_product_config",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "context": {
+                    "default": "",
+                    "title": "Context",
+                    "type": "string"
+                  },
+                  "instance": {
+                    "default": "",
+                    "title": "Instance",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "enum": [
+                      "dry-run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "default": "",
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "runtime_env": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      },
+                      {
+                        "$ref": "#/components/schemas/ProductConfigRuntimeInput"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Runtime Env"
+                  },
+                  "runtime_environment": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      },
+                      {
+                        "$ref": "#/components/schemas/ProductConfigRuntimeInput"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Runtime Environment"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  },
+                  "secrets": {
+                    "items": {
+                      "$ref": "#/components/schemas/ProductConfigSecretInput"
+                    },
+                    "title": "Secrets",
+                    "type": "array"
+                  },
+                  "source_label": {
+                    "default": "product-config-api",
+                    "title": "Source Label",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "product"
+                ],
+                "title": "ProductConfigApplyEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductConfigApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan or apply product config"
+      }
+    },
+    "/v1/work-graph/rank": {
+      "post": {
+        "operationId": "rank_work_graph_snapshot",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkGraphRankEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkGraphRankResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Rank Launchplane work graph snapshot"
       }
     }
   },
@@ -3829,6 +4226,12 @@
       "EveryCodeWorkRequestRecord": {
         "additionalProperties": false,
         "properties": {
+          "attempt": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Attempt",
+            "type": "integer"
+          },
           "claimed_at": {
             "default": "",
             "title": "Claimed At",
@@ -3843,6 +4246,12 @@
             "default": "",
             "title": "Error Message",
             "type": "string"
+          },
+          "fencing_token": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Fencing Token",
+            "type": "integer"
           },
           "finished_at": {
             "default": "",
@@ -3866,6 +4275,11 @@
           },
           "issue_url": {
             "title": "Issue Url",
+            "type": "string"
+          },
+          "lease_expires_at": {
+            "default": "",
+            "title": "Lease Expires At",
             "type": "string"
           },
           "lifecycle_id": {
@@ -3941,14 +4355,17 @@
           }
         },
         "required": [
+          "attempt",
           "claimed_at",
           "claimed_by_host",
           "error_message",
+          "fencing_token",
           "finished_at",
           "github_delivery_id",
           "issue_number",
           "issue_title",
           "issue_url",
+          "lease_expires_at",
           "lifecycle_id",
           "queued_at",
           "repository",
@@ -4148,6 +4565,686 @@
         ],
         "title": "EveryCodeWorkRequestSummary",
         "type": "object"
+      },
+      "GenericWebProdPromotionEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "promotion": {
+            "$ref": "#/components/schemas/GenericWebProdPromotionRequest"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "product",
+          "promotion"
+        ],
+        "title": "GenericWebProdPromotionEnvelope",
+        "type": "object"
+      },
+      "GenericWebProdPromotionRecords": {
+        "additionalProperties": false,
+        "properties": {
+          "backup_record_id": {
+            "default": "",
+            "title": "Backup Record Id",
+            "type": "string"
+          },
+          "backup_status": {
+            "default": "",
+            "title": "Backup Status",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "default": "",
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "deployment_status": {
+            "default": "",
+            "title": "Deployment Status",
+            "type": "string"
+          },
+          "destination_health_status": {
+            "default": "",
+            "title": "Destination Health Status",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": "",
+            "title": "Dry Run",
+            "type": "string"
+          },
+          "inventory_record_id": {
+            "default": "",
+            "title": "Inventory Record Id",
+            "type": "string"
+          },
+          "promotion_record_id": {
+            "default": "",
+            "title": "Promotion Record Id",
+            "type": "string"
+          },
+          "promotion_status": {
+            "default": "",
+            "title": "Promotion Status",
+            "type": "string"
+          },
+          "release_status": {
+            "default": "",
+            "title": "Release Status",
+            "type": "string"
+          },
+          "release_tag": {
+            "default": "",
+            "title": "Release Tag",
+            "type": "string"
+          },
+          "release_url": {
+            "default": "",
+            "title": "Release Url",
+            "type": "string"
+          },
+          "source_health_status": {
+            "default": "",
+            "title": "Source Health Status",
+            "type": "string"
+          }
+        },
+        "title": "GenericWebProdPromotionRecords",
+        "type": "object",
+        "required": [
+          "backup_record_id",
+          "backup_status",
+          "deployment_record_id",
+          "deployment_status",
+          "destination_health_status",
+          "dry_run",
+          "inventory_record_id",
+          "promotion_record_id",
+          "promotion_status",
+          "release_status",
+          "release_tag",
+          "release_url",
+          "source_health_status"
+        ]
+      },
+      "GenericWebProdPromotionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "default": "",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "backup_record_id": {
+            "default": "",
+            "title": "Backup Record Id",
+            "type": "string"
+          },
+          "backup_required": {
+            "default": false,
+            "title": "Backup Required",
+            "type": "boolean"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "from_instance": {
+            "default": "testing",
+            "title": "From Instance",
+            "type": "string"
+          },
+          "health_timeout_seconds": {
+            "default": 60,
+            "minimum": 1,
+            "title": "Health Timeout Seconds",
+            "type": "integer"
+          },
+          "no_cache": {
+            "default": false,
+            "title": "No Cache",
+            "type": "boolean"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "release_tag": {
+            "default": "",
+            "title": "Release Tag",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_git_ref": {
+            "default": "",
+            "title": "Source Git Ref",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout Seconds"
+          },
+          "to_instance": {
+            "default": "prod",
+            "title": "To Instance",
+            "type": "string"
+          },
+          "verify_health": {
+            "default": true,
+            "title": "Verify Health",
+            "type": "boolean"
+          },
+          "wait": {
+            "default": true,
+            "title": "Wait",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "product"
+        ],
+        "title": "GenericWebProdPromotionRequest",
+        "type": "object"
+      },
+      "GenericWebProdPromotionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id",
+            "x-launchplane-optional-response": true
+          },
+          "records": {
+            "$ref": "#/components/schemas/GenericWebProdPromotionRecords"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed",
+            "x-launchplane-optional-response": true
+          },
+          "result": {
+            "$ref": "#/components/schemas/GenericWebProdPromotionResponseResult"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "records",
+          "result",
+          "status",
+          "trace_id"
+        ],
+        "title": "GenericWebProdPromotionResponse",
+        "type": "object"
+      },
+      "GenericWebProdPromotionResponseResult": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "default": "",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "backup_record_id": {
+            "default": "",
+            "title": "Backup Record Id",
+            "type": "string"
+          },
+          "backup_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Backup Status",
+            "type": "string"
+          },
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "default": "",
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "deployment_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Deployment Status",
+            "type": "string"
+          },
+          "destination_health_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Destination Health Status",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "error_message": {
+            "default": "",
+            "title": "Error Message",
+            "type": "string"
+          },
+          "from_instance": {
+            "default": "",
+            "title": "From Instance",
+            "type": "string"
+          },
+          "inventory_record_id": {
+            "default": "",
+            "title": "Inventory Record Id",
+            "type": "string"
+          },
+          "product": {
+            "default": "",
+            "title": "Product",
+            "type": "string"
+          },
+          "promotion_record_id": {
+            "default": "",
+            "title": "Promotion Record Id",
+            "type": "string"
+          },
+          "promotion_status": {
+            "default": "pending",
+            "enum": [
+              "pending",
+              "pass",
+              "fail"
+            ],
+            "title": "Promotion Status",
+            "type": "string"
+          },
+          "provider_id": {
+            "default": "",
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "provider_target_type": {
+            "default": "",
+            "title": "Provider Target Type",
+            "type": "string"
+          },
+          "release_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Release Status",
+            "type": "string"
+          },
+          "release_tag": {
+            "default": "",
+            "title": "Release Tag",
+            "type": "string"
+          },
+          "release_url": {
+            "default": "",
+            "title": "Release Url",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "default": "",
+            "title": "Source Git Ref",
+            "type": "string"
+          },
+          "source_health_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Source Health Status",
+            "type": "string"
+          },
+          "target_category": {
+            "default": "unknown",
+            "enum": [
+              "application",
+              "compose",
+              "container",
+              "service",
+              "static",
+              "unknown"
+            ],
+            "title": "Target Category",
+            "type": "string"
+          },
+          "target_id": {
+            "default": "",
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_name": {
+            "default": "",
+            "title": "Target Name",
+            "type": "string"
+          },
+          "to_instance": {
+            "default": "",
+            "title": "To Instance",
+            "type": "string"
+          }
+        },
+        "title": "GenericWebProdPromotionResponseResult",
+        "type": "object",
+        "required": [
+          "artifact_id",
+          "backup_record_id",
+          "backup_status",
+          "context",
+          "deployment_record_id",
+          "deployment_status",
+          "destination_health_status",
+          "dry_run",
+          "error_message",
+          "from_instance",
+          "inventory_record_id",
+          "product",
+          "promotion_record_id",
+          "promotion_status",
+          "provider_id",
+          "provider_target_type",
+          "release_status",
+          "release_tag",
+          "release_url",
+          "source_git_ref",
+          "source_health_status",
+          "target_category",
+          "target_id",
+          "target_name",
+          "to_instance"
+        ]
+      },
+      "GenericWebPromotionWorkflowEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/GenericWebPromotionWorkflowRequest"
+          }
+        },
+        "required": [
+          "product",
+          "workflow"
+        ],
+        "title": "GenericWebPromotionWorkflowEnvelope",
+        "type": "object"
+      },
+      "GenericWebPromotionWorkflowRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "bump": {
+            "anyOf": [
+              {
+                "enum": [
+                  "patch",
+                  "minor",
+                  "major"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bump"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": true,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "observe_timeout_seconds": {
+            "default": 12,
+            "maximum": 60,
+            "minimum": 0,
+            "title": "Observe Timeout Seconds",
+            "type": "integer"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "product",
+          "context"
+        ],
+        "title": "GenericWebPromotionWorkflowRequest",
+        "type": "object"
+      },
+      "GenericWebPromotionWorkflowResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id",
+            "x-launchplane-optional-response": true
+          },
+          "records": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed",
+            "x-launchplane-optional-response": true
+          },
+          "result": {
+            "$ref": "#/components/schemas/GenericWebPromotionWorkflowResponseResult"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "records",
+          "result",
+          "status",
+          "trace_id"
+        ],
+        "title": "GenericWebPromotionWorkflowResponse",
+        "type": "object"
+      },
+      "GenericWebPromotionWorkflowResponseResult": {
+        "additionalProperties": false,
+        "properties": {
+          "bump": {
+            "default": "patch",
+            "enum": [
+              "patch",
+              "minor",
+              "major"
+            ],
+            "title": "Bump",
+            "type": "string"
+          },
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "dispatch_status": {
+            "const": "dispatched",
+            "default": "dispatched",
+            "title": "Dispatch Status",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "product": {
+            "default": "",
+            "title": "Product",
+            "type": "string"
+          },
+          "ref": {
+            "default": "",
+            "title": "Ref",
+            "type": "string"
+          },
+          "repository": {
+            "default": "",
+            "title": "Repository",
+            "type": "string"
+          },
+          "run_conclusion": {
+            "default": "",
+            "title": "Run Conclusion",
+            "type": "string"
+          },
+          "run_id": {
+            "default": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "run_status": {
+            "default": "pending",
+            "title": "Run Status",
+            "type": "string"
+          },
+          "run_url": {
+            "default": "",
+            "title": "Run Url",
+            "type": "string"
+          },
+          "workflow_id": {
+            "default": "",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "title": "GenericWebPromotionWorkflowResponseResult",
+        "type": "object",
+        "required": [
+          "bump",
+          "context",
+          "dispatch_status",
+          "dry_run",
+          "product",
+          "ref",
+          "repository",
+          "run_conclusion",
+          "run_id",
+          "run_status",
+          "run_url",
+          "workflow_id"
+        ]
       },
       "GitHubHumanIdentityResponse": {
         "additionalProperties": false,
@@ -4401,22 +5498,6 @@
         "title": "GitHubIssueInboxRepositoryGroup",
         "type": "object"
       },
-      "HTTPValidationError": {
-        "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
-          }
-        },
-        "title": "HTTPValidationError",
-        "type": "object",
-        "required": [
-          "detail"
-        ]
-      },
       "HealthcheckEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -4533,7 +5614,8 @@
                 "type": "null"
               }
             ],
-            "title": "Authz"
+            "title": "Authz",
+            "x-launchplane-optional-response": true
           },
           "error": {
             "$ref": "#/components/schemas/LaunchplaneErrorDetail"
@@ -4550,7 +5632,8 @@
                 "type": "null"
               }
             ],
-            "title": "Records"
+            "title": "Records",
+            "x-launchplane-optional-response": true
           },
           "status": {
             "default": "rejected",
@@ -4563,9 +5646,7 @@
           }
         },
         "required": [
-          "authz",
           "error",
-          "records",
           "status",
           "trace_id"
         ],
@@ -6855,6 +7936,684 @@
           "trace_id"
         ],
         "title": "ProductActivityResponse",
+        "type": "object"
+      },
+      "ProductConfigApplyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id",
+            "x-launchplane-optional-response": true
+          },
+          "records": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed",
+            "x-launchplane-optional-response": true
+          },
+          "result": {
+            "$ref": "#/components/schemas/ProductConfigApplyResult"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "records",
+          "result",
+          "status",
+          "trace_id"
+        ],
+        "title": "ProductConfigApplyResponse",
+        "type": "object"
+      },
+      "ProductConfigApplyResult": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_actions": {
+            "items": {
+              "$ref": "#/components/schemas/ProductConfigLiveTargetRuntimeNextAction"
+            },
+            "title": "Next Actions",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "runtime_environment": {
+            "$ref": "#/components/schemas/ProductConfigRuntimeEnvironmentResult"
+          },
+          "runtime_key_safety": {
+            "$ref": "#/components/schemas/ProductConfigRuntimeKeySafetyResult"
+          },
+          "secrets": {
+            "items": {
+              "$ref": "#/components/schemas/ProductConfigSecretResult"
+            },
+            "title": "Secrets",
+            "type": "array"
+          },
+          "source_label": {
+            "title": "Source Label",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "records_applied_live_sync_required"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ProductConfigApplySummary"
+          }
+        },
+        "required": [
+          "actor",
+          "context",
+          "instance",
+          "mode",
+          "next_actions",
+          "product",
+          "runtime_environment",
+          "runtime_key_safety",
+          "secrets",
+          "source_label",
+          "status",
+          "summary"
+        ],
+        "title": "ProductConfigApplyResult",
+        "type": "object"
+      },
+      "ProductConfigApplySummary": {
+        "additionalProperties": false,
+        "properties": {
+          "runtime_changed_key_count": {
+            "minimum": 0,
+            "title": "Runtime Changed Key Count",
+            "type": "integer"
+          },
+          "secret_change_count": {
+            "minimum": 0,
+            "title": "Secret Change Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runtime_changed_key_count",
+          "secret_change_count"
+        ],
+        "title": "ProductConfigApplySummary",
+        "type": "object"
+      },
+      "ProductConfigLiveTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "target_name": {
+            "title": "Target Name",
+            "type": "string"
+          },
+          "target_type": {
+            "title": "Target Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "instance",
+          "target_name",
+          "target_type"
+        ],
+        "title": "ProductConfigLiveTarget",
+        "type": "object"
+      },
+      "ProductConfigLiveTargetRuntimeNextAction": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "$ref": "#/components/schemas/ProductConfigLiveTargetRuntimeOperation"
+          },
+          "changed_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Keys",
+            "type": "array"
+          },
+          "dry_run": {
+            "$ref": "#/components/schemas/ProductConfigLiveTargetRuntimeOperation"
+          },
+          "instruction": {
+            "title": "Instruction",
+            "type": "string"
+          },
+          "kind": {
+            "const": "live_target_runtime_apply",
+            "title": "Kind",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "live_sync_required",
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/ProductConfigLiveTarget"
+          }
+        },
+        "required": [
+          "apply",
+          "changed_keys",
+          "dry_run",
+          "instruction",
+          "kind",
+          "required",
+          "status",
+          "target"
+        ],
+        "title": "ProductConfigLiveTargetRuntimeNextAction",
+        "type": "object"
+      },
+      "ProductConfigLiveTargetRuntimeOperation": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "title": "Endpoint",
+            "type": "string"
+          },
+          "method": {
+            "const": "POST",
+            "title": "Method",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "endpoint",
+          "method",
+          "mode"
+        ],
+        "title": "ProductConfigLiveTargetRuntimeOperation",
+        "type": "object"
+      },
+      "ProductConfigRuntimeEnvironmentRecordSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "env_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Env Keys",
+            "type": "array"
+          },
+          "env_value_count": {
+            "minimum": 0,
+            "title": "Env Value Count",
+            "type": "integer"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "context",
+              "instance"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "source_label": {
+            "title": "Source Label",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "env_keys",
+          "env_value_count",
+          "instance",
+          "scope",
+          "source_label",
+          "updated_at"
+        ],
+        "title": "ProductConfigRuntimeEnvironmentRecordSummary",
+        "type": "object"
+      },
+      "ProductConfigRuntimeEnvironmentResult": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "skipped",
+              "created",
+              "updated",
+              "unchanged"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "changed_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Keys",
+            "type": "array"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "env_value_count_after": {
+            "minimum": 0,
+            "title": "Env Value Count After",
+            "type": "integer"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Keys",
+            "type": "array"
+          },
+          "record": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductConfigRuntimeEnvironmentRecordSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "context",
+              "instance"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "unchanged_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unchanged Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "changed_keys",
+          "context",
+          "env_value_count_after",
+          "instance",
+          "keys",
+          "scope",
+          "unchanged_keys"
+        ],
+        "title": "ProductConfigRuntimeEnvironmentResult",
+        "type": "object"
+      },
+      "ProductConfigRuntimeInput": {
+        "additionalProperties": true,
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "env": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "title": "Env",
+            "type": "object"
+          },
+          "instance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "enum": [
+                  "global",
+                  "context",
+                  "instance"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          }
+        },
+        "title": "ProductConfigRuntimeInput",
+        "type": "object"
+      },
+      "ProductConfigRuntimeKeySafetyResult": {
+        "additionalProperties": false,
+        "properties": {
+          "checked_binding_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Checked Binding Keys",
+            "type": "array"
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/RuntimeKeySafetyFinding"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "policy_record_id": {
+            "default": "",
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_sha256": {
+            "default": "",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "skipped",
+              "pass"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeKeySafetyTarget"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          }
+        },
+        "required": [
+          "checked_binding_keys",
+          "findings",
+          "policy_record_id",
+          "policy_sha256",
+          "required",
+          "status"
+        ],
+        "title": "ProductConfigRuntimeKeySafetyResult",
+        "type": "object"
+      },
+      "ProductConfigSecretInput": {
+        "additionalProperties": true,
+        "properties": {
+          "binding_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Key"
+          },
+          "context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "instance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance"
+          },
+          "integration": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Integration"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "enum": [
+                  "global",
+                  "context",
+                  "context_instance"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "ProductConfigSecretInput",
+        "type": "object"
+      },
+      "ProductConfigSecretResult": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "created",
+              "rotated",
+              "unchanged"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "context",
+              "context_instance"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "secret_id": {
+            "default": "",
+            "title": "Secret Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "binding_key",
+          "context",
+          "instance",
+          "integration",
+          "name",
+          "scope",
+          "secret_id"
+        ],
+        "title": "ProductConfigSecretResult",
         "type": "object"
       },
       "ProductEnvironmentConfigStatus": {
@@ -9302,6 +11061,90 @@
         "title": "RuntimeIdentity",
         "type": "object"
       },
+      "RuntimeKeySafetyFinding": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_id": {
+            "default": "",
+            "title": "Binding Id",
+            "type": "string"
+          },
+          "binding_key": {
+            "default": "",
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "code": {
+            "enum": [
+              "ambiguous_binding",
+              "binding_disabled",
+              "binding_missing",
+              "context_not_allowed",
+              "instance_not_allowed",
+              "secret_class_not_allowed",
+              "unclassified_binding",
+              "unknown_environment_class"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "secret_class": {
+            "default": "",
+            "title": "Secret Class",
+            "type": "string"
+          },
+          "secret_id": {
+            "default": "",
+            "title": "Secret Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_id",
+          "binding_key",
+          "code",
+          "detail",
+          "secret_class",
+          "secret_id"
+        ],
+        "title": "RuntimeKeySafetyFinding",
+        "type": "object"
+      },
+      "RuntimeKeySafetyTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "environment_class": {
+            "enum": [
+              "prod",
+              "testing",
+              "preview",
+              "dev",
+              "unknown"
+            ],
+            "title": "Environment Class",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "environment_class",
+          "instance"
+        ],
+        "title": "RuntimeKeySafetyTarget",
+        "type": "object"
+      },
       "SecretBinding": {
         "additionalProperties": false,
         "properties": {
@@ -9436,48 +11279,6 @@
           "status",
           "version"
         ]
-      },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "ctx",
-          "input",
-          "loc",
-          "msg",
-          "type"
-        ],
-        "title": "ValidationError",
-        "type": "object"
       },
       "WorkGraphIssueInboxResponse": {
         "additionalProperties": false,
@@ -9646,6 +11447,333 @@
           "url"
         ],
         "title": "WorkGraphIssueSnapshot",
+        "type": "object"
+      },
+      "WorkGraphQueue": {
+        "additionalProperties": false,
+        "properties": {
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "hidden_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Hidden Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WorkGraphQueueItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generated_at",
+          "hidden_count",
+          "items",
+          "schema_version"
+        ],
+        "title": "WorkGraphQueue",
+        "type": "object"
+      },
+      "WorkGraphQueueEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "source_url": {
+            "default": "",
+            "title": "Source Url",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "detail",
+          "source_url",
+          "state"
+        ],
+        "title": "WorkGraphQueueEvidence",
+        "type": "object"
+      },
+      "WorkGraphQueueItem": {
+        "additionalProperties": false,
+        "properties": {
+          "blocked_by_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Blocked By Count",
+            "type": "integer"
+          },
+          "evidence": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WorkGraphQueueEvidence"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "finish_line": {
+            "default": "",
+            "title": "Finish Line",
+            "type": "string"
+          },
+          "focus": {
+            "enum": [
+              "Now",
+              "Next",
+              "Waiting",
+              "Later",
+              "Done",
+              "Unknown"
+            ],
+            "title": "Focus",
+            "type": "string"
+          },
+          "handoff_url": {
+            "default": "",
+            "title": "Handoff Url",
+            "type": "string"
+          },
+          "manager": {
+            "default": "",
+            "title": "Manager",
+            "type": "string"
+          },
+          "next_action": {
+            "title": "Next Action",
+            "type": "string"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "product": {
+            "default": "",
+            "title": "Product",
+            "type": "string"
+          },
+          "product_display_name": {
+            "default": "",
+            "title": "Product Display Name",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "$ref": "#/components/schemas/WorkGraphRecommendationReason"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "recommendation": {
+            "enum": [
+              "quick_win",
+              "deep_work",
+              "switch_projects",
+              "blocked_cleanup",
+              "attention_needed",
+              "watch"
+            ],
+            "title": "Recommendation",
+            "type": "string"
+          },
+          "repo_classification": {
+            "enum": [
+              "managed_runtime",
+              "active_awareness",
+              "support_dependency",
+              "out_of_scope"
+            ],
+            "title": "Repo Classification",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "safe_to_start": {
+            "title": "Safe To Start",
+            "type": "boolean"
+          },
+          "score": {
+            "title": "Score",
+            "type": "integer"
+          },
+          "source_of_truth_url": {
+            "title": "Source Of Truth Url",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "ready",
+              "waiting",
+              "blocked",
+              "done",
+              "hidden"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "default": "",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "why_now": {
+            "title": "Why Now",
+            "type": "string"
+          }
+        },
+        "required": [
+          "blocked_by_count",
+          "evidence",
+          "finish_line",
+          "focus",
+          "handoff_url",
+          "manager",
+          "next_action",
+          "number",
+          "product",
+          "product_display_name",
+          "reasons",
+          "recommendation",
+          "repo_classification",
+          "repository",
+          "safe_to_start",
+          "score",
+          "source_of_truth_url",
+          "state",
+          "title",
+          "updated_at",
+          "url",
+          "why_now"
+        ],
+        "title": "WorkGraphQueueItem",
+        "type": "object"
+      },
+      "WorkGraphRankEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 25,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/WorkGraphSnapshot"
+          }
+        },
+        "required": [
+          "snapshot"
+        ],
+        "title": "WorkGraphRankEnvelope",
+        "type": "object"
+      },
+      "WorkGraphRankResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "records": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Records",
+            "type": "object"
+          },
+          "result": {
+            "$ref": "#/components/schemas/WorkGraphRankResult"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "records",
+          "result",
+          "status",
+          "trace_id"
+        ],
+        "title": "WorkGraphRankResponse",
+        "type": "object"
+      },
+      "WorkGraphRankResult": {
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/components/schemas/WorkGraphQueue"
+          }
+        },
+        "required": [
+          "queue"
+        ],
+        "title": "WorkGraphRankResult",
+        "type": "object"
+      },
+      "WorkGraphRecommendationReason": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "detail"
+        ],
+        "title": "WorkGraphRecommendationReason",
         "type": "object"
       },
       "WorkGraphRepoSnapshot": {

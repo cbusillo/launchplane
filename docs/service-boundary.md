@@ -92,6 +92,26 @@ VeriReel product paths:
   - `POST /v1/ingress/canary-routes/apply`, requiring `ingress_route.apply` for
     the requested product/context, resolving the stored canary route and edge
     endpoint before provider apply, and requiring an `Idempotency-Key`
+- native FastAPI environment route-binding reads and backfill writes:
+  - `GET /v1/route-bindings/records`, requiring `route_binding.read` for the
+    requested product/context and supporting `instance`, `status`, and bounded
+    `limit` filters
+  - `GET /v1/route-bindings/records/current`, requiring `route_binding.read` for
+    the requested product/context/instance tuple
+  - `POST /v1/route-bindings/backfill/apply`, requiring `route_binding.apply`
+    for the requested product/context, requiring the provider-target projection
+    to match its tracked Dokploy target and target-id records, comparing bounded
+    edge-endpoint and ingress-audit evidence, and rejecting unknown TLS
+    ownership, unresolved newer applies, evidence older than 24 hours, or an
+    existing binding. `dry-run` does not require an `Idempotency-Key`; `apply`
+    does. Apply reserves before planning, releases an unbound reservation for a
+    blocked or already-satisfied plan, and commits the route-binding record plus
+    completed replay evidence in one PostgreSQL transaction. Concurrent
+    same-key requests replay or report the active claim, while different keys
+    racing the same product/context/instance cannot both create the binding.
+    Filesystem-backed service apply fails closed because it cannot provide that
+    atomic boundary; filesystem route-binding storage remains available for
+    explicit local rehearsal.
 - native FastAPI ingress route apply write:
   - `POST /v1/drivers/ingress/route-apply`, requiring `ingress_route.plan` for
     `dry-run` and `ingress_route.apply` for `apply`, resolving optional edge
@@ -235,19 +255,29 @@ VeriReel product paths:
     worker-token callers and bearer-token callers with
     `every_code_work_request.claim`, record-store claim capability checks,
     `404 not_found` for missing requests, `409 work_request_already_claimed`
-    for non-queued requests, and workflow `Idempotency-Key` replay/conflict
-    handling)
+    for non-queued requests, and bearer or worker-token `Idempotency-Key`
+    replay/conflict handling; PostgreSQL commits the claim and completed replay
+    evidence atomically)
+  - `POST /v1/every-code/work-requests/heartbeat` (native FastAPI for Every Code
+    worker-token callers and authorized bearer callers, extending the lease only
+    when host and fencing token still match the active record)
+  - `POST /v1/every-code/work-requests/recover-stale` (native FastAPI for Every
+    Code worker-token callers and bearer-token callers with
+    `every_code_work_request.update`, using a locked stale-snapshot compare to
+    requeue bounded attempts or block for manual review)
   - `POST /v1/every-code/work-requests/status` (native FastAPI for Every Code
     worker-token callers and bearer-token callers with
     `every_code_work_request.update`, replay-before-write idempotency handling,
-    record-store status capability checks, `404 not_found` for missing requests,
-    and blocked-notification delivery)
+    record-store status capability checks, exact fencing-token enforcement for
+    leased requests, `404 not_found` for missing requests, and
+    blocked-notification delivery)
   - `POST /v1/every-code/work-requests/rerun` (native FastAPI for Every Code
     worker-token callers and bearer-token callers with
     `every_code_work_request.rerun`, approved `every_code_rerun` write-intent
     evidence, workflow replay-before-write idempotency handling, record-store
-    rerun capability checks, `404 not_found` for missing requests, and
-    terminal-only requeue semantics)
+    rerun capability checks, `404 not_found` for missing requests, terminal-only
+    compare-and-write requeue semantics, and atomic replay evidence for bearer
+    and worker-token callers)
   - `POST /v1/every-code/pr-feedback` (native FastAPI for Every Code
     worker-token callers, direct PR-feedback record writes, and DB-backed
     storage capability enforcement without idempotency state)
@@ -355,7 +385,7 @@ New or changed service route families must preserve the completed HTTP boundary:
 typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
-Frontend read-contract generation uses the same boundary. Run
+Frontend contract generation uses the same boundary. Run
 `uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`
 to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
 without live credentials, managed-secret values, or runtime-authority examples.
@@ -363,11 +393,24 @@ The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
 and checked `frontend/src/generated/openapi.ts/` types from that canonical
 export. `pnpm --dir frontend check:openapi-drift` regenerates those artifacts in
 temporary paths and fails when the checked schema or generated types drift from
-the backend contract. The canonical `x-launchplane-ui-read-operations` manifest
-owns each selected GET path and stable operation id; slicing fails closed when a
-route, operation id, success response, or referenced schema drifts. Generated
-response envelopes are the API boundary consumed by the UI. Handwritten
-frontend types remain only for write requests and explicit UI normalization.
+the backend contract. The canonical `x-launchplane-ui-read-operations` and
+`x-launchplane-ui-write-operations` manifests own each selected GET or accepted
+browser-safe POST path and stable operation id; slicing fails closed when a
+route, method, operation id, success response, or referenced schema drifts. The
+write slice currently covers work-graph ranking, product-config dry-run/apply,
+generic-web promotion dry-runs, and generic-web promotion workflow dispatches.
+Issue reconciliation remains a bearer-only service operation rather than a
+browser client binding. Generated request, success, validation, and error
+bindings are the API boundary consumed by the UI. Handwritten frontend types
+remain only for UI view models and explicit normalization.
+
+Launchplane converts FastAPI request-validation failures into the standard
+`400` Launchplane error envelope, so canonical and generated contracts omit the
+framework's unreachable `422` response. Product-config request generation keeps
+the structured `runtime_env` model while accepting the legacy flat environment
+map and unknown nested fields that earlier external callers could send; precise
+response contracts must not turn contract generation into an unannounced input
+compatibility break.
 
 The human auth/session family uses FastAPI routes in the production service:
 `GET /auth/github/login`, `GET /auth/github/callback`, `GET /v1/auth/session`,
@@ -697,7 +740,7 @@ base-branch movement before merging, relies on GitHub's SHA guard for each PR
 head, and records stale landing evidence before returning the normal stale-state
 response. When landing a collapsed stack root, the route validates the linked
 stack-collapse record before the root merge and then writes stack-child
-disposition evidence after the landing record is persisted and accepted calls
+disposition evidence after the landing record is persisted. Accepted calls
 support optional `Idempotency-Key` replay/conflict handling.
 
 `.github/workflows/merge-train-runner.yml` is the first external scheduler for
@@ -1304,11 +1347,17 @@ SHA-256 and an `Idempotency-Key`; changed reviewed inputs or a profile-row chang
 during apply make the operation stale. A successful apply uses an atomic
 compare-and-write, rebuilds from the current stored record, and changes only the
 preview certificate value plus `updated_at` and server-owned `source`;
-profile-row serialization and idempotency evidence commit in the same
-transaction even when the requested value is already current. The operator
-workflow receives the real target product as dispatch input, and its
-product-specific authz grant comes from operator-supplied configuration rather
-than checked-in runtime authority.
+DB-clock preflight rejects active claims, preserves reconciliation-bound claims,
+and releases only expired unbound orphans that cannot have committed this
+DB-only atomic write. The transaction inserts a typed `running` mutation
+reservation before the profile write and commits the profile plus `completed`
+replay evidence together, even when the requested value is already current.
+Concurrent same-key requests cannot both write; matching requests replay the
+committed response and changed fingerprints fail with
+`409 idempotency_key_reused`. The operator workflow
+receives the real target product as dispatch input, and its product-specific
+authz grant comes from operator-supplied configuration rather than checked-in
+runtime authority.
 
 Public ingress notification policy writes use
 `POST /v1/public-ingress/notification-policies/apply`. The request carries
@@ -1773,6 +1822,10 @@ are present. The descriptor routes remain discoverable.
   human-session callers)
 - `GET /v1/ingress/canary-routes/records/{canary_key}` (native FastAPI for
   bearer-token and human-session callers)
+- `GET /v1/route-bindings/records` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/route-bindings/records/current` (native FastAPI for bearer-token and
+  human-session callers)
 - `GET /v1/ingress/route-audits/records` (native FastAPI for bearer-token and
   human-session callers)
 - `GET /v1/ingress/route-audits/records/{record_id}` (native FastAPI for
@@ -1835,6 +1888,18 @@ scope query parameters for list and single-record reads, preserve optional
 list filters, and return `404 not_found` when a record exists outside the
 requested scope. Endpoint apply and ingress route apply routes use native
 FastAPI write handlers with the apply contracts above.
+
+Environment route-binding reads check `route_binding.read` against the requested
+product/context before storage access and require product/context for list reads
+and product/context/instance for the singleton read. Responses are redacted read
+models: provider-specific host ids, certificate ids, target ids, edge addresses,
+provider payload evidence, and certificate references remain stored evidence
+and are omitted from the ordinary operator/API read contract. The backfill apply
+route checks `route_binding.apply` for the requested product/context, accepts no
+caller-supplied domains, provider identifiers, or freshness timestamps, and
+fails closed unless the provider-target projection matches its Dokploy target
+and target-id records and bounded, terminal, explicitly owned, fresh evidence
+resolves exactly one binding for the requested tuple.
 
 Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.
@@ -1947,8 +2012,8 @@ requests. The artifact-publish and artifact-publish inputs routes are owned by
 native FastAPI; product-specific artifact publish calls validate the requested
 context and instance against the DB-backed product profile lane before
 authorization. Native FastAPI owns the paths. Failed publish evidence is not
-cached as an idempotent success. Odoo post-deploy, config-parameter override, and
-website-bootstrap override are native FastAPI routes too. They preserve
+cached as an idempotent success. Odoo post-deploy, config-parameter override,
+and website-bootstrap override are native FastAPI routes too. They preserve
 product-profile driver validation, lane-scoped authorization, optional
 `Idempotency-Key` replay/conflict behavior, post-deploy transition records, and
 Odoo instance override record merge behavior. Odoo preview apply inputs and
@@ -2099,6 +2164,19 @@ for all write routes. Launchplane replays the first successful accepted
 response when the same authenticated workflow scope retries the same route
 with the same key and the same request fingerprint. Launchplane rejects reuse
 of the same key for a different payload on the same route.
+
+Reservation-backed mutations strengthen that completed-response contract by
+claiming `(scope, route, key)` before effects. The reservation records a typed
+owner, lease, attempt, state, optional provider reconciliation key, and eventual
+response. A matching active request reports that execution is already in
+progress. An expired reservation without an external operation key may be
+reclaimed; an expired reservation with a bound operation key becomes
+`reconcile_required` and must not repeat the provider effect. DB-only routes
+commit business state and completion evidence atomically. Provider routes must
+bind their stable operation/reconciliation key before invoking the provider.
+Product preview TLS apply is the first DB-only route migrated to this boundary;
+remaining route migrations must preserve the same fail-closed semantics rather
+than relying on process-local locks.
 
 Current VeriReel key shapes:
 

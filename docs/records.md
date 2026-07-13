@@ -96,6 +96,57 @@ creates isolated databases, applies Alembic from empty schema to `head`, verifie
 the exact schema head and critical invariants, and then drops the databases. It
 must not use Launchplane runtime credentials or shared production databases.
 
+## Mutation Reservations
+
+The `launchplane_idempotency_records` table is also the durable mutation-
+reservation boundary. Existing completed-response rows remain valid and are
+backfilled as `completed`; reservation-backed routes add promoted state, lease,
+attempt, owner, reconciliation-key, and timestamp columns while retaining the
+typed payload as the complete evidence envelope.
+
+Reservation identity is `(scope, route_path, idempotency_key)` and remains
+unique in PostgreSQL. The typed lifecycle is:
+
+- `running`: one owner holds a bounded lease before effects begin.
+- `completed`: the response status, trace, payload, and completion timestamp are
+  durable replay evidence.
+- `reconcile_required`: an external operation key was bound and the effect is
+  now unknown; automatic re-execution is forbidden until domain reconciliation
+  proves the provider state.
+
+Reservation attempts return typed `acquired`, `replayed`, `conflict`,
+`in_progress`, or `reconcile_required` decisions. A different request
+fingerprint always conflicts, including while the first request is running. An
+expired reservation without a reconciliation key may be reclaimed by a new
+owner with an incremented attempt. Once a provider operation or reconciliation
+key is bound, lease expiry transitions to `reconcile_required` instead of
+repeating the effect. Lease renewal, completion, and reconciliation binding use
+owner checks and fail closed for stale owners.
+
+DB-only mutations should reserve and complete inside the same transaction as
+their business write. `POST /v1/product-profiles/preview-tls/apply` and
+`POST /v1/route-bindings/backfill/apply` use that boundary: the reservation
+insert occurs before the domain write, and the domain record plus completed
+response commit atomically. A no-op apply still commits the completed
+reservation so concurrent and later same-key requests replay the original
+response. If response-evidence persistence fails, the domain write and
+reservation both roll back. A DB-only preflight may remove an expired unbound
+orphan reservation when the route could not have committed the atomic domain
+write; active or reconciliation-bound claims remain fail-closed. Persisted
+reservation and completion timestamps come from the database clock.
+
+Route-binding backfill additionally releases its unbound reservation when a
+fresh plan proves the operation is blocked, stale, or already satisfied before
+any record can be written. PostgreSQL apply is the supported service mutation
+boundary. Filesystem storage retains typed route-binding read/write parity for
+local rehearsal, but the service does not emulate the PostgreSQL transaction by
+performing a split filesystem apply.
+
+Provider-backed routes must durably reserve first, bind their stable provider
+operation or reconciliation key before invoking the provider, and complete only
+after durable local evidence is ready. A crash or timeout after key binding is
+an unknown outcome, not permission to retry the provider mutation.
+
 ## ORM Query Boundary
 
 Launchplane's Postgres storage layer should expose GUI and driver reads through
@@ -313,6 +364,27 @@ an ORM column/table or remains only in the evidence payload.
   `POST /v1/ingress/canary-routes/apply` consumes the stored record, records an
   ingress route audit, and preserves the existing idempotency replay/conflict
   contract.
+- Environment route binding: modeled fields are `product`, `context`,
+  `instance`, provider target summary, ingress provider/endpoint,
+  termination kind, primary domain, TLS owner, `status`, freshness, and
+  `updated_at`. The payload carries all typed desired domains, source record
+  references, and provider evidence needed to explain the binding. The primary
+  key is the neutral environment tuple, not a provider host id, certificate id,
+  IP address, or Dokploy target id. Native FastAPI
+  `GET /v1/route-bindings/records` and
+  `GET /v1/route-bindings/records/current` return redacted read models that omit
+  provider evidence. Native FastAPI
+  `POST /v1/route-bindings/backfill/apply` plans or writes one binding by
+  comparing existing Launchplane provider-target, tracked Dokploy target, edge
+  endpoint, and applied ingress audit records. The provider-target record must
+  equal the projection of the Dokploy target plus target-id record; the latest
+  matching apply audit must be terminal and include explicit TLS ownership.
+  Source record timestamps are retained as versions and must be within the
+  service-owned 24-hour freshness window. Backfill fails closed when any join is
+  missing, ambiguous, stale, conflicting, unresolved, or exceeds the bounded
+  evidence scan, and it never overwrites an existing route-binding record.
+  Product repositories must not own route bindings, TLS ownership, provider
+  host ids, certificate ids, or edge topology.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from
@@ -458,10 +530,11 @@ always reads fresh state and returns the current value, requested value, profile
 timestamp, and a canonical plan SHA-256 without storing idempotency evidence.
 Apply requires that reviewed SHA-256 plus an idempotency key and fails stale if
 the reviewed TLS plan inputs changed or the profile row changes during apply.
-Apply serializes the profile row and commits idempotency evidence in the same
-transaction, including no-op applies. The manual `Product Preview TLS` workflow
-is the audited operator surface for both modes and supplies the target product
-and requested `none` or `letsencrypt` value as runtime input. Its
+Apply inserts its mutation reservation before the profile write and commits the
+profile plus completed response evidence in the same transaction, including
+no-op applies. The manual `Product Preview TLS` workflow is the audited operator
+surface for both modes and supplies the target product and requested `none` or
+`letsencrypt` value as runtime input. Its
 `product_profile.preview_tls.apply` grant is target-product scoped and must come
 from operator-supplied authz input rather than a checked-in product catalog.
 
@@ -1089,15 +1162,52 @@ preflights.
 - State is `queued`, `claimed`, `running`, `done`, or `blocked`. Workers claim a
   queued request before reporting progress. Terminal states are immutable through
   the service status route.
+- Every claim is atomic and sets three lease fields: `lease_expires_at` (ISO
+  timestamp when the lease lapses), `fencing_token` (monotonically increasing
+  integer equal to the cumulative claim count for this request id), and `attempt`
+  (same value, kept separately for readability). The fencing token starts at 1 on
+  the first claim and increments on every subsequent requeue-and-reclaim cycle.
+  Once a record has a non-zero fence, service status updates must carry that
+  exact `fencing_token`; missing and stale tokens are rejected before the row is
+  changed. Heartbeats enforce the same host-and-fence match, preventing
+  stale-owner writes after a lease expires and a new worker reclaims.
+- Workers send periodic heartbeats through `POST /v1/every-code/work-requests/heartbeat`
+  to extend `lease_expires_at` before it lapses. A heartbeat is rejected (409)
+  when the host or fencing token does not match, or when the request is already
+  terminal. Workers that die without heartbeating leave the record with an expired
+  lease and the recovery path handles it.
+- `POST /v1/every-code/work-requests/recover-stale` scans for claimed or running
+  records whose `lease_expires_at` has passed and applies a recovery policy:
+  `safe_requeue` (attempt ≤ 3) resets the record to `queued` with all lease
+  fields cleared so another worker can pick it up; `manual_review` (attempt > 3)
+  marks the record `blocked` with an error message requiring operator inspection
+  before any requeue. Recovery locks and compares the exact stale snapshot, so a
+  concurrent heartbeat or status transition wins cleanly instead of being
+  overwritten by a stale recovery decision.
+- Service-backed workers invoke the same recovery route during their polling
+  loop. Filesystem-backed workers serialize claim, heartbeat, status, and
+  recovery transitions with per-request process locks and publish JSON records
+  through atomic replacement.
+- Requests that were already active before lease fields existed migrate with an
+  expired lease and an exhausted safe-retry attempt. Their first recovery marks
+  them `blocked` for manual review instead of risking duplicate execution.
+- Worker-token claim and rerun requests use a stable synthetic idempotency scope.
+  PostgreSQL claim commits the claimed record and completed replay evidence in
+  one transaction; rerun uses compare-and-write with the completed response in
+  the same transaction. Same-key retries replay the original response, changed
+  payloads conflict, and a lost HTTP response does not permit a second claim or
+  rerun mutation.
 - The local worker handoff is `uv run launchplane every-code run` for polling or
   `uv run launchplane every-code run-once` for a single scan. Each pass applies
   trusted PR feedback, reconciles preview gates and ready preview labels, removes
   stale source-issue queue labels for closed requests that can no longer reach
   preview readiness, routes failed checks back to the owning session, then claims
-  at most one queued request. Request handoff opens or reuses deterministic
-  visible tmux sessions for local checkouts, records `running` or immediate
-  `blocked` status, and wraps the visible command so terminal success or failure
-  calls `uv run launchplane every-code finish`.
+  at most one queued request. Request handoff terminates any stale deterministic
+  tmux session before launching a newly claimed attempt, records `running` or
+  immediate `blocked` status, and wraps the visible command so terminal success
+  or failure calls `uv run launchplane every-code finish` with the fencing token
+  captured at launch. A recovered or superseded session therefore cannot read a
+  newer token and finish as the new owner.
 - A Mac host can leave the poller running with
   `uv run launchplane every-code start`, inspect it with
   `uv run launchplane every-code status`, and stop it with

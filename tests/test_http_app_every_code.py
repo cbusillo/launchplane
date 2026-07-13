@@ -227,9 +227,25 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
             )
 
+            claim_payload: dict[str, object] = {
+                "request_id": seeded.request_id,
+                "host": "Chris-Studio",
+            }
             response = await _post_every_code_work_request_claim(
                 app,
-                {"request_id": seeded.request_id, "host": "Chris-Studio"},
+                claim_payload,
+                authorization="Bearer worker-token",
+                idempotency_key="every-code-worker-claim",
+            )
+            replayed_response = await _post_every_code_work_request_claim(
+                app,
+                claim_payload,
+                authorization="Bearer worker-token",
+                idempotency_key="every-code-worker-claim",
+            )
+            conflict_response = await _post_every_code_work_request_claim(
+                app,
+                {"request_id": seeded.request_id, "host": "Other-Host"},
                 authorization="Bearer worker-token",
                 idempotency_key="every-code-worker-claim",
             )
@@ -241,6 +257,10 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"]["state"], "claimed")
         self.assertEqual(payload["result"]["request"]["state"], "claimed")
         self.assertEqual(payload["result"]["request"]["claimed_by_host"], "Chris-Studio")
+        self.assertEqual(replayed_response.status_code, 202)
+        self.assertTrue(replayed_response.json()["replayed"])
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
         self.assertEqual(stored_request.state, "claimed")
         self.assertEqual(stored_request.claimed_by_host, "Chris-Studio")
 
@@ -436,6 +456,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     "request_id": seeded.request_id,
                     "host": "Chris-Studio",
                     "state": "running",
+                    "fencing_token": claimed.fencing_token,
                     "updated_at": "2026-05-05T22:02:00Z",
                 },
                 authorization="Bearer worker-token",
@@ -473,6 +494,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     "request_id": seeded.request_id,
                     "host": "Runner-Host",
                     "state": "done",
+                    "fencing_token": claimed.fencing_token,
                     "result_pr_url": "https://github.com/cbusillo/code/pull/26",
                     "result_summary": "Opened a PR with the requested fix.",
                 },
@@ -484,6 +506,39 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
             response.json()["result"]["request"]["result_pr_url"],
             "https://github.com/cbusillo/code/pull/26",
         )
+
+    async def test_every_code_work_request_status_rejects_missing_fencing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=seeded.request_id,
+                host="Chris-Studio",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            if claimed is None:
+                raise AssertionError("expected seeded request to be claimable")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_status(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "host": "Chris-Studio",
+                    "state": "running",
+                },
+                authorization="Bearer worker-token",
+            )
+            stored_request = store.read_every_code_work_request_record(seeded.request_id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_payload")
+        self.assertEqual(stored_request.state, "claimed")
 
     async def test_every_code_work_request_status_replays_authorized_idempotency(self) -> None:
         payload: dict[str, object] = {
@@ -596,6 +651,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     "request_id": "every-code-cbusillo-code-123-test",
                     "host": "Chris-Studio",
                     "state": "running",
+                    "fencing_token": 1,
                 },
                 authorization="Bearer worker-token",
             )
@@ -702,6 +758,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                         "request_id": seeded.request_id,
                         "host": "Chris-Studio",
                         "state": "blocked",
+                        "fencing_token": claimed.fencing_token,
                         "error_message": "Every Code bot auth actor mismatch.",
                     },
                     authorization="Bearer worker-token",
@@ -739,6 +796,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="blocked",
                     host="Chris-Studio",
+                    fencing_token=claimed.fencing_token,
                     updated_at="2026-05-05T22:05:00Z",
                     result_pr_url="https://github.com/cbusillo/code/pull/26",
                     result_summary="Detached session went stale.",
@@ -757,14 +815,27 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
             )
 
+            rerun_payload: dict[str, object] = {
+                "request_id": seeded.request_id,
+                "trigger_actor": "cbusillo",
+                "source_url": "https://github.com/cbusillo/code/issues/123",
+                "agent_write_intent_record_id": intent.record_id,
+            }
             response = await _post_every_code_work_request_rerun(
                 app,
-                {
-                    "request_id": seeded.request_id,
-                    "trigger_actor": "cbusillo",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "agent_write_intent_record_id": intent.record_id,
-                },
+                rerun_payload,
+                authorization="Bearer worker-token",
+                idempotency_key="every-code-rerun-intent:123",
+            )
+            replayed_response = await _post_every_code_work_request_rerun(
+                app,
+                rerun_payload,
+                authorization="Bearer worker-token",
+                idempotency_key="every-code-rerun-intent:123",
+            )
+            conflict_response = await _post_every_code_work_request_rerun(
+                app,
+                {**rerun_payload, "trigger_actor": "other-operator"},
                 authorization="Bearer worker-token",
                 idempotency_key="every-code-rerun-intent:123",
             )
@@ -776,6 +847,10 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"]["state"], "queued")
         self.assertEqual(payload["records"]["agent_write_intent_record_id"], intent.record_id)
         self.assertEqual(payload["result"]["request"]["trigger_actor"], "cbusillo")
+        self.assertEqual(replayed_response.status_code, 202)
+        self.assertTrue(replayed_response.json()["replayed"])
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
         self.assertEqual(stored_request.state, "queued")
         self.assertEqual(stored_request.claimed_by_host, "")
         self.assertEqual(stored_request.result_pr_url, "")
@@ -799,6 +874,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="done",
                     host="Runner-Host",
+                    fencing_token=claimed.fencing_token,
                     updated_at="2026-05-05T22:05:00Z",
                     result_pr_url="https://github.com/cbusillo/code/pull/26",
                 ),
@@ -843,6 +919,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="blocked",
                     host="Chris-Studio",
+                    fencing_token=claimed.fencing_token,
                     updated_at="2026-05-05T22:05:00Z",
                     error_message="Needs another pass.",
                 ),
@@ -1002,6 +1079,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="blocked",
                     host="Chris-Studio",
+                    fencing_token=claimed.fencing_token,
                     updated_at="2026-05-05T22:05:00Z",
                     error_message="Needs another pass.",
                 ),
@@ -1768,7 +1846,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     "required"
                 ]
             ),
-            {"request_id", "host", "state"},
+            {"request_id", "host", "state", "fencing_token"},
         )
         self.assertEqual(
             work_request_status_route["responses"]["202"]["content"]["application/json"]["schema"][

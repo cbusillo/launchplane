@@ -4128,6 +4128,66 @@ async def _get_private_health_endpoint_record(
     )
 
 
+async def _get_route_binding_records(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "example-product",
+    context: str = "example-testing",
+    instance: str = "",
+    status: str = "",
+    limit: str = "",
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    params = {}
+    if product:
+        params["product"] = product
+    if context:
+        params["context"] = context
+    if instance:
+        params["instance"] = instance
+    if status:
+        params["status"] = status
+    if limit:
+        params["limit"] = limit
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/route-bindings/records{suffix}",
+        headers=request_headers,
+    )
+
+
+async def _get_route_binding_record(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "example-product",
+    context: str = "example-testing",
+    instance: str = "web",
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    params = {}
+    if product:
+        params["product"] = product
+    if context:
+        params["context"] = context
+    if instance:
+        params["instance"] = instance
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/route-bindings/records/current{suffix}",
+        headers=request_headers,
+    )
+
+
 async def _get_ingress_canary_route_records(
     app: FastAPI,
     *,
