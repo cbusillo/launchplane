@@ -142,6 +142,37 @@ boundary. Filesystem storage retains typed route-binding read/write parity for
 local rehearsal, but the service does not emulate the PostgreSQL transaction by
 performing a split filesystem apply.
 
+Product authority bundle writes are the same atomicity boundary for product
+runtime/config ownership. PostgreSQL storage exposes a single
+`write_product_authority_bundle` repository method for the authority graph that
+can include product profiles, provider targets, legacy Dokploy target records,
+runtime-environment rows and delete events, managed-secret versions/current
+pointers/bindings/audit events, environment inventory, release tuples, and the
+completed idempotency response. Product config, onboarding, context cutover,
+and legacy cleanup plan their whole graph first and then commit through this
+method once. A current managed-secret pointer must not advance unless the new
+version, binding, audit evidence, required runtime-environment changes, and
+applicable idempotency completion are in the same transaction. Cleanup deletes
+compare the current row payload with the planned expected record under the
+storage boundary and fail closed on missing or drifted authority instead of
+publishing a partial graph. Provider-target writes likewise carry an
+expected-current or expected-absent precondition so a concurrent route owner
+cannot be overwritten after planning. Lane-summary reads hold a shared bundle
+guard while assembling their multi-record view, so a bundle commit cannot split
+one response across the old and new authority graphs.
+
+Filesystem storage remains local rehearsal state, not shared runtime authority.
+Its product authority bundle path stages every replacement under
+`.product_authority_bundle_stages/` before touching live record files. A stage
+left in `ready` state is discarded on the next store access because no live file
+has been published yet. A stage left in `publishing` state is explicitly
+resumable: the next store access completes remaining `os.replace` writes and
+expected-payload deletes from the manifest, then removes the stage. If live data
+changed from the manifest while recovery was pending, recovery fails closed and
+leaves the stage for operator inspection rather than guessing at authority.
+Ordinary filesystem reads, writes, creates, deletes, and composite promotion
+evidence rollback hold the same bundle lock through their live-file access.
+
 Provider-backed routes must durably reserve first, bind their stable provider
 operation or reconciliation key before invoking the provider, and complete only
 after durable local evidence is ready. A crash or timeout after key binding is

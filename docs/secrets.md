@@ -93,7 +93,8 @@ The target rotation model is:
    blocked from retirement, and a digest bound to the current secret versions.
 4. Apply through the same service endpoint with the dry-run digest, an operator
    reason, and an idempotency key. Launchplane atomically writes every new
-   ciphertext version, current-version pointer, and audit event.
+   ciphertext version, current-version pointer, audit event, and apply
+   idempotency completion record.
 5. Run dry-run again and verify the previous key id is reported as ready for
    retirement.
 6. Retire the previous root by removing it from the service bootstrap key ring.
@@ -333,7 +334,10 @@ decryption key state denies the reveal or resolution.
 - `uv run launchplane product-config apply --input-file bundle.json --dry-run`
   previews an approved product runtime/secret bundle without printing plaintext
   values or writing records. `--apply` writes non-secret runtime keys and
-  managed secret values through the same DB-backed stores. Run this command only
+  managed secret values through the same DB-backed authority bundle. Runtime
+  records, encrypted secret versions, current secret pointers, bindings, audit
+  events, and applicable idempotency evidence commit together or roll back
+  together. Run this command only
   from a trusted Launchplane context with current `LAUNCHPLANE_DATABASE_URL` and,
   when secrets are present, `LAUNCHPLANE_SECRET_KEYS_JSON` (or the legacy
   `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`). Dry-run and

@@ -8,12 +8,13 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
-from typing import Literal, Mapping, Protocol
+from typing import Callable, Literal, Mapping, Protocol
 
 import click
 from cryptography.fernet import Fernet, InvalidToken
 
 from control_plane.child_process_errors import redact_untrusted_text
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -89,7 +90,12 @@ class SecretWriteStore(SecretReadStore, Protocol):
 
 
 class SecretRotationStore(SecretWriteStore, Protocol):
-    def write_secret_rotations(self, rotations: tuple[SecretRotationWrite, ...]) -> None: ...
+    def write_secret_rotations(
+        self,
+        rotations: tuple[SecretRotationWrite, ...],
+        *,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> None: ...
 
 
 def _secret_slug(value: str) -> str:
@@ -784,6 +790,9 @@ def reencrypt_secrets(
     apply: bool = False,
     expected_plan_digest: str = "",
     operation_token: str = "",
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    idempotency_record_factory: Callable[[dict[str, object]], LaunchplaneIdempotencyRecord]
+    | None = None,
     actor: str = "cli",
     source_label: str = "manual",
     reason: str = "",
@@ -948,7 +957,13 @@ def reencrypt_secrets(
         )
 
     try:
-        record_store.write_secret_rotations(tuple(rotations))
+        completion_idempotency_record = idempotency_record
+        if completion_idempotency_record is None and idempotency_record_factory is not None:
+            completion_idempotency_record = idempotency_record_factory(result)
+        record_store.write_secret_rotations(
+            tuple(rotations),
+            idempotency_record=completion_idempotency_record,
+        )
     except (FileNotFoundError, ValueError):
         return {
             **result,

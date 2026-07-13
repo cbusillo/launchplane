@@ -52,6 +52,7 @@ from control_plane.storage.postgres import (
     MutationReservationResult,
     PostgresRecordStore,
 )
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
@@ -559,6 +560,64 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_lane_summary_waits_for_authority_bundle_commit(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            bundle_step_reached = threading.Event()
+            release_bundle = threading.Event()
+            read_started = threading.Event()
+            read_finished = threading.Event()
+            errors: list[BaseException] = []
+
+            class _BlockingStore(PostgresRecordStore):
+                def _after_product_authority_bundle_step(self, step_name: str) -> None:
+                    if step_name == "write_product_profile":
+                        bundle_step_reached.set()
+                        if not release_bundle.wait(timeout=5):
+                            raise TimeoutError("timed out waiting to release authority bundle")
+
+            blocking_store = _BlockingStore(database_url=store.database_url)
+            reader_store = PostgresRecordStore(database_url=store.database_url)
+
+            def write_bundle() -> None:
+                try:
+                    blocking_store.write_product_authority_bundle(
+                        ProductAuthorityBundle(product_profiles=(_product_profile(),))
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            def read_lane_summary() -> None:
+                read_started.set()
+                try:
+                    reader_store.read_lane_summary(
+                        context_name="example-product",
+                        instance_name="prod",
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    read_finished.set()
+
+            writer_thread = threading.Thread(target=write_bundle)
+            reader_thread = threading.Thread(target=read_lane_summary)
+            writer_thread.start()
+            try:
+                self.assertTrue(bundle_step_reached.wait(timeout=5))
+                reader_thread.start()
+                self.assertTrue(read_started.wait(timeout=5))
+                self.assertFalse(read_finished.wait(timeout=0.1))
+            finally:
+                release_bundle.set()
+                writer_thread.join(timeout=5)
+                if reader_thread.ident is not None:
+                    reader_thread.join(timeout=5)
+                blocking_store.close()
+                reader_store.close()
+
+        self.assertFalse(writer_thread.is_alive())
+        self.assertFalse(reader_thread.is_alive())
+        self.assertEqual(errors, [])
+
     def test_every_code_two_workers_claim_exactly_once(self) -> None:
         with _store_for_fresh_head_database() as store:
             record = _every_code_work_request()

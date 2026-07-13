@@ -15,6 +15,7 @@ from control_plane.product_config_service import (
     apply_product_config_service_request,
     product_config_service_error,
 )
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 
 
 class _FailingProductConfigStore:
@@ -88,6 +89,9 @@ class _FailingProductConfigStore:
 
     def write_secret_audit_event(self, event: SecretAuditEvent) -> None:
         raise AssertionError("dry-run test should not write secret audit events")
+
+    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
+        raise AssertionError("dry-run test should not write product authority bundles")
 
 
 class ProductConfigServiceTests(unittest.TestCase):

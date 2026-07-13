@@ -20,14 +20,18 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProductAuthorityBundleStore,
+    ProviderTargetWrite,
+)
 from control_plane.workflows.provider_target_dual_write import (
     prepare_provider_target_from_dokploy_records,
-    write_provider_target_from_dokploy_records,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-class ProductOnboardingRecordStore(Protocol):
+class ProductOnboardingRecordStore(ProductAuthorityBundleStore, Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None: ...
@@ -317,6 +321,21 @@ def apply_product_onboarding_manifest(
     manifest: ProductOnboardingManifest,
     updated_at: str = "",
 ) -> ProductOnboardingApplyResult:
+    result, bundle = plan_product_onboarding_authority_bundle(
+        record_store=record_store,
+        manifest=manifest,
+        updated_at=updated_at,
+    )
+    record_store.write_product_authority_bundle(bundle)
+    return result
+
+
+def plan_product_onboarding_authority_bundle(
+    *,
+    record_store: ProductOnboardingRecordStore,
+    manifest: ProductOnboardingManifest,
+    updated_at: str = "",
+) -> tuple[ProductOnboardingApplyResult, ProductAuthorityBundle]:
     recorded_at = updated_at.strip() or manifest.updated_at.strip() or utc_now_timestamp()
     existing_product_profile = _read_existing_product_profile(
         record_store=record_store,
@@ -335,6 +354,10 @@ def apply_product_onboarding_manifest(
         provider_targets=provider_targets,
         provider_target_ids=provider_target_ids,
     )
+    current_provider_targets = {
+        (record.context, record.instance): record
+        for record in record_store.list_physical_provider_target_records()
+    }
     runtime_environments = build_runtime_environment_records(
         manifest=manifest, updated_at=recorded_at
     )
@@ -364,25 +387,7 @@ def apply_product_onboarding_manifest(
             target_id_record=target_id_record,
         )
 
-    record_store.write_product_profile_record(product_profile)
-    for target_record in provider_targets:
-        record_store.write_dokploy_target_record(target_record)
-    for target_id_record in provider_target_ids:
-        record_store.write_dokploy_target_id_record(target_id_record)
-    for target_record, target_id_record in provider_target_pairs:
-        write_provider_target_from_dokploy_records(
-            record_store=record_store,
-            target_record=target_record,
-            target_id_record=target_id_record,
-        )
-    for runtime_record in runtime_environments:
-        record_store.write_runtime_environment_record(runtime_record)
-    for binding in secret_bindings:
-        record_store.write_secret_binding(binding)
-    for binding in secret_binding_plan.retired_bindings:
-        record_store.write_secret_binding(binding)
-
-    return ProductOnboardingApplyResult(
+    result = ProductOnboardingApplyResult(
         product=manifest.product,
         product_profile=product_profile,
         provider_targets=provider_targets,
@@ -390,6 +395,22 @@ def apply_product_onboarding_manifest(
         runtime_environments=runtime_environments,
         secret_bindings=secret_bindings,
     )
+    bundle = ProductAuthorityBundle(
+        product_profiles=(product_profile,),
+        dokploy_targets=provider_targets,
+        dokploy_target_ids=provider_target_ids,
+        provider_target_writes=tuple(
+            ProviderTargetWrite(
+                record=record,
+                expected_record=current_provider_targets.get((record.context, record.instance)),
+                expected_absent=(record.context, record.instance) not in current_provider_targets,
+            )
+            for record in physical_provider_targets
+        ),
+        runtime_environments=runtime_environments,
+        secret_bindings=(*secret_bindings, *secret_binding_plan.retired_bindings),
+    )
+    return result, bundle
 
 
 def _health_url(base_url: str, health_path: str) -> str:
