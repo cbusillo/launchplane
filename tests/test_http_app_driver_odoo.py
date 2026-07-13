@@ -54,11 +54,10 @@ from tests.http_app_test_support import (
     _post_odoo_target_replacement_plan,
     _post_odoo_website_bootstrap_override,
 )
-from tests.test_service import (
-    _identity,
-    _odoo_preview_profile_payload,
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.profiles import _odoo_preview_profile_payload
+from tests.support.stores import (
     _sqlite_database_url,
-    _StubVerifier,
     _write_odoo_preview_template_runtime_environment,
 )
 

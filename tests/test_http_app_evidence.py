@@ -43,7 +43,7 @@ from tests.http_app_test_support import (
     _runner_lane_registration_audit_write_identity,
     _runner_lane_registration_audit_write_policy,
 )
-from tests.test_service import _StubVerifier
+from tests.support.auth import _StubVerifier
 
 
 class FastApiDeploymentEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):

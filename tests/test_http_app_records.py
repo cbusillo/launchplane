@@ -94,11 +94,10 @@ from tests.http_app_test_support import (
     _write_recent_operations_records,
     _write_secret_status_records,
 )
-from tests.test_service import (
-    _identity,
-    _sqlite_database_url,
-    _StubVerifier,
-)
+from tests.support.http import request as http_request
+from tests.support.raw_asgi import request as raw_asgi_request
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.stores import _sqlite_database_url
 
 
 class FastApiDeploymentPromotionReadTests(unittest.IsolatedAsyncioTestCase):
@@ -3082,7 +3081,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
-        response = await _asgi_request(
+        response = await http_request(
             app,
             "POST",
             "/v1/evidence/deployments",
@@ -3133,7 +3132,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
-        response = await _asgi_request(
+        response = await raw_asgi_request(
             app,
             "POST",
             "/v1/evidence/deployments",
@@ -3161,7 +3160,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
-        response = await _asgi_request(
+        response = await raw_asgi_request(
             app,
             "POST",
             "/v1/evidence/deployments",
@@ -3189,7 +3188,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
-        response = await _asgi_request(
+        response = await raw_asgi_request(
             app,
             "POST",
             "/v1/evidence/deployments",
@@ -3217,7 +3216,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
-        response = await _asgi_request(
+        response = await raw_asgi_request(
             app,
             "POST",
             "/v1/evidence/deployments",
@@ -3246,7 +3245,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
-        response = await _asgi_request(
+        response = await raw_asgi_request(
             app,
             "POST",
             "/v1/evidence/deployments",
@@ -3274,7 +3273,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
-        response = await _asgi_request(
+        response = await raw_asgi_request(
             app,
             "POST",
             "/v1/evidence/deployments",
@@ -3302,7 +3301,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
-        response = await _asgi_request(
+        response = await raw_asgi_request(
             app,
             "POST",
             "/v1/evidence/deployments",
@@ -3332,7 +3331,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
-        response = await _asgi_request(
+        response = await raw_asgi_request(
             app,
             "POST",
             "/v1/evidence/deployments",

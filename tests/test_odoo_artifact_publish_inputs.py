@@ -158,7 +158,7 @@ class OdooArtifactPublishInputsTests(unittest.TestCase):
                 ]
             }
         )
-        from tests.test_service import _identity
+        from tests.support.auth import _identity
 
         self.assertTrue(
             policy.allows(

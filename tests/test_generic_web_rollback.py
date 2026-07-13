@@ -44,7 +44,7 @@ from tests.http_app_test_support import (
     _post_generic_web_rollback,
     _post_generic_web_rollback_plan,
 )
-from tests.test_service import _StubVerifier, _identity
+from tests.support.auth import _StubVerifier, _identity
 
 
 class _GenericWebRollbackStore:

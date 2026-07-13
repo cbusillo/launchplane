@@ -53,12 +53,14 @@ from tests.http_app_test_support import (
     _PreviewRecordOnlyStore,
     _record_read_policy,
 )
-from tests.test_service import (
+from tests.support.http import lifespan_client
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.profiles import (
     _generic_site_profile_payload,
-    _identity,
     _product_profile_payload,
+)
+from tests.support.stores import (
     _sqlite_database_url,
-    _StubVerifier,
 )
 
 
@@ -202,20 +204,21 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
                 "Idempotency-Key": "preview-lifecycle-cleanup:42",
             }
 
-            first_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/previews/lifecycle-cleanup",
-                headers=headers,
-                payload=request_payload,
-            )
-            replay_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/previews/lifecycle-cleanup",
-                headers=headers,
-                payload=request_payload,
-            )
+            async with lifespan_client(app) as client:
+                first_response = await _asgi_request(
+                    client,
+                    "POST",
+                    "/v1/previews/lifecycle-cleanup",
+                    headers=headers,
+                    payload=request_payload,
+                )
+                replay_response = await _asgi_request(
+                    client,
+                    "POST",
+                    "/v1/previews/lifecycle-cleanup",
+                    headers=headers,
+                    payload=request_payload,
+                )
             cleanup_records = FilesystemRecordStore(
                 state_dir=state_dir
             ).list_preview_lifecycle_cleanup_records(context_name="verireel-testing")

@@ -44,7 +44,8 @@ from tests.http_app_test_support import (
     _UnsupportedStackMergeTrainSnapshotReader,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
-from tests.test_service import (
+from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
+from tests.support.merge_train import (
     _CleanupFailingMergeTrainGitHubClient,
     _FakeCollapsedRootStackedMergeTrainSnapshotReader,
     _FakeExpandedMergeTrainSnapshotReader,
@@ -53,8 +54,6 @@ from tests.test_service import (
     _FakeMergeTrainSnapshotReader,
     _FakeMovedRootStackedMergeTrainSnapshotReader,
     _FakeStackedMergeTrainSnapshotReader,
-    _identity,
-    _local_operator_policy,
     _mark_merge_train_batch_candidate_record_passed,
     _merge_train_policy_table,
     _merge_train_run_record,
@@ -67,7 +66,6 @@ from tests.test_service import (
     _seed_merge_train_stack_collapse_plan_record,
     _StackCollapseWriteFailingFilesystemRecordStore,
     _StaleLandingMergeTrainGitHubClient,
-    _StubVerifier,
 )
 
 

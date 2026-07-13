@@ -61,7 +61,7 @@ process env for the first bring-up.
 uv run launchplane --help
 uv run launchplane service serve --help
 cd frontend && npx pnpm@10.10.0 validate
-uv run python -m unittest
+uv run --extra dev python -m unittest
 ```
 
 Frontend validation currently covers TypeScript and the production Vite build.

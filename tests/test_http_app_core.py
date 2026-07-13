@@ -68,11 +68,9 @@ from tests.http_app_test_support import (
     _StubFastApiGitHubOAuthClient,
     _terminal_agent_launchplane_service_reconcile_policy,
 )
-from tests.test_service import (
-    _identity,
-    _sqlite_database_url,
-    _StubVerifier,
-)
+from tests.support.http import lifespan_client
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.stores import _sqlite_database_url
 
 
 class FastApiConstructionMetadataTests(unittest.TestCase):
@@ -361,13 +359,13 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
             human_session_manager=session_manager,
             github_oauth_client=oauth_client,
         )
-        login_response = await _asgi_get(app, "/auth/github/login?return_to=/ui")
-        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
-
-        response = await _asgi_get(
-            app,
-            f"/auth/github/callback?code=github-code&state={state}",
-        )
+        async with lifespan_client(app) as client:
+            login_response = await _asgi_get(client, "/auth/github/login?return_to=/ui")
+            state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+            response = await _asgi_get(
+                client,
+                f"/auth/github/callback?code=github-code&state={state}",
+            )
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers["Location"], "/ui")
@@ -393,12 +391,13 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
                 human_session_manager=session_manager,
                 github_oauth_client=_StubFastApiGitHubOAuthClient(_github_human_identity()),
             )
-            login_response = await _asgi_get(app, "/auth/github/login")
-            state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
-            callback_response = await _asgi_get(
-                app,
-                f"/auth/github/callback?code=github-code&state={state}",
-            )
+            async with lifespan_client(app) as client:
+                login_response = await _asgi_get(client, "/auth/github/login")
+                state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+                callback_response = await _asgi_get(
+                    client,
+                    f"/auth/github/callback?code=github-code&state={state}",
+                )
 
             recreated_store = PostgresRecordStore(database_url=database_url)
             recreated_session_manager = HumanSessionManager(
@@ -411,11 +410,12 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
                 record_store_factory=lambda: recreated_store,
                 human_session_manager=recreated_session_manager,
             )
-            session_response = await _asgi_get(
-                recreated_app,
-                "/v1/auth/session",
-                headers={"Cookie": callback_response.headers["Set-Cookie"]},
-            )
+            async with lifespan_client(recreated_app) as recreated_client:
+                session_response = await _asgi_get(
+                    recreated_client,
+                    "/v1/auth/session",
+                    headers={"Cookie": callback_response.headers["Set-Cookie"]},
+                )
 
         self.assertEqual(callback_response.status_code, 302)
         self.assertEqual(session_response.status_code, 200)
@@ -436,16 +436,16 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
             human_session_manager=session_manager,
             github_oauth_client=oauth_client,
         )
-        login_response = await _asgi_get(
-            app,
-            "/auth/github/login?return_to=https%3A%2F%2Fevil.example%2Fui",
-        )
-        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
-
-        response = await _asgi_get(
-            app,
-            f"/auth/github/callback?code=github-code&state={state}",
-        )
+        async with lifespan_client(app) as client:
+            login_response = await _asgi_get(
+                client,
+                "/auth/github/login?return_to=https%3A%2F%2Fevil.example%2Fui",
+            )
+            state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+            response = await _asgi_get(
+                client,
+                f"/auth/github/callback?code=github-code&state={state}",
+            )
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers["Location"], "/")
@@ -480,14 +480,14 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
             human_session_manager=session_manager,
             github_oauth_client=_StubFastApiGitHubOAuthClient(_github_human_identity()),
         )
-        login_response = await _asgi_get(app, "/auth/github/login")
-        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
-        await _asgi_get(app, f"/auth/github/callback?code=github-code&state={state}")
-
-        response = await _asgi_get(
-            app,
-            f"/auth/github/callback?code=github-code&state={state}",
-        )
+        async with lifespan_client(app) as client:
+            login_response = await _asgi_get(client, "/auth/github/login")
+            state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+            await _asgi_get(client, f"/auth/github/callback?code=github-code&state={state}")
+            response = await _asgi_get(
+                client,
+                f"/auth/github/callback?code=github-code&state={state}",
+            )
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_oauth_callback")
@@ -506,13 +506,13 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
                 _github_human_identity(), permission_error=True
             ),
         )
-        login_response = await _asgi_get(app, "/auth/github/login")
-        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
-
-        response = await _asgi_get(
-            app,
-            f"/auth/github/callback?code=github-code&state={state}",
-        )
+        async with lifespan_client(app) as client:
+            login_response = await _asgi_get(client, "/auth/github/login")
+            state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+            response = await _asgi_get(
+                client,
+                f"/auth/github/callback?code=github-code&state={state}",
+            )
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
@@ -531,14 +531,14 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
                 _github_human_identity(), fail_fetch=True
             ),
         )
-        login_response = await _asgi_get(app, "/auth/github/login")
-        state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
-
-        with self.assertLogs("control_plane.http_app", level="ERROR") as captured_logs:
-            response = await _asgi_get(
-                app,
-                f"/auth/github/callback?code=github-code&state={state}",
-            )
+        async with lifespan_client(app) as client:
+            login_response = await _asgi_get(client, "/auth/github/login")
+            state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
+            with self.assertLogs("control_plane.http_app", level="ERROR") as captured_logs:
+                response = await _asgi_get(
+                    client,
+                    f"/auth/github/callback?code=github-code&state={state}",
+                )
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_oauth_callback")
@@ -814,19 +814,20 @@ class FastApiOperatorUiTests(unittest.IsolatedAsyncioTestCase):
                 control_plane_root_path=root,
             )
 
-            shell_response = await _asgi_get(app, "/ui")
-            asset_response = await _asgi_get(app, "/ui/assets/app.js")
+            async with lifespan_client(app) as client:
+                shell_response = await _asgi_get(client, "/ui")
+                asset_response = await _asgi_get(client, "/ui/assets/app.js")
 
         self.assertEqual(shell_response.status_code, 200)
         self.assertEqual(shell_response.headers["Content-Type"], "text/html")
-        self.assertIn(b"/ui/assets/app.js", shell_response.body)
+        self.assertIn(b"/ui/assets/app.js", shell_response.content)
         self.assertEqual(shell_response.headers["Cache-Control"], "no-store")
         self.assertEqual(asset_response.status_code, 200)
         self.assertIn(
             asset_response.headers["Content-Type"],
             {"text/javascript", "application/javascript"},
         )
-        self.assertIn(b"launchplane ui", asset_response.body)
+        self.assertIn(b"launchplane ui", asset_response.content)
         self.assertEqual(
             asset_response.headers["Cache-Control"],
             "public, max-age=31536000, immutable",
@@ -853,7 +854,7 @@ class FastApiOperatorUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Content-Type"], "text/html")
         self.assertEqual(response.headers["Cache-Control"], "no-store")
-        self.assertIn(b"/ui/assets/app.js", response.body)
+        self.assertIn(b"/ui/assets/app.js", response.content)
 
     async def test_ui_route_falls_back_to_shell_for_nested_paths(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -872,7 +873,7 @@ class FastApiOperatorUiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Content-Type"], "text/html")
-        self.assertIn(b"Launchplane UI", response.body)
+        self.assertIn(b"Launchplane UI", response.content)
 
     async def test_ui_asset_route_rejects_parent_directory_segments(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -891,7 +892,7 @@ class FastApiOperatorUiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.headers["Content-Type"], "application/json")
-        self.assertNotIn(b"Launchplane UI", response.body)
+        self.assertNotIn(b"Launchplane UI", response.content)
 
     async def test_unknown_route_uses_launchplane_error_envelope(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -1441,21 +1442,24 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             bearer_identity_config=_local_operator_bearer_config(),
         )
 
-        runtime_response = await _asgi_get(app, "/v1/service/runtime")
-        worker_response = await _asgi_get(app, "/v1/service/odoo-workers/status")
-        verireel_worker_response = await _asgi_get(app, "/v1/service/verireel-workers/status")
-        reconcile_response = await _asgi_request(
-            app,
-            "POST",
-            "/v1/service/odoo-workers/reconcile",
-            payload={},
-        )
-        verireel_reconcile_response = await _asgi_request(
-            app,
-            "POST",
-            "/v1/service/verireel-workers/reconcile",
-            payload={},
-        )
+        async with lifespan_client(app) as client:
+            runtime_response = await _asgi_get(client, "/v1/service/runtime")
+            worker_response = await _asgi_get(client, "/v1/service/odoo-workers/status")
+            verireel_worker_response = await _asgi_get(
+                client, "/v1/service/verireel-workers/status"
+            )
+            reconcile_response = await _asgi_request(
+                client,
+                "POST",
+                "/v1/service/odoo-workers/reconcile",
+                payload={},
+            )
+            verireel_reconcile_response = await _asgi_request(
+                client,
+                "POST",
+                "/v1/service/verireel-workers/reconcile",
+                payload={},
+            )
 
         self.assertEqual(runtime_response.status_code, 401)
         self.assertEqual(worker_response.status_code, 401)

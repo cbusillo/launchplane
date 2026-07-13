@@ -15,7 +15,7 @@ from control_plane.work_graph_issue_inbox import (
     load_github_issue_inbox_config_from_env,
     reconcile_github_issue_inbox,
 )
-from tests.test_work_graph_github_projects import _write_fake_gh_sequence
+from tests.support.work_graph import write_fake_gh_sequence as _write_fake_gh_sequence
 
 
 class GitHubIssueInboxTests(unittest.TestCase):
