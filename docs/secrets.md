@@ -12,8 +12,11 @@ title: Secrets
 - Dokploy credentials belong to `launchplane`.
 - Launchplane can now persist managed secret values in the Postgres
   shared-service backend when `LAUNCHPLANE_DATABASE_URL` is configured.
-- Managed secret values are encrypted before Launchplane stores them; the master
-  key stays outside the database in `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
+  Secret versions are encrypted before Launchplane stores them.
+- New deployments must use `LAUNCHPLANE_SECRET_KEYS_JSON` with explicit, canonical
+  high-entropy Fernet roots to manage encryption keys. Existing deployments can
+  continue to use `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` as a legacy fallback, but
+  should migrate to the JSON format to support explicit rotation and key retirement.
 - Keep bootstrap values only in process env long enough to write the real
   Launchplane-managed secret records.
 - Runtime environment truth should live in Launchplane DB records in steady
@@ -80,14 +83,15 @@ ids may decrypt old versions only during an explicit rotation or recovery window
 The target rotation model is:
 
 1. Introduce a new bootstrap decryption root or platform-secret reference and an
-   active `encryption_key_id`.
+   active `encryption_key_id` in `LAUNCHPLANE_SECRET_KEYS_JSON`.
 2. Keep the previous decryption root available only as an allowed historical key
-   for versions that still carry its key id.
+   in the JSON keys map for versions that still carry its key id.
 3. Re-encrypt managed-secret versions under the new key id through a
-   Launchplane-owned rotation path that writes audit evidence.
+   Launchplane-owned rotation path that writes audit evidence:
+   `uv run launchplane secrets reencrypt --apply`.
 4. Verify that all active versions are readable under the new key id.
-5. Retire the old key id so later reads fail closed if any active secret still
-   depends on it.
+5. Retire the old key id by removing it from `LAUNCHPLANE_SECRET_KEYS_JSON` so
+   later reads fail closed if any active secret still depends on it.
 
 Rotation is a service/storage operation, not a product workflow shortcut. It
 must not copy plaintext into GitHub issues, workflow logs, checked-in files,
@@ -222,7 +226,8 @@ decryption key state denies the reveal or resolution.
 
 - Treat these as bootstrap/process concerns, not product runtime truth:
   - `LAUNCHPLANE_DATABASE_URL`
-  - `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
+  - `LAUNCHPLANE_SECRET_KEYS_JSON`
+  - `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` (legacy fallback)
   - policy/bootstrap selectors such as `LAUNCHPLANE_POLICY_*`
   - service-ingress bearer secrets such as
     `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` and
@@ -243,10 +248,10 @@ decryption key state denies the reveal or resolution.
 - Never commit alternate secret files or rendered env artifacts.
 - Do not rely on a repo-local `.env` for control-plane-owned secrets.
 - Missing Dokploy credentials are a hard error, not a silent fallback.
-- Missing `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` is a hard error when Launchplane
-  needs to read or write DB-backed managed secrets.
+- Missing `LAUNCHPLANE_SECRET_KEYS_JSON` (and its legacy fallback `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`)
+  is a hard error when Launchplane needs to read or write DB-backed managed secrets.
 - The live Launchplane Dokploy target should expose bootstrap env such as
-  `LAUNCHPLANE_DATABASE_URL` and `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, while
+  `LAUNCHPLANE_DATABASE_URL` and `LAUNCHPLANE_SECRET_KEYS_JSON`, while
   Dokploy credentials and runtime/product values should resolve from
   Launchplane-managed records instead of target env.
 - Use `uv run launchplane service inspect-dokploy-target ...` to verify that
@@ -277,7 +282,8 @@ decryption key state denies the reveal or resolution.
   values or writing records. `--apply` writes non-secret runtime keys and
   managed secret values through the same DB-backed stores. Run this command only
   from a trusted Launchplane context with current `LAUNCHPLANE_DATABASE_URL` and,
-  when secrets are present, `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`. Dry-run and
+  when secrets are present, `LAUNCHPLANE_SECRET_KEYS_JSON` (or the legacy
+  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`). Dry-run and
   apply both reject invalid secret scopes or scope/context/instance mismatches
   before any managed secret write starts. Runtime-environment secret bundles
   also require an active runtime key-safety policy that allows each requested
@@ -318,6 +324,6 @@ decryption key state denies the reveal or resolution.
 ## Bootstrap
 
 Bring up the service with bootstrap env such as `LAUNCHPLANE_DATABASE_URL` and
-`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, then write the durable DB-backed secret
+`LAUNCHPLANE_SECRET_KEYS_JSON`, then write the durable DB-backed secret
 and runtime records through the normal Launchplane commands. Dokploy
 credentials belong in Launchplane-managed secrets before Dokploy operations run.

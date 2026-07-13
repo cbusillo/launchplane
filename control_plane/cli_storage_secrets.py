@@ -221,3 +221,39 @@ def secrets_show(database_url: str, secret_id: str) -> None:
     finally:
         postgres_store.close()
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@secrets.command("reencrypt")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane managed secrets.",
+)
+@click.option(
+    "--apply",
+    is_flag=True,
+    default=False,
+    help="Apply the re-encryption rather than just dry-running.",
+)
+@click.option(
+    "--allow-direct-db-mutation",
+    is_flag=True,
+    default=False,
+    help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
+)
+def secrets_reencrypt(database_url: str, apply: bool, allow_direct_db_mutation: bool) -> None:
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        result = control_plane_secrets.reencrypt_secrets(
+            record_store=postgres_store,
+            apply=apply,
+        )
+    finally:
+        postgres_store.close()
+    
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
+    if result["status"] == "error":
+        raise click.exceptions.Exit(1)

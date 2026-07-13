@@ -473,7 +473,7 @@ def _product_config_secret_current_action(
     if existing_record is None:
         return "created", ""
     current_version = record_store.read_secret_version(existing_record.current_version_id)
-    if control_plane_secrets._decrypt_secret_value(current_version.ciphertext) == str(
+    if control_plane_secrets._decrypt_secret_value(current_version.ciphertext, current_version.key_id) == str(
         secret["value"]
     ):
         return "unchanged", existing_record.secret_id

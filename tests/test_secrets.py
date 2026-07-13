@@ -302,5 +302,133 @@ class LaunchplaneSecretsTests(unittest.TestCase):
             store.close()
 
 
+    def test_json_encryption_keys(self) -> None:
+        import base64
+        import json
+        from cryptography.fernet import Fernet
+        import click
+        key1 = base64.urlsafe_b64encode(b"0" * 32).decode()
+        key2 = base64.urlsafe_b64encode(b"1" * 32).decode()
+        with patch.dict(
+            os.environ,
+            {
+                control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: json.dumps({
+                    "active_key_id": "key-2",
+                    "keys": {
+                        "key-1": key1,
+                        "key-2": key2,
+                    }
+                }),
+            },
+            clear=True,
+        ):
+            ciphertext, key_id = control_plane_secrets._encrypt_secret_value("plaintext-data")
+            self.assertEqual(key_id, "key-2")
+            
+            decrypted = control_plane_secrets._decrypt_secret_value(ciphertext, "key-2")
+            self.assertEqual(decrypted, "plaintext-data")
+            
+            with self.assertRaises(click.ClickException) as ctx:
+                control_plane_secrets._decrypt_secret_value(ciphertext, "key-3")
+            self.assertIn("key_id 'key-3' is unknown", str(ctx.exception))
+            
+            # Encrypt with key-1 manually and verify it decrypts
+            f1 = Fernet(key1.encode())
+            c1 = f1.encrypt(b"old-data").decode()
+            decrypted_1 = control_plane_secrets._decrypt_secret_value(c1, "key-1")
+            self.assertEqual(decrypted_1, "old-data")
+
+    def test_reencrypt_secrets(self) -> None:
+        import base64
+        import json
+        key1 = base64.urlsafe_b64encode(b"0" * 32).decode()
+        key2 = base64.urlsafe_b64encode(b"1" * 32).decode()
+        
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            
+            # Step 1: Write secret using key-1
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: json.dumps({
+                        "active_key_id": "key-1",
+                        "keys": {"key-1": key1}
+                    }),
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                },
+                clear=True,
+            ):
+                result1 = control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="global",
+                    integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
+                    name="host",
+                    plaintext_value="https://dokploy.db.example",
+                    binding_key="DOKPLOY_HOST",
+                    actor="test",
+                )
+                self.assertEqual(result1["status"], "ok")
+            
+            # Step 2: Rotate key (active is now key-2, key-1 still present), do dry run
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: json.dumps({
+                        "active_key_id": "key-2",
+                        "keys": {"key-1": key1, "key-2": key2}
+                    }),
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                },
+                clear=True,
+            ):
+                reencrypt_result_dry = control_plane_secrets.reencrypt_secrets(
+                    record_store=store,
+                    apply=False,
+                )
+                self.assertTrue(reencrypt_result_dry["dry_run"])
+                self.assertEqual(reencrypt_result_dry["rotated_count"], 1)
+                self.assertEqual(reencrypt_result_dry["unchanged_count"], 0)
+                
+                reencrypt_result = control_plane_secrets.reencrypt_secrets(
+                    record_store=store,
+                    apply=True,
+                )
+                self.assertFalse(reencrypt_result["dry_run"])
+                self.assertEqual(reencrypt_result["rotated_count"], 1)
+                self.assertEqual(reencrypt_result["unchanged_count"], 0)
+                
+                # Doing it again should yield 0 rotated, 1 unchanged
+                reencrypt_result_noop = control_plane_secrets.reencrypt_secrets(
+                    record_store=store,
+                    apply=True,
+                )
+                self.assertEqual(reencrypt_result_noop["rotated_count"], 0)
+                self.assertEqual(reencrypt_result_noop["unchanged_count"], 1)
+
+            # Step 3: Retire key-1 (no longer present), decryption works because it's re-encrypted
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: json.dumps({
+                        "active_key_id": "key-2",
+                        "keys": {"key-2": key2}
+                    }),
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                },
+                clear=True,
+            ):
+                # We can still read the secret
+                values = control_plane_secrets.resolve_secret_values_for_integration_from_store(
+                    record_store=store,
+                    integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
+                )
+                self.assertEqual(values.get("DOKPLOY_HOST"), "https://dokploy.db.example")
+            
+            store.close()
+
 if __name__ == "__main__":
     unittest.main()
