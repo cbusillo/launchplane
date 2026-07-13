@@ -29,7 +29,11 @@ from control_plane.route_binding_backfill import (
     RouteBindingBackfillRequest,
     plan_route_binding_backfill,
 )
-from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_app import (
+    create_launchplane_fastapi_app,
+    idempotency_request_fingerprint,
+    idempotency_scope,
+)
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -39,7 +43,7 @@ from tests.http_app_test_support import (
     _get_route_binding_record,
     _get_route_binding_records,
 )
-from tests.test_service import _StubVerifier, _identity
+from tests.support.auth import _StubVerifier, _identity
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -381,6 +385,137 @@ class RouteBindingStorageTests(unittest.TestCase):
             '["example-product","example-testing","api"]',
         )
         self.assertEqual(records, (record,))
+
+    def test_sqlite_route_binding_mutation_commits_record_and_completion_atomically(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _route_binding_record()
+            reservation = store.reserve_mutation(
+                scope="github-actions:route-binding-test",
+                route_path="/v1/route-bindings/backfill/apply",
+                idempotency_key="route-binding-create",
+                request_fingerprint="route-binding-fingerprint",
+                lease_owner="trace-route-binding-create",
+            ).record
+
+            result = store.create_route_binding_record_with_mutation(
+                record=record,
+                reservation=reservation,
+                response_status_code=202,
+                response_trace_id="trace-route-binding-create",
+                response_payload={"status": "accepted"},
+            )
+            loaded_record = store.read_route_binding_record(
+                product=record.product,
+                context_name=record.context,
+                instance_name=record.instance,
+            )
+            stored_completion = store.read_idempotency_record(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(result.status, "created")
+        self.assertEqual(loaded_record, record)
+        self.assertIsNotNone(stored_completion)
+        assert stored_completion is not None
+        self.assertEqual(stored_completion.state, "completed")
+        self.assertEqual(stored_completion.response_trace_id, "trace-route-binding-create")
+
+    def test_sqlite_route_binding_existing_record_releases_reservation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _route_binding_record()
+            store.write_route_binding_record(record)
+            reservation = store.reserve_mutation(
+                scope="github-actions:route-binding-test",
+                route_path="/v1/route-bindings/backfill/apply",
+                idempotency_key="route-binding-existing",
+                request_fingerprint="route-binding-existing-fingerprint",
+                lease_owner="trace-route-binding-existing",
+            ).record
+
+            result = store.create_route_binding_record_with_mutation(
+                record=record,
+                reservation=reservation,
+                response_status_code=202,
+                response_trace_id="trace-route-binding-existing",
+                response_payload={"status": "accepted"},
+            )
+            stored_reservation = store.read_idempotency_record(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(result.status, "exists")
+        self.assertEqual(result.route_binding, record)
+        self.assertIsNone(stored_reservation)
+
+    def test_sqlite_route_binding_completion_failure_rolls_back_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _route_binding_record()
+            reservation = store.reserve_mutation(
+                scope="github-actions:route-binding-test",
+                route_path="/v1/route-bindings/backfill/apply",
+                idempotency_key="route-binding-fault",
+                request_fingerprint="route-binding-fault-fingerprint",
+                lease_owner="trace-route-binding-fault",
+            ).record
+
+            with patch.object(
+                store,
+                "_sync_idempotency_row",
+                side_effect=RuntimeError("injected route binding completion failure"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected route binding completion failure",
+                ):
+                    store.create_route_binding_record_with_mutation(
+                        record=record,
+                        reservation=reservation,
+                        response_status_code=202,
+                        response_trace_id="trace-route-binding-fault",
+                        response_payload={"status": "accepted"},
+                    )
+            with self.assertRaises(FileNotFoundError):
+                store.read_route_binding_record(
+                    product=record.product,
+                    context_name=record.context,
+                    instance_name=record.instance,
+                )
+            stored_reservation = store.read_idempotency_record(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+            )
+            store.close()
+
+        self.assertIsNotNone(stored_reservation)
+        assert stored_reservation is not None
+        self.assertEqual(stored_reservation.state, "running")
 
 
 class RouteBindingBackfillTests(unittest.TestCase):
@@ -757,6 +892,72 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
 
+    async def test_route_binding_backfill_apply_requires_database_mutation_store(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_route_binding_policy(action="route_binding.apply"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/route-bindings/backfill/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "route-binding-backfill-filesystem",
+                },
+                payload=_route_binding_backfill_payload(),
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
+    async def test_route_binding_backfill_apply_reports_running_reservation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            identity = _identity()
+            payload = _route_binding_backfill_payload()
+            route_path = "/v1/route-bindings/backfill/apply"
+            idempotency_key = "route-binding-backfill-running"
+            store.reserve_mutation(
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+                request_fingerprint=idempotency_request_fingerprint(
+                    route_path=route_path,
+                    payload=payload,
+                ),
+                lease_owner="running-worker",
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=_route_binding_policy(action="route_binding.apply"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                route_path,
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": idempotency_key,
+                },
+                payload=payload,
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "mutation_in_progress")
+
     async def test_route_binding_backfill_apply_writes_record_without_provider_evidence_response(
         self,
     ) -> None:
@@ -806,6 +1007,11 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
                 context_name="example-testing",
                 instance_name="web",
             )
+            stored_reservation = store.read_idempotency_record(
+                scope=idempotency_scope(_identity()),
+                route_path="/v1/route-bindings/backfill/apply",
+                idempotency_key="route-binding-backfill-1",
+            )
             store.close()
 
         self.assertEqual(response.status_code, 202)
@@ -818,6 +1024,9 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"]["route_binding_status"], "applied")
         self.assertNotIn("provider_evidence", payload["result"]["record"]["provider_target"])
         self.assertEqual(loaded.ingress.endpoint_key, "example-edge")
+        self.assertIsNotNone(stored_reservation)
+        assert stored_reservation is not None
+        self.assertEqual(stored_reservation.state, "completed")
 
     async def test_route_binding_backfill_dry_run_reports_blockers_without_writing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -892,6 +1101,11 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
                 context_name="example-testing",
                 instance_name="web",
             )
+            stored_reservation = store.read_idempotency_record(
+                scope=idempotency_scope(_identity()),
+                route_path="/v1/route-bindings/backfill/apply",
+                idempotency_key="route-binding-backfill-existing",
+            )
             store.close()
 
         self.assertEqual(response.status_code, 202)
@@ -899,6 +1113,7 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"]["route_binding_status"], "blocked")
         self.assertEqual(payload["result"]["findings"][0]["code"], "route_binding_exists")
         self.assertEqual(loaded, existing_record)
+        self.assertIsNone(stored_reservation)
 
     async def test_openapi_includes_route_binding_contracts(self) -> None:
         app = create_launchplane_fastapi_app(

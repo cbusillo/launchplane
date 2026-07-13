@@ -104,7 +104,14 @@ VeriReel product paths:
     edge-endpoint and ingress-audit evidence, and rejecting unknown TLS
     ownership, unresolved newer applies, evidence older than 24 hours, or an
     existing binding. `dry-run` does not require an `Idempotency-Key`; `apply`
-    does.
+    does. Apply reserves before planning, releases an unbound reservation for a
+    blocked or already-satisfied plan, and commits the route-binding record plus
+    completed replay evidence in one PostgreSQL transaction. Concurrent
+    same-key requests replay or report the active claim, while different keys
+    racing the same product/context/instance cannot both create the binding.
+    Filesystem-backed service apply fails closed because it cannot provide that
+    atomic boundary; filesystem route-binding storage remains available for
+    explicit local rehearsal.
 - native FastAPI ingress route apply write:
   - `POST /v1/drivers/ingress/route-apply`, requiring `ingress_route.plan` for
     `dry-run` and `ingress_route.apply` for `apply`, resolving optional edge

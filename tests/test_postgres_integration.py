@@ -35,6 +35,14 @@ from control_plane.contracts.product_profile_record import (
     ProductImageProfile,
     ProductPreviewProfile,
 )
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+    RouteBindingIngress,
+    RouteBindingProviderTarget,
+    RouteBindingSource,
+    RouteBindingTls,
+)
 from control_plane.storage.postgres import (
     DbOnlyMutationRequest,
     MutationReservationResult,
@@ -241,6 +249,40 @@ def _product_profile() -> LaunchplaneProductProfileRecord:
         preview=ProductPreviewProfile(),
         updated_at="2026-07-13T00:00:00Z",
         source="test:postgres-integration",
+    )
+
+
+def _route_binding() -> EnvironmentRouteBindingRecord:
+    return EnvironmentRouteBindingRecord(
+        product="example-product",
+        context="example-testing",
+        instance="web",
+        provider_target=RouteBindingProviderTarget(
+            provider_id="dokploy",
+            target_category="compose",
+            provider_target_type="compose",
+            target_name="example-target",
+            provider_evidence={"target_record": "example-testing:web"},
+        ),
+        ingress=RouteBindingIngress(
+            provider="npmplus",
+            endpoint_key="example-edge",
+            termination_kind="edge",
+            provider_evidence={"audit_record": "audit-1"},
+        ),
+        domains=(RouteBindingDomain(domain_name="app.example.test", role="primary"),),
+        tls=RouteBindingTls(
+            owner="launchplane",
+            provider_evidence={"audit_record": "audit-1"},
+        ),
+        source=RouteBindingSource(
+            source_kind="operator",
+            source_label="test",
+            source_record_ids=("operator:test",),
+            refreshed_at="2026-07-12T00:00:00Z",
+            freshness_status="recorded",
+        ),
+        updated_at="2026-07-12T00:00:00Z",
     )
 
 
@@ -852,6 +894,77 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(stored_reservation.attempt, 2)
         self.assertEqual(stored_reservation.lease_owner, mutation.lease_owner)
         self.assertEqual(stored_reservation.response_trace_id, mutation.response_trace_id)
+
+    def test_route_binding_mutation_serializes_distinct_keys_across_stores(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            record = _route_binding()
+            first_reservation = store.reserve_mutation(
+                scope="github-actions:route-binding-test",
+                route_path="/v1/route-bindings/backfill/apply",
+                idempotency_key="route-binding-first",
+                request_fingerprint="route-binding-fingerprint-first",
+                lease_owner="worker-a",
+            ).record
+            second_reservation = second_store.reserve_mutation(
+                scope="github-actions:route-binding-test",
+                route_path="/v1/route-bindings/backfill/apply",
+                idempotency_key="route-binding-second",
+                request_fingerprint="route-binding-fingerprint-second",
+                lease_owner="worker-b",
+            ).record
+            barrier = threading.Barrier(2)
+
+            def create_binding(
+                active_store: PostgresRecordStore,
+                reservation: LaunchplaneIdempotencyRecord,
+                trace_id: str,
+            ) -> str:
+                barrier.wait()
+                return active_store.create_route_binding_record_with_mutation(
+                    record=record,
+                    reservation=reservation,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    response_payload={"status": "accepted", "trace_id": trace_id},
+                ).status
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: create_binding(*arguments),
+                            (
+                                (store, first_reservation, "trace-worker-a"),
+                                (second_store, second_reservation, "trace-worker-b"),
+                            ),
+                        )
+                    )
+                stored_record = store.read_route_binding_record(
+                    product=record.product,
+                    context_name=record.context,
+                    instance_name=record.instance,
+                )
+                reservation_records = tuple(
+                    store.read_idempotency_record(
+                        scope=reservation.scope,
+                        route_path=reservation.route_path,
+                        idempotency_key=reservation.idempotency_key,
+                    )
+                    for reservation in (first_reservation, second_reservation)
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["created", "exists"])
+        self.assertEqual(stored_record, record)
+        self.assertEqual(
+            sorted(
+                reservation.state if reservation is not None else "missing"
+                for reservation in reservation_records
+            ),
+            ["completed", "missing"],
+        )
 
     def test_profile_write_rolls_back_when_completion_persistence_fails(self) -> None:
         with _store_for_fresh_head_database() as store:

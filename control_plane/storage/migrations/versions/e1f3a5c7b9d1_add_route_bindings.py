@@ -1,7 +1,7 @@
 """add environment route binding records
 
-Revision ID: d0e2f4a6b8c0
-Revises: c9d1e3f5a7b9
+Revision ID: e1f3a5c7b9d1
+Revises: d0e2f4a6b8c0
 Create Date: 2026-07-12 00:00:00.000000+00:00
 """
 
@@ -13,8 +13,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision: str = "d0e2f4a6b8c0"
-down_revision: str | None = "c9d1e3f5a7b9"
+revision: str = "e1f3a5c7b9d1"
+down_revision: str | None = "d0e2f4a6b8c0"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

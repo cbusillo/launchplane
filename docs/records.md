@@ -124,16 +124,23 @@ repeating the effect. Lease renewal, completion, and reconciliation binding use
 owner checks and fail closed for stale owners.
 
 DB-only mutations should reserve and complete inside the same transaction as
-their business write. `POST /v1/product-profiles/preview-tls/apply` is the first
-migrated route: the reservation insert occurs before the profile write, and the
-profile plus completed response commit atomically. A no-op apply still commits
-the completed reservation so concurrent and later same-key requests replay the
-original response. If response-evidence persistence fails, the profile write
-and reservation both roll back. Its DB-only preflight may remove an expired
-unbound orphan reservation because the route cannot commit the profile write
-without completing that same transaction; active or reconciliation-bound claims
-remain fail-closed. Persisted reservation and completion timestamps come from
-the database clock.
+their business write. `POST /v1/product-profiles/preview-tls/apply` and
+`POST /v1/route-bindings/backfill/apply` use that boundary: the reservation
+insert occurs before the domain write, and the domain record plus completed
+response commit atomically. A no-op apply still commits the completed
+reservation so concurrent and later same-key requests replay the original
+response. If response-evidence persistence fails, the domain write and
+reservation both roll back. A DB-only preflight may remove an expired unbound
+orphan reservation when the route could not have committed the atomic domain
+write; active or reconciliation-bound claims remain fail-closed. Persisted
+reservation and completion timestamps come from the database clock.
+
+Route-binding backfill additionally releases its unbound reservation when a
+fresh plan proves the operation is blocked, stale, or already satisfied before
+any record can be written. PostgreSQL apply is the supported service mutation
+boundary. Filesystem storage retains typed route-binding read/write parity for
+local rehearsal, but the service does not emulate the PostgreSQL transaction by
+performing a split filesystem apply.
 
 Provider-backed routes must durably reserve first, bind their stable provider
 operation or reconciliation key before invoking the provider, and complete only

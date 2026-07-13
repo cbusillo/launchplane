@@ -588,7 +588,13 @@ from control_plane.launchplane_mutations import (
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
-from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
+from control_plane.storage.postgres import (
+    DbOnlyMutationRequest,
+    MutationReservationResult,
+    MutationReservationUpdateResult,
+    PostgresRecordStore,
+    RouteBindingMutationResult,
+)
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     PromotionEvidenceValidationError,
@@ -2604,6 +2610,36 @@ class _RouteBindingApplyStore(
     ) -> object: ...
 
 
+class _RouteBindingMutationStore(_RouteBindingApplyStore, Protocol):
+    def reserve_mutation(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        lease_owner: str,
+        lease_seconds: int = 300,
+        reconciliation_key: str = "",
+    ) -> MutationReservationResult: ...
+
+    def release_mutation_reservation(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+    ) -> MutationReservationUpdateResult: ...
+
+    def create_route_binding_record_with_mutation(
+        self,
+        *,
+        record: EnvironmentRouteBindingRecord,
+        reservation: LaunchplaneIdempotencyRecord,
+        response_status_code: int,
+        response_trace_id: str,
+        response_payload: dict[str, Any],
+    ) -> RouteBindingMutationResult: ...
+
+
 class _IngressRouteApplyStore(Protocol):
     def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> object: ...
 
@@ -3458,6 +3494,27 @@ def require_route_binding_apply_store(record_store: object) -> _RouteBindingAppl
             f"{missing_summary}"
         )
     return cast(_RouteBindingApplyStore, record_store)
+
+
+def require_route_binding_mutation_store(record_store: object) -> _RouteBindingMutationStore:
+    route_binding_store = require_route_binding_apply_store(record_store)
+    required_methods = (
+        "reserve_mutation",
+        "release_mutation_reservation",
+        "create_route_binding_record_with_mutation",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(route_binding_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support atomic route binding mutations: "
+            f"{missing_summary}"
+        )
+    return cast(_RouteBindingMutationStore, route_binding_store)
 
 
 def require_ingress_canary_route_record_apply_store(
@@ -14633,21 +14690,8 @@ def create_launchplane_fastapi_app(
                 code="idempotency_key_required",
                 message="Route binding backfill apply requests require an Idempotency-Key header.",
             )
-        (
-            normalized_key,
-            payload_fingerprint,
-            replayed_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=binding_request.mode == "apply",
-        )
-        if replayed_response is not None:
-            return replayed_response
+        normalized_key = idempotency_key.strip()
+        payload_fingerprint = ""
         try:
             route_binding_store = require_route_binding_apply_store(record_store)
         except TypeError as error:
@@ -14657,15 +14701,80 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        try:
-            existing_record = route_binding_store.read_route_binding_record(
-                product=binding_request.product,
-                context_name=binding_request.context,
-                instance_name=binding_request.instance,
+        mutation_store: _RouteBindingMutationStore | None = None
+        mutation_reservation: LaunchplaneIdempotencyRecord | None = None
+        if binding_request.mode == "apply":
+            try:
+                mutation_store = require_route_binding_mutation_store(record_store)
+            except TypeError as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message=str(error),
+                ) from error
+            raw_payload = await request.json()
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                payload=cast(dict[str, object], raw_payload),
             )
-        except FileNotFoundError:
-            existing_record = None
-        if existing_record is not None:
+            reservation_result = mutation_store.reserve_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+            )
+            if reservation_result.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=reservation_result.record,
+                    route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                )
+            if reservation_result.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if reservation_result.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching route binding mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if reservation_result.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=("The route binding mutation requires reconciliation before retry."),
+                )
+            mutation_reservation = reservation_result.record
+
+        def release_route_binding_reservation() -> None:
+            if mutation_store is None or mutation_reservation is None:
+                return
+            release_result = mutation_store.release_mutation_reservation(
+                reservation=mutation_reservation,
+            )
+            if release_result.status != "released":
+                raise RuntimeError(
+                    "Route binding mutation reservation could not be released before effects."
+                )
+
+        def existing_route_binding_response(
+            existing_record: EnvironmentRouteBindingRecord,
+        ) -> AcceptedEvidenceResponse:
             existing_plan = control_plane_route_binding_backfill.RouteBindingBackfillPlan(
                 status="blocked",
                 findings=(
@@ -14682,15 +14791,27 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 records={
                     "route_binding_status": "blocked",
-                    "product": binding_request.product,
-                    "context": binding_request.context,
-                    "instance": binding_request.instance,
+                    "product": existing_record.product,
+                    "context": existing_record.context,
+                    "instance": existing_record.instance,
                 },
                 result={
                     "mode": binding_request.mode,
                     **existing_plan.model_dump(mode="json", exclude_none=True),
                 },
             )
+
+        try:
+            existing_record = route_binding_store.read_route_binding_record(
+                product=binding_request.product,
+                context_name=binding_request.context,
+                instance_name=binding_request.instance,
+            )
+        except FileNotFoundError:
+            existing_record = None
+        if existing_record is not None:
+            release_route_binding_reservation()
+            return existing_route_binding_response(existing_record)
         backfill_plan = control_plane_route_binding_backfill.plan_route_binding_backfill(
             record_store=route_binding_store,
             request=control_plane_route_binding_backfill.RouteBindingBackfillRequest(
@@ -14702,6 +14823,7 @@ def create_launchplane_fastapi_app(
             ),
         )
         if backfill_plan.status != "ready" or backfill_plan.record is None:
+            release_route_binding_reservation()
             return accepted_evidence_response(
                 trace_id=trace_id,
                 records={
@@ -14716,8 +14838,6 @@ def create_launchplane_fastapi_app(
                 },
             )
         record_status = "applied" if binding_request.mode == "apply" else "planned"
-        if binding_request.mode == "apply":
-            route_binding_store.write_route_binding_record(backfill_plan.record)
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={
@@ -14735,14 +14855,64 @@ def create_launchplane_fastapi_app(
             },
         )
         if binding_request.mode == "apply":
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
-                route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint_value=payload_fingerprint,
+            if mutation_store is None or mutation_reservation is None:
+                raise RuntimeError("Route binding apply requires a mutation reservation.")
+            mutation_result = mutation_store.create_route_binding_record_with_mutation(
+                record=backfill_plan.record,
+                reservation=mutation_reservation,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+            )
+            if mutation_result.status == "created":
+                return response
+            if mutation_result.status == "replayed":
+                if mutation_result.idempotency_record is None:
+                    raise RuntimeError("Replayed route binding mutation requires evidence.")
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=mutation_result.idempotency_record,
+                    route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                )
+            if mutation_result.status == "exists":
+                if mutation_result.route_binding is None:
+                    raise RuntimeError("Existing route binding mutation requires a record.")
+                return existing_route_binding_response(mutation_result.route_binding)
+            if mutation_result.status == "idempotency_conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if mutation_result.status == "reconciliation_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=("The route binding mutation requires reconciliation before retry."),
+                )
+            if mutation_result.status == "reservation_expired":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_lease_expired",
+                    message=(
+                        "The route binding mutation lease expired before completion. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            raise _launchplane_http_error(
+                status_code=409,
                 trace_id=trace_id,
-                response=response,
+                code="mutation_in_progress",
+                message=(
+                    "The route binding mutation reservation changed before completion. "
+                    "Retry with the same Idempotency-Key."
+                ),
             )
         return response
 

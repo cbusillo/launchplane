@@ -8,7 +8,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-EXPECTED_ALEMBIC_HEAD_REVISION = "d0e2f4a6b8c0"
+EXPECTED_ALEMBIC_HEAD_REVISION = "e1f3a5c7b9d1"
 
 
 class SchemaInspectorProtocol(Protocol):
