@@ -1,3 +1,24 @@
+import type {
+  AuthSessionResponse as GeneratedAuthSessionResponse,
+  DriverContextViewResponse as GeneratedDriverContextViewResponse,
+  DriverDescriptorsResponse as GeneratedDriverDescriptorsResponse,
+  EveryCodeSummaryResponse as GeneratedEveryCodeSummaryResponse,
+  EveryCodeWorkRequestRecordsResponse as GeneratedEveryCodeWorkRequestRecordsResponse,
+  HttpValidationError as GeneratedHttpValidationError,
+  LaunchplaneErrorResponse as GeneratedLaunchplaneErrorResponse,
+  MergeTrainControllerStatusResponse as GeneratedMergeTrainControllerStatusResponse,
+  MergeTrainPolicyTargetsResponse as GeneratedMergeTrainPolicyTargetsResponse,
+  MergeTrainRunRecord as GeneratedMergeTrainRunRecord,
+  ProductEnvironmentConfigStatus as GeneratedProductEnvironmentConfigStatus,
+  ProductEnvironmentConfigStatusResponse as GeneratedProductEnvironmentConfigStatusResponse,
+  ProductEnvironmentListResponse as GeneratedProductEnvironmentListResponse,
+  ProductProfileListResponse as GeneratedProductProfileListResponse,
+  PreviewReadinessResponse as GeneratedPreviewReadinessResponse,
+  RepoProductMappingResponse as GeneratedRepoProductMappingResponse,
+  WorkGraphIssueInboxResponse as GeneratedWorkGraphIssueInboxResponse,
+  WorkGraphSnapshotResponse as GeneratedWorkGraphSnapshotResponse,
+} from "./generated/openapi.ts";
+
 export type Safety = "read" | "safe_write" | "mutation" | "destructive";
 export type Status =
   | "pass"
@@ -263,17 +284,9 @@ export interface DriverContextView {
   drivers: DriverView[];
 }
 
-export interface DriverListPayload {
-  status: "ok";
-  trace_id: string;
-  drivers: DriverDescriptor[];
-}
+export type DriverListPayload = GeneratedDriverDescriptorsResponse;
 
-export interface DriverViewPayload {
-  status: "ok";
-  trace_id: string;
-  view: DriverContextView;
-}
+export type DriverViewPayload = GeneratedDriverContextViewResponse;
 
 export interface AuthIdentity {
   provider: "github";
@@ -286,25 +299,14 @@ export interface AuthIdentity {
   role: "read_only" | "admin";
 }
 
-export interface AuthSessionPayload {
-  status: "ok";
-  trace_id: string;
-  identity: AuthIdentity;
-}
+export type AuthSessionPayload = GeneratedAuthSessionResponse;
 
 export interface LogoutPayload {
   status: "ok";
   trace_id: string;
 }
 
-export interface ApiErrorPayload {
-  status: "rejected";
-  trace_id?: string;
-  error?: {
-    code?: string;
-    message?: string;
-  };
-}
+export type ApiErrorPayload = GeneratedLaunchplaneErrorResponse | GeneratedHttpValidationError;
 
 export type ProductConfigMode = "dry-run" | "apply";
 export type ProductConfigRuntimeScope = "global" | "context" | "instance";
@@ -433,16 +435,11 @@ export interface ProductProfileRecord {
     ref: string;
     dry_run_input: string;
     bump_input: string;
-    default_bump: "patch" | "minor" | "major";
+    default_bump: string;
   };
 }
 
-export interface ProductProfileListPayload {
-  status: "ok";
-  trace_id: string;
-  driver_id: string;
-  profiles: ProductProfileRecord[];
-}
+export type ProductProfileListPayload = GeneratedProductProfileListResponse;
 
 export interface ProductActionAvailability {
   action_id: string;
@@ -522,33 +519,12 @@ export interface ProductManagedSecretConfigStatusItem {
   trust_state: FreshnessStatus | "disabled";
 }
 
-export interface ProductEnvironmentConfigStatus {
-  schema_version: number;
-  product: string;
-  display_name: string;
-  repository: string;
-  driver_id: string;
-  base_driver_id: string;
-  environment: string;
-  context: string;
-  runtime_settings: ProductRuntimeConfigStatusItem[];
-  managed_secrets: ProductManagedSecretConfigStatusItem[];
-  warnings: string[];
-  trust_state: FreshnessStatus;
-  provenance: DataProvenance;
-}
+export type ProductEnvironmentConfigStatus = GeneratedProductEnvironmentConfigStatus;
 
-export interface ProductEnvironmentConfigStatusPayload {
-  status: "ok";
-  trace_id: string;
-  config_status: ProductEnvironmentConfigStatus;
-}
+export type ProductEnvironmentConfigStatusPayload =
+  GeneratedProductEnvironmentConfigStatusResponse;
 
-export interface ProductListPayload {
-  status: "ok";
-  trace_id: string;
-  products: ProductSiteOverview[];
-}
+export type ProductListPayload = GeneratedProductEnvironmentListResponse;
 
 export type EveryCodeWorkRequestState =
   | "queued"
@@ -580,13 +556,7 @@ export interface EveryCodeWorkRequestRecord {
   error_message: string;
 }
 
-export interface EveryCodeWorkRequestListPayload {
-  status: "ok";
-  trace_id: string;
-  state: string;
-  repository: string;
-  requests: EveryCodeWorkRequestRecord[];
-}
+export type EveryCodeWorkRequestListPayload = GeneratedEveryCodeWorkRequestRecordsResponse;
 
 export interface EveryCodeWorkRequestSummary {
   request_id: string;
@@ -613,18 +583,7 @@ export interface EveryCodeWorkRequestSummary {
   evidence: AgentContextEvidence[];
 }
 
-export interface EveryCodeSummaryPayload {
-  status: "ok";
-  trace_id: string;
-  summary: {
-    schema_version: number;
-    generated_at: string;
-    repository: string;
-    issue_number: number | null;
-    state_filter: EveryCodeWorkRequestRecord["state"] | "";
-    summaries: EveryCodeWorkRequestSummary[];
-  };
-}
+export type EveryCodeSummaryPayload = GeneratedEveryCodeSummaryResponse;
 
 export interface PreviewReadinessItem {
   gate_id: string;
@@ -661,18 +620,7 @@ export interface PreviewReadinessItem {
   evidence: AgentContextEvidence[];
 }
 
-export interface PreviewReadinessPayload {
-  status: "ok";
-  trace_id: string;
-  readiness: {
-    schema_version: number;
-    generated_at: string;
-    repository: string;
-    pr_number: number | null;
-    status_filter: PreviewReadinessItem["gate_status"] | "";
-    items: PreviewReadinessItem[];
-  };
-}
+export type PreviewReadinessPayload = GeneratedPreviewReadinessResponse;
 
 export type WorkGraphRepoClassification =
   | "managed_runtime"
@@ -728,22 +676,13 @@ export interface WorkGraphIssueSnapshot {
 }
 
 export interface WorkGraphSnapshot {
-  schema_version?: 1;
+  schema_version?: number;
   generated_at: string;
   repos: WorkGraphRepoSnapshot[];
   issues: WorkGraphIssueSnapshot[];
 }
 
-export interface WorkGraphSnapshotPayload {
-  status: "ok";
-  trace_id: string;
-  snapshot: WorkGraphSnapshot;
-  source: {
-    product_count: number;
-    work_request_count: number;
-    planning_fact_count?: number;
-  };
-}
+export type WorkGraphSnapshotPayload = GeneratedWorkGraphSnapshotResponse;
 
 export interface RepoProductMappingEntry {
   repository: string;
@@ -758,19 +697,7 @@ export interface RepoProductMappingEntry {
   updated_at: string;
 }
 
-export interface RepoProductMappingPayload {
-  status: "ok";
-  trace_id: string;
-  mapping: {
-    schema_version: number;
-    generated_at: string;
-    repositories: RepoProductMappingEntry[];
-  };
-  source: {
-    product_count: number;
-    work_request_count: number;
-  };
-}
+export type RepoProductMappingPayload = GeneratedRepoProductMappingResponse;
 
 export interface WorkGraphQueueItem {
   repository: string;
@@ -855,12 +782,7 @@ export interface GitHubIssueInbox {
   repositories: GitHubIssueInboxRepositoryGroup[];
 }
 
-export interface GitHubIssueInboxPayload {
-  status: "ok";
-  trace_id: string;
-  configured: boolean;
-  inbox: GitHubIssueInbox | null;
-}
+export type GitHubIssueInboxPayload = GeneratedWorkGraphIssueInboxResponse;
 
 export type GitHubIssueInboxReconcileMode = "dry_run" | "apply";
 export type GitHubIssueInboxReconcileAction =
@@ -921,17 +843,7 @@ export interface MergeTrainAdmissionDecision {
   detail: string;
 }
 
-export interface MergeTrainRunRecord {
-  run_id: string;
-  repository: string;
-  base_branch: string;
-  mode: string;
-  status: string;
-  recorded_at: string;
-  required_checks_status: string;
-  reread_required?: boolean;
-  poll_required?: boolean;
-}
+export type MergeTrainRunRecord = GeneratedMergeTrainRunRecord;
 
 export interface MergeTrainDryRunQueueEntrySummary {
   pull_request_number: number;
@@ -985,11 +897,8 @@ export interface MergeTrainControllerStatus {
   controller_records: MergeTrainControllerRecordSummary[];
 }
 
-export interface MergeTrainControllerStatusPayload {
-  status: "ok";
-  trace_id: string;
-  controller_status: MergeTrainControllerStatus;
-}
+export type MergeTrainControllerStatusPayload =
+  GeneratedMergeTrainControllerStatusResponse;
 
 export interface MergeTrainPolicyTarget {
   repository: string;
@@ -1002,16 +911,7 @@ export interface MergeTrainPolicyTarget {
   };
 }
 
-export interface MergeTrainPolicyTargetsPayload {
-  status: "ok";
-  trace_id: string;
-  policy: {
-    record_id: string;
-    updated_at: string;
-    policy_sha256: string;
-  };
-  targets: MergeTrainPolicyTarget[];
-}
+export type MergeTrainPolicyTargetsPayload = GeneratedMergeTrainPolicyTargetsResponse;
 
 export interface GenericWebProdPromotionRequest {
   schema_version: 1;

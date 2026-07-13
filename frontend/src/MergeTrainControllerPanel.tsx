@@ -267,7 +267,7 @@ export function MergeTrainControllerPanel({
                 <code>{status.latest_run.run_id}</code>
               </span>
               <span>
-                {status.latest_run.required_checks_status || "checks unknown"}
+                {status.latest_run.selected_required_checks_status || "checks unknown"}
               </span>
               <code>{formatTime(status.latest_run.recorded_at)}</code>
             </div>

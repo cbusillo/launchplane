@@ -103,6 +103,8 @@ from control_plane.contracts.ingress_route_audit_record import (
     build_ingress_route_audit_record_id,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
+from control_plane.contracts.merge_train_policy import MergeTrainServiceAuthz
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -110,6 +112,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.merge_train_admission import (
+    MergeTrainControllerStatusReadModel,
     MergeTrainRunHistoryStore,
     build_merge_train_controller_status_read_model,
     evaluate_merge_train_admission_from_store,
@@ -1406,7 +1409,25 @@ class MergeTrainControllerStatusResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    controller_status: dict[str, object]
+    controller_status: MergeTrainControllerStatusReadModel
+
+
+class MergeTrainPolicySummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_id: str
+    updated_at: str
+    policy_sha256: str
+
+
+class MergeTrainPolicyTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
+    base_branch: str
+    policy_key: str
+    scheduler: MergeTrainSchedulerPolicy
+    service_authz: MergeTrainServiceAuthz
 
 
 class MergeTrainPolicyTargetsResponse(BaseModel):
@@ -1414,8 +1435,8 @@ class MergeTrainPolicyTargetsResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    policy: dict[str, object]
-    targets: list[dict[str, object]]
+    policy: MergeTrainPolicySummary
+    targets: tuple[MergeTrainPolicyTarget, ...]
 
 
 class DokployTargetInspectResponse(BaseModel):
@@ -5798,7 +5819,7 @@ def create_launchplane_fastapi_app(
         )
         return MergeTrainControllerStatusResponse(
             trace_id=trace_id,
-            controller_status=read_model.model_dump(mode="json"),
+            controller_status=read_model,
         )
 
     def read_merge_train_policy_targets(
@@ -5810,7 +5831,7 @@ def create_launchplane_fastapi_app(
             policy_record = resolve_merge_train_policy_record(record_store)
         except MergeTrainPolicyStoreMissingError as error:
             raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
-        targets: list[dict[str, object]] = []
+        targets: list[MergeTrainPolicyTarget] = []
         local_operator_can_read_targets = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="merge_train.policy_targets",
@@ -5827,23 +5848,23 @@ def create_launchplane_fastapi_app(
             if not service_authz_allowed and not local_operator_can_read_targets:
                 continue
             targets.append(
-                {
-                    "repository": repository_policy.repository,
-                    "base_branch": repository_policy.base_branch,
-                    "policy_key": repository_policy.policy_key,
-                    "scheduler": repository_policy.scheduler.model_dump(mode="json"),
-                    "service_authz": repository_policy.service_authz.model_dump(mode="json"),
-                }
+                MergeTrainPolicyTarget(
+                    repository=repository_policy.repository,
+                    base_branch=repository_policy.base_branch,
+                    policy_key=repository_policy.policy_key,
+                    scheduler=repository_policy.scheduler,
+                    service_authz=repository_policy.service_authz,
+                )
             )
-        targets.sort(key=lambda target: (str(target["repository"]), str(target["base_branch"])))
+        targets.sort(key=lambda target: (target.repository, target.base_branch))
         return MergeTrainPolicyTargetsResponse(
             trace_id=trace_id,
-            policy={
-                "record_id": policy_record.record_id,
-                "updated_at": policy_record.updated_at,
-                "policy_sha256": policy_record.policy_sha256,
-            },
-            targets=targets,
+            policy=MergeTrainPolicySummary(
+                record_id=policy_record.record_id,
+                updated_at=policy_record.updated_at,
+                policy_sha256=policy_record.policy_sha256,
+            ),
+            targets=tuple(targets),
         )
 
     async def write_merge_train_batch_candidate_run_once(
@@ -21276,6 +21297,7 @@ def create_launchplane_fastapi_app(
         "/v1/products/{product}/environments/{environment}/config-status",
         read_product_environment_config_status,
         methods=["GET"],
+        operation_id="read_product_environment_config_status",
         response_model=ProductEnvironmentConfigStatusResponse,
         responses={
             400: {"model": LaunchplaneErrorResponse},

@@ -74,6 +74,7 @@ import type {
   GenericWebPromotionWorkflowPayload,
   GenericWebPromotionWorkflowRequest,
   LaneSummary,
+  MergeTrainControllerStatusPayload,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
   ProductEnvironmentConfigStatus,
@@ -108,6 +109,13 @@ type EvidenceFact = {
   mono?: boolean;
   status?: Status | string;
 };
+
+function requireFixtureProvenance(provenance: DataProvenance | undefined): DataProvenance {
+  if (!provenance) {
+    throw new Error("Fixture provenance is required.");
+  }
+  return provenance;
+}
 
 const THEME_STORAGE_KEY = "launchplane.theme";
 const FIXTURE_ACTIONS: DriverActionDescriptor[] = [
@@ -1082,7 +1090,7 @@ function StateFixtureGallery({
       base_url: "https://testing.sellyouroutboard.example",
       health_url: "https://testing.sellyouroutboard.example/healthz",
       trust_state: "verified",
-      provenance: readyTesting.provenance,
+      provenance: requireFixtureProvenance(readyTesting.provenance),
       warnings: [],
       available_actions: FIXTURE_GENERIC_WEB_ACTIONS.map((action) => ({
         ...action,
@@ -1101,7 +1109,7 @@ function StateFixtureGallery({
       base_url: "https://sellyouroutboard.example",
       health_url: "https://sellyouroutboard.example/healthz",
       trust_state: "verified",
-      provenance: readyProd.provenance,
+      provenance: requireFixtureProvenance(readyProd.provenance),
       warnings: [],
       available_actions: FIXTURE_GENERIC_WEB_ACTIONS.map((action) => ({
         ...action,
@@ -1128,11 +1136,11 @@ function StateFixtureGallery({
         active_count: 3,
         latest_preview_id: "preview-pr-190",
         trust_state: "recorded",
-        provenance: readyTesting.provenance,
+        provenance: requireFixtureProvenance(readyTesting.provenance),
       },
       warnings: [],
       trust_state: "verified",
-      provenance: readyProd.provenance,
+      provenance: requireFixtureProvenance(readyProd.provenance),
       available_actions: [],
     },
     {
@@ -1156,13 +1164,13 @@ function StateFixtureGallery({
         active_count: 1,
         latest_preview_id: "preview-verireel-168",
         trust_state: "recorded",
-        provenance: readyTesting.provenance,
+        provenance: requireFixtureProvenance(readyTesting.provenance),
       },
       warnings: [
         "Runtime owner route evidence is recorded, not provider verified.",
       ],
       trust_state: "recorded",
-      provenance: readyTesting.provenance,
+      provenance: requireFixtureProvenance(readyTesting.provenance),
       available_actions: [],
     },
   ];
@@ -1200,7 +1208,7 @@ function StateFixtureGallery({
       ],
       warnings: [],
       trust_state: "recorded",
-      provenance: readyTesting.provenance,
+      provenance: requireFixtureProvenance(readyTesting.provenance),
     },
     {
       schema_version: 1,
@@ -1235,7 +1243,7 @@ function StateFixtureGallery({
       ],
       warnings: [],
       trust_state: "missing",
-      provenance: missingBackupProd.provenance,
+      provenance: requireFixtureProvenance(missingBackupProd.provenance),
     },
   ];
   const fixtureRequests: EveryCodeWorkRequestRecord[] = [
@@ -1609,7 +1617,7 @@ function StateFixtureGallery({
 function fixtureMergeTrainControllerStatus(
   repository = "cbusillo/launchplane",
   baseBranch = "main",
-) {
+): Promise<MergeTrainControllerStatusPayload> {
   const policyKey = `${repository}:${baseBranch}`;
   return Promise.resolve({
     status: "ok",
@@ -1641,15 +1649,26 @@ function fixtureMergeTrainControllerStatus(
           "Merge-train poll interval has elapsed for the latest wait boundary.",
       },
       latest_run: {
+        schema_version: 1,
         run_id: "merge-train-run-fixture",
+        trace_id: "fixture-trace-merge-train-run",
         repository,
         base_branch: baseBranch,
         mode: "mutate",
         status: "waiting",
         recorded_at: "2026-05-20T16:14:00Z",
-        required_checks_status: "pending",
+        intended_next_action: "wait_for_checks",
+        selected_pr_number: 762,
+        selected_head_sha: "abc123fixture",
+        selected_mergeable: "mergeable",
+        selected_required_checks_status: "pending",
         reread_required: false,
         poll_required: true,
+        policy_key: policyKey,
+        policy_sha256: "fixture-policy-sha256",
+        dry_run_result: {},
+        worker_step_result: null,
+        snapshot: {},
       },
       latest_dry_run: {
         intended_next_action: "wait_for_checks",
@@ -1968,7 +1987,7 @@ function ActionReviewDialog({
           <KeyValue label="Scope" value={action.scope} />
           <KeyValue
             label="Writes"
-            value={action.writes_records.join(", ") || "none"}
+            value={action.writes_records?.join(", ") || "none"}
             mono
           />
         </div>
@@ -2045,6 +2064,12 @@ function buildEvidenceRows(
   ].forEach(({ lane, laneName }) => {
     if (lane?.inventory) {
       const inventory = lane.inventory;
+      const inventoryHealth = inventory.destination_health ?? {
+        status: "unknown",
+        urls: [],
+      };
+      const inventoryDeployStatus = inventory.deploy.status ?? "unknown";
+      const inventoryHealthStatus = inventoryHealth.status ?? "unknown";
       rows.push({
         id: `${inventory.context}:${inventory.instance}:inventory`,
         title: `${lane.instance} inventory`,
@@ -2053,8 +2078,8 @@ function buildEvidenceRows(
           artifactFromLane(lane) ||
           "recorded inventory",
         status: worstStatus([
-          inventory.deploy.status,
-          inventory.destination_health.status,
+          inventoryDeployStatus,
+          inventoryHealthStatus,
         ]),
         time: inventory.updated_at,
         lane: laneName,
@@ -2084,17 +2109,17 @@ function buildEvidenceRows(
           },
           {
             label: "Deploy status",
-            value: labelForStatus(inventory.deploy.status),
-            status: inventory.deploy.status,
+            value: labelForStatus(inventoryDeployStatus),
+            status: inventoryDeployStatus,
           },
           {
             label: "Health status",
-            value: labelForStatus(inventory.destination_health.status),
-            status: inventory.destination_health.status,
+            value: labelForStatus(inventoryHealthStatus),
+            status: inventoryHealthStatus,
           },
           {
             label: "Health URLs",
-            value: inventory.destination_health.urls.join(", ") || "none",
+            value: inventoryHealth.urls?.join(", ") || "none",
             mono: true,
           },
           { label: "Updated", value: formatTime(inventory.updated_at) },
@@ -2152,11 +2177,18 @@ function buildEvidenceRows(
     }
     if (lane?.latest_deployment) {
       const deployment = lane.latest_deployment;
+      const deploymentStatus = deployment.deploy.status ?? "unknown";
+      const deploymentHealth = deployment.destination_health ?? {
+        verified: false,
+        status: "unknown",
+        urls: [],
+      };
+      const deploymentHealthStatus = deploymentHealth.status ?? "unknown";
       rows.push({
         id: deployment.record_id,
         title: `${lane.instance} deployment`,
         detail: artifactFromLane(lane) || deployment.record_id,
-        status: deployment.deploy.status,
+        status: deploymentStatus,
         time: deployment.deploy.finished_at ?? lane.inventory?.updated_at ?? "",
         lane: laneName,
         kind: "deploy",
@@ -2176,8 +2208,14 @@ function buildEvidenceRows(
             label: "Target",
             value: deployment.deploy.target_name || "unknown",
           },
-          { label: "Target type", value: deployment.deploy.target_type },
-          { label: "Deploy mode", value: deployment.deploy.deploy_mode },
+          {
+            label: "Target type",
+            value: deployment.deploy.target_type ?? "unknown",
+          },
+          {
+            label: "Deploy mode",
+            value: deployment.deploy.deploy_mode ?? "unknown",
+          },
           {
             label: "Deployment id",
             value: deployment.deploy.deployment_id ?? "unknown",
@@ -2185,22 +2223,22 @@ function buildEvidenceRows(
           },
           {
             label: "Deploy status",
-            value: labelForStatus(deployment.deploy.status),
-            status: deployment.deploy.status,
+            value: labelForStatus(deploymentStatus),
+            status: deploymentStatus,
           },
           {
             label: "Health status",
-            value: labelForStatus(deployment.destination_health.status),
-            status: deployment.destination_health.status,
+            value: labelForStatus(deploymentHealthStatus),
+            status: deploymentHealthStatus,
           },
           {
             label: "Health URLs",
-            value: deployment.destination_health.urls.join(", ") || "none",
+            value: deploymentHealth.urls?.join(", ") || "none",
             mono: true,
           },
           {
             label: "Health verified",
-            value: deployment.destination_health.verified ? "yes" : "no",
+            value: deploymentHealth.verified ? "yes" : "no",
           },
           {
             label: "Started",
@@ -2215,11 +2253,13 @@ function buildEvidenceRows(
     }
     if (lane?.latest_backup_gate) {
       const backup = lane.latest_backup_gate;
+      const backupStatus = backup.status ?? "unknown";
+      const backupEvidence = backup.evidence ?? {};
       rows.push({
         id: backup.record_id,
         title: `${lane.instance} backup gate`,
         detail: backup.source,
-        status: backup.status,
+        status: backupStatus,
         time: backup.created_at,
         lane: laneName,
         kind: "backup",
@@ -2229,11 +2269,11 @@ function buildEvidenceRows(
           { label: "Required", value: backup.required ? "yes" : "no" },
           {
             label: "Status",
-            value: labelForStatus(backup.status),
-            status: backup.status,
+            value: labelForStatus(backupStatus),
+            status: backupStatus,
           },
           { label: "Created", value: formatTime(backup.created_at) },
-          ...Object.entries(backup.evidence).map(([label, value]) => ({
+          ...Object.entries(backupEvidence).map(([label, value]) => ({
             label,
             value,
             mono: true,
@@ -2243,11 +2283,21 @@ function buildEvidenceRows(
     }
     if (lane?.latest_promotion) {
       const promotion = lane.latest_promotion;
+      const promotionStatus = promotion.deploy.status ?? "unknown";
+      const backupGate = promotion.backup_gate ?? {
+        required: false,
+        status: "unknown",
+        evidence: {},
+      };
+      const destinationHealth = promotion.destination_health ?? {
+        status: "unknown",
+        urls: [],
+      };
       rows.push({
         id: promotion.record_id,
         title: `${promotion.from_instance} to ${promotion.to_instance}`,
         detail: promotion.artifact_identity.artifact_id,
-        status: promotion.deploy.status,
+        status: promotionStatus,
         time: promotion.deploy.finished_at ?? "",
         lane: "prod",
         kind: "promote",
@@ -2272,8 +2322,8 @@ function buildEvidenceRows(
           },
           {
             label: "Backup gate",
-            value: labelForStatus(promotion.backup_gate.status),
-            status: promotion.backup_gate.status,
+            value: labelForStatus(backupGate.status),
+            status: backupGate.status,
           },
           {
             label: "Deploy target",
@@ -2281,13 +2331,13 @@ function buildEvidenceRows(
           },
           {
             label: "Deploy status",
-            value: labelForStatus(promotion.deploy.status),
-            status: promotion.deploy.status,
+            value: labelForStatus(promotionStatus),
+            status: promotionStatus,
           },
           {
             label: "Health status",
-            value: labelForStatus(promotion.destination_health.status),
-            status: promotion.destination_health.status,
+            value: labelForStatus(destinationHealth.status),
+            status: destinationHealth.status,
           },
           {
             label: "Source health",
@@ -2301,7 +2351,7 @@ function buildEvidenceRows(
           },
           {
             label: "Health URLs",
-            value: promotion.destination_health.urls.join(", ") || "none",
+            value: destinationHealth.urls?.join(", ") || "none",
             mono: true,
           },
           {
