@@ -1,10 +1,15 @@
 import type {
+  ApplyGenericWebProdPromotionData as GeneratedApplyGenericWebProdPromotionData,
+  ApplyGenericWebProdPromotionResponse as GeneratedApplyGenericWebProdPromotionResponse,
+  ApplyProductConfigData as GeneratedApplyProductConfigData,
+  ApplyProductConfigResponse as GeneratedApplyProductConfigResponse,
   AuthSessionResponse as GeneratedAuthSessionResponse,
+  DispatchGenericWebProdPromotionWorkflowData as GeneratedDispatchGenericWebProdPromotionWorkflowData,
+  DispatchGenericWebProdPromotionWorkflowResponse as GeneratedDispatchGenericWebProdPromotionWorkflowResponse,
   DriverContextViewResponse as GeneratedDriverContextViewResponse,
   DriverDescriptorsResponse as GeneratedDriverDescriptorsResponse,
   EveryCodeSummaryResponse as GeneratedEveryCodeSummaryResponse,
   EveryCodeWorkRequestRecordsResponse as GeneratedEveryCodeWorkRequestRecordsResponse,
-  HttpValidationError as GeneratedHttpValidationError,
   LaunchplaneErrorResponse as GeneratedLaunchplaneErrorResponse,
   MergeTrainControllerStatusResponse as GeneratedMergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse as GeneratedMergeTrainPolicyTargetsResponse,
@@ -13,9 +18,12 @@ import type {
   ProductEnvironmentConfigStatusResponse as GeneratedProductEnvironmentConfigStatusResponse,
   ProductEnvironmentListResponse as GeneratedProductEnvironmentListResponse,
   ProductProfileListResponse as GeneratedProductProfileListResponse,
+  ProductConfigRuntimeInput as GeneratedProductConfigRuntimeInput,
   PreviewReadinessResponse as GeneratedPreviewReadinessResponse,
+  RankWorkGraphSnapshotResponse as GeneratedRankWorkGraphSnapshotResponse,
   RepoProductMappingResponse as GeneratedRepoProductMappingResponse,
   WorkGraphIssueInboxResponse as GeneratedWorkGraphIssueInboxResponse,
+  WorkGraphSnapshot as GeneratedWorkGraphSnapshot,
   WorkGraphSnapshotResponse as GeneratedWorkGraphSnapshotResponse,
 } from "./generated/openapi.ts";
 
@@ -306,110 +314,22 @@ export interface LogoutPayload {
   trace_id: string;
 }
 
-export type ApiErrorPayload = GeneratedLaunchplaneErrorResponse | GeneratedHttpValidationError;
+export type ApiErrorPayload = GeneratedLaunchplaneErrorResponse;
 
-export type ProductConfigMode = "dry-run" | "apply";
-export type ProductConfigRuntimeScope = "global" | "context" | "instance";
-export type ProductConfigSecretScope =
-  | "global"
-  | "context"
-  | "context_instance";
-
-export interface ProductConfigRuntimeInput {
-  scope?: ProductConfigRuntimeScope;
-  context?: string;
-  instance?: string;
-  env: Record<string, string | number | boolean>;
-}
-
-export interface ProductConfigSecretInput {
-  scope?: ProductConfigSecretScope;
-  context?: string;
-  instance?: string;
-  integration?: string;
-  name: string;
-  binding_key: string;
-  value: string;
-  description?: string;
-}
-
-export interface ProductConfigApplyRequest {
-  schema_version: 1;
-  mode: ProductConfigMode;
-  product: string;
-  context: string;
-  instance: string;
-  source_label?: string;
-  runtime_env?: ProductConfigRuntimeInput;
-  secrets?: ProductConfigSecretInput[];
-}
-
-export interface ProductConfigRuntimeResult {
-  action: "skipped" | "created" | "updated" | "unchanged";
-  scope: ProductConfigRuntimeScope | string;
-  context: string;
-  instance: string;
-  keys: string[];
-  changed_keys: string[];
-  unchanged_keys: string[];
-  env_value_count_after: number;
-  record?: {
-    scope: ProductConfigRuntimeScope | string;
-    context: string;
-    instance: string;
-    updated_at: string;
-    source_label: string;
-    env_keys: string[];
-    env_value_count: number;
-  };
-}
-
-export interface ProductConfigSecretResult {
-  action: "created" | "rotated" | "unchanged";
-  scope: ProductConfigSecretScope | string;
-  context: string;
-  instance: string;
-  integration: string;
-  name: string;
-  binding_key: string;
-  secret_id: string;
-  description: string;
-  value_present: boolean;
-}
-
-export interface ProductConfigApplyPayload {
-  status: "ok" | "records_applied_live_sync_required";
-  mode: ProductConfigMode;
-  product: string;
-  context: string;
-  instance: string;
-  actor: string;
-  source_label: string;
-  runtime_environment: ProductConfigRuntimeResult;
-  secrets: ProductConfigSecretResult[];
-  summary: {
-    runtime_changed_key_count: number;
-    secret_change_count: number;
-  };
-  next_actions?: ProductConfigNextAction[];
-}
-
-export interface ProductConfigNextAction {
-  kind: string;
-  required: boolean;
-  instruction?: string;
-  target?: {
-    target_type?: string;
-    target_name?: string;
-  };
-}
-
-export interface ProductConfigApplyResponsePayload {
-  status: "accepted";
-  trace_id: string;
-  records: Record<string, string>;
-  result: ProductConfigApplyPayload;
-}
+export type ProductConfigApplyRequest = GeneratedApplyProductConfigData["body"];
+export type ProductConfigMode = ProductConfigApplyRequest["mode"];
+export type ProductConfigRuntimeInput = GeneratedProductConfigRuntimeInput;
+export type ProductConfigRuntimeScope = NonNullable<
+  ProductConfigRuntimeInput["scope"]
+>;
+export type ProductConfigSecretInput = NonNullable<
+  ProductConfigApplyRequest["secrets"]
+>[number];
+export type ProductConfigSecretScope = NonNullable<
+  ProductConfigSecretInput["scope"]
+>;
+export type ProductConfigApplyResponsePayload = GeneratedApplyProductConfigResponse;
+export type ProductConfigApplyPayload = ProductConfigApplyResponsePayload["result"];
 
 export interface ProductProfileRecord {
   schema_version: number;
@@ -675,12 +595,7 @@ export interface WorkGraphIssueSnapshot {
   deploy_state?: "success" | "pending" | "failure" | "unknown";
 }
 
-export interface WorkGraphSnapshot {
-  schema_version?: number;
-  generated_at: string;
-  repos: WorkGraphRepoSnapshot[];
-  issues: WorkGraphIssueSnapshot[];
-}
+export type WorkGraphSnapshot = GeneratedWorkGraphSnapshot;
 
 export type WorkGraphSnapshotPayload = GeneratedWorkGraphSnapshotResponse;
 
@@ -729,18 +644,7 @@ export interface WorkGraphQueueItem {
   reasons: Array<{ code: string; detail: string }>;
 }
 
-export interface WorkGraphRankPayload {
-  status: "accepted";
-  trace_id: string;
-  result: {
-    queue: {
-      schema_version: number;
-      generated_at: string;
-      items: WorkGraphQueueItem[];
-      hidden_count: number;
-    };
-  };
-}
+export type WorkGraphRankPayload = GeneratedRankWorkGraphSnapshotResponse;
 
 export type GitHubIssueInboxProjectStatus =
   | "present"
@@ -800,6 +704,8 @@ export interface GitHubIssueInboxReconcileItem {
   url: string;
   action: GitHubIssueInboxReconcileAction;
   detail: string;
+  error_code: string;
+  error_correlation_id: string;
 }
 
 export interface GitHubIssueInboxReconcileSummary {
@@ -819,6 +725,7 @@ export interface GitHubIssueInboxReconcileSummary {
 export interface GitHubIssueInboxReconcilePayload {
   status: "accepted";
   trace_id: string;
+  records: Record<string, string>;
   result: {
     reconcile: GitHubIssueInboxReconcileSummary;
   };
@@ -913,74 +820,11 @@ export interface MergeTrainPolicyTarget {
 
 export type MergeTrainPolicyTargetsPayload = GeneratedMergeTrainPolicyTargetsResponse;
 
-export interface GenericWebProdPromotionRequest {
-  schema_version: 1;
-  product: string;
-  promotion: {
-    schema_version: 1;
-    product: string;
-    artifact_id: string;
-    source_git_ref: string;
-    from_instance: "testing";
-    to_instance: "prod";
-    timeout_seconds: number;
-    health_timeout_seconds: number;
-    dry_run: true;
-  };
-}
-
-export interface GenericWebProdPromotionPayload {
-  status: "accepted";
-  trace_id: string;
-  records: {
-    promotion_record_id?: string;
-    deployment_record_id?: string;
-    backup_record_id?: string;
-    inventory_record_id?: string;
-  };
-  result: {
-    promotion_record_id: string;
-    deployment_record_id: string;
-    backup_record_id: string;
-    inventory_record_id: string;
-    promotion_status: Status;
-    deployment_status: Status;
-    source_health_status: Status;
-    destination_health_status: Status;
-    backup_status: Status;
-    dry_run: boolean;
-  };
-}
-
-export interface GenericWebPromotionWorkflowRequest {
-  schema_version: 1;
-  product: string;
-  workflow: {
-    schema_version: 1;
-    product: string;
-    context: string;
-    dry_run: boolean;
-    bump?: "patch" | "minor" | "major";
-    observe_timeout_seconds: number;
-  };
-}
-
-export interface GenericWebPromotionWorkflowPayload {
-  status: "accepted";
-  trace_id: string;
-  records: Record<string, string>;
-  result: {
-    product: string;
-    context: string;
-    repository: string;
-    workflow_id: string;
-    ref: string;
-    dry_run: boolean;
-    bump: "patch" | "minor" | "major";
-    dispatch_status: "dispatched";
-    run_id: number;
-    run_url: string;
-    run_status: string;
-    run_conclusion: string;
-  };
-}
+export type GenericWebProdPromotionRequest =
+  GeneratedApplyGenericWebProdPromotionData["body"];
+export type GenericWebProdPromotionPayload =
+  GeneratedApplyGenericWebProdPromotionResponse;
+export type GenericWebPromotionWorkflowRequest =
+  GeneratedDispatchGenericWebProdPromotionWorkflowData["body"];
+export type GenericWebPromotionWorkflowPayload =
+  GeneratedDispatchGenericWebProdPromotionWorkflowResponse;

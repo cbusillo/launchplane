@@ -93,6 +93,7 @@ class DocsContractsTests(TestCase):
             Path("frontend/generated/openapi-ui.json").read_text(encoding="utf-8")
         )
         frontend_types = Path("frontend/src/types.ts").read_text(encoding="utf-8")
+        frontend_api = Path("frontend/src/api.ts").read_text(encoding="utf-8")
 
         self.assertEqual(
             "uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json",
@@ -114,10 +115,17 @@ class DocsContractsTests(TestCase):
         self.assertIn("Install uv", ci_workflow)
         self.assertIn("Install Python", ci_workflow)
         read_operations = canonical_openapi["x-launchplane-ui-read-operations"]
-        self.assertEqual(set(read_operations), set(ui_openapi["paths"]))
+        write_operations = canonical_openapi["x-launchplane-ui-write-operations"]
+        self.assertEqual(
+            set(read_operations) | set(write_operations),
+            set(ui_openapi["paths"]),
+        )
         for route_path, operation_id in read_operations.items():
             self.assertEqual(set(ui_openapi["paths"][route_path]), {"get"})
             self.assertEqual(ui_openapi["paths"][route_path]["get"]["operationId"], operation_id)
+        for route_path, operation_id in write_operations.items():
+            self.assertEqual(set(ui_openapi["paths"][route_path]), {"post"})
+            self.assertEqual(ui_openapi["paths"][route_path]["post"]["operationId"], operation_id)
         self.assertIn(
             "export type DriverListPayload = GeneratedDriverDescriptorsResponse",
             frontend_types,
@@ -126,6 +134,32 @@ class DocsContractsTests(TestCase):
             "export type WorkGraphSnapshotPayload = GeneratedWorkGraphSnapshotResponse",
             frontend_types,
         )
+        self.assertIn(
+            'export type ProductConfigApplyRequest = GeneratedApplyProductConfigData["body"]',
+            frontend_types,
+        )
+        self.assertIn(
+            "export type GenericWebProdPromotionPayload =",
+            frontend_types,
+        )
+        self.assertIn(
+            "GeneratedApplyGenericWebProdPromotionResponse",
+            frontend_types,
+        )
+        self.assertIn("export interface GitHubIssueInboxReconcilePayload", frontend_types)
+        self.assertNotIn(
+            "/v1/work-graph/github/issues/reconcile",
+            write_operations,
+        )
+        for operation_data_type in (
+            "ApplyGenericWebProdPromotionData",
+            "ApplyProductConfigData",
+            "DispatchGenericWebProdPromotionWorkflowData",
+            "RankWorkGraphSnapshotData",
+        ):
+            self.assertIn(operation_data_type, frontend_api)
+        self.assertNotIn("ReconcileWorkGraphIssueInboxData", frontend_api)
+        self.assertIn("requestGeneratedPost", frontend_api)
 
     def test_post_v2_transition_plans_are_issue_backed(self) -> None:
         docs_index = Path("docs/README.md").read_text(encoding="utf-8")
