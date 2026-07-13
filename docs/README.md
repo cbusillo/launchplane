@@ -44,6 +44,8 @@ Use these docs as the source of truth for `launchplane`.
   before making Launchplane public.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
+- [github-actions-security.md](github-actions-security.md) — GitHub Actions
+  supply-chain pinning, source classification, provenance, and update policy.
 - [style/python.md](style/python.md) — Python conventions.
 - [style/testing.md](style/testing.md) — testing conventions.
 - [policies/coding-standards.md](policies/coding-standards.md) — naming and

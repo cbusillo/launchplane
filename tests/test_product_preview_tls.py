@@ -9,7 +9,7 @@ from control_plane.product_preview_tls import (
     build_product_preview_tls_plan,
     updated_product_preview_tls_profile,
 )
-from tests.test_service import _product_profile_payload
+from tests.support.profiles import _product_profile_payload
 
 
 def _profile() -> LaunchplaneProductProfileRecord:

@@ -43,19 +43,19 @@ from tests.http_app_test_support import (
     _record_read_policy,
     _RejectingVerifier,
 )
-from tests.test_service import (
+from tests.support.http import lifespan_client
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.ingress import (
     _edge_endpoint_apply_payload,
     _edge_endpoint_record,
     _FakeIngressProvider,
     _FakeNpmplusIngressClient,
-    _identity,
     _ingress_canary_route_record,
     _ingress_canary_route_record_apply_payload,
     _npmplus_ingress_route_payload,
     _npmplus_proxy_host,
     _private_health_endpoint_apply_payload,
     _private_health_endpoint_record,
-    _StubVerifier,
 )
 
 
@@ -558,36 +558,37 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
             endpoint = cast(dict[str, object], conflicting_payload["endpoint"])
             endpoint["upstream_port"] = 8443
 
-            first_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/edge-endpoints/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "edge-endpoint-replay-test",
-                },
-                payload=payload,
-            )
-            replay_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/edge-endpoints/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "edge-endpoint-replay-test",
-                },
-                payload=payload,
-            )
-            conflict_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/edge-endpoints/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "edge-endpoint-replay-test",
-                },
-                payload=conflicting_payload,
-            )
+            async with lifespan_client(app) as client:
+                first_response = await _asgi_request(
+                    client,
+                    "POST",
+                    "/v1/edge-endpoints/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "edge-endpoint-replay-test",
+                    },
+                    payload=payload,
+                )
+                replay_response = await _asgi_request(
+                    client,
+                    "POST",
+                    "/v1/edge-endpoints/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "edge-endpoint-replay-test",
+                    },
+                    payload=payload,
+                )
+                conflict_response = await _asgi_request(
+                    client,
+                    "POST",
+                    "/v1/edge-endpoints/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "edge-endpoint-replay-test",
+                    },
+                    payload=conflicting_payload,
+                )
 
         self.assertEqual(first_response.status_code, 202)
         self.assertEqual(replay_response.status_code, 202)
@@ -775,36 +776,37 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
             endpoint = cast(dict[str, object], conflicting_payload["endpoint"])
             endpoint["url"] = "http://10.0.0.6:8000/health"
 
-            first_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/private-health-endpoints/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "private-health-replay-test",
-                },
-                payload=payload,
-            )
-            replay_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/private-health-endpoints/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "private-health-replay-test",
-                },
-                payload=payload,
-            )
-            conflict_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/private-health-endpoints/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "private-health-replay-test",
-                },
-                payload=conflicting_payload,
-            )
+            async with lifespan_client(app) as client:
+                first_response = await _asgi_request(
+                    client,
+                    "POST",
+                    "/v1/private-health-endpoints/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "private-health-replay-test",
+                    },
+                    payload=payload,
+                )
+                replay_response = await _asgi_request(
+                    client,
+                    "POST",
+                    "/v1/private-health-endpoints/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "private-health-replay-test",
+                    },
+                    payload=payload,
+                )
+                conflict_response = await _asgi_request(
+                    client,
+                    "POST",
+                    "/v1/private-health-endpoints/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "private-health-replay-test",
+                    },
+                    payload=conflicting_payload,
+                )
 
         self.assertEqual(first_response.status_code, 202)
         self.assertEqual(replay_response.status_code, 202)
@@ -1080,29 +1082,30 @@ class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
                 npmplus_ingress_client_factory=lambda: client,
             )
 
-            first_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/drivers/ingress/route-apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "npmplus-ingress-conflict",
-                },
-                payload=_npmplus_ingress_route_payload(mode="apply"),
-            )
-            conflict_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/drivers/ingress/route-apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "npmplus-ingress-conflict",
-                },
-                payload=_npmplus_ingress_route_payload(
-                    mode="apply",
-                    forward_host="192.0.2.11",
-                ),
-            )
+            async with lifespan_client(app) as http_client:
+                first_response = await _asgi_request(
+                    http_client,
+                    "POST",
+                    "/v1/drivers/ingress/route-apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "npmplus-ingress-conflict",
+                    },
+                    payload=_npmplus_ingress_route_payload(mode="apply"),
+                )
+                conflict_response = await _asgi_request(
+                    http_client,
+                    "POST",
+                    "/v1/drivers/ingress/route-apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "npmplus-ingress-conflict",
+                    },
+                    payload=_npmplus_ingress_route_payload(
+                        mode="apply",
+                        forward_host="192.0.2.11",
+                    ),
+                )
 
         self.assertEqual(first_response.status_code, 202)
         self.assertEqual(conflict_response.status_code, 409)
@@ -1461,34 +1464,35 @@ class FastApiIngressCanaryRouteApplyTests(unittest.IsolatedAsyncioTestCase):
                 record_store_factory=lambda: store,
             )
 
-            first_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/ingress/canary-routes/records/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "ingress-canary-record-replay",
-                },
-                payload=request_payload,
-            )
-            store.write_ingress_canary_route_record(
-                _ingress_canary_route_record().model_copy(
-                    update={
-                        "domain_name": "changed-canary.example.test",
-                        "updated_at": "2026-06-11T01:00:00Z",
-                    }
+            async with lifespan_client(app) as http_client:
+                first_response = await _asgi_request(
+                    http_client,
+                    "POST",
+                    "/v1/ingress/canary-routes/records/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "ingress-canary-record-replay",
+                    },
+                    payload=request_payload,
                 )
-            )
-            replay_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/ingress/canary-routes/records/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "ingress-canary-record-replay",
-                },
-                payload=request_payload,
-            )
+                store.write_ingress_canary_route_record(
+                    _ingress_canary_route_record().model_copy(
+                        update={
+                            "domain_name": "changed-canary.example.test",
+                            "updated_at": "2026-06-11T01:00:00Z",
+                        }
+                    )
+                )
+                replay_response = await _asgi_request(
+                    http_client,
+                    "POST",
+                    "/v1/ingress/canary-routes/records/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "ingress-canary-record-replay",
+                    },
+                    payload=request_payload,
+                )
             stored_record = store.read_ingress_canary_route_record("ingress-canary")
 
         self.assertEqual(first_response.status_code, 202)
@@ -1615,36 +1619,37 @@ class FastApiIngressCanaryRouteApplyTests(unittest.IsolatedAsyncioTestCase):
                 npmplus_ingress_client_factory=lambda: client,
             )
 
-            first_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/ingress/canary-routes/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "ingress-canary-replay",
-                },
-                payload=request_payload,
-            )
-            store.write_ingress_canary_route_record(
-                _ingress_canary_route_record().model_copy(
-                    update={
-                        "domain_name": "changed-canary.example.test",
-                        "expected_host_id": 99,
-                        "status": "disabled",
-                        "updated_at": "2026-06-11T01:00:00Z",
-                    }
+            async with lifespan_client(app) as http_client:
+                first_response = await _asgi_request(
+                    http_client,
+                    "POST",
+                    "/v1/ingress/canary-routes/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "ingress-canary-replay",
+                    },
+                    payload=request_payload,
                 )
-            )
-            replay_response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/ingress/canary-routes/apply",
-                headers={
-                    "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "ingress-canary-replay",
-                },
-                payload=request_payload,
-            )
+                store.write_ingress_canary_route_record(
+                    _ingress_canary_route_record().model_copy(
+                        update={
+                            "domain_name": "changed-canary.example.test",
+                            "expected_host_id": 99,
+                            "status": "disabled",
+                            "updated_at": "2026-06-11T01:00:00Z",
+                        }
+                    )
+                )
+                replay_response = await _asgi_request(
+                    http_client,
+                    "POST",
+                    "/v1/ingress/canary-routes/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "ingress-canary-replay",
+                    },
+                    payload=request_payload,
+                )
             records = store.list_ingress_route_audit_records(
                 product="launchplane", context_name="reon-prod"
             )

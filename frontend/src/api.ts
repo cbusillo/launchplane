@@ -10,8 +10,6 @@ import type {
   GenericWebPromotionWorkflowPayload,
   GenericWebPromotionWorkflowRequest,
   GitHubIssueInboxPayload,
-  GitHubIssueInboxReconcileMode,
-  GitHubIssueInboxReconcilePayload,
   LogoutPayload,
   MergeTrainControllerStatusPayload,
   MergeTrainPolicyTargetsPayload,
@@ -40,17 +38,54 @@ export class LaunchplaneApiError extends Error {
   }
 }
 
+let browserMutationQueue: Promise<void> = Promise.resolve();
+
 async function requestJson<T>(
   path: string,
   method: "GET" | "POST" = "GET",
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
+  if (method === "GET") {
+    return performJsonRequest<T>(path, method, body, signal);
+  }
+  const queuedRequest = browserMutationQueue.then(async () => {
+    const session = await performJsonRequest<AuthSessionPayload>(
+      "/v1/auth/session",
+      "GET",
+      undefined,
+      signal,
+    );
+    return performJsonRequest<T>(
+      path,
+      method,
+      body,
+      signal,
+      session.csrf_token,
+    );
+  });
+  browserMutationQueue = queuedRequest.then(
+    () => undefined,
+    () => undefined,
+  );
+  return queuedRequest;
+}
+
+async function performJsonRequest<T>(
+  path: string,
+  method: "GET" | "POST",
+  body?: unknown,
+  signal?: AbortSignal,
+  csrfToken = "",
+): Promise<T> {
   const headers: HeadersInit = {
     Accept: "application/json",
   };
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
+  }
+  if (csrfToken) {
+    headers["X-CSRF-Token"] = csrfToken;
   }
   const response = await fetch(path, {
     method,
@@ -62,11 +97,18 @@ async function requestJson<T>(
   const payload = (await response.json()) as T | ApiErrorPayload;
   if (!response.ok) {
     const errorPayload = payload as ApiErrorPayload;
+    const errorMessage =
+      "error" in errorPayload && errorPayload.error
+        ? errorPayload.error.message ?? `Launchplane API returned ${response.status}.`
+        : `Launchplane API returned ${response.status}.`;
+    const traceId =
+      "trace_id" in errorPayload && typeof errorPayload.trace_id === "string"
+        ? errorPayload.trace_id
+        : "";
     throw new LaunchplaneApiError(
-      errorPayload.error?.message ??
-        `Launchplane API returned ${response.status}.`,
+      errorMessage,
       response.status,
-      errorPayload.trace_id,
+      traceId,
     );
   }
   return payload as T;
@@ -172,18 +214,6 @@ export function readGitHubIssueInbox(
     "/v1/work-graph/github/issues",
     "GET",
     undefined,
-    signal,
-  );
-}
-
-export function reconcileGitHubIssueInbox(
-  mode: GitHubIssueInboxReconcileMode,
-  signal?: AbortSignal,
-): Promise<GitHubIssueInboxReconcilePayload> {
-  return requestJson<GitHubIssueInboxReconcilePayload>(
-    "/v1/work-graph/github/issues/reconcile",
-    "POST",
-    { mode },
     signal,
   );
 }

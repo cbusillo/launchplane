@@ -11,7 +11,11 @@ from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
-from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_app import (
+    create_launchplane_fastapi_app,
+    idempotency_request_fingerprint,
+    idempotency_scope,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubActionsIdentity,
@@ -33,6 +37,7 @@ from control_plane.work_graph_issue_inbox import (
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
+    _browser_mutation_headers,
     _get_agent_context,
     _get_config_status,
     _get_product,
@@ -76,15 +81,14 @@ from tests.http_app_test_support import (
     _terminal_agent_work_graph_rank_policy,
     _work_graph_read_policy,
 )
-from tests.test_protected_artifacts import _seed_store as seed_protected_artifact_store
-from tests.test_service import (
+from tests.support.protected_artifacts import seed_protected_artifact_store
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.profiles import (
     _generic_site_profile_payload,
-    _identity,
     _product_profile_payload,
-    _sqlite_database_url,
-    _StubVerifier,
-    _work_graph_snapshot_payload,
 )
+from tests.support.stores import _sqlite_database_url
+from tests.support.work_graph import _work_graph_snapshot_payload
 
 
 def _product_expected_config_payload() -> dict[str, object]:
@@ -803,7 +807,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             app,
             payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
             authorization="",
-            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            headers=_browser_mutation_headers(session_manager, human_session),
         )
 
         self.assertEqual(response.status_code, 202)
@@ -2243,6 +2247,11 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                 idempotency_key="product-preview-tls-no-change-apply",
             )
             stored_profile = store.read_product_profile_record("odoo-product")
+            stored_reservation = store.read_idempotency_record(
+                scope=idempotency_scope(_product_preview_tls_identity()),
+                route_path="/v1/product-profiles/preview-tls/apply",
+                idempotency_key="product-preview-tls-no-change-apply",
+            )
 
         self.assertEqual(apply_response.status_code, 202)
         self.assertFalse(apply_response.json()["result"]["changed"])
@@ -2250,6 +2259,186 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay_response.json()["replayed"])
         self.assertEqual(stored_profile.updated_at, original_profile.updated_at)
         self.assertEqual(stored_profile.source, original_profile.source)
+        self.assertIsNotNone(stored_reservation)
+        assert stored_reservation is not None
+        self.assertEqual(stored_reservation.state, "completed")
+        self.assertEqual(stored_reservation.attempt, 1)
+        self.assertEqual(
+            stored_reservation.response_trace_id,
+            apply_response.json()["trace_id"],
+        )
+
+    async def test_apply_product_preview_tls_reports_running_reservation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_preview_tls_profile())
+            identity = _product_preview_tls_identity()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            apply_payload = {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+            route_path = "/v1/product-profiles/preview-tls/apply"
+            store.reserve_mutation(
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key="product-preview-tls-running",
+                request_fingerprint=idempotency_request_fingerprint(
+                    route_path=route_path,
+                    payload=apply_payload,
+                ),
+                lease_owner="worker-running",
+            )
+
+            response = await _post_product_preview_tls(
+                app,
+                apply_payload,
+                idempotency_key="product-preview-tls-running",
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "mutation_in_progress")
+
+    async def test_apply_product_preview_tls_releases_expired_db_only_reservation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_preview_tls_profile())
+            identity = _product_preview_tls_identity()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            apply_payload = {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+            route_path = "/v1/product-profiles/preview-tls/apply"
+            idempotency_key = "product-preview-tls-expired"
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                store.reserve_mutation(
+                    scope=idempotency_scope(identity),
+                    route_path=route_path,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=idempotency_request_fingerprint(
+                        route_path=route_path,
+                        payload=apply_payload,
+                    ),
+                    lease_owner="orphaned-worker",
+                    lease_seconds=60,
+                )
+                clock["now"] = "2026-07-12T01:02:00Z"
+                response = await _post_product_preview_tls(
+                    app,
+                    apply_payload,
+                    idempotency_key=idempotency_key,
+                )
+            stored_record = store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 202)
+        self.assertIsNotNone(stored_record)
+        assert stored_record is not None
+        self.assertEqual(stored_record.state, "completed")
+        self.assertEqual(stored_record.attempt, 1)
+        self.assertEqual(stored_record.created_at, "2026-07-12T01:02:00Z")
+        self.assertEqual(stored_record.recorded_at, "2026-07-12T01:02:00Z")
+
+    async def test_apply_product_preview_tls_reports_reconcile_required_reservation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_preview_tls_profile())
+            identity = _product_preview_tls_identity()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            apply_payload = {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+            route_path = "/v1/product-profiles/preview-tls/apply"
+            acquired = store.reserve_mutation(
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key="product-preview-tls-reconcile",
+                request_fingerprint=idempotency_request_fingerprint(
+                    route_path=route_path,
+                    payload=apply_payload,
+                ),
+                lease_owner="worker-reconcile",
+            )
+            bound = store.bind_mutation_reconciliation_key(
+                reservation=acquired.record,
+                reconciliation_key="provider-operation-reconcile",
+            )
+            assert bound.record is not None
+            store.mark_mutation_reconcile_required(
+                reservation=bound.record,
+                reconciliation_key="provider-operation-reconcile",
+            )
+
+            response = await _post_product_preview_tls(
+                app,
+                apply_payload,
+                idempotency_key="product-preview-tls-reconcile",
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "mutation_reconciliation_required",
+        )
 
     async def test_apply_product_preview_tls_serializes_concurrent_noop_retries(
         self,
@@ -2446,6 +2635,77 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(apply_response.status_code, 409)
         self.assertEqual(apply_response.json()["error"]["code"], "stale")
         self.assertEqual(stored_profile.preview.domain_certificate_type, "none")
+
+    async def test_apply_product_preview_tls_stale_plan_releases_expired_reservation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            original_profile = _product_preview_tls_profile()
+            store.write_product_profile_record(original_profile)
+            identity = _product_preview_tls_identity()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            route_path = "/v1/product-profiles/preview-tls/apply"
+            idempotency_key = "product-preview-tls-expired-stale"
+            apply_payload = {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                store.reserve_mutation(
+                    scope=idempotency_scope(identity),
+                    route_path=route_path,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=idempotency_request_fingerprint(
+                        route_path=route_path,
+                        payload=apply_payload,
+                    ),
+                    lease_owner="orphaned-worker",
+                    lease_seconds=60,
+                )
+                store.write_product_profile_record(
+                    original_profile.model_copy(
+                        update={
+                            "updated_at": "2026-07-12T02:00:00Z",
+                            "source": "concurrent-profile-update",
+                        }
+                    )
+                )
+                clock["now"] = "2026-07-12T01:02:00Z"
+                response = await _post_product_preview_tls(
+                    app,
+                    apply_payload,
+                    idempotency_key=idempotency_key,
+                )
+            stored_record = store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "stale")
+        self.assertIsNone(stored_record)
 
     async def test_apply_product_preview_tls_requires_idempotency_key(self) -> None:
         app = create_launchplane_fastapi_app(

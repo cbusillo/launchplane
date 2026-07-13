@@ -10,6 +10,7 @@ from typing import Any, Literal
 import click
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.child_process_errors import normalize_child_process_failure
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.work_graph_github_projects import (
     GitHubProjectPlanningFactsConfig,
@@ -82,6 +83,8 @@ class GitHubIssueInboxReconcileItem(BaseModel):
     url: str = ""
     action: Literal["would_add", "added", "already_present", "failed", "skipped"]
     detail: str = ""
+    error_code: str = ""
+    error_correlation_id: str = ""
 
 
 class GitHubIssueInboxReconcileResult(BaseModel):
@@ -170,7 +173,10 @@ def build_github_issue_inbox_read_model(
         repository_count=len(groups),
         issue_count=sum(group.issue_count for group in groups),
         stale_project_item_count=sum(
-            1 for group in groups for issue in group.issues if issue.project_status in {"stale", "closed"}
+            1
+            for group in groups
+            for issue in group.issues
+            if issue.project_status in {"stale", "closed"}
         ),
         repositories=groups,
     )
@@ -424,14 +430,24 @@ def _apply_issue_reconcile_item(
     try:
         _project_item_add(config=config, issue=issue)
     except FileNotFoundError as error:
-        raise click.ClickException(
-            "GitHub CLI is required for work graph issue inbox reconciliation."
-        ) from error
+        failure = normalize_child_process_failure(
+            operation="Add GitHub issue inbox item to Project",
+            tool="github_cli",
+            exception=error,
+        )
+        raise click.ClickException(failure.operator_message()) from error
     except subprocess.CalledProcessError as error:
+        failure = normalize_child_process_failure(
+            operation="Add GitHub issue inbox item to Project",
+            tool="github_cli",
+            exception=error,
+        )
         return _reconcile_item(
             issue=issue,
             action="failed",
-            detail=_redacted_gh_error(error),
+            detail=failure.detail,
+            error_code=failure.code,
+            error_correlation_id=failure.correlation_id,
         )
     return _reconcile_item(issue=issue, action="added")
 
@@ -462,6 +478,8 @@ def _reconcile_item(
     issue: GitHubIssueInboxIssue,
     action: Literal["would_add", "added", "already_present", "failed", "skipped"],
     detail: str = "",
+    error_code: str = "",
+    error_correlation_id: str = "",
 ) -> GitHubIssueInboxReconcileItem:
     return GitHubIssueInboxReconcileItem(
         key=issue.key,
@@ -471,18 +489,8 @@ def _reconcile_item(
         url=issue.url,
         action=action,
         detail=detail,
-    )
-
-
-def _redacted_gh_error(error: subprocess.CalledProcessError) -> str:
-    detail = (error.stderr or error.stdout or str(error)).strip()
-    return (
-        re.sub(
-            r"(?i)(gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|bearer\s+[A-Za-z0-9._-]+)",
-            "[redacted]",
-            detail,
-        )
-        or "GitHub Project item-add failed."
+        error_code=error_code,
+        error_correlation_id=error_correlation_id,
     )
 
 
@@ -495,10 +503,19 @@ def _run_gh_json_array(command: Sequence[str]) -> list[object]:
             text=True,
         )
     except FileNotFoundError as error:
-        raise click.ClickException("GitHub CLI is required for work graph issue inbox.") from error
+        failure = normalize_child_process_failure(
+            operation="Load GitHub issue inbox",
+            tool="github_cli",
+            exception=error,
+        )
+        raise click.ClickException(failure.operator_message()) from error
     except subprocess.CalledProcessError as error:
-        detail = (error.stderr or error.stdout or str(error)).strip()
-        raise click.ClickException(f"GitHub issue inbox could not be loaded: {detail}") from error
+        failure = normalize_child_process_failure(
+            operation="Load GitHub issue inbox",
+            tool="github_cli",
+            exception=error,
+        )
+        raise click.ClickException(failure.operator_message()) from error
     try:
         payload: object = json.loads(result.stdout)
     except json.JSONDecodeError as error:

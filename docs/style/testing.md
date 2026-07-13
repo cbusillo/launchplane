@@ -7,21 +7,21 @@ title: Testing Style
 - Test fail-closed behavior explicitly.
 - Keep fixtures small and inline unless they are reused heavily.
 - Default local full-suite entrypoint is
-  `uv run launchplane ci unittest-shard local`.
+  `uv run --extra dev launchplane ci unittest-shard local`.
 
 ## Local test loop
 
 Run a focused unittest module or test method before the full suite:
 
 ```bash
-uv run python -m unittest tests.test_module_name
-uv run python -m unittest tests.test_module_name.TestCaseName.test_behavior
+uv run --extra dev python -m unittest tests.test_module_name
+uv run --extra dev python -m unittest tests.test_module_name.TestCaseName.test_behavior
 ```
 
 Before review, run the official local full-suite gate:
 
 ```bash
-uv run launchplane ci unittest-shard local
+uv run --extra dev launchplane ci unittest-shard local
 ```
 
 The local gate computes one deterministic plan, runs every shard in an isolated
@@ -43,25 +43,26 @@ or partial unique index predicates.
 The real PostgreSQL storage proof is an explicit integration gate:
 
 ```bash
-LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run launchplane ci postgres-integration
+LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run --extra dev launchplane ci postgres-integration
 ```
 
 The URL is a temporary/root test service URL, not a Launchplane runtime
 credential. The harness creates and drops isolated databases, upgrades each from
 empty schema through Alembic `head`, verifies the exact checked-in schema head
 and critical indexes/types, and runs focused two-connection concurrency tests
-for idempotency conflicts, operation claims, stale lease owners, lease recovery,
-and active-operation partial uniqueness. Same-repo CI provides the URL via a
-PostgreSQL service container; fork PRs keep the SQLite/unittest path only. Keep
-the integration module focused: target runtime is under 2 minutes in CI, and any
-flake should be treated as a storage or harness bug rather than hidden with a
-retry loop.
+for mutation reservation/replay/conflict, reconciliation-key fencing, atomic
+business-write completion and rollback, operation claims, stale lease owners,
+lease recovery, and active-operation partial uniqueness. Same-repo CI provides
+the URL via a PostgreSQL service container; fork PRs keep the SQLite/unittest
+path only. Keep the integration module focused: target runtime is under 2
+minutes in CI, and any flake should be treated as a storage or harness bug
+rather than hidden with a retry loop.
 
 The lower-level CI shard commands remain available for diagnosis:
 
 ```bash
-uv run launchplane ci unittest-shard plan --shard-count 12 --timings-file .ci-cache/unittest-timings/history.json --max-tests-per-target 20 --max-seconds-per-target 30
-uv run launchplane ci unittest-shard run --shard-count 12 --shard-index 0 --timings-file .ci-cache/unittest-timings/history.json --max-tests-per-target 20 --max-seconds-per-target 30 --timings-output tmp/shard-0.json
+uv run --extra dev launchplane ci unittest-shard plan --shard-count 12 --timings-file .ci-cache/unittest-timings/history.json --max-tests-per-target 20 --max-seconds-per-target 30
+uv run --extra dev launchplane ci unittest-shard run --shard-count 12 --shard-index 0 --timings-file .ci-cache/unittest-timings/history.json --max-tests-per-target 20 --max-seconds-per-target 30 --timings-output tmp/shard-0.json
 ```
 
 Shard planning discovers `tests/test*.py` dynamically. Small files run as whole
@@ -92,3 +93,19 @@ local command is the official pre-review full-suite proof; the PostgreSQL
 integration command is the official production storage-semantics proof when a
 local or CI PostgreSQL service is available. Neither local command replaces CI's
 runner isolation, artifact retention, or required status checks.
+
+## HTTP and ASGI contracts
+
+- Use `tests.support.http.lifespan_client` or `tests.support.http.request` for
+  ordinary HTTP contracts, including GET/POST, cookies, redirects, and OpenAPI.
+  These helpers enter the application's lifespan through the supported async
+  HTTP client path; do not construct HTTP ASGI scopes in contract tests.
+- `tests.support.raw_asgi.request` is reserved for duplicate, absent, or
+  deliberately malformed framing headers that a supported client cannot emit.
+  Streaming, body-limit, cancellation, and `http.disconnect` tests may use a
+  bespoke scripted ASGI receive sequence when the shared helper cannot express
+  the transport condition. Keep every raw-scope test explicit about the
+  exceptional ASGI behavior being exercised.
+- When moving a test between these paths, retain the behavior assertion and
+  document any intentional coverage replacement in the change description; do
+  not delete behavior tests merely because the support implementation changed.

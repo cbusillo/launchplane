@@ -119,6 +119,39 @@ existing explicit provider-target row before mutating the Dokploy pair, write th
 Dokploy target/id records, then write the matching provider-target row. A stale
 explicit provider-target row blocks the mutation instead of being overwritten.
 
+## Mutation Reservation Recovery
+
+Reservation-backed service mutations use the PostgreSQL
+`launchplane_idempotency_records` table as a typed execution claim. Operators
+and reconcilers should interpret states as follows:
+
+- `running` with an unexpired lease means another owner is executing; do not
+  bypass it or retry with a new key.
+- `completed` is terminal replay evidence. Retry the same route, caller scope,
+  key, and request fingerprint to receive the original accepted response.
+- `reconcile_required` means a provider operation/reconciliation key was bound
+  before the outcome became unknown. Do not repeat the provider mutation. Use
+  the owning domain's service reconciliation workflow to inspect provider state
+  and write terminal evidence.
+
+Expired DB-only reservations without a reconciliation key may be reclaimed by
+the storage API with an incremented attempt. Provider-backed work must bind its
+stable provider operation key before effects; after that point lease expiry is a
+reconciliation event, not a retry signal. Stale owners cannot renew or complete
+another owner's lease or an earlier attempt owned by the same worker identity.
+Lease timestamps and expiry decisions use the database clock rather than caller
+time. Do not repair reservation rows with direct SQL or an arbitrary checkout;
+shared/live recovery belongs in a typed Launchplane service endpoint or domain
+reconciler.
+
+Product preview TLS apply is the first migrated DB-only route. Its reservation,
+profile compare-and-write, and response completion share one transaction, so a
+completion-persistence failure rolls back the profile change and a no-op apply
+still produces replay evidence. Before planning, the route uses the database
+clock to reject active claims, replay completed claims, transition bound expired
+claims to reconciliation, and release only expired unbound orphan claims that
+cannot have committed the atomic profile write.
+
 ## Target Launchplane Ingress
 
 The target communication model is:
@@ -231,6 +264,13 @@ session cookie, and the service validates the caller's
 stores audit metadata, and reloads the current service worker's active policy.
 Launchplane self-deploy authority is separate and does not authorize authz
 policy grant maintenance.
+
+When the CLI uses `--session-cookie`, it first reads `GET /v1/auth/session` and
+then sends the returned single-use CSRF token with strict same-origin fetch
+metadata. Use the configured public Launchplane URL so its origin matches
+`LAUNCHPLANE_PUBLIC_URL`. Reusing a captured CSRF token, omitting `Origin`, or
+calling through a different origin fails closed. Bearer-token and GitHub Actions
+OIDC callers do not use this browser preflight.
 
 The Launchplane deploy workflow also reconciles configured signed-in operator
 grants for product-config writes. Set
@@ -551,7 +591,8 @@ uv run launchplane service inspect-dokploy-target \
 
 That command reports only non-secret metadata and fails closed when the live
 Launchplane target is missing critical runtime pieces such as
-`LAUNCHPLANE_DATABASE_URL`, `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`,
+`LAUNCHPLANE_DATABASE_URL`, `LAUNCHPLANE_SECRET_KEYS_JSON` (or the
+migration-only legacy `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`),
 Launchplane-managed Dokploy secret bindings, or a Dokploy SSH key for a private
 `git@github.com:...` compose source.
 
@@ -559,8 +600,8 @@ The intended live service contract is now bootstrap-only target env plus
 DB-backed Launchplane records:
 
 - keep bootstrap/process inputs such as `LAUNCHPLANE_DATABASE_URL`,
-  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, and policy selectors on the service
-  target
+  `LAUNCHPLANE_SECRET_KEYS_JSON`, migration-only
+  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, and policy selectors on the service target
 - move Dokploy credentials into Launchplane-managed secret records
 - move per-context runtime values, ship-mode overrides, preview base URLs, and
   product-specific worker config into Launchplane runtime-environment records
@@ -772,7 +813,8 @@ Current derived-state behavior:
   writes non-secret values to runtime-environment records and secret-shaped
   values to managed secret records while returning only key names, actions,
   counts, actor, and source metadata. Bundles with secrets require
-  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`. Runtime and secret scopes default from
+  valid `LAUNCHPLANE_SECRET_KEYS_JSON` or the migration-only legacy key. Runtime
+  and secret scopes default from
   the top-level `context`/`instance`; nested `runtime_env` and secret routes must
   match that top-level target. Dry-run validates secret scope/route
   compatibility and runtime key-safety policy before reporting a plan, so apply
@@ -792,14 +834,23 @@ Current derived-state behavior:
   credentials stay read-only and cannot apply product config. The service
   response is redacted and the route rejects nested runtime or secret targets
   that differ from the authorized top-level context/instance. It fails closed
-  when secret writes are requested without the Launchplane master encryption key
-  in the service runtime or when no active runtime key-safety policy allows the
+  when secret writes are requested without valid Launchplane secret-key
+  configuration in the service runtime or when no active runtime key-safety policy allows the
   requested binding. When apply changes runtime-environment keys for a tracked
   Dokploy target, the response includes a required `live_target_runtime_apply`
   `next_actions` item. Treat product-config apply as a record mutation only
   until that next action has been dry-run and applied through
   `/v1/live-target-runtime/apply`; redeploying the same app image does not sync
   the live Dokploy target environment.
+- `POST /v1/secrets/reencrypt` is the normal shared/production root-rotation
+  path. Run `mode: "dry-run"` with `secret.reencrypt.dry-run`, then submit
+  `mode: "apply"` with the returned plan digest, a reason, an
+  `Idempotency-Key`, and `secret.reencrypt.apply`. Launchplane atomically writes
+  the new versions, current-version pointers, and audit events. If the mutation
+  commits before idempotency evidence is persisted, a retry with the same
+  request recovers from the rotation audit token instead of rotating again.
+  Direct `launchplane secrets reencrypt --apply` remains bootstrap/recovery-only
+  and requires explicit direct-DB acknowledgement.
 - The operator UI uses the same service route. It requires a successful dry-run
   result before enabling apply, clears rendered secret input values after each
   submit, and shows only key/action/count metadata from Launchplane responses.

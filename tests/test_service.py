@@ -5,8 +5,7 @@ import json
 import os
 import tempfile
 import unittest
-from collections.abc import Mapping, MutableMapping
-from dataclasses import dataclass
+from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
@@ -41,30 +40,9 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
-from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
-from control_plane.contracts.edge_endpoint_record import EdgeEndpointStatus
-from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_policy import parse_merge_train_policy_toml
-from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
-from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
-from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
-from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
-from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
-from control_plane.merge_train_github import MergeTrainGitHubError
-from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
-from control_plane.contracts.merge_train_stack_collapse import (
-    build_merge_train_stack_collapse_plan,
-    build_merge_train_stack_collapse_plan_record,
-    execute_merge_train_stack_collapse_plan,
-)
-from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
-from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -100,10 +78,6 @@ from control_plane.contracts.runner_lane_registration import (
     RunnerLaneRegistrationRequest,
     plan_runner_lane_registration,
 )
-from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
-from control_plane.merge_train import MergeTrainCheckStatus
-from control_plane.merge_train import build_merge_train_dry_run_result
-from control_plane.merge_train import discover_merge_train_stack
 from control_plane.service import (
     GenericWebPreviewVerificationRequest,
     handle_every_code_github_webhook_request,
@@ -120,7 +94,6 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalAdminPolicyRule,
     LocalOperatorIdentity,
-    LocalOperatorPolicyRule,
     TerminalAgentIdentity,
 )
 from control_plane.service_human_auth import (
@@ -133,6 +106,7 @@ from control_plane.service_human_auth import (
     HumanSessionManager,
     HumanSessionStore,
     InMemoryHumanSessionStore,
+    build_browser_mutation_request_headers,
     load_github_oauth_config_from_env,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -150,8 +124,6 @@ from control_plane.workflows.verireel_app_maintenance import VeriReelAppMaintena
 from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateResult
 from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotionResult
 from control_plane.workflows.verireel_prod_rollback import VeriReelProdRollbackResult
-from control_plane.workflows.merge_train_worker import MergeTrainWorkerClients
-from control_plane.workflows.merge_train_worker import run_merge_train_worker_step
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
 from control_plane.workflows.verireel_environment import VeriReelStableEnvironmentResult
 from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
@@ -159,8 +131,24 @@ from control_plane.workflows.odoo_artifact_publish import OdooArtifactPublishRes
 from control_plane.workflows.odoo_generic_web_post_deploy import (
     execute_odoo_generic_web_post_deploy,
 )
-from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.support.http import get as http_get
+from tests.support.http import request as http_request
+from tests.support.auth import (
+    _StubVerifier,
+    _identity,
+)
+from tests.support.profiles import (
+    _product_profile_payload,
+    _odoo_preview_profile_payload,
+    _odoo_profile_payload_with_prod_lane,
+    _product_profile_payload_with_prod,
+    _generic_site_profile_payload,
+)
+from tests.support.stores import (
+    _sqlite_database_url,
+    _seed_tracked_target_records,
+)
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
 from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
 from control_plane.workflows.generic_web_rollback import GenericWebRollbackApplyResult
@@ -175,12 +163,6 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewRefreshResult,
     GenericWebPreviewTransportSummary,
 )
-from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
-from control_plane.workflows.npmplus_ingress import (
-    NpmplusIngressApplyRequest,
-    NpmplusIngressApplyResult,
-    NpmplusIngressRouteDesiredState,
-)
 
 CLI_MAIN = cast(Command, main)
 TERMINAL_AGENT_AUTH_ENV = {
@@ -193,16 +175,6 @@ LOCAL_OPERATOR_AUTH_ENV = {
     "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
     "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
 }
-
-
-class _StubVerifier:
-    def __init__(self, identity: GitHubActionsIdentity):
-        self.identity = identity
-
-    def verify(self, token: str) -> GitHubActionsIdentity:
-        if token != "valid-token":
-            raise ValueError("OIDC bearer token is required.")
-        return self.identity
 
 
 _FAKE_DESCRIPTOR_DRIVER_ID = "fake-descriptor"
@@ -254,66 +226,6 @@ class _StubGitHubOAuthClient:
         return self.identity
 
 
-class _FakeNpmplusIngressClient:
-    def __init__(self, proxy_hosts: tuple[NpmplusProxyHost, ...] = ()) -> None:
-        self.proxy_hosts = list(proxy_hosts)
-        self.calls: list[str] = []
-        self.next_id = 100
-
-    def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]:
-        self.calls.append("list")
-        return tuple(self.proxy_hosts)
-
-    def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
-        self.calls.append("create")
-        created = NpmplusProxyHost.model_validate({"id": self.next_id, **payload.to_api_payload()})
-        self.proxy_hosts.append(created)
-        return created
-
-    def update_proxy_host(
-        self, *, host_id: int, payload: NpmplusProxyHostPayload
-    ) -> NpmplusProxyHost:
-        self.calls.append(f"update:{host_id}")
-        updated = NpmplusProxyHost.model_validate({"id": host_id, **payload.to_api_payload()})
-        self.proxy_hosts = [updated if host.id == host_id else host for host in self.proxy_hosts]
-        return updated
-
-    def disable_proxy_host(self, host_id: int) -> NpmplusProxyHost:
-        self.calls.append(f"disable:{host_id}")
-        return self._set_enabled(host_id=host_id, enabled=False)
-
-    def enable_proxy_host(self, host_id: int) -> NpmplusProxyHost:
-        self.calls.append(f"enable:{host_id}")
-        return self._set_enabled(host_id=host_id, enabled=True)
-
-    def _set_enabled(self, *, host_id: int, enabled: bool) -> NpmplusProxyHost:
-        for index, host in enumerate(self.proxy_hosts):
-            if host.id == host_id:
-                updated = NpmplusProxyHost.model_validate(
-                    {**host.model_dump(mode="json"), "enabled": enabled}
-                )
-                self.proxy_hosts[index] = updated
-                return updated
-        raise AssertionError(f"Unknown proxy host: {host_id}")
-
-
-class _FakeIngressProvider:
-    provider_id = "fake-ingress"
-    delegated_executor = "control-plane.fake-ingress"
-
-    def __init__(self, result: NpmplusIngressApplyResult) -> None:
-        self.result = result
-        self.requests: list[NpmplusIngressApplyRequest] = []
-
-    def apply_route(
-        self,
-        *,
-        request: NpmplusIngressApplyRequest,
-    ) -> NpmplusIngressApplyResult:
-        self.requests.append(request)
-        return self.result
-
-
 class _FakeGitHubResponse:
     def __init__(self, payload: object):
         self._payload = payload
@@ -338,365 +250,6 @@ class _FakeOAuth2Session:
     def get(self, url: str) -> _FakeGitHubResponse:
         self.requested_urls.append(url)
         return _FakeGitHubResponse(self.payloads[url])
-
-
-class _FakeMergeTrainGitHubClient:
-    land_batch_candidate_calls = 0
-    cleanup_batch_candidate_ref_calls = 0
-
-    def __init__(self, *, transport: object) -> None:
-        self.transport = transport
-
-    def add_pull_request_label(
-        self, *, repository: str, pull_request_number: int, label: str
-    ) -> None:
-        return None
-
-    def update_pull_request_branch(
-        self, *, repository: str, pull_request_number: int, expected_head_sha: str
-    ) -> None:
-        return None
-
-    def merge_pull_request(
-        self,
-        *,
-        repository: str,
-        pull_request_number: int,
-        head_sha: str,
-        merge_method: str,
-    ) -> str:
-        return f"merge-{pull_request_number}"
-
-    def build_batch_candidate(
-        self, *, candidate: MergeTrainBatchCandidate
-    ) -> MergeTrainBatchCandidate:
-        return candidate.model_copy(
-            update={"candidate_sha": "candidate-built", "status": "ready_for_checks"}
-        )
-
-    def observe_batch_candidate_checks(
-        self, *, candidate: MergeTrainBatchCandidate
-    ) -> MergeTrainBatchCandidate:
-        return candidate.model_copy(update={"required_checks_status": "pass", "status": "passed"})
-
-    def land_batch_candidate(
-        self, *, landing_plan: MergeTrainBatchLandingPlan
-    ) -> MergeTrainBatchLandingPlan:
-        type(self).land_batch_candidate_calls += 1
-        return landing_plan.model_copy(
-            update={
-                "entries": tuple(
-                    entry.model_copy(
-                        update={
-                            "status": "merged",
-                            "merge_commit_sha": f"merge-{entry.pull_request_number}",
-                        }
-                    )
-                    for entry in landing_plan.entries
-                )
-            }
-        )
-
-    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
-        type(self).cleanup_batch_candidate_ref_calls += 1
-        return True
-
-    def merge_stack_child_into_parent(
-        self,
-        *,
-        repository: str,
-        child_head_sha: str,
-        expected_parent_head_sha: str,
-        parent_head_ref: str,
-        collapse_id: str,
-        child_pull_request_number: int,
-        parent_pull_request_number: int,
-    ) -> str:
-        return f"stack-merge-{child_pull_request_number}-into-{parent_pull_request_number}"
-
-    def comment_pull_request(self, *, repository: str, pull_request_number: int, body: str) -> str:
-        return f"https://github.com/{repository}/pull/{pull_request_number}#issuecomment-1"
-
-    def close_pull_request(
-        self, *, repository: str, pull_request_number: int, expected_head_sha: str
-    ) -> None:
-        return None
-
-
-class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
-    def observe_batch_candidate_checks(
-        self, *, candidate: MergeTrainBatchCandidate
-    ) -> MergeTrainBatchCandidate:
-        return candidate.model_copy(update={"required_checks_status": "fail", "status": "failed"})
-
-
-class _StaleLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
-    def land_batch_candidate(
-        self, *, landing_plan: MergeTrainBatchLandingPlan
-    ) -> MergeTrainBatchLandingPlan:
-        raise MergeTrainGitHubStaleHeadError(
-            "Base branch moved outside the batch landing plan.", status_code=409
-        )
-
-
-class _UnavailableLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
-    def land_batch_candidate(
-        self, *, landing_plan: MergeTrainBatchLandingPlan
-    ) -> MergeTrainBatchLandingPlan:
-        raise MergeTrainGitHubError(
-            "GitHub API request failed for /repos/example/repo", status_code=503
-        )
-
-
-class _CleanupFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
-    cleanup_batch_candidate_ref_calls = 0
-
-    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
-        type(self).cleanup_batch_candidate_ref_calls += 1
-        raise MergeTrainGitHubError("candidate ref cleanup unavailable", status_code=503)
-
-
-class _CleanupAlreadyMissingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
-    cleanup_batch_candidate_ref_calls = 0
-
-    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
-        type(self).cleanup_batch_candidate_ref_calls += 1
-        return False
-
-
-class _CleanupFailingWithoutStatusMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
-    cleanup_batch_candidate_ref_calls = 0
-
-    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
-        type(self).cleanup_batch_candidate_ref_calls += 1
-        raise MergeTrainGitHubError("candidate ref cleanup network unavailable")
-
-
-class _FailingChildDispositionMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
-    def add_pull_request_label(
-        self, *, repository: str, pull_request_number: int, label: str
-    ) -> None:
-        raise RuntimeError("label persistence unavailable")
-
-
-class _StackCollapseWriteFailingFilesystemRecordStore(FilesystemRecordStore):
-    def write_merge_train_stack_collapse_plan_record(self, record: object) -> Path:
-        raise RuntimeError("stack collapse persistence unavailable")
-
-
-class _CandidateReflowWriteFailingFilesystemRecordStore(FilesystemRecordStore):
-    def write_merge_train_batch_candidate_record(self, record: object) -> Path:
-        candidate_record = cast(MergeTrainBatchCandidateRecord, record)
-        if "candidate-reflow" in candidate_record.source:
-            raise RuntimeError("candidate reflow persistence unavailable")
-        return super().write_merge_train_batch_candidate_record(candidate_record)
-
-
-class _CandidateReflowSupersedeFailingFilesystemRecordStore(FilesystemRecordStore):
-    def write_merge_train_batch_candidate_record(self, record: object) -> Path:
-        candidate_record = cast(MergeTrainBatchCandidateRecord, record)
-        if (
-            candidate_record.status == "superseded"
-            and "candidate-reflow" not in candidate_record.source
-        ):
-            raise RuntimeError("candidate supersession persistence unavailable")
-        return super().write_merge_train_batch_candidate_record(candidate_record)
-
-
-class _SameBatchIdReflowFilesystemRecordStore(FilesystemRecordStore):
-    def write_merge_train_batch_candidate_record(self, record: object) -> Path:
-        candidate_record = cast(MergeTrainBatchCandidateRecord, record)
-        if "candidate-reflow" in candidate_record.source:
-            records = self.list_merge_train_batch_candidate_records(
-                repository=candidate_record.candidate.repository,
-                base_branch=candidate_record.candidate.base_branch,
-                status="active",
-            )
-            failed_record = next(
-                record for record in records if record.candidate.status == "failed"
-            )
-            candidate_record = candidate_record.model_copy(
-                update={
-                    "candidate": candidate_record.candidate.model_copy(
-                        update={"batch_id": failed_record.candidate.batch_id}
-                    )
-                }
-            )
-        return super().write_merge_train_batch_candidate_record(candidate_record)
-
-
-class _NoopMergeTrainGitHubClient:
-    def add_pull_request_label(
-        self, *, repository: str, pull_request_number: int, label: str
-    ) -> None:
-        return None
-
-    def update_pull_request_branch(
-        self, *, repository: str, pull_request_number: int, expected_head_sha: str
-    ) -> None:
-        return None
-
-    def merge_pull_request(
-        self,
-        *,
-        repository: str,
-        pull_request_number: int,
-        head_sha: str,
-        merge_method: str,
-    ) -> str:
-        return f"merge-{pull_request_number}"
-
-
-class _FakeMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object) -> None:
-        self.transport = transport
-
-    def read_merge_train_snapshot(
-        self, *, repository: str, base_branch: str
-    ) -> MergeTrainDryRunSnapshot:
-        return MergeTrainDryRunSnapshot(
-            repository=repository,
-            base_branch=base_branch,
-            base_sha="current-base-main",
-            pull_requests=(
-                MergeTrainPullRequestSnapshot(
-                    number=1,
-                    url=f"https://github.com/{repository}/pull/1",
-                    title="Ready PR",
-                    created_at="2026-05-08T10:00:00Z",
-                    labels=("ready-to-merge",),
-                    actor_role="repo_admin",
-                    head_sha="head-1",
-                    head_ref="feature/root",
-                    head_repository=repository,
-                    base_ref=base_branch,
-                    base_repository=repository,
-                    base_sha="base-main",
-                    mergeable="mergeable",
-                    required_checks_status="pass",
-                ),
-            ),
-        )
-
-
-class _FakeExpandedMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
-    def read_merge_train_snapshot(
-        self, *, repository: str, base_branch: str
-    ) -> MergeTrainDryRunSnapshot:
-        base_snapshot = super().read_merge_train_snapshot(
-            repository=repository, base_branch=base_branch
-        )
-        return base_snapshot.model_copy(
-            update={
-                "pull_requests": (
-                    *base_snapshot.pull_requests,
-                    MergeTrainPullRequestSnapshot(
-                        number=2,
-                        url=f"https://github.com/{repository}/pull/2",
-                        title="Validation fix",
-                        created_at="2026-05-08T10:05:00Z",
-                        labels=("ready-to-merge",),
-                        actor_role="repo_admin",
-                        head_sha="head-2",
-                        head_ref="feature/validation-fix",
-                        head_repository=repository,
-                        base_ref=base_branch,
-                        base_repository=repository,
-                        base_sha="base-main",
-                        mergeable="mergeable",
-                        required_checks_status="pass",
-                    ),
-                )
-            }
-        )
-
-
-class _FakeEmptyMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object) -> None:
-        self.transport = transport
-
-    def read_merge_train_snapshot(
-        self, *, repository: str, base_branch: str
-    ) -> MergeTrainDryRunSnapshot:
-        return MergeTrainDryRunSnapshot(
-            repository=repository,
-            base_branch=base_branch,
-            base_sha="current-base-main",
-            pull_requests=(),
-        )
-
-
-class _FakeStackedMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object) -> None:
-        self.transport = transport
-
-    def read_merge_train_snapshot(
-        self, *, repository: str, base_branch: str
-    ) -> MergeTrainDryRunSnapshot:
-        return MergeTrainDryRunSnapshot(
-            repository=repository,
-            base_branch=base_branch,
-            base_sha="current-base-main",
-            pull_requests=(
-                MergeTrainPullRequestSnapshot(
-                    number=1,
-                    url=f"https://github.com/{repository}/pull/1",
-                    title="Root PR",
-                    created_at="2026-05-08T10:00:00Z",
-                    labels=("ready-to-merge",),
-                    actor_role="repo_admin",
-                    head_sha=self._root_head_sha(),
-                    head_ref="feature/root",
-                    head_repository=repository,
-                    base_ref=base_branch,
-                    base_repository=repository,
-                    base_sha="base-main",
-                    mergeable="mergeable",
-                    required_checks_status="pass",
-                ),
-                MergeTrainPullRequestSnapshot(
-                    number=2,
-                    url=f"https://github.com/{repository}/pull/2",
-                    title="Stacked child PR",
-                    created_at="2026-05-08T11:00:00Z",
-                    labels=(),
-                    actor_role="repo_admin",
-                    head_sha="head-child",
-                    head_ref="feature/child",
-                    head_repository=repository,
-                    base_ref="feature/root",
-                    base_repository=repository,
-                    base_sha="head-root",
-                    mergeable="mergeable",
-                    required_checks_status="pending",
-                ),
-            ),
-        )
-
-    def _root_head_sha(self) -> str:
-        return "head-root"
-
-
-class _FakeCollapsedRootStackedMergeTrainSnapshotReader(_FakeStackedMergeTrainSnapshotReader):
-    def _root_head_sha(self) -> str:
-        return "stack-merge-2-into-1"
-
-
-class _FakeMovedRootStackedMergeTrainSnapshotReader(_FakeStackedMergeTrainSnapshotReader):
-    def read_merge_train_snapshot(
-        self, *, repository: str, base_branch: str
-    ) -> MergeTrainDryRunSnapshot:
-        snapshot = super().read_merge_train_snapshot(repository=repository, base_branch=base_branch)
-        return snapshot.model_copy(
-            update={
-                "pull_requests": tuple(
-                    pull_request.model_copy(update={"head_sha": "moved-root-head"})
-                    if pull_request.number == 1
-                    else pull_request
-                    for pull_request in snapshot.pull_requests
-                )
-            }
-        )
 
 
 class _FlakyEveryCodeNotificationStore:
@@ -755,46 +308,6 @@ class _FlakyEveryCodeNotificationStore:
         return record.attempt_id
 
 
-def _merge_train_service_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "github_actions": [
-                {
-                    "repository": "cbusillo/launchplane",
-                    "workflow_refs": [
-                        "cbusillo/launchplane/.github/workflows/merge-train.yml@refs/heads/main"
-                    ],
-                    "event_names": ["workflow_dispatch"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["merge_train.run_once"],
-                }
-            ]
-        }
-    )
-
-
-def _local_operator_policy(
-    *,
-    actions: tuple[str, ...],
-    products: tuple[str, ...] = ("*",),
-    contexts: tuple[str, ...] = ("*",),
-    subject: str = "local-owner-agent",
-    token_label: str = "local-owner-write",
-) -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy(
-        local_operators=(
-            LocalOperatorPolicyRule(
-                subjects=(subject,),
-                token_labels=(token_label,),
-                products=products,
-                contexts=contexts,
-                actions=actions,
-            ),
-        )
-    )
-
-
 def _local_admin_policy(
     *,
     actions: tuple[str, ...],
@@ -811,14 +324,6 @@ def _local_admin_policy(
                 actions=actions,
             ),
         )
-    )
-
-
-def _merge_train_service_identity() -> GitHubActionsIdentity:
-    return _identity(
-        repository="cbusillo/launchplane",
-        workflow_ref="cbusillo/launchplane/.github/workflows/merge-train.yml@refs/heads/main",
-        event_name="workflow_dispatch",
     )
 
 
@@ -854,58 +359,6 @@ def _every_code_worker_identity() -> GitHubActionsIdentity:
     )
 
 
-def _seed_merge_train_policy(
-    state_dir: Path, *, policy: MergeTrainPolicyRecord | None = None
-) -> MergeTrainPolicyRecord:
-    record = policy or build_test_merge_train_policy_record()
-    FilesystemRecordStore(state_dir).write_merge_train_policy_record(record)
-    return record
-
-
-def _merge_train_policy_table(
-    repository: str,
-    base_branch: str = "main",
-    *,
-    scheduler_enabled: bool = False,
-    scheduler_runner_mode: str = "controller",
-    scheduler_mutate: bool = False,
-) -> str:
-    scheduler_table = ""
-    if scheduler_enabled:
-        scheduler_table = f"""
-[policies.scheduler]
-enabled = true
-runner_mode = "{scheduler_runner_mode}"
-mutate = {str(scheduler_mutate).lower()}
-"""
-    return f"""[[policies]]
-repository = "{repository}"
-base_branch = "{base_branch}"
-enqueue_label = "ready-to-merge"
-blocked_label = "merge-blocked"
-stack_child_disposition_label = "stack-landed"
-merge_method = "merge"
-failure_policy = "pause_train"
-
-[policies.enqueue]
-label_required = true
-allowed_actor_roles = ["repo_owner", "repo_admin"]
-
-[policies.merge_identity]
-kind = "github_actions_oidc"
-name = "launchplane-merge-train"
-
-[policies.service_authz]
-action = "merge_train.run_once"
-product = "launchplane"
-context = "launchplane"
-
-[policies.github_token]
-env_var = "GH_TOKEN"
-{scheduler_table}
-"""
-
-
 def _merge_train_policy_with_label(
     *, repository: str = "cbusillo/sellyouroutboard", enqueue_label: str = "ready-to-merge"
 ) -> MergeTrainPolicy:
@@ -937,265 +390,6 @@ context = "launchplane"
 [policies.github_token]
 env_var = "GH_TOKEN"
 """
-    )
-
-
-def _merge_train_run_record(
-    *,
-    recorded_at: str,
-    required_checks_status: MergeTrainCheckStatus = "pass",
-    mutate: bool = False,
-) -> MergeTrainRunRecord:
-    policy = build_test_merge_train_policy()
-    snapshot = MergeTrainDryRunSnapshot(
-        repository="cbusillo/sellyouroutboard",
-        base_branch="main",
-        pull_requests=(
-            MergeTrainPullRequestSnapshot(
-                number=1,
-                url="https://github.com/cbusillo/sellyouroutboard/pull/1",
-                title="Ready PR",
-                created_at="2026-05-08T10:00:00Z",
-                labels=("ready-to-merge",),
-                actor_role="repo_admin",
-                head_sha="head-1",
-                base_ref="main",
-                base_sha="base-main",
-                mergeable="mergeable",
-                required_checks_status=required_checks_status,
-            ),
-        ),
-    )
-    dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
-    worker_step_result = None
-    if mutate:
-        noop_client = _NoopMergeTrainGitHubClient()
-        worker_step_result = run_merge_train_worker_step(
-            policy=policy,
-            snapshot=snapshot,
-            clients=MergeTrainWorkerClients(
-                label_client=noop_client,
-                branch_client=noop_client,
-                merge_client=noop_client,
-            ),
-        )
-    return build_merge_train_run_record(
-        recorded_at=recorded_at,
-        trace_id="launchplane_req_merge_train_service_test",
-        policy_sha256=policy.policy_sha256,
-        snapshot=snapshot,
-        dry_run_result=dry_run_result,
-        worker_step_result=worker_step_result,
-    )
-
-
-def _seed_merge_train_batch_candidate_record(
-    state_dir: Path,
-    *,
-    status: str = "planned",
-    required_checks_status: str = "pending",
-    candidate_sha: str = "",
-    policy: MergeTrainPolicy | None = None,
-    snapshot_reader: type[_FakeMergeTrainSnapshotReader] = _FakeMergeTrainSnapshotReader,
-) -> MergeTrainBatchCandidateRecord:
-    merge_train_policy = policy or build_test_merge_train_policy()
-    snapshot = snapshot_reader(transport=object()).read_merge_train_snapshot(
-        repository="cbusillo/sellyouroutboard",
-        base_branch="main",
-    )
-    dry_run_result = build_merge_train_dry_run_result(
-        policy=merge_train_policy,
-        snapshot=snapshot,
-    )
-    candidate = build_merge_train_batch_candidate(
-        dry_run_result=dry_run_result,
-        base_sha=snapshot.base_sha,
-        policy_sha256=merge_train_policy.policy_sha256,
-        created_at="2026-05-13T21:00:00Z",
-    ).model_copy(
-        update={
-            "status": status,
-            "required_checks_status": required_checks_status,
-            "candidate_sha": candidate_sha,
-        }
-    )
-    record = build_merge_train_batch_candidate_record(
-        candidate=candidate,
-        source=f"test:{status}",
-        updated_at="2026-05-13T21:00:00Z",
-    )
-    FilesystemRecordStore(state_dir).write_merge_train_batch_candidate_record(record)
-    return record
-
-
-def _mark_merge_train_batch_candidate_record_passed(
-    state_dir: Path, *, record_id: str
-) -> MergeTrainBatchCandidateRecord:
-    store = FilesystemRecordStore(state_dir)
-    existing_record = next(
-        record
-        for record in store.list_merge_train_batch_candidate_records(
-            repository="cbusillo/sellyouroutboard",
-            base_branch="main",
-        )
-        if record.record_id == record_id
-    )
-    candidate = existing_record.candidate.model_copy(
-        update={
-            "status": "passed",
-            "required_checks_status": "pass",
-            "candidate_sha": "candidate-built",
-        }
-    )
-    passed_record = build_merge_train_batch_candidate_record(
-        candidate=candidate,
-        source="test:passed",
-        updated_at="2026-05-13T21:05:00Z",
-    )
-    store.write_merge_train_batch_candidate_record(passed_record)
-    return passed_record
-
-
-def _seed_merge_train_stack_collapse_plan_record(
-    state_dir: Path,
-    *,
-    policy: MergeTrainPolicy | None = None,
-    snapshot_reader: type[
-        _FakeStackedMergeTrainSnapshotReader
-    ] = _FakeStackedMergeTrainSnapshotReader,
-) -> str:
-    merge_train_policy = policy or build_test_merge_train_policy()
-    snapshot = snapshot_reader(transport=object()).read_merge_train_snapshot(
-        repository="cbusillo/sellyouroutboard",
-        base_branch="main",
-    )
-    dry_run_result = build_merge_train_dry_run_result(
-        policy=merge_train_policy,
-        snapshot=snapshot,
-    )
-    selected_pr = dry_run_result.selected_pr
-    assert selected_pr is not None
-    stack_discovery = discover_merge_train_stack(
-        snapshot=snapshot,
-        root_pull_request_number=selected_pr.number,
-    )
-    stack_collapse_plan = build_merge_train_stack_collapse_plan(
-        discovery_result=stack_discovery,
-        policy_key=dry_run_result.policy_key,
-        policy_sha256=merge_train_policy.policy_sha256,
-        created_at="2026-05-13T21:00:00Z",
-    )
-    record = build_merge_train_stack_collapse_plan_record(
-        plan=stack_collapse_plan,
-        source="test:plan",
-        updated_at="2026-05-13T21:00:00Z",
-    )
-    FilesystemRecordStore(state_dir).write_merge_train_stack_collapse_plan_record(record)
-    return record.record_id
-
-
-def _seed_executed_merge_train_stack_collapse_plan_record(
-    state_dir: Path,
-    *,
-    policy: MergeTrainPolicy | None = None,
-    snapshot_reader: type[
-        _FakeStackedMergeTrainSnapshotReader
-    ] = _FakeStackedMergeTrainSnapshotReader,
-) -> str:
-    planned_record_id = _seed_merge_train_stack_collapse_plan_record(
-        state_dir,
-        policy=policy,
-        snapshot_reader=snapshot_reader,
-    )
-    store = FilesystemRecordStore(state_dir)
-    planned_record = next(
-        record
-        for record in store.list_merge_train_stack_collapse_plan_records(
-            repository="cbusillo/sellyouroutboard", base_branch="main"
-        )
-        if record.record_id == planned_record_id
-    )
-    executed_plan = execute_merge_train_stack_collapse_plan(
-        plan=planned_record.plan,
-        branch_client=_FakeMergeTrainGitHubClient(transport=object()),
-        updated_at="2026-05-13T21:02:00Z",
-    )
-    executed_record = build_merge_train_stack_collapse_plan_record(
-        plan=executed_plan,
-        source="test:execute",
-        updated_at="2026-05-13T21:02:00Z",
-    )
-    store.write_merge_train_stack_collapse_plan_record(executed_record)
-    return executed_record.record_id
-
-
-def _seed_admitted_merge_train_stack_collapse_candidate(
-    state_dir: Path,
-    *,
-    executed_record_id: str,
-    policy: MergeTrainPolicy | None = None,
-    snapshot_reader: type[
-        _FakeStackedMergeTrainSnapshotReader
-    ] = _FakeCollapsedRootStackedMergeTrainSnapshotReader,
-) -> MergeTrainBatchCandidateRecord:
-    merge_train_policy = policy or build_test_merge_train_policy()
-    store = FilesystemRecordStore(state_dir)
-    executed_record = next(
-        record
-        for record in store.list_merge_train_stack_collapse_plan_records(
-            repository="cbusillo/sellyouroutboard", base_branch="main"
-        )
-        if record.record_id == executed_record_id
-    )
-    snapshot = snapshot_reader(transport=object()).read_merge_train_snapshot(
-        repository="cbusillo/sellyouroutboard",
-        base_branch="main",
-    )
-    root_pull_request = next(
-        pull_request
-        for pull_request in snapshot.pull_requests
-        if pull_request.number == executed_record.plan.root_pull_request_number
-    )
-    dry_run_result = build_merge_train_dry_run_result(
-        policy=merge_train_policy,
-        snapshot=snapshot.model_copy(update={"pull_requests": (root_pull_request,)}),
-    )
-    candidate = build_merge_train_batch_candidate(
-        dry_run_result=dry_run_result,
-        base_sha=snapshot.base_sha,
-        policy_sha256=merge_train_policy.policy_sha256,
-        created_at="2026-05-13T21:03:00Z",
-    )
-    candidate_record = build_merge_train_batch_candidate_record(
-        candidate=candidate,
-        source="test:stack-collapse-admit",
-        updated_at="2026-05-13T21:03:00Z",
-    )
-    store.write_merge_train_batch_candidate_record(candidate_record)
-    return candidate_record
-
-
-def _identity(
-    *,
-    repository: str = "every/verireel",
-    workflow_ref: str = "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
-    job_workflow_ref: str = "",
-    event_name: str = "pull_request",
-    ref: str = "refs/heads/main",
-    environment: str = "",
-) -> GitHubActionsIdentity:
-    return GitHubActionsIdentity(
-        repository=repository,
-        repository_owner="every",
-        workflow_ref=workflow_ref,
-        job_workflow_ref=job_workflow_ref,
-        ref=ref,
-        ref_type="branch",
-        event_name=event_name,
-        environment=environment,
-        subject="repo:every/verireel:pull_request",
-        sha="6b3c9d7e8f901234567890abcdef1234567890ab",
-        raw_claims={"repository": repository, "workflow_ref": workflow_ref},
     )
 
 
@@ -1257,6 +451,21 @@ def _fastapi_signed_in_cookie(
     return session_manager.session_cookie_header(human_session)
 
 
+def _fastapi_browser_mutation_headers(
+    session_manager: HumanSessionManager,
+    cookie: str,
+) -> dict[str, str]:
+    human_session = session_manager.read_cookie(cookie)
+    assert human_session is not None
+    return {
+        "Cookie": cookie,
+        **build_browser_mutation_request_headers(
+            origin=session_manager.public_origin,
+            csrf_token=session_manager.csrf_token(human_session),
+        ),
+    }
+
+
 def _authz_policy_record_by_id(
     records: tuple[LaunchplaneAuthzPolicyRecord, ...], record_id: object
 ) -> LaunchplaneAuthzPolicyRecord:
@@ -1264,132 +473,6 @@ def _authz_policy_record_by_id(
         if record.record_id == str(record_id):
             return record
     raise AssertionError(f"Authz policy record {record_id!r} was not found")
-
-
-def _product_profile_payload(product: str = "sellyouroutboard") -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "product": product,
-        "display_name": "Sell Your Outboard",
-        "repository": f"cbusillo/{product}",
-        "driver_id": "generic-web",
-        "image": {"repository": f"ghcr.io/cbusillo/{product}"},
-        "runtime_port": 3000,
-        "health_path": "/api/health",
-        "lanes": (
-            {
-                "instance": "testing",
-                "context": f"{product}-testing",
-                "base_url": "https://testing.sellyouroutboard.com",
-                "health_url": "https://testing.sellyouroutboard.com/api/health",
-            },
-        ),
-        "preview": {
-            "enabled": True,
-            "context": f"{product}-testing",
-            "slug_template": "pr-{number}",
-        },
-        "updated_at": "2026-04-30T21:30:00Z",
-        "source": "test",
-    }
-
-
-def _odoo_preview_profile_payload(product: str = "odoo-tenant-cm") -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "product": product,
-        "display_name": "CM Odoo",
-        "repository": f"cbusillo/{product}",
-        "driver_id": "odoo",
-        "image": {"repository": f"ghcr.io/cbusillo/{product}"},
-        "runtime_port": 8069,
-        "health_path": "/web/health",
-        "lanes": (
-            {
-                "instance": "testing",
-                "context": "cm",
-                "base_url": "https://cm-testing.example.com",
-                "health_url": "https://cm-testing.example.com/web/health",
-            },
-        ),
-        "preview": {
-            "enabled": True,
-            "context": "cm",
-            "slug_template": "pr-{number}",
-            "app_name_prefix": "cm-odoo-preview",
-        },
-        "updated_at": "2026-05-09T12:00:00Z",
-        "source": "test",
-    }
-
-
-def _odoo_profile_payload_with_prod_lane(
-    product: str = "odoo-tenant-cm",
-) -> dict[str, object]:
-    payload = _odoo_preview_profile_payload(product)
-    lanes = list(cast(tuple[dict[str, object], ...], payload["lanes"]))
-    lanes.append(
-        {
-            "instance": "prod",
-            "context": "cm",
-            "base_url": "https://cm.example.com",
-            "health_url": "https://cm.example.com/web/health",
-        }
-    )
-    payload["lanes"] = tuple(lanes)
-    return payload
-
-
-def _write_odoo_preview_template_runtime_environment(
-    *, store: Any, context: str = "cm", instance: str = "testing"
-) -> None:
-    store.write_runtime_environment_record(
-        RuntimeEnvironmentRecord(
-            scope="instance",
-            context=context,
-            instance=instance,
-            env={"ODOO_DB_USER": "odoo"},
-            updated_at="2026-05-09T12:30:00Z",
-            source_label="test",
-        )
-    )
-    with patch.dict(
-        os.environ,
-        {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-        clear=True,
-    ):
-        for name, binding_key, value in (
-            ("db-password", "ODOO_DB_PASSWORD", "template-db-secret"),
-            ("master-password", "ODOO_MASTER_PASSWORD", "template-master-secret"),
-            ("admin-password", "ODOO_ADMIN_PASSWORD", "template-admin-secret"),
-        ):
-            control_plane_secrets.write_secret_value(
-                record_store=store,
-                scope="context_instance",
-                integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                name=name,
-                plaintext_value=value,
-                binding_key=binding_key,
-                context_name=context,
-                instance_name=instance,
-                actor="test",
-                source_label="test",
-            )
-
-
-def _product_profile_payload_with_prod(product: str = "sellyouroutboard") -> dict[str, object]:
-    payload = _product_profile_payload(product)
-    lanes = list(cast(tuple[dict[str, object], ...], payload["lanes"]))
-    lanes.append(
-        {
-            "instance": "prod",
-            "context": f"{product}-testing",
-            "base_url": "https://www.sellyouroutboard.com",
-            "health_url": "https://www.sellyouroutboard.com/api/health",
-        }
-    )
-    payload["lanes"] = tuple(lanes)
-    return payload
 
 
 def _live_target_runtime_profile_payload(
@@ -1426,10 +509,6 @@ def _product_profile_lanes(payload: dict[str, object]) -> tuple[dict[str, object
     return cast(tuple[dict[str, object], ...], payload["lanes"])
 
 
-def _product_config_secrets(payload: dict[str, object]) -> list[dict[str, object]]:
-    return cast(list[dict[str, object]], payload["secrets"])
-
-
 def _passed_healthcheck_evidence(url: str) -> HealthcheckEvidence:
     return HealthcheckEvidence(
         verified=True,
@@ -1437,54 +516,6 @@ def _passed_healthcheck_evidence(url: str) -> HealthcheckEvidence:
         timeout_seconds=45,
         status="pass",
     )
-
-
-def _generic_site_profile_payload(product: str = "example-site") -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "product": product,
-        "display_name": "Example Site",
-        "repository": f"every/{product}",
-        "driver_id": "generic-web",
-        "image": {"repository": f"ghcr.io/every/{product}"},
-        "runtime_port": 3000,
-        "health_path": "/healthz",
-        "lanes": (
-            {
-                "instance": "testing",
-                "context": product,
-                "base_url": f"https://testing.{product}.example",
-                "health_url": f"https://testing.{product}.example/healthz",
-            },
-            {
-                "instance": "prod",
-                "context": product,
-                "base_url": f"https://{product}.example",
-                "health_url": f"https://{product}.example/healthz",
-            },
-        ),
-        "preview": {
-            "enabled": True,
-            "context": product,
-            "slug_template": "pr-{number}",
-        },
-        "expected_config": {
-            "runtime_environment_keys": [
-                {"key": "INTERNAL_CALLBACK_URL", "context": product, "instance": "prod"},
-                {"key": "RESEND_FROM_EMAIL", "context": product, "instance": "prod"},
-            ],
-            "managed_secret_bindings": [
-                {"binding_key": "SMTP_PASSWORD", "context": product, "instance": "prod"},
-                {"binding_key": "RESEND_API_KEY", "context": product, "instance": "prod"},
-            ],
-        },
-        "updated_at": "2026-05-02T22:30:00Z",
-        "source": "test",
-    }
-
-
-def _sqlite_database_url(database_path: Path) -> str:
-    return f"sqlite+pysqlite:///{database_path}"
 
 
 def create_launchplane_fastapi_test_app(**kwargs: object) -> Any:
@@ -1540,37 +571,6 @@ def create_launchplane_dokploy_target_setup_app(**kwargs: object) -> Any:
         kwargs["record_store_factory"] = record_store_factory
     factory = cast(Any, create_launchplane_fastapi_app)
     return factory(**kwargs)
-
-
-def _write_runtime_key_safety_policy(
-    *,
-    database_url: str,
-    context_name: str = "sellyouroutboard-prod",
-    instance_name: str = "prod",
-    rules: tuple[RuntimeSecretSafetyRule, ...] | None = None,
-) -> None:
-    store = PostgresRecordStore(database_url=database_url)
-    store.ensure_schema()
-    try:
-        store.write_runtime_key_safety_policy_record(
-            RuntimeKeySafetyPolicyRecord(
-                record_id="runtime-key-safety-policy-service-test",
-                status="active",
-                source="test",
-                updated_at="2026-05-05T20:00:00Z",
-                rules=rules
-                or (
-                    RuntimeSecretSafetyRule(
-                        binding_key="SMTP_PASSWORD",
-                        secret_class="prod_only",
-                        allowed_contexts=(context_name,),
-                        allowed_instances=(instance_name,),
-                    ),
-                ),
-            )
-        )
-    finally:
-        store.close()
 
 
 def _runner_host_hygiene_audit_payload(
@@ -1697,213 +697,6 @@ def _generic_web_deploy_result(
         post_deploy_status=post_deploy_status,
         error_message=error_message,
     )
-
-
-def _seed_tracked_target_records(
-    *,
-    database_url: str,
-    context: str,
-    instance: str,
-    target_id: str,
-    target_type: Literal["compose", "application"],
-    target_name: str,
-    domains: tuple[str, ...] = (),
-    deploy_timeout_seconds: int | None = None,
-) -> None:
-    store = PostgresRecordStore(database_url=database_url)
-    store.ensure_schema()
-    try:
-        store.write_dokploy_target_record(
-            DokployTargetRecord(
-                context=context,
-                instance=instance,
-                target_type=target_type,
-                target_name=target_name,
-                deploy_timeout_seconds=deploy_timeout_seconds,
-                domains=domains,
-                updated_at="2026-05-01T00:00:00Z",
-                source_label="test",
-            )
-        )
-        store.write_dokploy_target_id_record(
-            DokployTargetIdRecord(
-                context=context,
-                instance=instance,
-                target_id=target_id,
-                updated_at="2026-05-01T00:00:00Z",
-                source_label="test",
-            )
-        )
-    finally:
-        store.close()
-
-
-def _product_config_payload() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "mode": "dry-run",
-        "product": "sellyouroutboard",
-        "context": "sellyouroutboard-prod",
-        "instance": "prod",
-        "source_label": "product-config-api-test",
-        "runtime_env": {
-            "scope": "instance",
-            "env": {
-                "CONTACT_EMAIL_MODE": "smtp",
-                "SELLYOUROUTBOARD_SITE_URL": "https://www.sellyouroutboard.com",
-            },
-        },
-        "secrets": [
-            {
-                "name": "SMTP_PASSWORD",
-                "binding_key": "SMTP_PASSWORD",
-                "value": "smtp-secret-value",
-                "scope": "context_instance",
-                "description": "SMTP password",
-            }
-        ],
-    }
-
-
-def _npmplus_ingress_route_payload(
-    *, mode: str = "dry-run", context: str = "reon-prod", **overrides: object
-) -> dict[str, object]:
-    route: dict[str, object] = {
-        "domain_names": ["ingress-canary.example.test"],
-        "forward_scheme": "http",
-        "forward_host": "192.0.2.10",
-        "forward_port": 8123,
-        "certificate_id": 47,
-    }
-    route.update(overrides)
-    return {
-        "schema_version": 1,
-        "product": "launchplane",
-        "context": context,
-        "ingress": {
-            "mode": mode,
-            "route": route,
-            "reason": "test ingress route apply",
-        },
-    }
-
-
-def _npmplus_proxy_host(**overrides: object) -> NpmplusProxyHost:
-    payload = NpmplusIngressRouteDesiredState(
-        domain_names=("ingress-canary.example.test",),
-        forward_scheme="https",
-        forward_host="100.73.170.113",
-        forward_port=443,
-        certificate_id=47,
-    ).to_proxy_host_payload()
-    return NpmplusProxyHost.model_validate(
-        {"id": 79, **payload.model_dump(mode="json"), "enabled": True, **overrides}
-    )
-
-
-def _edge_endpoint_record(*, status: EdgeEndpointStatus = "active") -> EdgeEndpointRecord:
-    return EdgeEndpointRecord(
-        endpoint_key="cm-prod-dokploy",
-        provider="dokploy",
-        server_name="docker-cm-prod",
-        upstream_host="100.73.170.113",
-        upstream_host_kind="ip",
-        upstream_scheme="https",
-        upstream_port=443,
-        status=status,
-        updated_at="2026-06-07T00:00:00Z",
-        source_label="test:edge-endpoint",
-    )
-
-
-def _edge_endpoint_apply_payload(*, mode: str = "dry-run") -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "mode": mode,
-        "endpoint": _edge_endpoint_record().model_dump(mode="json"),
-        "reason": "test edge endpoint apply",
-        "confirmation": "APPLY LAUNCHPLANE EDGE ENDPOINT" if mode == "apply" else "",
-    }
-
-
-def _private_health_endpoint_record(
-    *, url: str = "http://10.0.0.5:8000/health"
-) -> PrivateHealthEndpointRecord:
-    return PrivateHealthEndpointRecord(
-        endpoint_key="repairshopr-sync-prod-runtime",
-        product="repairshopr-sync",
-        context="repairshopr-sync",
-        instance="prod",
-        url=url,
-        updated_at="2026-06-15T00:00:00Z",
-        source_label="test:private-health-endpoint",
-    )
-
-
-def _private_health_endpoint_apply_payload(*, mode: str = "dry-run") -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "mode": mode,
-        "endpoint": _private_health_endpoint_record().model_dump(mode="json"),
-        "reason": "test private health endpoint apply",
-        "confirmation": "APPLY LAUNCHPLANE PRIVATE HEALTH ENDPOINT" if mode == "apply" else "",
-    }
-
-
-def _ingress_canary_route_record(*, status: str = "active") -> IngressCanaryRouteRecord:
-    return IngressCanaryRouteRecord(
-        canary_key="ingress-canary",
-        product="launchplane",
-        context="reon-prod",
-        domain_name="ingress-canary.example.test",
-        expected_host_id=78,
-        edge_endpoint_key="cm-prod-dokploy",
-        certificate_id=47,
-        status=status,  # type: ignore[arg-type]
-        updated_at="2026-06-11T00:00:00Z",
-        source_label="test:ingress-canary-route",
-    )
-
-
-def _ingress_canary_route_record_apply_payload(*, mode: str = "dry-run") -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "mode": mode,
-        "route": _ingress_canary_route_record().model_dump(mode="json"),
-        "reason": "test ingress canary route record apply",
-        "confirmation": "APPLY LAUNCHPLANE INGRESS CANARY ROUTE RECORD" if mode == "apply" else "",
-    }
-
-
-def _meta_product_config_payload(
-    *, mode: str = "dry-run", reason: str | None = None
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "schema_version": 1,
-        "mode": mode,
-        "product": "sellyouroutboard",
-        "context": "sellyouroutboard",
-        "instance": "prod",
-        "source_label": "product-config-ui-test",
-        "runtime_env": {
-            "scope": "instance",
-            "env": {
-                "NEXT_PUBLIC_META_PIXEL_ID": "123456789012345",
-            },
-        },
-        "secrets": [
-            {
-                "name": "META_CONVERSIONS_API_TOKEN",
-                "binding_key": "META_CONVERSIONS_API_TOKEN",
-                "value": "meta-conversions-api-secret-value",
-                "scope": "context_instance",
-                "description": "Meta conversions API token",
-            }
-        ],
-    }
-    if reason is not None:
-        payload["reason"] = reason
-    return payload
 
 
 def _github_webhook_body_signature(body_bytes: bytes, secret: str) -> str:
@@ -2199,45 +992,6 @@ def _every_code_github_issue_comment_payload(
     }
 
 
-def _work_graph_snapshot_payload() -> dict[str, object]:
-    return {
-        "generated_at": "2026-05-06T01:45:00Z",
-        "repos": [
-            {
-                "repository": "cbusillo/launchplane",
-                "classification": "managed_runtime",
-                "product": "launchplane",
-                "display_name": "Launchplane",
-            }
-        ],
-        "issues": [
-            {
-                "repository": "cbusillo/launchplane",
-                "number": 190,
-                "title": "Build operator work graph",
-                "url": "https://github.com/cbusillo/launchplane/issues/190",
-                "focus": "Now",
-                "manager": "Code",
-                "finish_line": "Ranked work queue is available to the operator UI.",
-                "labels": ["plan", "plan:active"],
-                "blocking": 2,
-                "subissues_total": 2,
-                "subissues_completed": 1,
-                "check_state": "success",
-                "deploy_state": "success",
-            },
-            {
-                "repository": "cbusillo/launchplane",
-                "number": 164,
-                "title": "Absorb product orchestration",
-                "url": "https://github.com/cbusillo/launchplane/issues/164",
-                "state": "closed",
-                "focus": "Done",
-            },
-        ],
-    }
-
-
 def _invoke_app(
     app: Any,
     *,
@@ -2249,7 +1003,7 @@ def _invoke_app(
     headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     response = asyncio.run(
-        _asgi_request_for_service_test(
+        _http_request_for_service_test(
             app,
             method=method,
             path=path,
@@ -2287,7 +1041,7 @@ def _write_github_planning_config(
     return config_path
 
 
-def _invoke_raw_app(
+def _invoke_http_app(
     app: Any,
     *,
     method: str,
@@ -2298,7 +1052,7 @@ def _invoke_raw_app(
     body_bytes: bytes = b"",
 ) -> tuple[int, dict[str, str], bytes]:
     response = asyncio.run(
-        _asgi_request_for_service_test(
+        _http_request_for_service_test(
             app,
             method=method,
             path=path,
@@ -2308,24 +1062,14 @@ def _invoke_raw_app(
             body_bytes=body_bytes,
         )
     )
-    return response.status_code, response.headers, response.body
+    return response.status_code, dict(response.headers), response.content
 
 
-@dataclass(frozen=True)
-class _AsgiServiceTestResponse:
-    status_code: int
-    headers: dict[str, str]
-    body: bytes
-
-    def json(self) -> Any:
-        return json.loads(self.body.decode("utf-8"))
+async def _http_get_for_service_test(app: Any, path: str) -> Any:
+    return await http_get(app, path)
 
 
-async def _asgi_get_for_service_test(app: Any, path: str) -> _AsgiServiceTestResponse:
-    return await _asgi_request_for_service_test(app, method="GET", path=path)
-
-
-async def _asgi_request_for_service_test(
+async def _http_request_for_service_test(
     app: Any,
     *,
     method: str,
@@ -2335,62 +1079,20 @@ async def _asgi_request_for_service_test(
     authorization: str = "",
     headers: Mapping[str, str] | None = None,
     body_bytes: bytes | None = None,
-) -> _AsgiServiceTestResponse:
+) -> Any:
     if payload is not None and body_bytes is not None:
         raise AssertionError("service tests must pass either payload or body_bytes")
-    body = body_bytes if body_bytes is not None else b""
-    if payload is not None:
-        body = json.dumps(payload).encode("utf-8")
-    request_headers = [
-        (key.lower().encode("ascii"), value.encode("latin-1"))
-        for key, value in (headers or {}).items()
-    ]
+    request_headers = dict(headers or {})
     if authorization:
-        request_headers.append((b"authorization", authorization.encode("latin-1")))
-    if payload is not None:
-        request_headers.append((b"content-type", b"application/json"))
-    if body:
-        request_headers.append((b"content-length", str(len(body)).encode("ascii")))
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "method": method,
-        "scheme": "http",
-        "path": path,
-        "raw_path": path.encode("ascii"),
-        "query_string": query_string.encode("ascii"),
-        "headers": request_headers,
-        "client": ("testclient", 50000),
-        "server": ("testserver", 80),
-        "root_path": "",
-    }
-    messages = [
-        {"type": "http.request", "body": body, "more_body": False},
-    ]
-    sent: list[MutableMapping[str, Any]] = []
-
-    async def receive() -> dict[str, Any]:
-        if messages:
-            return messages.pop(0)
-        return {"type": "http.disconnect"}
-
-    async def send(message: MutableMapping[str, Any]) -> None:
-        sent.append(message)
-
-    await app(scope, receive, send)
-
-    start = next(message for message in sent if message["type"] == "http.response.start")
-    body = b"".join(
-        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
-    )
-    response_headers = {
-        key.decode("latin-1"): value.decode("latin-1") for key, value in start.get("headers", [])
-    }
-    return _AsgiServiceTestResponse(
-        status_code=start["status"],
-        headers=response_headers,
-        body=body,
+        request_headers["Authorization"] = authorization
+    request_path = f"{path}?{query_string}" if query_string else path
+    return await http_request(
+        app,
+        method,
+        request_path,
+        headers=request_headers,
+        payload=payload,
+        raw_body=body_bytes,
     )
 
 
@@ -2406,7 +1108,7 @@ def _invoke_dokploy_target_setup_app(
     if method != "POST" or path != "/v1/dokploy-targets/setup":
         raise AssertionError("Dokploy target setup tests must call the setup route")
     response = asyncio.run(
-        _asgi_request_for_service_test(
+        _http_request_for_service_test(
             app,
             method=method,
             path=path,
@@ -3100,6 +1802,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 repository="cbusillo/codex-skills",
                 record_id="merge-train-policy-codex-skills-human-import",
             )
+            cookie = session_manager.session_cookie_header(human_session)
 
             status_code, payload = _invoke_app(
                 app,
@@ -3114,7 +1817,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": session_manager.session_cookie_header(human_session),
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "merge-train-policy:human-import",
                 },
             )
@@ -5449,7 +4152,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            status_code, _headers, response_body = _invoke_raw_app(
+            status_code, _headers, response_body = _invoke_http_app(
                 app,
                 method="POST",
                 path="/v1/every-code/github-webhook",
@@ -5978,20 +4681,46 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, msg=result.output)
         self.assertIn("refuses startup without --audience", result.output)
 
+    def test_service_export_openapi_writes_canonical_schema(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            output_path = Path(temporary_directory_name) / "openapi.json"
+
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "export-openapi",
+                    "--output",
+                    str(output_path),
+                ],
+            )
+
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(result.output.strip(), str(output_path))
+        self.assertIn("/v1/drivers", payload["paths"])
+        self.assertIn(
+            "/v1/products/{product}/environments/{environment}/config-status",
+            payload["paths"],
+        )
+        self.assertNotIn('"examples"', json.dumps(payload, sort_keys=True))
+
     def test_service_serve_runs_fastapi_app(self) -> None:
-        fastapi_response: _AsgiServiceTestResponse | None = None
-        ui_response: _AsgiServiceTestResponse | None = None
-        denied_config_response: _AsgiServiceTestResponse | None = None
-        grant_response: _AsgiServiceTestResponse | None = None
-        authorized_config_response: _AsgiServiceTestResponse | None = None
+        fastapi_response: Any | None = None
+        ui_response: Any | None = None
+        denied_config_response: Any | None = None
+        grant_response: Any | None = None
+        authorized_config_response: Any | None = None
 
         def capture_uvicorn_run(app: Any, **_kwargs: object) -> None:
             nonlocal fastapi_response, ui_response, denied_config_response
             nonlocal grant_response, authorized_config_response
-            fastapi_response = asyncio.run(_asgi_get_for_service_test(app, "/openapi.json"))
-            ui_response = asyncio.run(_asgi_get_for_service_test(app, "/ui"))
+            fastapi_response = asyncio.run(_http_get_for_service_test(app, "/openapi.json"))
+            ui_response = asyncio.run(_http_get_for_service_test(app, "/ui"))
             denied_config_response = asyncio.run(
-                _asgi_request_for_service_test(
+                _http_request_for_service_test(
                     app,
                     method="GET",
                     path="/v1/products/example-site/environments/prod/config-status",
@@ -5999,7 +4728,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             )
             grant_response = asyncio.run(
-                _asgi_request_for_service_test(
+                _http_request_for_service_test(
                     app,
                     method="POST",
                     path="/v1/authz-policies/github-actions/grants",
@@ -6026,7 +4755,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             )
             authorized_config_response = asyncio.run(
-                _asgi_request_for_service_test(
+                _http_request_for_service_test(
                     app,
                     method="GET",
                     path="/v1/products/example-site/environments/prod/config-status",
@@ -6111,11 +4840,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(ui_response.status_code, 200)
         self.assertEqual(ui_response.headers["content-type"], "text/html")
-        self.assertIn(b"Launchplane UI", ui_response.body)
+        self.assertIn(b"Launchplane UI", ui_response.content)
         self.assertEqual(
             denied_config_response.status_code,
             403,
-            msg=denied_config_response.body.decode("utf-8"),
+            msg=denied_config_response.content.decode("utf-8"),
         )
         self.assertEqual(grant_response.status_code, 202)
         self.assertEqual(grant_response.json()["result"]["changed"], True)
@@ -10376,7 +9105,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         },
                     },
                     authorization="",
-                    headers={"Cookie": cookie},
+                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
                 )
 
         self.assertEqual(status_code, 202)
@@ -10433,7 +9162,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 },
                 authorization="",
-                headers={"Cookie": cookie},
+                headers=_fastapi_browser_mutation_headers(session_manager, cookie),
             )
 
         self.assertEqual(status_code, 403)
@@ -10509,7 +9238,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 path="/v1/drivers/generic-web/prod-promotion",
                 payload=request_payload,
                 authorization="",
-                headers={"Cookie": cookie, "Idempotency-Key": idempotency_key},
+                headers={
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
+                    "Idempotency-Key": idempotency_key,
+                },
             )
 
         self.assertEqual(status_code, 403)
@@ -10578,7 +9310,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         },
                     },
                     authorization="",
-                    headers={"Cookie": cookie},
+                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
                 )
 
         self.assertEqual(status_code, 202)
@@ -10659,7 +9391,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         },
                     },
                     authorization="",
-                    headers={"Cookie": cookie},
+                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
                 )
 
         self.assertEqual(status_code, 202)
@@ -10831,7 +9563,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 },
                 authorization="",
-                headers={"Cookie": cookie},
+                headers=_fastapi_browser_mutation_headers(session_manager, cookie),
             )
 
         self.assertEqual(status_code, 403)
@@ -10967,7 +9699,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         },
                     },
                     authorization="",
-                    headers={"Cookie": cookie},
+                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
                 )
 
         self.assertEqual(status_code, 403)
@@ -13679,7 +12411,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-grant:human-admin",
                 },
             )
@@ -13755,7 +12487,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-human-grant:dispatch",
                 },
             )
@@ -13783,7 +12515,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-human-grant:dispatch-repeat",
                 },
             )
@@ -13888,7 +12620,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-human-grant:dry-run",
                 },
             )
@@ -13976,7 +12708,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-terminal-agent-grant:syo-read",
                 },
             )
@@ -14001,7 +12733,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-terminal-agent-grant:syo-read-repeat",
                 },
             )
@@ -14093,7 +12825,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-terminal-agent-grant:dry-run",
                 },
             )
@@ -14175,7 +12907,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-local-operator-grant:ingress",
                 },
             )
@@ -14200,7 +12932,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-local-operator-grant:ingress-repeat",
                 },
             )
@@ -14286,7 +13018,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-local-admin-grant:self-deploy",
                 },
             )

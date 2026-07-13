@@ -96,6 +96,50 @@ creates isolated databases, applies Alembic from empty schema to `head`, verifie
 the exact schema head and critical invariants, and then drops the databases. It
 must not use Launchplane runtime credentials or shared production databases.
 
+## Mutation Reservations
+
+The `launchplane_idempotency_records` table is also the durable mutation-
+reservation boundary. Existing completed-response rows remain valid and are
+backfilled as `completed`; reservation-backed routes add promoted state, lease,
+attempt, owner, reconciliation-key, and timestamp columns while retaining the
+typed payload as the complete evidence envelope.
+
+Reservation identity is `(scope, route_path, idempotency_key)` and remains
+unique in PostgreSQL. The typed lifecycle is:
+
+- `running`: one owner holds a bounded lease before effects begin.
+- `completed`: the response status, trace, payload, and completion timestamp are
+  durable replay evidence.
+- `reconcile_required`: an external operation key was bound and the effect is
+  now unknown; automatic re-execution is forbidden until domain reconciliation
+  proves the provider state.
+
+Reservation attempts return typed `acquired`, `replayed`, `conflict`,
+`in_progress`, or `reconcile_required` decisions. A different request
+fingerprint always conflicts, including while the first request is running. An
+expired reservation without a reconciliation key may be reclaimed by a new
+owner with an incremented attempt. Once a provider operation or reconciliation
+key is bound, lease expiry transitions to `reconcile_required` instead of
+repeating the effect. Lease renewal, completion, and reconciliation binding use
+owner checks and fail closed for stale owners.
+
+DB-only mutations should reserve and complete inside the same transaction as
+their business write. `POST /v1/product-profiles/preview-tls/apply` is the first
+migrated route: the reservation insert occurs before the profile write, and the
+profile plus completed response commit atomically. A no-op apply still commits
+the completed reservation so concurrent and later same-key requests replay the
+original response. If response-evidence persistence fails, the profile write
+and reservation both roll back. Its DB-only preflight may remove an expired
+unbound orphan reservation because the route cannot commit the profile write
+without completing that same transaction; active or reconciliation-bound claims
+remain fail-closed. Persisted reservation and completion timestamps come from
+the database clock.
+
+Provider-backed routes must durably reserve first, bind their stable provider
+operation or reconciliation key before invoking the provider, and complete only
+after durable local evidence is ready. A crash or timeout after key binding is
+an unknown outcome, not permission to retry the provider mutation.
+
 ## ORM Query Boundary
 
 Launchplane's Postgres storage layer should expose GUI and driver reads through
@@ -479,10 +523,11 @@ always reads fresh state and returns the current value, requested value, profile
 timestamp, and a canonical plan SHA-256 without storing idempotency evidence.
 Apply requires that reviewed SHA-256 plus an idempotency key and fails stale if
 the reviewed TLS plan inputs changed or the profile row changes during apply.
-Apply serializes the profile row and commits idempotency evidence in the same
-transaction, including no-op applies. The manual `Product Preview TLS` workflow
-is the audited operator surface for both modes and supplies the target product
-and requested `none` or `letsencrypt` value as runtime input. Its
+Apply inserts its mutation reservation before the profile write and commits the
+profile plus completed response evidence in the same transaction, including
+no-op applies. The manual `Product Preview TLS` workflow is the audited operator
+surface for both modes and supplies the target product and requested `none` or
+`letsencrypt` value as runtime input. Its
 `product_profile.preview_tls.apply` grant is target-product scoped and must come
 from operator-supplied authz input rather than a checked-in product catalog.
 

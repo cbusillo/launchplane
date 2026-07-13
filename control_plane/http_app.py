@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
-from typing import Annotated, Any, Literal, Protocol, cast
+from typing import Annotated, Any, Literal, NoReturn, Protocol, cast
 from uuid import uuid4
 import click
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
@@ -105,6 +105,8 @@ from control_plane.contracts.ingress_route_audit_record import (
     build_ingress_route_audit_record_id,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
+from control_plane.contracts.merge_train_policy import MergeTrainServiceAuthz
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -112,6 +114,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.merge_train_admission import (
+    MergeTrainControllerStatusReadModel,
     MergeTrainRunHistoryStore,
     build_merge_train_controller_status_read_model,
     evaluate_merge_train_admission_from_store,
@@ -503,6 +506,7 @@ from control_plane.contracts.runner_lane_registration_evidence import (
     RunnerLaneRegistrationAuditEvidenceEnvelope,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
+from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
@@ -567,12 +571,14 @@ from control_plane.service_auth import (
     bearer_identity_from_token,
 )
 from control_plane.service_human_auth import (
+    BROWSER_CSRF_HEADER_NAME,
     HumanSessionManager,
     LaunchplaneHumanSession,
     OAuthLoginState,
     OAuthLoginStateStore,
     build_pkce_verifier,
     safe_oauth_return_to,
+    validate_browser_mutation_request_headers,
 )
 from control_plane.launchplane_mutations import (
     LaunchplaneDestroyPreviewStore,
@@ -582,7 +588,7 @@ from control_plane.launchplane_mutations import (
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     PromotionEvidenceValidationError,
@@ -665,8 +671,12 @@ _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
 _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
+_PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
+_SECRET_REENCRYPT_ROUTE = "/v1/secrets/reencrypt"
 _EVIDENCE_INGRESS_MAX_BODY_BYTES = 2 * 1024 * 1024
 _GITHUB_WEBHOOK_MAX_BODY_BYTES = 2 * 1024 * 1024
+_PRODUCT_CONFIG_MAX_BODY_BYTES = 2 * 1024 * 1024
+_SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _EVIDENCE_INGRESS_ROUTES = frozenset(
     {
         _DEPLOYMENT_EVIDENCE_ROUTE,
@@ -687,6 +697,18 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
         "GitHub webhook",
         _GITHUB_WEBHOOK_MAX_BODY_BYTES,
         False,
+        True,
+    ),
+    _PRODUCT_CONFIG_APPLY_ROUTE: (
+        "Product config",
+        _PRODUCT_CONFIG_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _SECRET_REENCRYPT_ROUTE: (
+        "Managed-secret re-encryption",
+        _SECRET_REENCRYPT_MAX_BODY_BYTES,
+        True,
         True,
     ),
 }
@@ -721,7 +743,6 @@ _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/app
 _PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
-_PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
 _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_GITHUB_ACTIONS_GRANTS_ROUTE = "/v1/authz-policies/github-actions/grants"
@@ -738,6 +759,7 @@ _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
 _AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
+_DB_ONLY_MUTATION_LEASE = timedelta(minutes=5)
 
 AuthzPolicyRouteEnvelope = (
     control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope
@@ -897,6 +919,7 @@ class AuthSessionResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     identity: GitHubHumanIdentityResponse
+    csrf_token: str
 
 
 class AuthSessionRequiredResponse(BaseModel):
@@ -1414,7 +1437,25 @@ class MergeTrainControllerStatusResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    controller_status: dict[str, object]
+    controller_status: MergeTrainControllerStatusReadModel
+
+
+class MergeTrainPolicySummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_id: str
+    updated_at: str
+    policy_sha256: str
+
+
+class MergeTrainPolicyTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
+    base_branch: str
+    policy_key: str
+    scheduler: MergeTrainSchedulerPolicy
+    service_authz: MergeTrainServiceAuthz
 
 
 class MergeTrainPolicyTargetsResponse(BaseModel):
@@ -1422,8 +1463,8 @@ class MergeTrainPolicyTargetsResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    policy: dict[str, object]
-    targets: list[dict[str, object]]
+    policy: MergeTrainPolicySummary
+    targets: tuple[MergeTrainPolicyTarget, ...]
 
 
 class DokployTargetInspectResponse(BaseModel):
@@ -4231,6 +4272,7 @@ def create_launchplane_fastapi_app(
             session_cookie_header = human_session_manager.session_cookie_header(session)
             response.headers.append("Set-Cookie", session_cookie_header)
             request.state.launchplane_renewed_session_cookie = session_cookie_header
+        request.state.launchplane_human_session = session
         return session.identity
 
     def human_identity_response(identity: GitHubHumanIdentity) -> GitHubHumanIdentityResponse:
@@ -4263,15 +4305,20 @@ def create_launchplane_fastapi_app(
             return JSONResponse(
                 status_code=401,
                 content=payload.model_dump(mode="json"),
+                headers={"Cache-Control": "no-store"},
             )
         session, was_renewed = session_result
         if was_renewed and human_session_manager is not None:
             session_cookie_header = human_session_manager.session_cookie_header(session)
             response.headers.append("Set-Cookie", session_cookie_header)
             request.state.launchplane_renewed_session_cookie = session_cookie_header
+        if human_session_manager is None:
+            raise RuntimeError("Launchplane human session manager is not initialized.")
+        response.headers["Cache-Control"] = "no-store"
         return AuthSessionResponse(
             trace_id=trace_id,
             identity=human_identity_response(session.identity),
+            csrf_token=human_session_manager.csrf_token(session),
         )
 
     def reject_github_oauth_not_configured(trace_id: str) -> JSONResponse:
@@ -4363,12 +4410,50 @@ def create_launchplane_fastapi_app(
             headers={"Set-Cookie": human_session_manager.session_cookie_header(session)},
         )
 
+    def reject_browser_mutation() -> NoReturn:
+        raise _launchplane_http_error(
+            status_code=403,
+            trace_id=next_trace_id(),
+            code="browser_mutation_denied",
+            message="Browser mutation request failed origin, fetch metadata, or CSRF validation.",
+        )
+
+    def consume_browser_mutation_request(
+        *,
+        request: Request,
+        session: LaunchplaneHumanSession,
+    ) -> LaunchplaneHumanSession:
+        session_manager = human_session_manager
+        if session_manager is None:
+            reject_browser_mutation()
+        try:
+            csrf_token = validate_browser_mutation_request_headers(
+                expected_origin=session_manager.public_origin,
+                origin_values=tuple(request.headers.getlist("Origin")),
+                sec_fetch_site_values=tuple(request.headers.getlist("Sec-Fetch-Site")),
+                sec_fetch_mode_values=tuple(request.headers.getlist("Sec-Fetch-Mode")),
+                sec_fetch_dest_values=tuple(request.headers.getlist("Sec-Fetch-Dest")),
+                csrf_token_values=tuple(request.headers.getlist(BROWSER_CSRF_HEADER_NAME)),
+            )
+        except (PermissionError, ValueError):
+            reject_browser_mutation()
+        rotated_session = session_manager.consume_csrf_token(session, csrf_token)
+        if rotated_session is None:
+            reject_browser_mutation()
+        request.state.launchplane_human_session = rotated_session
+        return rotated_session
+
     def logout_auth_session(
+        request: Request,
         response: Response,
         cookie: Annotated[str, Header(alias="Cookie")] = "",
     ) -> AuthLogoutResponse:
         trace_id = next_trace_id()
         if human_session_manager is not None:
+            session_result = read_human_session(cookie_header=cookie)
+            if session_result is not None:
+                session, _was_renewed = session_result
+                consume_browser_mutation_request(request=request, session=session)
             human_session_manager.delete_cookie_session(cookie)
             clear_cookie = human_session_manager.clear_cookie_header()
         else:
@@ -4382,6 +4467,19 @@ def create_launchplane_fastapi_app(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
         cookie: Annotated[str, Header(alias="Cookie")] = "",
     ) -> LaunchplaneIdentity:
+        bearer_identity = resolve_bearer_identity(authorization)
+        if bearer_identity is not None:
+            return bearer_identity
+        human_identity = read_human_session_identity(
+            cookie_header=cookie,
+            request=request,
+            response=response,
+        )
+        if human_identity is not None:
+            return human_identity
+        raise _authentication_required_error("Authorization header is required.")
+
+    def resolve_bearer_identity(authorization: str) -> LaunchplaneIdentity | None:
         header = authorization.strip()
         if header:
             scheme, _, token = header.partition(" ")
@@ -4400,14 +4498,35 @@ def create_launchplane_fastapi_app(
                     return verifier.verify(bearer_token)
                 except (InvalidTokenError, ValueError) as error:
                     raise _authentication_required_error(str(error)) from error
-        human_identity = read_human_session_identity(
-            cookie_header=cookie,
+        return None
+
+    def read_bearer_identity(
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+    ) -> LaunchplaneIdentity:
+        identity = resolve_bearer_identity(authorization)
+        if identity is not None:
+            return identity
+        raise _authentication_required_error("Authorization header is required.")
+
+    def read_browser_mutation_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        identity = read_identity(
             request=request,
             response=response,
+            authorization=authorization,
+            cookie=cookie,
         )
-        if human_identity is not None:
-            return human_identity
-        raise _authentication_required_error("Authorization header is required.")
+        if not isinstance(identity, GitHubHumanIdentity):
+            return identity
+        session: object = getattr(request.state, "launchplane_human_session", None)
+        if not isinstance(session, LaunchplaneHumanSession):
+            reject_browser_mutation()
+        consume_browser_mutation_request(request=request, session=session)
+        return identity
 
     def read_work_graph_rank_identity(
         request: Request,
@@ -4447,6 +4566,26 @@ def create_launchplane_fastapi_app(
             return verifier.verify(bearer_token)
         except (InvalidTokenError, ValueError) as error:
             raise _authentication_required_error(str(error)) from error
+
+    def read_browser_work_graph_rank_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> GitHubActionsIdentity | GitHubHumanIdentity:
+        identity = read_work_graph_rank_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+        )
+        if not isinstance(identity, GitHubHumanIdentity):
+            return identity
+        session: object = getattr(request.state, "launchplane_human_session", None)
+        if not isinstance(session, LaunchplaneHumanSession):
+            reject_browser_mutation()
+        consume_browser_mutation_request(request=request, session=session)
+        return identity
 
     def every_code_worker_token_authorized(authorization: str) -> bool:
         if bearer_identity_config is None:
@@ -5707,7 +5846,7 @@ def create_launchplane_fastapi_app(
         payload: WorkGraphRankEnvelope,
         identity: Annotated[
             GitHubActionsIdentity | GitHubHumanIdentity,
-            Depends(read_work_graph_rank_identity),
+            Depends(read_browser_work_graph_rank_identity),
         ],
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
@@ -5940,7 +6079,7 @@ def create_launchplane_fastapi_app(
         )
         return MergeTrainControllerStatusResponse(
             trace_id=trace_id,
-            controller_status=read_model.model_dump(mode="json"),
+            controller_status=read_model,
         )
 
     def read_merge_train_policy_targets(
@@ -5952,7 +6091,7 @@ def create_launchplane_fastapi_app(
             policy_record = resolve_merge_train_policy_record(record_store)
         except MergeTrainPolicyStoreMissingError as error:
             raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
-        targets: list[dict[str, object]] = []
+        targets: list[MergeTrainPolicyTarget] = []
         local_operator_can_read_targets = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="merge_train.policy_targets",
@@ -5969,23 +6108,23 @@ def create_launchplane_fastapi_app(
             if not service_authz_allowed and not local_operator_can_read_targets:
                 continue
             targets.append(
-                {
-                    "repository": repository_policy.repository,
-                    "base_branch": repository_policy.base_branch,
-                    "policy_key": repository_policy.policy_key,
-                    "scheduler": repository_policy.scheduler.model_dump(mode="json"),
-                    "service_authz": repository_policy.service_authz.model_dump(mode="json"),
-                }
+                MergeTrainPolicyTarget(
+                    repository=repository_policy.repository,
+                    base_branch=repository_policy.base_branch,
+                    policy_key=repository_policy.policy_key,
+                    scheduler=repository_policy.scheduler,
+                    service_authz=repository_policy.service_authz,
+                )
             )
-        targets.sort(key=lambda target: (str(target["repository"]), str(target["base_branch"])))
+        targets.sort(key=lambda target: (target.repository, target.base_branch))
         return MergeTrainPolicyTargetsResponse(
             trace_id=trace_id,
-            policy={
-                "record_id": policy_record.record_id,
-                "updated_at": policy_record.updated_at,
-                "policy_sha256": policy_record.policy_sha256,
-            },
-            targets=targets,
+            policy=MergeTrainPolicySummary(
+                record_id=policy_record.record_id,
+                updated_at=policy_record.updated_at,
+                policy_sha256=policy_record.policy_sha256,
+            ),
+            targets=tuple(targets),
         )
 
     async def write_merge_train_batch_candidate_run_once(
@@ -9504,7 +9643,7 @@ def create_launchplane_fastapi_app(
     async def evaluate_agent_write_intent_route(
         request: Request,
         intent_request: AgentWriteIntentRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -12032,20 +12171,63 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
         payload_fingerprint = ""
-        if preview_tls_request.mode == "apply":
-            (
-                normalized_idempotency_key,
-                payload_fingerprint,
-                replay_response,
-            ) = await replay_apply_idempotency(
-                request=request,
-                record_store=database_store,
-                identity=identity,
+
+        def prepare_product_preview_tls_mutation() -> AcceptedEvidenceResponse | None:
+            preflight = database_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
                 route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
                 idempotency_key=normalized_idempotency_key,
-                trace_id=trace_id,
-                check_replay=True,
+                request_fingerprint=payload_fingerprint,
             )
+            if preflight.status in {"missing", "released"}:
+                return None
+            if preflight.record is None:
+                raise RuntimeError("Product preview TLS mutation preflight requires evidence.")
+            if preflight.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=preflight.record,
+                    route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                )
+            if preflight.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if preflight.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product preview TLS mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if preflight.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product preview TLS mutation requires reconciliation before retry."
+                    ),
+                )
+            raise RuntimeError(
+                f"Unsupported product preview TLS mutation preflight status: {preflight.status}"
+            )
+
+        if preview_tls_request.mode == "apply":
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                payload=cast(dict[str, object], raw_payload),
+            )
+            replay_response = prepare_product_preview_tls_mutation()
             if replay_response is not None:
                 return replay_response
         try:
@@ -12080,27 +12262,9 @@ def create_launchplane_fastapi_app(
             preview_tls_request.mode == "apply"
             and preview_tls_request.reviewed_plan_sha256 != plan.plan_sha256
         ):
-            stored_idempotency_record = database_store.read_idempotency_record(
-                scope=idempotency_scope(identity),
-                route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            )
-            if stored_idempotency_record is not None:
-                if stored_idempotency_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=stored_idempotency_record,
-                    route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
-                )
+            replay_response = prepare_product_preview_tls_mutation()
+            if replay_response is not None:
+                return replay_response
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -12138,18 +12302,21 @@ def create_launchplane_fastapi_app(
                 records={"product_profile": preview_tls_request.product},
                 result=result_plan.model_dump(mode="json"),
             )
-            atomic_idempotency_record = build_apply_idempotency_record(
-                identity=identity,
+            mutation = DbOnlyMutationRequest(
+                scope=idempotency_scope(identity),
                 route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
                 idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
             )
             write_result = database_store.compare_and_write_product_profile_record(
                 expected_record=profile,
                 replacement_record=replacement_profile,
-                idempotency_record=atomic_idempotency_record,
+                mutation=mutation,
             )
             if write_result.status == "replayed":
                 if write_result.idempotency_record is None:
@@ -12185,6 +12352,25 @@ def create_launchplane_fastapi_app(
                     code="stale",
                     message=(
                         "Product profile changed while applying the reviewed preview TLS plan."
+                    ),
+                )
+            if write_result.status == "reservation_in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product preview TLS mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if write_result.status == "reconciliation_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product preview TLS mutation requires reconciliation before retry."
                     ),
                 )
             return response
@@ -12492,6 +12678,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_secret_reencryption_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Managed-secret re-encryption requires DB-backed Launchplane storage.",
+            )
+        return record_store
+
     def require_product_onboarding_database_store(
         *, record_store: object, trace_id: str
     ) -> PostgresRecordStore:
@@ -12606,6 +12804,25 @@ def create_launchplane_fastapi_app(
                             "Launchplane request payload on this route."
                         ),
                     )
+                if stored_record.state == "running":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_in_progress",
+                        message=(
+                            "A matching Launchplane mutation is already running. "
+                            "Retry with the same Idempotency-Key."
+                        ),
+                    )
+                if stored_record.state == "reconcile_required":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_reconciliation_required",
+                        message=(
+                            "The prior Launchplane mutation requires reconciliation before retry."
+                        ),
+                    )
                 return (
                     normalized_idempotency_key,
                     payload_fingerprint,
@@ -12679,6 +12896,25 @@ def create_launchplane_fastapi_app(
                             "Launchplane request payload on this route."
                         ),
                     )
+                if stored_record.state == "running":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_in_progress",
+                        message=(
+                            "A matching Launchplane mutation is already running. "
+                            "Retry with the same Idempotency-Key."
+                        ),
+                    )
+                if stored_record.state == "reconcile_required":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_reconciliation_required",
+                        message=(
+                            "The prior Launchplane mutation requires reconciliation before retry."
+                        ),
+                    )
                 return (
                     normalized_idempotency_key,
                     payload_fingerprint,
@@ -12737,7 +12973,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_config(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -12895,6 +13131,130 @@ def create_launchplane_fastapi_app(
         )
         return product_config_response
 
+    async def reencrypt_managed_secrets(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if isinstance(identity, TerminalAgentIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials cannot rotate managed-secret roots.",
+            )
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Managed-secret re-encryption request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Managed-secret re-encryption request failed validation.",
+            )
+        request_payload = cast(dict[str, object], raw_payload)
+        try:
+            reencryption_request = SecretReencryptionRequest.model_validate(request_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Managed-secret re-encryption request failed validation.",
+            ) from error
+        action = f"secret.reencrypt.{reencryption_request.mode}"
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product="launchplane",
+            context="launchplane",
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot re-encrypt Launchplane managed secrets.",
+            )
+        if reencryption_request.mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Managed-secret re-encryption apply requires Idempotency-Key.",
+            )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_SECRET_REENCRYPT_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=reencryption_request.mode == "apply",
+        )
+        if replay_response is not None:
+            return replay_response
+        database_store = require_secret_reencryption_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        actor = product_config_identity_actor(identity)
+        operation_token = ""
+        if reencryption_request.mode == "apply":
+            operation_token = hashlib.sha256(
+                "\x1f".join((actor, normalized_idempotency_key, payload_fingerprint)).encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+        try:
+            result = control_plane_secrets.reencrypt_secrets(
+                record_store=database_store,
+                apply=reencryption_request.mode == "apply",
+                expected_plan_digest=reencryption_request.expected_plan_digest,
+                operation_token=operation_token,
+                actor=actor,
+                source_label=reencryption_request.source_label,
+                reason=reencryption_request.reason,
+            )
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="secret_key_configuration_invalid",
+                message="Managed-secret key configuration is unavailable or invalid.",
+            ) from error
+        if reencryption_request.mode == "apply" and result["status"] != "ok":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="secret_reencryption_conflict",
+                message="Managed-secret state no longer matches the approved dry-run.",
+            )
+        response = accepted_evidence_response(trace_id=trace_id, records={}, result=result)
+        if reencryption_request.mode == "apply":
+            store_apply_idempotency(
+                record_store=database_store,
+                identity=identity,
+                route_path=_SECRET_REENCRYPT_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
     async def apply_product_onboarding(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -12999,7 +13359,7 @@ def create_launchplane_fastapi_app(
 
     async def import_merge_train_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13243,7 +13603,7 @@ def create_launchplane_fastapi_app(
 
     async def grant_github_actions_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13260,7 +13620,7 @@ def create_launchplane_fastapi_app(
 
     async def remove_github_actions_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13277,7 +13637,7 @@ def create_launchplane_fastapi_app(
 
     async def grant_github_human_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13294,7 +13654,7 @@ def create_launchplane_fastapi_app(
 
     async def grant_terminal_agent_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13311,7 +13671,7 @@ def create_launchplane_fastapi_app(
 
     async def grant_local_operator_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13328,7 +13688,7 @@ def create_launchplane_fastapi_app(
 
     async def grant_local_admin_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -15535,7 +15895,7 @@ def create_launchplane_fastapi_app(
     async def apply_generic_web_prod_promotion(
         request: Request,
         promotion_request: GenericWebProdPromotionEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse | JSONResponse:
@@ -15653,7 +16013,7 @@ def create_launchplane_fastapi_app(
     async def dispatch_generic_web_prod_promotion_workflow(
         request: Request,
         workflow_request: GenericWebPromotionWorkflowEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse | JSONResponse:
@@ -21113,6 +21473,32 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _SECRET_REENCRYPT_ROUTE,
+        reencrypt_managed_secrets,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": _openapi_model_schema(SecretReencryptionRequest)}
+                },
+            }
+        },
+        operation_id="reencrypt_managed_secrets",
+        summary="Dry-run or apply managed-secret root re-encryption",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _PRODUCT_ONBOARDING_APPLY_ROUTE,
         apply_product_onboarding,
         methods=["POST"],
@@ -21763,6 +22149,7 @@ def create_launchplane_fastapi_app(
         "/v1/products/{product}/environments/{environment}/config-status",
         read_product_environment_config_status,
         methods=["GET"],
+        operation_id="read_product_environment_config_status",
         response_model=ProductEnvironmentConfigStatusResponse,
         responses={
             400: {"model": LaunchplaneErrorResponse},

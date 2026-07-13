@@ -25,17 +25,18 @@
     "operations": "docs/operations.md",
     "records": "docs/records.md",
     "secrets": "docs/secrets.md",
+    "githubActionsSecurity": "docs/github-actions-security.md",
     "publicReadiness": "docs/public-readiness.md",
     "style": ["docs/style/python.md", "docs/style/testing.md"],
     "policies": ["docs/policies/coding-standards.md"]
   },
   "qualityGate": {
     "test": {
-      "default": "uv run launchplane ci unittest-shard local",
-      "targeted": "uv run python -m unittest {modules}",
-      "postgresIntegration": "LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run launchplane ci postgres-integration",
-      "shardPlan": "uv run launchplane ci unittest-shard plan --shard-count {shard_count} --timings-file {timings_file} --max-tests-per-target {max_tests_per_target} --max-seconds-per-target {max_seconds_per_target}",
-      "shardRun": "uv run launchplane ci unittest-shard run --shard-count {shard_count} --shard-index {shard_index} --timings-file {timings_file} --max-tests-per-target {max_tests_per_target} --max-seconds-per-target {max_seconds_per_target} --timings-output {timings_output}",
+      "default": "uv run --extra dev launchplane ci unittest-shard local",
+      "targeted": "uv run --extra dev python -m unittest {modules}",
+      "postgresIntegration": "LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run --extra dev launchplane ci postgres-integration",
+      "shardPlan": "uv run --extra dev launchplane ci unittest-shard plan --shard-count {shard_count} --timings-file {timings_file} --max-tests-per-target {max_tests_per_target} --max-seconds-per-target {max_seconds_per_target}",
+      "shardRun": "uv run --extra dev launchplane ci unittest-shard run --shard-count {shard_count} --shard-index {shard_index} --timings-file {timings_file} --max-tests-per-target {max_tests_per_target} --max-seconds-per-target {max_seconds_per_target} --timings-output {timings_output}",
       "shardGranularity": "whole modules by default; large or timing-known-slow modules may split into unittest target IDs"
     },
     "lint": {
@@ -52,6 +53,11 @@
     "build": {
       "frontend": "pnpm --dir frontend validate",
       "container": "docker build -t launchplane-ci:test ."
+    },
+    "openapi": {
+      "export": "uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json",
+      "frontendGenerate": "pnpm --dir frontend generate:openapi",
+      "frontendDrift": "pnpm --dir frontend check:openapi-drift"
     },
     "audit": {
       "pythonDependencies": "uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183",

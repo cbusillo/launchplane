@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
-import stat
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -14,6 +12,7 @@ from control_plane.work_graph_github_projects import (
     build_github_project_planning_facts,
     load_github_project_planning_facts_config_from_env,
 )
+from tests.support.work_graph import write_fake_gh_sequence as _write_fake_gh_sequence
 
 
 def _write_fake_gh(
@@ -22,31 +21,6 @@ def _write_fake_gh(
     return _write_fake_gh_sequence(
         directory, responses=[{"stdout": stdout, "exit_code": exit_code, "stderr": stderr}]
     )
-
-
-def _write_fake_gh_sequence(directory: Path, *, responses: list[dict[str, object]]) -> Path:
-    script = directory / "gh"
-    responses_path = directory / "responses.jsonl"
-    responses_path.write_text("\n".join(json.dumps(response) for response in responses) + "\n")
-    script.write_text(
-        "#!/bin/sh\n"
-        'printf \'%s\n\' "$@" >> "$FAKE_GH_ARGS"\n'
-        f"responses_path={json.dumps(str(responses_path))}\n"
-        'if [ -s "$responses_path" ]; then\n'
-        "  response=$(sed -n '1p' \"$responses_path\")\n"
-        '  tail -n +2 "$responses_path" > "$responses_path.tmp"\n'
-        '  mv "$responses_path.tmp" "$responses_path"\n'
-        "else\n"
-        '  response=\'{"stdout":[],"exit_code":0,"stderr":""}\'\n'
-        "fi\n"
-        "printf '%s' \"$response\" | jq -c '.stdout'\n"
-        "stderr=$(printf '%s' \"$response\" | jq -r '.stderr // \"\"')\n"
-        'if [ -n "$stderr" ]; then printf \'%s\' "$stderr" >&2; fi\n'
-        "exit_code=$(printf '%s' \"$response\" | jq -r '.exit_code // 0')\n"
-        'exit "$exit_code"\n'
-    )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 class GitHubProjectPlanningFactsTests(unittest.TestCase):

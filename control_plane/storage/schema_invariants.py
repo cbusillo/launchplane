@@ -56,6 +56,11 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("integer", "int4"),
     ),
     CriticalColumnType(
+        "launchplane_idempotency_records",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
         "launchplane_odoo_stable_bootstrap_operations",
         "payload",
         ("jsonb",),
@@ -100,6 +105,11 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_idempotency_scope_route_key_idx",
         ("scope", "route_path", "idempotency_key"),
         unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_idempotency_records",
+        "launchplane_idempotency_state_lease_idx",
+        ("state", "lease_expires_at", "updated_at"),
     ),
     CriticalIndex(
         "launchplane_odoo_stable_bootstrap_operations",

@@ -368,6 +368,20 @@ New or changed service route families must preserve the completed HTTP boundary:
 typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
+Frontend read-contract generation uses the same boundary. Run
+`uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`
+to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
+without live credentials, managed-secret values, or runtime-authority examples.
+The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
+and checked `frontend/src/generated/openapi.ts/` types from that canonical
+export. `pnpm --dir frontend check:openapi-drift` regenerates those artifacts in
+temporary paths and fails when the checked schema or generated types drift from
+the backend contract. The canonical `x-launchplane-ui-read-operations` manifest
+owns each selected GET path and stable operation id; slicing fails closed when a
+route, operation id, success response, or referenced schema drifts. Generated
+response envelopes are the API boundary consumed by the UI. Handwritten
+frontend types remain only for write requests and explicit UI normalization.
+
 The human auth/session family uses FastAPI routes in the production service:
 `GET /auth/github/login`, `GET /auth/github/callback`, `GET /v1/auth/session`,
 and `POST /auth/logout`. GitHub OAuth login preserves PKCE state, same-origin
@@ -378,6 +392,63 @@ response shape, renews expiring signed session cookies, and returns
 `authentication_required` with the `configured` flag when no valid human session
 exists. Logout deletes the cookie-backed session when auth is configured and
 always emits the Launchplane session clearing cookie.
+
+### Browser Mutation Boundary
+
+`SameSite=Lax` remains defense-in-depth; it is not the authorization or CSRF
+contract. A request that resolves to a GitHub human session may use a mutation
+route only when all of these browser facts validate before route authorization
+or mutation logic runs:
+
+- exactly one `Origin` matches the normalized origin of
+  `LAUNCHPLANE_PUBLIC_URL`; forwarded host headers are not origin authority
+- exactly one `Sec-Fetch-Site: same-origin`, one fetch mode of `cors` or
+  `same-origin`, and one `Sec-Fetch-Dest: empty` are present
+- exactly one `X-CSRF-Token` matches the current HMAC-bound session generation
+
+`GET /v1/auth/session` returns the current `csrf_token` with
+`Cache-Control: no-store`. Each accepted token is consumed atomically before the
+route handler runs and advances the generation stored with the human session.
+The old token is then stale and cannot be replayed, including when later route
+authorization or request handling rejects the operation. Browser clients must
+serialize writes and acquire the current token before each attempt. Existing
+signed sessions remain compatible: records written before this boundary begin
+at generation zero and receive a token through the normal session read instead
+of forcing a logout.
+
+The cookie-capable mutation inventory is intentionally limited to:
+
+- `POST /auth/logout`
+- `POST /v1/work-graph/rank`
+- `POST /v1/agent/write-intents/evaluate`
+- `POST /v1/drivers/generic-web/prod-promotion`
+- `POST /v1/drivers/generic-web/prod-promotion-workflow`
+- `POST /v1/product-config/apply`
+- `POST /v1/merge-train/policies/import`
+- `POST /v1/authz-policies/github-actions/grants`
+- `POST /v1/authz-policies/github-actions/removals`
+- `POST /v1/authz-policies/github-humans/grants`
+- `POST /v1/authz-policies/terminal-agents/grants`
+- `POST /v1/authz-policies/local-operators/grants`
+- `POST /v1/authz-policies/local-admins/grants`
+
+Every other authenticated mutation route intentionally rejects session-cookie
+authentication and continues to require its existing GitHub Actions OIDC,
+local-operator/admin bearer, Every Code worker, or webhook boundary. A valid
+`Authorization: Bearer` identity on the routes above also bypasses browser
+origin, fetch-metadata, and CSRF checks exactly as before; a cookie does not
+weaken or replace bearer verification. The operator UI therefore exposes only
+the cookie-capable writes. In particular, GitHub issue inbox reconciliation is
+displayed as unavailable because it remains a GitHub Actions OIDC service
+operation. Managed-secret root re-encryption is explicitly bearer-only even
+when a valid human session cookie is present; rotating the service root is not a
+browser mutation surface.
+
+Trusted Launchplane CLI clients that are explicitly given `--session-cookie`
+preserve compatibility by reading `/v1/auth/session` immediately before the
+write and sending the same strict origin/fetch-metadata headers plus the returned
+single-use token. Bearer-token CLI requests do not perform that preflight and
+retain their existing request shape.
 
 Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
 deployment/promotion/preview lifecycle evidence over HTTP, and executes the
@@ -1246,11 +1317,17 @@ SHA-256 and an `Idempotency-Key`; changed reviewed inputs or a profile-row chang
 during apply make the operation stale. A successful apply uses an atomic
 compare-and-write, rebuilds from the current stored record, and changes only the
 preview certificate value plus `updated_at` and server-owned `source`;
-profile-row serialization and idempotency evidence commit in the same
-transaction even when the requested value is already current. The operator
-workflow receives the real target product as dispatch input, and its
-product-specific authz grant comes from operator-supplied configuration rather
-than checked-in runtime authority.
+DB-clock preflight rejects active claims, preserves reconciliation-bound claims,
+and releases only expired unbound orphans that cannot have committed this
+DB-only atomic write. The transaction inserts a typed `running` mutation
+reservation before the profile write and commits the profile plus `completed`
+replay evidence together, even when the requested value is already current.
+Concurrent same-key requests cannot both write; matching requests replay the
+committed response and changed fingerprints fail with
+`409 idempotency_key_reused`. The operator workflow
+receives the real target product as dispatch input, and its product-specific
+authz grant comes from operator-supplied configuration rather than checked-in
+runtime authority.
 
 Public ingress notification policy writes use
 `POST /v1/public-ingress/notification-policies/apply`. The request carries
@@ -1330,11 +1407,22 @@ target. It reuses the same planner/writer as `launchplane product-config apply`,
 returns only actions, keys, counts, actor/source metadata, and secret IDs, uses
 generic validation messages for rejected requests, and fails closed when the
 record store is not DB-backed, when a secret bundle is submitted without
-`LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane runtime, or when
+valid `LAUNCHPLANE_SECRET_KEYS_JSON` (or the migration-only legacy
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`) in the trusted Launchplane runtime, or when
 there is no active runtime key-safety policy that allows the requested managed
 secret binding for the target runtime class. Request bodies for this route must
 not be copied into logs, issues, docs, or workflow artifacts because they can
 contain plaintext secret values.
+
+`POST /v1/secrets/reencrypt` owns shared and production managed-secret root
+rotation. The route requires JSON with a bounded body, exact
+`secret.reencrypt.dry-run` or `secret.reencrypt.apply` authority, a reason, and
+DB-backed storage. Apply additionally requires the matching dry-run digest and
+an `Idempotency-Key`. Version, current-pointer, and audit writes commit in one
+transaction; the audit operation token provides retry recovery if idempotency
+evidence cannot be persisted after that transaction. Terminal-agent read
+credentials cannot call the route, and responses expose key IDs and counts but
+never plaintext or ciphertext.
 
 #### Product-config secret source contract
 
@@ -2046,6 +2134,19 @@ for all write routes. Launchplane replays the first successful accepted
 response when the same authenticated workflow scope retries the same route
 with the same key and the same request fingerprint. Launchplane rejects reuse
 of the same key for a different payload on the same route.
+
+Reservation-backed mutations strengthen that completed-response contract by
+claiming `(scope, route, key)` before effects. The reservation records a typed
+owner, lease, attempt, state, optional provider reconciliation key, and eventual
+response. A matching active request reports that execution is already in
+progress. An expired reservation without an external operation key may be
+reclaimed; an expired reservation with a bound operation key becomes
+`reconcile_required` and must not repeat the provider effect. DB-only routes
+commit business state and completion evidence atomically. Provider routes must
+bind their stable operation/reconciliation key before invoking the provider.
+Product preview TLS apply is the first DB-only route migrated to this boundary;
+remaining route migrations must preserve the same fail-closed semantics rather
+than relying on process-local locks.
 
 Current VeriReel key shapes:
 

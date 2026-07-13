@@ -15,7 +15,7 @@ from control_plane.work_graph_issue_inbox import (
     load_github_issue_inbox_config_from_env,
     reconcile_github_issue_inbox,
 )
-from tests.test_work_graph_github_projects import _write_fake_gh_sequence
+from tests.support.work_graph import write_fake_gh_sequence as _write_fake_gh_sequence
 
 
 class GitHubIssueInboxTests(unittest.TestCase):
@@ -415,8 +415,10 @@ class GitHubIssueInboxTests(unittest.TestCase):
 
         self.assertEqual(result.failed_count, 1)
         self.assertEqual(result.items[0].action, "failed")
-        self.assertIn("[redacted]", result.items[0].detail)
+        self.assertIn("[redacted-token]", result.items[0].detail)
         self.assertNotIn("ghp_supersecret", result.items[0].detail)
+        self.assertEqual(result.items[0].error_code, "github_cli_failed")
+        self.assertTrue(result.items[0].error_correlation_id.startswith("cpf-"))
 
     def test_reconcile_issue_inbox_apply_reports_empty_and_already_present(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
