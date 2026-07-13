@@ -67,6 +67,11 @@ class EveryCodeWorkRequestRecord(BaseModel):
                 raise ValueError("claimed Every Code work request requires claimed_at")
             if not self.claimed_by_host.strip():
                 raise ValueError("claimed Every Code work request requires claimed_by_host")
+        if self.state in {"claimed", "running"}:
+            if self.fencing_token < 1:
+                raise ValueError("active Every Code work request requires fencing_token")
+            if self.attempt < 1:
+                raise ValueError("active Every Code work request requires attempt")
         if self.state in {"running", "done"} and not self.started_at.strip():
             raise ValueError("running Every Code work request requires started_at")
         if self.state in {"done", "blocked"} and not self.finished_at.strip():
@@ -84,7 +89,7 @@ class EveryCodeWorkRequestStatusUpdate(BaseModel):
     state: Literal["running", "done", "blocked"]
     host: str
     updated_at: str
-    fencing_token: int = Field(default=0, ge=0)
+    fencing_token: int = Field(ge=0)
     result_pr_url: str = ""
     result_summary: str = ""
     error_message: str = ""
@@ -224,7 +229,7 @@ def apply_every_code_work_request_status(
         raise ValueError("finished Every Code work request cannot be updated")
     if record.claimed_by_host.strip() != update.host.strip():
         raise ValueError("Every Code status update host does not match claim host")
-    if update.fencing_token > 0 and record.fencing_token != update.fencing_token:
+    if record.fencing_token != update.fencing_token:
         raise ValueError(
             f"Every Code status update fencing token {update.fencing_token} "
             f"does not match record fencing token {record.fencing_token}"

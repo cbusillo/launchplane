@@ -1671,7 +1671,7 @@ class EveryCodeWorkRequestStatusEnvelope(BaseModel):
     request_id: str
     host: str
     state: Literal["running", "done", "blocked"]
-    fencing_token: int = Field(default=0, ge=0)
+    fencing_token: int = Field(ge=0)
     result_pr_url: str = ""
     result_summary: str = ""
     error_message: str = ""

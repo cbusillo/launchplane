@@ -50,6 +50,12 @@ def upgrade() -> None:
             _TABLE,
             sa.Column("attempt", sa.Integer(), nullable=False, server_default="0"),
         )
+    op.execute(
+        sa.text(
+            f"UPDATE {_TABLE} SET fencing_token = 1, attempt = 1 "
+            "WHERE state IN ('claimed', 'running') AND fencing_token = 0"
+        )
+    )
     if not _index_exists(_TABLE, _LEASE_IDX):
         op.create_index(_LEASE_IDX, _TABLE, ["state", "lease_expires_at"])
 

@@ -456,6 +456,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     "request_id": seeded.request_id,
                     "host": "Chris-Studio",
                     "state": "running",
+                    "fencing_token": 0,
                     "fencing_token": claimed.fencing_token,
                     "updated_at": "2026-05-05T22:02:00Z",
                 },
@@ -651,6 +652,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     "request_id": "every-code-cbusillo-code-123-test",
                     "host": "Chris-Studio",
                     "state": "running",
+                    "fencing_token": 0,
                 },
                 authorization="Bearer worker-token",
             )
@@ -795,6 +797,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="blocked",
                     host="Chris-Studio",
+                    fencing_token=claimed.fencing_token,
                     updated_at="2026-05-05T22:05:00Z",
                     result_pr_url="https://github.com/cbusillo/code/pull/26",
                     result_summary="Detached session went stale.",
@@ -872,6 +875,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="done",
                     host="Runner-Host",
+                    fencing_token=claimed.fencing_token,
                     updated_at="2026-05-05T22:05:00Z",
                     result_pr_url="https://github.com/cbusillo/code/pull/26",
                 ),
@@ -916,6 +920,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="blocked",
                     host="Chris-Studio",
+                    fencing_token=claimed.fencing_token,
                     updated_at="2026-05-05T22:05:00Z",
                     error_message="Needs another pass.",
                 ),
@@ -1075,6 +1080,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="blocked",
                     host="Chris-Studio",
+                    fencing_token=claimed.fencing_token,
                     updated_at="2026-05-05T22:05:00Z",
                     error_message="Needs another pass.",
                 ),
@@ -1841,7 +1847,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     "required"
                 ]
             ),
-            {"request_id", "host", "state"},
+            {"request_id", "host", "state", "fencing_token"},
         )
         self.assertEqual(
             work_request_status_route["responses"]["202"]["content"]["application/json"]["schema"][

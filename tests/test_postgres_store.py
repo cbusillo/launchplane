@@ -2278,6 +2278,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     update=EveryCodeWorkRequestStatusUpdate(
                         state="done",
                         host="worker-1",
+                        fencing_token=0,
                         updated_at="2026-05-05T22:05:00Z",
                         result_summary="done",
                     ),

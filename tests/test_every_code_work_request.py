@@ -76,6 +76,7 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="running",
                     host="Other-Host",
+                    fencing_token=claimed_record.fencing_token,
                     updated_at="2026-05-05T22:02:00Z",
                 ),
             )
@@ -93,6 +94,7 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
             EveryCodeWorkRequestStatusUpdate(
                 state="done",
                 host="Chris-Studio",
+                fencing_token=claimed_record.fencing_token,
                 updated_at="2026-05-05T22:03:00Z",
                 result_pr_url="https://github.com/cbusillo/code/pull/99",
             ),
@@ -115,6 +117,7 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
             EveryCodeWorkRequestStatusUpdate(
                 state="running",
                 host="Chris-Studio",
+                fencing_token=claimed_record.fencing_token,
                 updated_at="2026-05-05T22:03:00Z",
                 result_pr_url="https://github.com/cbusillo/code/pull/99",
             ),
@@ -153,6 +156,7 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
             EveryCodeWorkRequestStatusUpdate(
                 state="running",
                 host="Chris-Studio",
+                fencing_token=claimed_record.fencing_token,
                 updated_at="2026-05-05T22:03:00Z",
             ),
         )
@@ -192,6 +196,7 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
             EveryCodeWorkRequestStatusUpdate(
                 state="running",
                 host="Chris-Studio",
+                fencing_token=claimed_record.fencing_token,
                 updated_at="2026-05-05T22:03:00Z",
             ),
         )
@@ -241,6 +246,7 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
             EveryCodeWorkRequestStatusUpdate(
                 state="running",
                 host="Chris-Studio",
+                fencing_token=claimed_record.fencing_token,
                 updated_at="2026-05-05T22:03:00Z",
                 result_pr_url="https://github.com/cbusillo/code/pull/88",
             ),
@@ -284,6 +290,7 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
             EveryCodeWorkRequestStatusUpdate(
                 state="blocked",
                 host="Chris-Studio",
+                fencing_token=claimed_record.fencing_token,
                 updated_at="2026-05-05T22:03:00Z",
                 result_pr_url="https://github.com/cbusillo/code/pull/99",
                 result_summary="Old session went stale.",
