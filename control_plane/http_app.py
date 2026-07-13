@@ -40,6 +40,7 @@ from control_plane import product_context_cutover as control_plane_product_conte
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_preview_tls as control_plane_product_preview_tls
 from control_plane import product_read_service as control_plane_product_read_service
+from control_plane import route_binding_backfill as control_plane_route_binding_backfill
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
 from control_plane import tracked_target_logs as control_plane_tracked_target_logs
@@ -99,6 +100,7 @@ from control_plane.contracts.ingress_canary_route_record import IngressCanaryRou
 from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
+    IngressRouteTlsOwner,
     build_ingress_route_audit_record_id,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
@@ -493,6 +495,11 @@ from control_plane.contracts.protected_artifacts import (
     build_protected_artifact_set,
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingReadModel,
+    EnvironmentRouteBindingRecord,
+    redacted_route_binding_record,
+)
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene_evidence import (
     RunnerHostHygieneAuditEvidenceEnvelope,
@@ -586,7 +593,13 @@ from control_plane.launchplane_mutations import (
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
-from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
+from control_plane.storage.postgres import (
+    DbOnlyMutationRequest,
+    MutationReservationResult,
+    MutationReservationUpdateResult,
+    PostgresRecordStore,
+    RouteBindingMutationResult,
+)
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     PromotionEvidenceValidationError,
@@ -739,6 +752,7 @@ _LIVE_TARGET_RUNTIME_APPLY_ROUTE = "/v1/live-target-runtime/apply"
 _INGRESS_ROUTE_APPLY_ROUTE = "/v1/drivers/ingress/route-apply"
 _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
+_ROUTE_BINDING_BACKFILL_APPLY_ROUTE = "/v1/route-bindings/backfill/apply"
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
 _PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
@@ -1572,6 +1586,27 @@ class PrivateHealthEndpointRecordsResponse(BaseModel):
     limit: int
     count: int
     records: tuple[PrivateHealthEndpointRecord, ...]
+
+
+class RouteBindingRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: EnvironmentRouteBindingReadModel
+
+
+class RouteBindingRecordsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    product: str
+    context: str
+    instance: str
+    limit: int
+    count: int
+    records: tuple[EnvironmentRouteBindingReadModel, ...]
 
 
 class IngressCanaryRouteRecordResponse(BaseModel):
@@ -2429,6 +2464,40 @@ class IngressCanaryRouteApplyEnvelope(BaseModel):
         return self
 
 
+class RouteBindingBackfillApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    product: str
+    context: str
+    instance: str
+    source_label: str = "operator-backfill"
+    reason: str = ""
+    confirmation: str = ""
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "RouteBindingBackfillApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported route binding backfill schema version")
+        self.product = self.product.strip()
+        self.context = self.context.strip()
+        self.instance = self.instance.strip()
+        self.source_label = self.source_label.strip()
+        self.reason = self.reason.strip()
+        self.confirmation = self.confirmation.strip()
+        if not self.product or not self.context or not self.instance:
+            raise ValueError("Route binding backfill requires product, context, and instance")
+        if not self.source_label:
+            raise ValueError("Route binding backfill requires source_label")
+        if self.mode == "apply":
+            if not self.reason:
+                raise ValueError("Route binding backfill apply requires a reason")
+            if self.confirmation != "APPLY LAUNCHPLANE ROUTE BINDING":
+                raise ValueError("Route binding backfill apply requires exact confirmation text")
+        return self
+
+
 class _RecordStoreFactory(Protocol):
     def __call__(self) -> object: ...
 
@@ -2537,6 +2606,53 @@ class _IngressCanaryRouteRecordApplyStore(Protocol):
         self,
         record: IngressCanaryRouteRecord,
     ) -> object: ...
+
+
+class _RouteBindingApplyStore(
+    control_plane_route_binding_backfill.RouteBindingBackfillStore, Protocol
+):
+    def read_route_binding_record(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentRouteBindingRecord: ...
+
+    def write_route_binding_record(
+        self,
+        record: EnvironmentRouteBindingRecord,
+    ) -> object: ...
+
+
+class _RouteBindingMutationStore(_RouteBindingApplyStore, Protocol):
+    def reserve_mutation(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        lease_owner: str,
+        lease_seconds: int = 300,
+        reconciliation_key: str = "",
+    ) -> MutationReservationResult: ...
+
+    def release_mutation_reservation(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+    ) -> MutationReservationUpdateResult: ...
+
+    def create_route_binding_record_with_mutation(
+        self,
+        *,
+        record: EnvironmentRouteBindingRecord,
+        reservation: LaunchplaneIdempotencyRecord,
+        response_status_code: int,
+        response_trace_id: str,
+        response_payload: dict[str, Any],
+    ) -> RouteBindingMutationResult: ...
 
 
 class _IngressRouteApplyStore(Protocol):
@@ -2659,6 +2775,26 @@ class _PrivateHealthEndpointReadStore(Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[PrivateHealthEndpointRecord, ...]: ...
+
+
+class _RouteBindingReadStore(Protocol):
+    def read_route_binding_record(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentRouteBindingRecord: ...
+
+    def list_route_binding_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EnvironmentRouteBindingRecord, ...]: ...
 
 
 class _IngressCanaryRouteReadStore(Protocol):
@@ -3294,6 +3430,24 @@ def require_private_health_endpoint_read_store(
     return cast(_PrivateHealthEndpointReadStore, record_store)
 
 
+def require_route_binding_read_store(record_store: object) -> _RouteBindingReadStore:
+    required_methods = (
+        "read_route_binding_record",
+        "list_route_binding_records",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            f"Launchplane record store does not support route binding reads: {missing_summary}"
+        )
+    return cast(_RouteBindingReadStore, record_store)
+
+
 def require_edge_endpoint_apply_store(record_store: object) -> _EdgeEndpointApplyStore:
     required_methods = (
         "write_edge_endpoint_record",
@@ -3331,6 +3485,51 @@ def require_private_health_endpoint_apply_store(
             f"{missing_summary}"
         )
     return cast(_PrivateHealthEndpointApplyStore, record_store)
+
+
+def require_route_binding_apply_store(record_store: object) -> _RouteBindingApplyStore:
+    required_methods = (
+        "read_provider_target_record",
+        "read_dokploy_target_record",
+        "read_dokploy_target_id_record",
+        "read_route_binding_record",
+        "list_edge_endpoint_records",
+        "list_ingress_route_audit_records",
+        "write_route_binding_record",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support route binding backfill applies: "
+            f"{missing_summary}"
+        )
+    return cast(_RouteBindingApplyStore, record_store)
+
+
+def require_route_binding_mutation_store(record_store: object) -> _RouteBindingMutationStore:
+    route_binding_store = require_route_binding_apply_store(record_store)
+    required_methods = (
+        "reserve_mutation",
+        "release_mutation_reservation",
+        "create_route_binding_record_with_mutation",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(route_binding_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support atomic route binding mutations: "
+            f"{missing_summary}"
+        )
+    return cast(_RouteBindingMutationStore, route_binding_store)
 
 
 def require_ingress_canary_route_record_apply_store(
@@ -11041,6 +11240,152 @@ def create_launchplane_fastapi_app(
             )
         return PrivateHealthEndpointRecordResponse(trace_id=trace_id, record=record)
 
+    def ensure_route_binding_allowed(
+        *,
+        identity: LaunchplaneIdentity,
+        trace_id: str,
+        action: str,
+        product: str,
+        context_name: str,
+        message: str,
+    ) -> None:
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context_name,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=message,
+            )
+
+    def list_route_binding_records(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        product: Annotated[str, Query()] = "",
+        context: Annotated[str, Query()] = "",
+        instance: Annotated[str, Query()] = "",
+        status: Annotated[str, Query()] = "",
+        limit: Annotated[str, Query()] = "25",
+    ) -> RouteBindingRecordsResponse:
+        trace_id = next_trace_id()
+        normalized_product = product.strip()
+        context_name = context.strip()
+        instance_name = instance.strip()
+        if not normalized_product or not context_name:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message="Route binding list requires product and context query parameters.",
+            )
+        ensure_route_binding_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="route_binding.read",
+            product=normalized_product,
+            context_name=context_name,
+            message="Workflow cannot read route bindings for the requested product/context.",
+        )
+        try:
+            normalized_limit = control_plane_service_status.query_int_value(
+                limit,
+                "limit",
+                default=25,
+                minimum=1,
+                maximum=100,
+            )
+            assert normalized_limit is not None
+            route_binding_store = require_route_binding_read_store(record_store)
+            records = route_binding_store.list_route_binding_records(
+                product=normalized_product,
+                context_name=context_name,
+                instance_name=instance_name,
+                status=status.strip(),
+                limit=normalized_limit,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        return RouteBindingRecordsResponse(
+            trace_id=trace_id,
+            product=normalized_product,
+            context=context_name,
+            instance=instance_name,
+            limit=normalized_limit,
+            count=len(records),
+            records=tuple(redacted_route_binding_record(record) for record in records),
+        )
+
+    def read_route_binding_record(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        product: Annotated[str, Query()] = "",
+        context: Annotated[str, Query()] = "",
+        instance: Annotated[str, Query()] = "",
+    ) -> RouteBindingRecordResponse:
+        trace_id = next_trace_id()
+        normalized_product = product.strip()
+        context_name = context.strip()
+        instance_name = instance.strip()
+        if not normalized_product or not context_name or not instance_name:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=(
+                    "Route binding record reads require product, context, and instance "
+                    "query parameters."
+                ),
+            )
+        ensure_route_binding_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="route_binding.read",
+            product=normalized_product,
+            context_name=context_name,
+            message="Workflow cannot read route bindings for the requested product/context.",
+        )
+        try:
+            route_binding_store = require_route_binding_read_store(record_store)
+            record = route_binding_store.read_route_binding_record(
+                product=normalized_product,
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return RouteBindingRecordResponse(
+            trace_id=trace_id,
+            record=redacted_route_binding_record(record),
+        )
+
     def ensure_ingress_canary_route_read_allowed(
         *,
         identity: LaunchplaneIdentity,
@@ -14007,6 +14352,13 @@ def create_launchplane_fastapi_app(
         idempotency_key: str,
     ) -> IngressRouteAuditRecord:
         provider_host_id = result.proxy_host.id if result.proxy_host is not None else None
+        certificate_id = (
+            result.proxy_host.certificate_id
+            if result.proxy_host is not None
+            else request.route.certificate_id
+        )
+        tls_owner: IngressRouteTlsOwner = "none" if certificate_id == 0 else "provider"
+        provider_certificate_ref = "" if certificate_id == 0 else str(certificate_id)
         record = IngressRouteAuditRecord(
             record_id=build_ingress_route_audit_record_id(
                 trace_id=trace_id,
@@ -14022,6 +14374,8 @@ def create_launchplane_fastapi_app(
             dry_run=result.dry_run,
             requested_domains=request.route.domain_names,
             edge_endpoint_key=request.route.edge_endpoint_key,
+            tls_owner=tls_owner,
+            provider_certificate_ref=provider_certificate_ref,
             expected_host_id=request.expected_host_id,
             provider_host_id=provider_host_id,
             operations=tuple(
@@ -14046,6 +14400,9 @@ def create_launchplane_fastapi_app(
         request: NpmplusIngressApplyRequest,
         idempotency_key: str,
     ) -> IngressRouteAuditRecord:
+        certificate_id = request.route.certificate_id
+        tls_owner: IngressRouteTlsOwner = "none" if certificate_id == 0 else "provider"
+        provider_certificate_ref = "" if certificate_id == 0 else str(certificate_id)
         record = IngressRouteAuditRecord(
             record_id=build_ingress_route_audit_record_id(
                 trace_id=trace_id,
@@ -14061,6 +14418,8 @@ def create_launchplane_fastapi_app(
             dry_run=request.mode == "dry-run",
             requested_domains=request.route.domain_names,
             edge_endpoint_key=request.route.edge_endpoint_key,
+            tls_owner=tls_owner,
+            provider_certificate_ref=provider_certificate_ref,
             expected_host_id=request.expected_host_id,
             provider_host_id=None,
             operations=(
@@ -14333,6 +14692,255 @@ def create_launchplane_fastapi_app(
                 request_fingerprint_value=payload_fingerprint,
                 trace_id=trace_id,
                 response=response,
+            )
+        return response
+
+    async def apply_route_binding_backfill(
+        request: Request,
+        binding_request: RouteBindingBackfillApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        ensure_route_binding_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="route_binding.apply",
+            product=binding_request.product,
+            context_name=binding_request.context,
+            message="Workflow cannot apply route bindings for the requested product/context.",
+        )
+        if binding_request.mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Route binding backfill apply requests require an Idempotency-Key header.",
+            )
+        normalized_key = idempotency_key.strip()
+        payload_fingerprint = ""
+        try:
+            route_binding_store = require_route_binding_apply_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        mutation_store: _RouteBindingMutationStore | None = None
+        mutation_reservation: LaunchplaneIdempotencyRecord | None = None
+        if binding_request.mode == "apply":
+            try:
+                mutation_store = require_route_binding_mutation_store(record_store)
+            except TypeError as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message=str(error),
+                ) from error
+            raw_payload = await request.json()
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                payload=cast(dict[str, object], raw_payload),
+            )
+            reservation_result = mutation_store.reserve_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+            )
+            if reservation_result.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=reservation_result.record,
+                    route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                )
+            if reservation_result.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if reservation_result.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching route binding mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if reservation_result.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=("The route binding mutation requires reconciliation before retry."),
+                )
+            mutation_reservation = reservation_result.record
+
+        def release_route_binding_reservation() -> None:
+            if mutation_store is None or mutation_reservation is None:
+                return
+            release_result = mutation_store.release_mutation_reservation(
+                reservation=mutation_reservation,
+            )
+            if release_result.status != "released":
+                raise RuntimeError(
+                    "Route binding mutation reservation could not be released before effects."
+                )
+
+        def existing_route_binding_response(
+            existing_record: EnvironmentRouteBindingRecord,
+        ) -> AcceptedEvidenceResponse:
+            existing_plan = control_plane_route_binding_backfill.RouteBindingBackfillPlan(
+                status="blocked",
+                findings=(
+                    control_plane_route_binding_backfill.RouteBindingBackfillFinding(
+                        code="route_binding_exists",
+                        detail=(
+                            "Backfill will not overwrite an existing environment route-binding "
+                            "record."
+                        ),
+                    ),
+                ),
+            )
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={
+                    "route_binding_status": "blocked",
+                    "product": existing_record.product,
+                    "context": existing_record.context,
+                    "instance": existing_record.instance,
+                },
+                result={
+                    "mode": binding_request.mode,
+                    **existing_plan.model_dump(mode="json", exclude_none=True),
+                },
+            )
+
+        try:
+            existing_record = route_binding_store.read_route_binding_record(
+                product=binding_request.product,
+                context_name=binding_request.context,
+                instance_name=binding_request.instance,
+            )
+        except FileNotFoundError:
+            existing_record = None
+        if existing_record is not None:
+            release_route_binding_reservation()
+            return existing_route_binding_response(existing_record)
+        backfill_plan = control_plane_route_binding_backfill.plan_route_binding_backfill(
+            record_store=route_binding_store,
+            request=control_plane_route_binding_backfill.RouteBindingBackfillRequest(
+                product=binding_request.product,
+                context=binding_request.context,
+                instance=binding_request.instance,
+                source_label=binding_request.source_label,
+                evaluated_at=utc_now_timestamp(),
+            ),
+        )
+        if backfill_plan.status != "ready" or backfill_plan.record is None:
+            release_route_binding_reservation()
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={
+                    "route_binding_status": "blocked",
+                    "product": binding_request.product,
+                    "context": binding_request.context,
+                    "instance": binding_request.instance,
+                },
+                result={
+                    "mode": binding_request.mode,
+                    **backfill_plan.model_dump(mode="json", exclude_none=True),
+                },
+            )
+        record_status = "applied" if binding_request.mode == "apply" else "planned"
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "route_binding_status": record_status,
+                "product": backfill_plan.record.product,
+                "context": backfill_plan.record.context,
+                "instance": backfill_plan.record.instance,
+            },
+            result={
+                "mode": binding_request.mode,
+                "route_binding_status": record_status,
+                "record": redacted_route_binding_record(backfill_plan.record).model_dump(
+                    mode="json"
+                ),
+            },
+        )
+        if binding_request.mode == "apply":
+            if mutation_store is None or mutation_reservation is None:
+                raise RuntimeError("Route binding apply requires a mutation reservation.")
+            mutation_result = mutation_store.create_route_binding_record_with_mutation(
+                record=backfill_plan.record,
+                reservation=mutation_reservation,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+            )
+            if mutation_result.status == "created":
+                return response
+            if mutation_result.status == "replayed":
+                if mutation_result.idempotency_record is None:
+                    raise RuntimeError("Replayed route binding mutation requires evidence.")
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=mutation_result.idempotency_record,
+                    route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                )
+            if mutation_result.status == "exists":
+                if mutation_result.route_binding is None:
+                    raise RuntimeError("Existing route binding mutation requires a record.")
+                return existing_route_binding_response(mutation_result.route_binding)
+            if mutation_result.status == "idempotency_conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if mutation_result.status == "reconciliation_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=("The route binding mutation requires reconciliation before retry."),
+                )
+            if mutation_result.status == "reservation_expired":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_lease_expired",
+                    message=(
+                        "The route binding mutation lease expired before completion. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_in_progress",
+                message=(
+                    "The route binding mutation reservation changed before completion. "
+                    "Retry with the same Idempotency-Key."
+                ),
             )
         return response
 
@@ -20043,6 +20651,24 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+        apply_route_binding_backfill,
+        methods=["POST"],
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        status_code=202,
+        operation_id="apply_route_binding_backfill",
+        summary="Plan or apply one provider-neutral environment route binding",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _INGRESS_CANARY_ROUTE_APPLY_ROUTE,
         apply_ingress_canary_route,
         methods=["POST"],
@@ -20056,6 +20682,37 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/route-bindings/records",
+        list_route_binding_records,
+        methods=["GET"],
+        response_model=RouteBindingRecordsResponse,
+        operation_id="list_route_binding_records",
+        summary="List provider-neutral environment route bindings",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/route-bindings/records/current",
+        read_route_binding_record,
+        methods=["GET"],
+        response_model=RouteBindingRecordResponse,
+        operation_id="read_route_binding_record",
+        summary="Read one provider-neutral environment route binding",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

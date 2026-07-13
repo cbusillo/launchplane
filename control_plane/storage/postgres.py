@@ -88,6 +88,7 @@ from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedback
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
     migrate_product_profile_health_monitoring_payload,
@@ -150,6 +151,7 @@ MutationReservationDecision = Literal[
 ]
 MutationReservationUpdateStatus = Literal[
     "updated",
+    "released",
     "missing",
     "not_running",
     "owner_mismatch",
@@ -176,6 +178,17 @@ DbOnlyMutationPreflightStatus = Literal[
     "in_progress",
     "reconcile_required",
 ]
+RouteBindingMutationStatus = Literal[
+    "created",
+    "exists",
+    "replayed",
+    "idempotency_conflict",
+    "reservation_missing",
+    "reservation_in_progress",
+    "reservation_mismatch",
+    "reservation_expired",
+    "reconciliation_required",
+]
 
 
 class ProductProfileCompareWriteResult(NamedTuple):
@@ -201,6 +214,12 @@ class MutationReservationCompletionResult(NamedTuple):
 class DbOnlyMutationPreflightResult(NamedTuple):
     status: DbOnlyMutationPreflightStatus
     record: LaunchplaneIdempotencyRecord | None = None
+
+
+class RouteBindingMutationResult(NamedTuple):
+    status: RouteBindingMutationStatus
+    route_binding: EnvironmentRouteBindingRecord | None = None
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -759,6 +778,35 @@ class LaunchplanePrivateHealthEndpointRow(Base):
     instance: Mapped[str] = mapped_column(String, nullable=False)
     url: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneRouteBindingRow(Base):
+    __tablename__ = "launchplane_route_bindings"
+    __table_args__ = (
+        Index(
+            "launchplane_route_bindings_lookup_idx",
+            "product",
+            "context",
+            "status",
+            "instance",
+        ),
+        Index("launchplane_route_bindings_updated_idx", desc("updated_at")),
+    )
+
+    product: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    instance: Mapped[str] = mapped_column(String, primary_key=True)
+    provider_id: Mapped[str] = mapped_column(String, nullable=False)
+    target_category: Mapped[str] = mapped_column(String, nullable=False)
+    ingress_provider: Mapped[str] = mapped_column(String, nullable=False)
+    ingress_endpoint_key: Mapped[str] = mapped_column(String, nullable=False)
+    termination_kind: Mapped[str] = mapped_column(String, nullable=False)
+    tls_owner: Mapped[str] = mapped_column(String, nullable=False)
+    primary_domain: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    freshness_status: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -2151,6 +2199,56 @@ class PostgresRecordStore(HumanSessionStore):
             self._sync_idempotency_row(row, reclaimed_record)
             session.commit()
             return MutationReservationResult(status="acquired", record=reclaimed_record)
+
+    def release_mutation_reservation(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+    ) -> MutationReservationUpdateResult:
+        if reservation.state != "running":
+            raise ValueError("Mutation reservation release requires a running reservation.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if row is None:
+                return MutationReservationUpdateResult(status="missing")
+            current_record = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=row.payload,
+            )
+            if current_record.state != "running":
+                return MutationReservationUpdateResult(
+                    status="not_running",
+                    record=current_record,
+                )
+            if current_record.lease_owner != reservation.lease_owner:
+                return MutationReservationUpdateResult(
+                    status="owner_mismatch",
+                    record=current_record,
+                )
+            if not self._mutation_reservation_matches(current_record, reservation):
+                return MutationReservationUpdateResult(
+                    status="reservation_mismatch",
+                    record=current_record,
+                )
+            if current_record.reconciliation_key:
+                return MutationReservationUpdateResult(
+                    status="reconciliation_conflict",
+                    record=current_record,
+                )
+            session.delete(row)
+            session.commit()
+            return MutationReservationUpdateResult(
+                status="released",
+                record=current_record,
+            )
 
     def renew_mutation_reservation(
         self,
@@ -5290,6 +5388,232 @@ class PostgresRecordStore(HumanSessionStore):
                 updated_at=record.updated_at,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def _route_binding_row(
+        self,
+        record: EnvironmentRouteBindingRecord,
+    ) -> LaunchplaneRouteBindingRow:
+        primary_domain = next(
+            (domain.domain_name for domain in record.domains if domain.role == "primary"),
+            "",
+        )
+        return LaunchplaneRouteBindingRow(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+            provider_id=record.provider_target.provider_id,
+            target_category=record.provider_target.target_category,
+            ingress_provider=record.ingress.provider,
+            ingress_endpoint_key=record.ingress.endpoint_key,
+            termination_kind=record.ingress.termination_kind,
+            tls_owner=record.tls.owner,
+            primary_domain=primary_domain,
+            status=record.status,
+            freshness_status=record.source.freshness_status,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def write_route_binding_record(self, record: EnvironmentRouteBindingRecord) -> None:
+        self._write_row(self._route_binding_row(record))
+
+    def create_route_binding_record_with_mutation(
+        self,
+        *,
+        record: EnvironmentRouteBindingRecord,
+        reservation: LaunchplaneIdempotencyRecord,
+        response_status_code: int,
+        response_trace_id: str,
+        response_payload: dict[str, Any],
+    ) -> RouteBindingMutationResult:
+        if reservation.state != "running":
+            raise ValueError("Route binding mutation requires a running reservation.")
+        if not 100 <= response_status_code <= 599:
+            raise ValueError("Route binding mutation response status must be between 100 and 599.")
+        if not response_trace_id.strip():
+            raise ValueError("Route binding mutation response trace id is required.")
+        reservation_insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            idempotency_row = session.scalar(
+                self._idempotency_statement(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if idempotency_row is None:
+                return RouteBindingMutationResult(status="reservation_missing")
+            current_reservation = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=idempotency_row.payload,
+            )
+            if current_reservation.request_fingerprint != reservation.request_fingerprint:
+                return RouteBindingMutationResult(
+                    status="idempotency_conflict",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "completed":
+                return RouteBindingMutationResult(
+                    status="replayed",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "reconcile_required":
+                return RouteBindingMutationResult(
+                    status="reconciliation_required",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state != "running":
+                return RouteBindingMutationResult(
+                    status="reservation_in_progress",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.lease_owner != reservation.lease_owner or not (
+                self._mutation_reservation_matches(current_reservation, reservation)
+            ):
+                return RouteBindingMutationResult(
+                    status="reservation_mismatch",
+                    idempotency_record=current_reservation,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_reservation.lease_expires_at,
+                field_name="lease_expires_at",
+            ) <= parse_launchplane_mutation_timestamp(
+                observed_at,
+                field_name="observed_at",
+            ):
+                if current_reservation.reconciliation_key:
+                    reconcile_record = self._updated_idempotency_record(
+                        current_reservation,
+                        state="reconcile_required",
+                        updated_at=observed_at,
+                    )
+                    self._sync_idempotency_row(idempotency_row, reconcile_record)
+                    session.commit()
+                    return RouteBindingMutationResult(
+                        status="reconciliation_required",
+                        idempotency_record=reconcile_record,
+                    )
+                return RouteBindingMutationResult(
+                    status="reservation_expired",
+                    idempotency_record=current_reservation,
+                )
+            route_binding_statement = (
+                select(LaunchplaneRouteBindingRow)
+                .where(
+                    LaunchplaneRouteBindingRow.product == record.product,
+                    LaunchplaneRouteBindingRow.context == record.context,
+                    LaunchplaneRouteBindingRow.instance == record.instance,
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                route_binding_statement = route_binding_statement.with_for_update()
+            existing_row = session.scalar(route_binding_statement)
+            if existing_row is not None:
+                existing_record = self._read_payload(
+                    model_type=EnvironmentRouteBindingRecord,
+                    payload=existing_row.payload,
+                )
+                session.delete(idempotency_row)
+                session.commit()
+                return RouteBindingMutationResult(
+                    status="exists",
+                    route_binding=existing_record,
+                )
+            route_binding_row = self._route_binding_row(record)
+            session.add(route_binding_row)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                session.rollback()
+                reservation_insert_error = error
+            if reservation_insert_error is None:
+                completed_at = self._database_mutation_timestamp(session)
+                completion = complete_launchplane_mutation_reservation(
+                    current_reservation,
+                    response_status_code=response_status_code,
+                    response_trace_id=response_trace_id,
+                    completed_at=completed_at,
+                    response_payload=response_payload,
+                )
+                self._sync_idempotency_row(idempotency_row, completion)
+                session.commit()
+                return RouteBindingMutationResult(
+                    status="created",
+                    route_binding=record,
+                    idempotency_record=completion,
+                )
+
+        try:
+            existing_record = self.read_route_binding_record(
+                product=record.product,
+                context_name=record.context,
+                instance_name=record.instance,
+            )
+        except FileNotFoundError:
+            assert reservation_insert_error is not None
+            raise reservation_insert_error
+        release_result = self.release_mutation_reservation(reservation=reservation)
+        if release_result.status != "released":
+            return RouteBindingMutationResult(
+                status="reservation_mismatch",
+                route_binding=existing_record,
+                idempotency_record=release_result.record,
+            )
+        return RouteBindingMutationResult(
+            status="exists",
+            route_binding=existing_record,
+        )
+
+    def read_route_binding_record(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentRouteBindingRecord:
+        return self._read_model(
+            model_type=EnvironmentRouteBindingRecord,
+            orm_model=LaunchplaneRouteBindingRow,
+            filters=(
+                LaunchplaneRouteBindingRow.product == product,
+                LaunchplaneRouteBindingRow.context == context_name,
+                LaunchplaneRouteBindingRow.instance == instance_name,
+            ),
+        )
+
+    def list_route_binding_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EnvironmentRouteBindingRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneRouteBindingRow.product == product)
+        if context_name:
+            filters.append(LaunchplaneRouteBindingRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplaneRouteBindingRow.instance == instance_name)
+        if status:
+            filters.append(LaunchplaneRouteBindingRow.status == status)
+        return self._list_models(
+            model_type=EnvironmentRouteBindingRecord,
+            orm_model=LaunchplaneRouteBindingRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneRouteBindingRow.product.asc(),
+                LaunchplaneRouteBindingRow.context.asc(),
+                LaunchplaneRouteBindingRow.instance.asc(),
+            ),
+            limit=limit,
         )
 
     def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord:

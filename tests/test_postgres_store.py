@@ -57,6 +57,14 @@ from control_plane.contracts.idempotency_record import (
     complete_launchplane_mutation_reservation,
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+    RouteBindingIngress,
+    RouteBindingProviderTarget,
+    RouteBindingSource,
+    RouteBindingTls,
+)
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -549,6 +557,42 @@ def _private_health_endpoint_record(
         status=status,
         updated_at="2026-06-15T00:00:00Z",
         source_label="test:private-health-endpoint",
+    )
+
+
+def _route_binding_record(
+    *, product: str = "example-product", context: str = "reon", instance: str = "prod"
+) -> EnvironmentRouteBindingRecord:
+    return EnvironmentRouteBindingRecord(
+        product=product,
+        context=context,
+        instance=instance,
+        provider_target=RouteBindingProviderTarget(
+            provider_id="dokploy",
+            target_category="compose",
+            provider_target_type="compose",
+            target_name="example-target",
+            provider_evidence={"target_record": f"{context}:{instance}"},
+        ),
+        ingress=RouteBindingIngress(
+            provider="npmplus",
+            endpoint_key="example-edge",
+            termination_kind="edge",
+            provider_evidence={"audit_record": "audit-example"},
+        ),
+        domains=(RouteBindingDomain(domain_name="app.example.test", role="primary"),),
+        tls=RouteBindingTls(
+            owner="launchplane",
+            provider_evidence={"audit_record": "audit-example"},
+        ),
+        source=RouteBindingSource(
+            source_kind="operator",
+            source_label="test",
+            source_record_ids=("operator:test",),
+            refreshed_at="2026-07-12T00:00:00Z",
+            freshness_status="recorded",
+        ),
+        updated_at="2026-07-12T00:00:00Z",
     )
 
 
@@ -1186,6 +1230,8 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.write_private_health_endpoint_record(private_health_endpoint)
             ingress_canary_route = _ingress_canary_route_record()
             store.write_ingress_canary_route_record(ingress_canary_route)
+            route_binding = _route_binding_record()
+            store.write_route_binding_record(route_binding)
             inspect_engine = create_engine(database_url)
             inspector = inspect(inspect_engine)
             table_names = set(inspector.get_table_names())
@@ -1206,6 +1252,12 @@ class PostgresRecordStoreTests(unittest.TestCase):
             provider_target_indexes = {
                 index["name"] for index in inspector.get_indexes("launchplane_provider_targets")
             }
+            route_binding_columns = {
+                column["name"] for column in inspector.get_columns("launchplane_route_bindings")
+            }
+            route_binding_indexes = {
+                index["name"] for index in inspector.get_indexes("launchplane_route_bindings")
+            }
             loaded = store.read_artifact_manifest(manifest.artifact_id)
             loaded_provider_target = store.read_provider_target_record(
                 context_name="reon",
@@ -1217,6 +1269,11 @@ class PostgresRecordStoreTests(unittest.TestCase):
             )
             loaded_ingress_canary_route = store.read_ingress_canary_route_record(
                 ingress_canary_route.canary_key
+            )
+            loaded_route_binding = store.read_route_binding_record(
+                product=route_binding.product,
+                context_name=route_binding.context,
+                instance_name=route_binding.instance,
             )
             audit_records = store.list_ingress_route_audit_records(
                 product="launchplane", context_name="reon-prod"
@@ -1233,9 +1290,11 @@ class PostgresRecordStoreTests(unittest.TestCase):
             "http://10.0.0.5:8000/health",
         )
         self.assertEqual(loaded_ingress_canary_route.domain_name, "ingress-canary.example.test")
+        self.assertEqual(loaded_route_binding.binding_key, route_binding.binding_key)
         self.assertIn("launchplane_edge_endpoints", table_names)
         self.assertIn("launchplane_private_health_endpoints", table_names)
         self.assertIn("launchplane_ingress_canary_routes", table_names)
+        self.assertIn("launchplane_route_bindings", table_names)
         self.assertGreaterEqual(
             edge_endpoint_columns,
             {
@@ -1295,6 +1354,27 @@ class PostgresRecordStoreTests(unittest.TestCase):
         )
         self.assertIn("launchplane_provider_targets_provider_idx", provider_target_indexes)
         self.assertIn("launchplane_provider_targets_updated_idx", provider_target_indexes)
+        self.assertGreaterEqual(
+            route_binding_columns,
+            {
+                "product",
+                "context",
+                "instance",
+                "provider_id",
+                "target_category",
+                "ingress_provider",
+                "ingress_endpoint_key",
+                "termination_kind",
+                "tls_owner",
+                "primary_domain",
+                "status",
+                "freshness_status",
+                "updated_at",
+                "payload",
+            },
+        )
+        self.assertIn("launchplane_route_bindings_lookup_idx", route_binding_indexes)
+        self.assertIn("launchplane_route_bindings_updated_idx", route_binding_indexes)
         self.assertEqual(
             [record.record_id for record in audit_records], [ingress_route_audit.record_id]
         )
