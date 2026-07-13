@@ -38,6 +38,7 @@ from control_plane.workflows.public_ingress_monitor import (
     discover_public_ingress_monitor_targets,
     run_public_ingress_monitor_once,
 )
+from control_plane.outbound_http import PublicHttpDestinationError
 
 
 def _public_health_monitoring(
@@ -391,7 +392,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
 
         self.assertEqual(discover_public_ingress_monitor_targets(store), ())
 
-    def test_private_url_records_skipped_observation_without_request(self) -> None:
+    def test_private_url_records_failed_observation_without_request(self) -> None:
         lane = ProductLaneProfile(
             instance="prod",
             context="example-site",
@@ -407,9 +408,41 @@ class PublicIngressMonitorTests(unittest.TestCase):
             http_get=lambda url, _timeout: _capture_request(requested_urls, url),
         )
 
-        self.assertEqual(result.skipped_count, 1)
+        self.assertEqual(result.fail_count, 1)
         self.assertEqual(requested_urls, [])
+        self.assertEqual(store.records[0].status, "fail")
         self.assertEqual(store.records[0].failure_code, "private_url")
+
+    def test_public_http_timeout_records_connection_timeout(self) -> None:
+        store = _Store((_profile(),))
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:05:30Z",
+            http_get=lambda _url, _timeout: (_ for _ in ()).throw(TimeoutError("timed out")),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(store.records[0].failure_code, "connection_timeout")
+
+    def test_public_http_destination_policy_failure_records_private_url(self) -> None:
+        store = _Store((_profile(),))
+
+        with patch(
+            "control_plane.workflows.public_ingress_monitor.request_public_http",
+            side_effect=PublicHttpDestinationError(
+                "private_url",
+                "redirect resolved to a private address",
+            ),
+        ):
+            result = run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at="2026-05-29T12:05:45Z",
+            )
+
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(store.records[0].failure_code, "private_url")
+        self.assertIn("private address", store.records[0].targets[0].summary)
 
     def test_private_http_check_requests_private_health_endpoint_url(self) -> None:
         lane = ProductLaneProfile(
@@ -429,10 +462,14 @@ class PublicIngressMonitorTests(unittest.TestCase):
         _add_private_endpoint(store)
         requested_urls: list[str] = []
 
+        def reject_public_client(_url: str, _timeout: int) -> HttpObservation:
+            raise AssertionError("private health checks must not use the public HTTP client")
+
         result = run_public_ingress_monitor_once(
             record_store=store,
             checked_at="2026-05-29T12:06:00Z",
-            http_get=lambda url, _timeout: _capture_request(requested_urls, url),
+            http_get=reject_public_client,
+            private_http_get=lambda url, _timeout: _capture_request(requested_urls, url),
         )
 
         self.assertEqual(result.pass_count, 1)
@@ -462,7 +499,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         result = run_public_ingress_monitor_once(
             record_store=store,
             checked_at="2026-05-29T12:06:30Z",
-            http_get=lambda url, _timeout: _capture_request(requested_urls, url),
+            private_http_get=lambda url, _timeout: _capture_request(requested_urls, url),
         )
 
         self.assertEqual(result.pass_count, 1)
@@ -654,14 +691,18 @@ class PublicIngressMonitorTests(unittest.TestCase):
         store = _Store((_profile(lane=lane),))
         _add_private_endpoint(store)
 
-        result = run_public_ingress_monitor_once(
-            record_store=store,
-            checked_at="2026-05-29T12:08:00Z",
-            http_get=lambda url, _timeout: HttpObservation(
+        def failing_get(url: str, _timeout: int) -> HttpObservation:
+            return HttpObservation(
                 status_code=503,
                 final_url=url,
                 redirect_count=0,
-            ),
+            )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:08:00Z",
+            http_get=failing_get,
+            private_http_get=failing_get,
         )
 
         self.assertEqual(result.fail_count, 2)
@@ -1153,6 +1194,11 @@ class PublicIngressMonitorTests(unittest.TestCase):
             http_get=lambda _url, _timeout: HttpObservation(
                 status_code=503,
                 final_url="https://example.test",
+                redirect_count=0,
+            ),
+            private_http_get=lambda _url, _timeout: HttpObservation(
+                status_code=503,
+                final_url="http://10.0.0.5:8080/health",
                 redirect_count=0,
             ),
             notification_drivers=drivers,

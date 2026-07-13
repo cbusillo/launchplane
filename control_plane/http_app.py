@@ -657,7 +657,9 @@ _PREVIEW_GENERATION_EVIDENCE_ROUTE = "/v1/evidence/previews/generations"
 _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
 _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
+_EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _EVIDENCE_INGRESS_MAX_BODY_BYTES = 2 * 1024 * 1024
+_GITHUB_WEBHOOK_MAX_BODY_BYTES = 2 * 1024 * 1024
 _EVIDENCE_INGRESS_ROUTES = frozenset(
     {
         _DEPLOYMENT_EVIDENCE_ROUTE,
@@ -669,6 +671,18 @@ _EVIDENCE_INGRESS_ROUTES = frozenset(
         _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE,
     }
 )
+_BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
+    **{
+        route: ("Evidence ingress", _EVIDENCE_INGRESS_MAX_BODY_BYTES, True, False)
+        for route in _EVIDENCE_INGRESS_ROUTES
+    },
+    _EVERY_CODE_GITHUB_WEBHOOK_ROUTE: (
+        "GitHub webhook",
+        _GITHUB_WEBHOOK_MAX_BODY_BYTES,
+        False,
+        True,
+    ),
+}
 _DOKPLOY_TARGET_SETUP_ROUTE = "/v1/dokploy-targets/setup"
 _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE = "/v1/products/public-ingress-monitor/run-once"
 _PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/public-ingress/notification-policies/apply"
@@ -715,7 +729,6 @@ _AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
-_EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
 
 AuthzPolicyRouteEnvelope = (
@@ -894,32 +907,34 @@ class AuthLogoutResponse(BaseModel):
     trace_id: str
 
 
-class EvidenceIngressRequestContractMiddleware:
+class BoundedRequestBodyMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if (
-            scope.get("type") != "http"
-            or str(scope.get("method", "")).upper() != "POST"
-            or str(scope.get("path", "")) not in _EVIDENCE_INGRESS_ROUTES
-        ):
+        if scope.get("type") != "http" or str(scope.get("method", "")).upper() != "POST":
             await self.app(scope, receive, send)
             return
-
-        content_type_values = _asgi_header_values(scope=scope, name="content-type")
-        content_type = content_type_values[0] if len(content_type_values) == 1 else ""
-        media_type = content_type.split(";", 1)[0].strip().lower()
-        if media_type != "application/json":
-            await _send_launchplane_error_response(
-                scope=scope,
-                receive=receive,
-                send=send,
-                status_code=400,
-                code="invalid_request",
-                message="Evidence ingress requests require Content-Type: application/json.",
-            )
+        contract = _BOUNDED_REQUEST_BODY_CONTRACTS.get(str(scope.get("path", "")))
+        if contract is None:
+            await self.app(scope, receive, send)
             return
+        request_label, max_body_bytes, require_json, require_exact_length = contract
+
+        if require_json:
+            content_type_values = _asgi_header_values(scope=scope, name="content-type")
+            content_type = content_type_values[0] if len(content_type_values) == 1 else ""
+            media_type = content_type.split(";", 1)[0].strip().lower()
+            if media_type != "application/json":
+                await _send_launchplane_error_response(
+                    scope=scope,
+                    receive=receive,
+                    send=send,
+                    status_code=400,
+                    code="invalid_request",
+                    message=f"{request_label} requests require Content-Type: application/json.",
+                )
+                return
 
         transfer_encoding_tokens = {
             token.split(";", 1)[0].strip().lower()
@@ -927,14 +942,16 @@ class EvidenceIngressRequestContractMiddleware:
             for token in value.split(",")
             if token.strip()
         }
-        if "chunked" in transfer_encoding_tokens:
+        if "chunked" in transfer_encoding_tokens or (
+            require_exact_length and transfer_encoding_tokens
+        ):
             await _send_launchplane_error_response(
                 scope=scope,
                 receive=receive,
                 send=send,
                 status_code=413,
                 code="request_entity_too_large",
-                message="Evidence ingress requests require a bounded Content-Length.",
+                message=f"{request_label} requests require a bounded Content-Length.",
             )
             return
 
@@ -946,7 +963,7 @@ class EvidenceIngressRequestContractMiddleware:
                 send=send,
                 status_code=413,
                 code="request_entity_too_large",
-                message="Evidence ingress requests require a bounded Content-Length.",
+                message=f"{request_label} requests require a bounded Content-Length.",
             )
             return
         if len(content_length_values) != 1:
@@ -956,7 +973,7 @@ class EvidenceIngressRequestContractMiddleware:
                 send=send,
                 status_code=400,
                 code="invalid_request",
-                message="Evidence ingress requests require exactly one Content-Length header.",
+                message=f"{request_label} requests require exactly one Content-Length header.",
             )
             return
         content_length = content_length_values[0].strip()
@@ -967,44 +984,78 @@ class EvidenceIngressRequestContractMiddleware:
                 send=send,
                 status_code=400,
                 code="invalid_request",
-                message="Evidence ingress Content-Length must be an unsigned decimal integer.",
+                message=(f"{request_label} Content-Length must be an unsigned decimal integer."),
             )
             return
-        declared_body_size = int(content_length)
-        if declared_body_size > _EVIDENCE_INGRESS_MAX_BODY_BYTES:
+        normalized_content_length = content_length.lstrip("0") or "0"
+        max_body_size_text = str(max_body_bytes)
+        if len(normalized_content_length) > len(max_body_size_text) or (
+            len(normalized_content_length) == len(max_body_size_text)
+            and normalized_content_length > max_body_size_text
+        ):
             await _send_launchplane_error_response(
                 scope=scope,
                 receive=receive,
                 send=send,
                 status_code=413,
                 code="request_entity_too_large",
-                message="Evidence ingress request body is too large.",
+                message=f"{request_label} request body is too large.",
             )
             return
+        declared_body_size = int(normalized_content_length)
 
         buffered_messages: list[Message] = []
         observed_body_size = 0
         while True:
             message = await receive()
+            if message.get("type") == "http.disconnect":
+                return
             if message.get("type") != "http.request":
-                buffered_messages.append(message)
-                break
+                await _send_launchplane_error_response(
+                    scope=scope,
+                    receive=receive,
+                    send=send,
+                    status_code=400,
+                    code="invalid_request",
+                    message=f"{request_label} request body ended before completion.",
+                )
+                return
             body = message.get("body", b"")
-            if isinstance(body, bytes):
-                observed_body_size += len(body)
-            if observed_body_size > _EVIDENCE_INGRESS_MAX_BODY_BYTES:
+            if not isinstance(body, bytes):
+                await _send_launchplane_error_response(
+                    scope=scope,
+                    receive=receive,
+                    send=send,
+                    status_code=400,
+                    code="invalid_request",
+                    message=f"{request_label} request body is invalid.",
+                )
+                return
+            observed_body_size += len(body)
+            if observed_body_size > max_body_bytes:
                 await _send_launchplane_error_response(
                     scope=scope,
                     receive=receive,
                     send=send,
                     status_code=413,
                     code="request_entity_too_large",
-                    message="Evidence ingress request body is too large.",
+                    message=f"{request_label} request body is too large.",
                 )
                 return
             buffered_messages.append(message)
             if not message.get("more_body", False):
                 break
+
+        if require_exact_length and observed_body_size != declared_body_size:
+            await _send_launchplane_error_response(
+                scope=scope,
+                receive=receive,
+                send=send,
+                status_code=400,
+                code="invalid_request",
+                message=f"{request_label} Content-Length does not match the request body.",
+            )
+            return
 
         next_message_index = 0
 
@@ -3994,7 +4045,7 @@ def create_launchplane_fastapi_app(
                 shared_record_store.close()
 
     app = _LaunchplaneFastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
-    app.add_middleware(EvidenceIngressRequestContractMiddleware)
+    app.add_middleware(BoundedRequestBodyMiddleware)
     odoo_preview_apply_lock = asyncio.Lock()
     resolved_oauth_login_state_store = (
         oauth_login_state_store if oauth_login_state_store is not None else OAuthLoginStateStore()
@@ -19815,6 +19866,7 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},
+            413: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

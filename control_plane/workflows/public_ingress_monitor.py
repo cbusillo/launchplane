@@ -3,11 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from email.message import EmailMessage
-from http.client import HTTPMessage
-from typing import IO, Protocol, cast
+from typing import Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener, urlopen
+from urllib.request import Request, urlopen
 import json
 import os
 import smtplib
@@ -55,6 +54,9 @@ from control_plane.notifications import (
     public_discord_url_error,
     public_url_error,
 )
+from control_plane.outbound_http import PublicHttpDestinationError
+from control_plane.outbound_http import request_private_http
+from control_plane.outbound_http import request_public_http
 from control_plane.workflows.odoo_verification import (
     default_odoo_health_url,
     is_legacy_derived_odoo_health_url,
@@ -199,28 +201,6 @@ class PublicIngressMonitorResult(BaseModel):
 HttpGet = Callable[[str, int], HttpObservation]
 
 
-class _RedirectTrackingHandler(HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        req: Request,
-        fp: IO[bytes],
-        code: int,
-        msg: str,
-        headers: HTTPMessage,
-        newurl: str,
-    ) -> Request | None:
-        old_url = req.full_url
-        if _normalized_url(old_url) == _normalized_url(newurl):
-            raise RuntimeError(f"self redirect from {old_url}")
-        request = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if request is not None:
-            redirects = int(getattr(req, "redirect_count", 0)) + 1
-            setattr(request, "redirect_count", redirects)
-            if redirects > MAX_REDIRECTS:
-                raise RuntimeError(f"redirect loop after {MAX_REDIRECTS} redirects")
-        return request
-
-
 def discover_public_ingress_monitor_targets(
     record_store: PublicIngressMonitorStore,
 ) -> tuple[PublicIngressMonitorTarget, ...]:
@@ -355,10 +335,12 @@ def run_public_ingress_monitor_once(
     timeout_seconds: int = 10,
     notify: bool = True,
     http_get: HttpGet | None = None,
+    private_http_get: HttpGet | None = None,
     notification_drivers: PublicIngressNotificationDrivers | None = None,
 ) -> PublicIngressMonitorResult:
     observed_at = checked_at.strip() or utc_now_timestamp()
-    get = http_get or fetch_public_ingress_url
+    public_get = http_get or fetch_public_ingress_url
+    private_get = private_http_get or fetch_private_health_url
     records: list[PublicIngressObservationRecord] = []
     incidents: list[PublicIngressIncidentRecord] = []
     delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
@@ -370,7 +352,7 @@ def run_public_ingress_monitor_once(
             target=target,
             checked_at=observed_at,
             timeout_seconds=timeout_seconds,
-            http_get=get,
+            http_get=(private_get if target.check_kind == "private_http" else public_get),
         )
         record_store.write_public_ingress_observation_record(record)
         records.append(record)
@@ -628,23 +610,45 @@ def check_public_ingress_target(
 
 
 def fetch_public_ingress_url(url: str, timeout_seconds: int) -> HttpObservation:
-    opener: OpenerDirector = build_opener(_RedirectTrackingHandler)
-    request = Request(url, headers={"User-Agent": USER_AGENT}, method="GET")
-    with opener.open(request, timeout=timeout_seconds) as response:  # noqa: S310 - operator-configured product URLs.
-        body = response.read(1024 * 256)
-        payload: object = None
-        content_type = response.headers.get("content-type", "")
-        if body and "json" in content_type.lower():
-            try:
-                payload = json.loads(body.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                payload = None
-        return HttpObservation(
-            status_code=response.status,
-            final_url=response.geturl(),
-            redirect_count=int(getattr(response, "redirect_count", 0)),
-            payload=payload,
-        )
+    response = request_public_http(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout_seconds=timeout_seconds,
+        max_redirects=MAX_REDIRECTS,
+    )
+    payload: object = None
+    if response.body and "json" in response.header("content-type").lower():
+        try:
+            payload = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+    return HttpObservation(
+        status_code=response.status_code,
+        final_url=response.final_url,
+        redirect_count=response.redirect_count,
+        payload=payload,
+    )
+
+
+def fetch_private_health_url(url: str, timeout_seconds: int) -> HttpObservation:
+    response = request_private_http(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout_seconds=timeout_seconds,
+        max_redirects=MAX_REDIRECTS,
+    )
+    payload: object = None
+    if response.body and "json" in response.header("content-type").lower():
+        try:
+            payload = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+    return HttpObservation(
+        status_code=response.status_code,
+        final_url=response.final_url,
+        redirect_count=response.redirect_count,
+        payload=payload,
+    )
 
 
 def _check_url(
@@ -670,13 +674,10 @@ def _check_url(
     if target.check_kind != "private_http":
         public_url_error = _public_url_error(url)
     if public_url_error is not None:
-        status: PublicIngressObservationStatus = (
-            "skipped" if public_url_error == "private_url" else "fail"
-        )
         return PublicIngressTargetObservation(
             target=target_kind,
             url=url,
-            status=status,
+            status="fail",
             failure_code=public_url_error,
             summary=_failure_summary(public_url_error),
         )
@@ -698,6 +699,13 @@ def _check_url(
         )
     except TimeoutError:
         return _failed_target(target_kind=target_kind, url=url, code="connection_timeout")
+    except PublicHttpDestinationError as error:
+        return _failed_target(
+            target_kind=target_kind,
+            url=url,
+            code=error.code,
+            summary=str(error),
+        )
     except URLError as error:
         return _url_error_observation(target_kind=target_kind, url=url, error=error)
     except ssl.SSLError:

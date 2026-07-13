@@ -395,15 +395,20 @@ behavior can differ between request methods.
 
 `POST /v1/every-code/github-webhook` is the only unauthenticated write route.
 It trusts the request body through GitHub webhook HMAC verification instead of
-OIDC. The route requires `X-Hub-Signature-256`, `X-GitHub-Delivery`, and
-`X-GitHub-Event`, supports `issues.labeled` events for the `every-code` label,
-and accepts pull-request `closed` events to terminalize linked Every Code work
-requests. Other signed events, actions, or labels return `202` with
-`skipped: true`. Matching issue-label deliveries create or return the durable
-Every Code work request and include `deduped` plus the delivery id in the
-response. Matching pull-request close deliveries can close every linked request
-referenced by the PR, including still-queued requests that never stored a result
-PR URL. The route is native FastAPI.
+OIDC. Before buffering or HMAC processing, the ASGI boundary requires exactly
+one unsigned-decimal `Content-Length`, rejects transfer-encoded or missing-length
+requests, caps both declared and observed body bytes at 2 MiB, and rejects a
+declared/observed length mismatch. Contract failures return `400` or `413`
+without invoking the webhook handler. The route requires
+`X-Hub-Signature-256`, `X-GitHub-Delivery`, and `X-GitHub-Event`, supports
+`issues.labeled` events for the `every-code` label, and accepts pull-request
+`closed` events to terminalize linked Every Code work requests. Other signed
+events, actions, or labels return `202` with `skipped: true`. Matching
+issue-label deliveries create or return the durable Every Code work request and
+include `deduped` plus the delivery id in the response. Matching pull-request
+close deliveries can close every linked request referenced by the PR, including
+still-queued requests that never stored a result PR URL. The route is native
+FastAPI.
 
 The Every Code worker read, native claim, and status routes also accept a
 dedicated local-worker bearer token. Configure
