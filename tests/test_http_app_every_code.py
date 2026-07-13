@@ -456,7 +456,6 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     "request_id": seeded.request_id,
                     "host": "Chris-Studio",
                     "state": "running",
-                    "fencing_token": 0,
                     "fencing_token": claimed.fencing_token,
                     "updated_at": "2026-05-05T22:02:00Z",
                 },

@@ -3451,6 +3451,12 @@
       "EveryCodeWorkRequestRecord": {
         "additionalProperties": false,
         "properties": {
+          "attempt": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Attempt",
+            "type": "integer"
+          },
           "claimed_at": {
             "default": "",
             "title": "Claimed At",
@@ -3465,6 +3471,12 @@
             "default": "",
             "title": "Error Message",
             "type": "string"
+          },
+          "fencing_token": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Fencing Token",
+            "type": "integer"
           },
           "finished_at": {
             "default": "",
@@ -3488,6 +3500,11 @@
           },
           "issue_url": {
             "title": "Issue Url",
+            "type": "string"
+          },
+          "lease_expires_at": {
+            "default": "",
+            "title": "Lease Expires At",
             "type": "string"
           },
           "lifecycle_id": {
@@ -31274,6 +31291,187 @@
         "summary": "Create Every Code work request"
       }
     },
+    "/v1/every-code/work-requests/heartbeat": {
+      "post": {
+        "operationId": "write_every_code_work_request_heartbeat",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "fencing_token": {
+                    "minimum": 1,
+                    "title": "Fencing Token",
+                    "type": "integer"
+                  },
+                  "host": {
+                    "title": "Host",
+                    "type": "string"
+                  },
+                  "lease_seconds": {
+                    "default": 1800,
+                    "maximum": 86400,
+                    "minimum": 60,
+                    "title": "Lease Seconds",
+                    "type": "integer"
+                  },
+                  "request_id": {
+                    "title": "Request Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "request_id",
+                  "host",
+                  "fencing_token"
+                ],
+                "title": "EveryCodeWorkRequestHeartbeatEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Heartbeat Every Code work request lease"
+      }
+    },
+    "/v1/every-code/work-requests/recover-stale": {
+      "post": {
+        "operationId": "recover_stale_every_code_work_requests",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Recover stale Every Code work requests"
+      }
+    },
     "/v1/every-code/work-requests/rerun": {
       "post": {
         "operationId": "rerun_every_code_work_request",
@@ -31446,6 +31644,11 @@
                     "title": "Error Message",
                     "type": "string"
                   },
+                  "fencing_token": {
+                    "minimum": 0,
+                    "title": "Fencing Token",
+                    "type": "integer"
+                  },
                   "host": {
                     "title": "Host",
                     "type": "string"
@@ -31482,7 +31685,8 @@
                 "required": [
                   "request_id",
                   "host",
-                  "state"
+                  "state",
+                  "fencing_token"
                 ],
                 "title": "EveryCodeWorkRequestStatusEnvelope",
                 "type": "object"
