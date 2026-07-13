@@ -81,6 +81,7 @@ from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedback
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
     migrate_product_profile_health_monitoring_payload,
@@ -681,6 +682,35 @@ class LaunchplanePrivateHealthEndpointRow(Base):
     instance: Mapped[str] = mapped_column(String, nullable=False)
     url: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneRouteBindingRow(Base):
+    __tablename__ = "launchplane_route_bindings"
+    __table_args__ = (
+        Index(
+            "launchplane_route_bindings_lookup_idx",
+            "product",
+            "context",
+            "status",
+            "instance",
+        ),
+        Index("launchplane_route_bindings_updated_idx", desc("updated_at")),
+    )
+
+    product: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    instance: Mapped[str] = mapped_column(String, primary_key=True)
+    provider_id: Mapped[str] = mapped_column(String, nullable=False)
+    target_category: Mapped[str] = mapped_column(String, nullable=False)
+    ingress_provider: Mapped[str] = mapped_column(String, nullable=False)
+    ingress_endpoint_key: Mapped[str] = mapped_column(String, nullable=False)
+    termination_kind: Mapped[str] = mapped_column(String, nullable=False)
+    tls_owner: Mapped[str] = mapped_column(String, nullable=False)
+    primary_domain: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    freshness_status: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -4471,6 +4501,77 @@ class PostgresRecordStore(HumanSessionStore):
                 updated_at=record.updated_at,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_route_binding_record(self, record: EnvironmentRouteBindingRecord) -> None:
+        primary_domain = next(
+            (domain.domain_name for domain in record.domains if domain.role == "primary"),
+            "",
+        )
+        self._write_row(
+            LaunchplaneRouteBindingRow(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                provider_id=record.provider_target.provider_id,
+                target_category=record.provider_target.target_category,
+                ingress_provider=record.ingress.provider,
+                ingress_endpoint_key=record.ingress.endpoint_key,
+                termination_kind=record.ingress.termination_kind,
+                tls_owner=record.tls.owner,
+                primary_domain=primary_domain,
+                status=record.status,
+                freshness_status=record.source.freshness_status,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_route_binding_record(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentRouteBindingRecord:
+        return self._read_model(
+            model_type=EnvironmentRouteBindingRecord,
+            orm_model=LaunchplaneRouteBindingRow,
+            filters=(
+                LaunchplaneRouteBindingRow.product == product,
+                LaunchplaneRouteBindingRow.context == context_name,
+                LaunchplaneRouteBindingRow.instance == instance_name,
+            ),
+        )
+
+    def list_route_binding_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EnvironmentRouteBindingRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneRouteBindingRow.product == product)
+        if context_name:
+            filters.append(LaunchplaneRouteBindingRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplaneRouteBindingRow.instance == instance_name)
+        if status:
+            filters.append(LaunchplaneRouteBindingRow.status == status)
+        return self._list_models(
+            model_type=EnvironmentRouteBindingRecord,
+            orm_model=LaunchplaneRouteBindingRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneRouteBindingRow.product.asc(),
+                LaunchplaneRouteBindingRow.context.asc(),
+                LaunchplaneRouteBindingRow.instance.asc(),
+            ),
+            limit=limit,
         )
 
     def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord:

@@ -60,6 +60,10 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    build_route_binding_key,
+)
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
@@ -701,6 +705,57 @@ class FilesystemRecordStore:
             _ingress_canary_route_record_id(record.canary_key),
             record,
         )
+
+    def write_route_binding_record(self, record: EnvironmentRouteBindingRecord) -> Path:
+        return self._write_model(
+            "launchplane_route_bindings",
+            _route_binding_record_id(record.binding_key),
+            record,
+        )
+
+    def read_route_binding_record(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentRouteBindingRecord:
+        return self._read_model(
+            EnvironmentRouteBindingRecord,
+            "launchplane_route_bindings",
+            _route_binding_record_id(
+                build_route_binding_key(
+                    product=product,
+                    context=context_name,
+                    instance=instance_name,
+                )
+            ),
+        )
+
+    def list_route_binding_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EnvironmentRouteBindingRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                EnvironmentRouteBindingRecord,
+                "launchplane_route_bindings",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.product, record.context, record.instance))
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord:
         return self._read_model(
@@ -2270,6 +2325,10 @@ def _edge_endpoint_record_id(endpoint_key: str) -> str:
 
 def _private_health_endpoint_record_id(endpoint_key: str) -> str:
     return endpoint_key.replace("/", "%2F").replace("\\", "%5C")
+
+
+def _route_binding_record_id(binding_key: str) -> str:
+    return hashlib.sha256(binding_key.encode("utf-8")).hexdigest()
 
 
 def _ingress_canary_route_record_id(canary_key: str) -> str:

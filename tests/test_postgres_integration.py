@@ -27,6 +27,8 @@ from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISI
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
 LOCK_WAIT_TIMEOUT = "1000ms"
+
+
 def _postgres_root_database_url() -> str:
     database_url = os.environ.get(POSTGRES_TEST_URL_ENV, "").strip()
     if not database_url:
@@ -48,15 +50,11 @@ def _isolated_postgres_database() -> Iterator[str]:
     root_database_url = _postgres_root_database_url()
     root_url = make_url(root_database_url)
     database_name = f"launchplane_test_{uuid4().hex}"
-    database_url = root_url.set(database=database_name).render_as_string(
-        hide_password=False
-    )
+    database_url = root_url.set(database=database_name).render_as_string(hide_password=False)
     root_engine = create_engine(root_database_url, isolation_level="AUTOCOMMIT")
     try:
         with root_engine.connect() as connection:
-            connection.execute(
-                text(f'CREATE DATABASE "{database_name}"')
-            )
+            connection.execute(text(f'CREATE DATABASE "{database_name}"'))
         try:
             yield database_url
         finally:
@@ -192,15 +190,80 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             _upgrade_empty_database_to_head(database_url)
             engine = create_engine(database_url)
             with engine.begin() as connection:
-                connection.execute(
-                    text("drop index launchplane_idempotency_scope_route_key_idx")
-                )
+                connection.execute(text("drop index launchplane_idempotency_scope_route_key_idx"))
             engine.dispose()
             store = PostgresRecordStore(database_url=database_url)
             try:
                 with self.assertRaisesRegex(
                     RuntimeError,
                     "launchplane_idempotency_records missing required index",
+                ):
+                    store.verify_schema()
+            finally:
+                store.close()
+
+    def test_startup_verification_fails_closed_when_route_binding_index_is_missing(
+        self,
+    ) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(text("drop index launchplane_route_bindings_lookup_idx"))
+            engine.dispose()
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "launchplane_route_bindings missing required index",
+                ):
+                    store.verify_schema()
+            finally:
+                store.close()
+
+    def test_startup_verification_fails_closed_when_route_binding_payload_is_not_jsonb(
+        self,
+    ) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "alter table launchplane_route_bindings "
+                        "alter column payload type json using payload::json"
+                    )
+                )
+            engine.dispose()
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "launchplane_route_bindings.payload has type",
+                ):
+                    store.verify_schema()
+            finally:
+                store.close()
+
+    def test_startup_verification_fails_closed_when_route_binding_primary_key_is_missing(
+        self,
+    ) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "alter table launchplane_route_bindings "
+                        "drop constraint launchplane_route_bindings_pkey"
+                    )
+                )
+            engine.dispose()
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"launchplane_route_bindings has primary key \(<none>\)",
                 ):
                     store.verify_schema()
             finally:
@@ -252,11 +315,13 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     lease_expires_at="2026-05-17T00:11:00Z",
                     claimed_at="2026-05-17T00:02:00Z",
                 )
-                stale_owner_heartbeat = second_store.heartbeat_odoo_stable_bootstrap_operation_record(
-                    operation_id=first_claim.operation_id if first_claim else "missing",
-                    lease_owner="worker-b",
-                    heartbeat_at="2026-05-17T00:03:00Z",
-                    lease_expires_at="2026-05-17T00:13:00Z",
+                stale_owner_heartbeat = (
+                    second_store.heartbeat_odoo_stable_bootstrap_operation_record(
+                        operation_id=first_claim.operation_id if first_claim else "missing",
+                        lease_owner="worker-b",
+                        heartbeat_at="2026-05-17T00:03:00Z",
+                        lease_expires_at="2026-05-17T00:13:00Z",
+                    )
                 )
                 recovered_ids = store.recover_expired_odoo_stable_bootstrap_operation_records(
                     now="2026-05-17T00:12:00Z",
@@ -399,7 +464,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertFalse(created)
         self.assertEqual(existing_record.operation_id, first_record.operation_id)
-        self.assertEqual([record.operation_id for record in terminal_records], [terminal_record.operation_id])
+        self.assertEqual(
+            [record.operation_id for record in terminal_records], [terminal_record.operation_id]
+        )
 
 
 def _attempt_stale_owner_completion(

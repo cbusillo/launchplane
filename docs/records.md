@@ -313,6 +313,27 @@ an ORM column/table or remains only in the evidence payload.
   `POST /v1/ingress/canary-routes/apply` consumes the stored record, records an
   ingress route audit, and preserves the existing idempotency replay/conflict
   contract.
+- Environment route binding: modeled fields are `product`, `context`,
+  `instance`, provider target summary, ingress provider/endpoint,
+  termination kind, primary domain, TLS owner, `status`, freshness, and
+  `updated_at`. The payload carries all typed desired domains, source record
+  references, and provider evidence needed to explain the binding. The primary
+  key is the neutral environment tuple, not a provider host id, certificate id,
+  IP address, or Dokploy target id. Native FastAPI
+  `GET /v1/route-bindings/records` and
+  `GET /v1/route-bindings/records/current` return redacted read models that omit
+  provider evidence. Native FastAPI
+  `POST /v1/route-bindings/backfill/apply` plans or writes one binding by
+  comparing existing Launchplane provider-target, tracked Dokploy target, edge
+  endpoint, and applied ingress audit records. The provider-target record must
+  equal the projection of the Dokploy target plus target-id record; the latest
+  matching apply audit must be terminal and include explicit TLS ownership.
+  Source record timestamps are retained as versions and must be within the
+  service-owned 24-hour freshness window. Backfill fails closed when any join is
+  missing, ambiguous, stale, conflicting, unresolved, or exceeds the bounded
+  evidence scan, and it never overwrites an existing route-binding record.
+  Product repositories must not own route bindings, TLS ownership, provider
+  host ids, certificate ids, or edge topology.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from

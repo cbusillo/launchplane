@@ -120,7 +120,9 @@ Current product reads expose a provider target and reachability symptoms but do
 not join an environment to actual domains, runtime site/server, edge path, TLS
 terminator, or certificate state.
 
-- provider-neutral environment route authority: `#1694`
+- provider-neutral environment route authority: `#1694` implemented as
+  DB-backed route-binding contract, storage, redacted read routes, and
+  fail-closed backfill apply foundation
 - TLS certificate observations: `#1695`
 - product read-model projection and incident explanation: `#1696`
 
