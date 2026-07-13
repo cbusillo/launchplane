@@ -235,7 +235,8 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
         "GITHUB_TOKEN": frozenset(("${{ github.token }}",)),
     },
     ".github/workflows/deploy-launchplane.yml": {
-        "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY": frozenset(('"true"', "true"))
+        "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY": frozenset(('"true"', "true")),
+        "environment": frozenset(("launchplane-break-glass",)),
     },
     ".github/workflows/odoo-driver-route-smoke.yml": {
         "ROUTE_PATHS": frozenset(
@@ -624,10 +625,30 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "DEPLOY_IMAGE_REFERENCE": frozenset(("${{ inputs.image_reference }}",)),
         "LAUNCHPLANE_AUTHZ_GRANT_MODE": frozenset(("${{ inputs.authz_grants_mode }}",)),
         "LAUNCHPLANE_AUTHZ_GRANT_REASON": frozenset(("${{ inputs.authz_grants_reason }}",)),
-        "OMIT_EVERY_CODE_ENV": frozenset(("${{ inputs.omit_every_code_env }}",)),
-        "OMIT_NPMPLUS_ENV": frozenset(("${{ inputs.omit_npmplus_env }}",)),
-        "OMIT_OWNER_AGENT_ENV": frozenset(("${{ inputs.omit_owner_agent_env }}",)),
-        "OMIT_TERMINAL_AGENT_ENV": frozenset(("${{ inputs.omit_terminal_agent_env }}",)),
+        "OMIT_EVERY_CODE_ENV": frozenset(
+            (
+                "${{ inputs.omit_every_code_env }}",
+                "${{ inputs.omit_every_code_env || false }}",
+            )
+        ),
+        "OMIT_NPMPLUS_ENV": frozenset(
+            (
+                "${{ inputs.omit_npmplus_env }}",
+                "${{ inputs.omit_npmplus_env || false }}",
+            )
+        ),
+        "OMIT_OWNER_AGENT_ENV": frozenset(
+            (
+                "${{ inputs.omit_owner_agent_env }}",
+                "${{ inputs.omit_owner_agent_env || false }}",
+            )
+        ),
+        "OMIT_TERMINAL_AGENT_ENV": frozenset(
+            (
+                "${{ inputs.omit_terminal_agent_env }}",
+                "${{ inputs.omit_terminal_agent_env || false }}",
+            )
+        ),
         "REVIEWED_GRANTS_SHA256": frozenset(("${{ inputs.authz_grants_expected_sha256 }}",)),
     },
     ".github/workflows/edge-endpoint-apply.yml": {
@@ -3021,7 +3042,10 @@ def _is_github_action_metadata_mechanic(*, path: str, key: str, value: object) -
 
 
 def _is_workflow_image_artifact_mechanic(*, path: str, key: str, value: object) -> bool:
-    if path != ".github/workflows/launchplane-deploy.yml":
+    if path not in {
+        ".github/workflows/deploy-launchplane.yml",
+        ".github/workflows/launchplane-deploy.yml",
+    }:
         return False
     key_text = key.upper().replace(".", "_").replace("-", "_")
     value_text = _string_value(value).strip()
