@@ -31645,7 +31645,7 @@
                     "type": "string"
                   },
                   "fencing_token": {
-                    "minimum": 0,
+                    "minimum": 1,
                     "title": "Fencing Token",
                     "type": "integer"
                   },
