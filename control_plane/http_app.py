@@ -13540,7 +13540,17 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=product_config_response,
             )
-        if product_config_request.mode == "apply":
+        if product_config_request.mode == "dry-run":
+            store_apply_idempotency(
+                record_store=database_store,
+                identity=identity,
+                route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=product_config_response,
+            )
+        else:
             database_store.write_product_authority_bundle(
                 authority_bundle_with_apply_idempotency(
                     bundle=authority_bundle,
