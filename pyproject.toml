@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Launchplane control-plane contracts and workflows for deployment truth and promotion"
 requires-python = ">=3.13"
 dependencies = [
-    "Authlib>=1.7.0",
+    "Authlib>=1.7.2",
     "click>=8.4.2",
     "fastapi>=0.139.0",
     "pydantic>=2.13.4",

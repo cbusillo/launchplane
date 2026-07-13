@@ -8,12 +8,8 @@ on:
       - completed
   workflow_dispatch:
     inputs:
-      git_ref:
-        description: Git ref to build when deploying a new Launchplane image.
-        required: false
-        type: string
       image_reference:
-        description: Exact image reference to deploy instead of building a new one.
+        description: Exact immutable Launchplane image digest to deploy instead of building a new one.
         required: false
         type: string
       authz_grants_mode:
@@ -58,11 +54,11 @@ on:
         required: false
         type: string
       break_glass_image_reference:
-        description: Exact previous Launchplane image reference for manual direct Dokploy rollback.
+        description: Exact previous immutable Launchplane image digest for manual direct Dokploy rollback.
         required: false
         type: string
       break_glass_reason:
-        description: Operator reason for manual direct Dokploy rollback.
+        description: Single-line 8-500 character operator reason for manual direct Dokploy rollback.
         required: false
         type: string
 
@@ -84,6 +80,8 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main') ||
       (github.event_name == 'workflow_dispatch' &&
+       github.ref_type == 'branch' &&
+       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
        inputs.break_glass_confirm == '' &&
        inputs.authz_grants_mode == 'none')
     runs-on:
@@ -134,40 +132,90 @@ jobs:
       LAUNCHPLANE_AUTHZ_GRANTS_JSON: ${{ vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON }}
       LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON: ${{ vars.LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON }}
       LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: ${{ vars.LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK }}
-      LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}
-      LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}
+      OMIT_EVERY_CODE_ENV: ${{ inputs.omit_every_code_env || false }}
+      OMIT_TERMINAL_AGENT_ENV: ${{ inputs.omit_terminal_agent_env || false }}
+      OMIT_OWNER_AGENT_ENV: ${{ inputs.omit_owner_agent_env || false }}
+      OMIT_NPMPLUS_ENV: ${{ inputs.omit_npmplus_env || false }}
     steps:
       - name: Resolve deploy inputs
         id: prep
         shell: bash
+        env:
+          DISPATCH_IMAGE_REFERENCE: ${{ inputs.image_reference }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            checkout_ref="${{ github.event.workflow_run.head_sha }}"
-          elif [ -n "${{ inputs.git_ref }}" ]; then
-            checkout_ref="${{ inputs.git_ref }}"
+          validate_single_line_value() {
+            local name="$1"
+            local value="$2"
+            if [[ "$value" =~ [[:cntrl:]] ]]; then
+              echo "${name} must not contain control characters." >&2
+              exit 1
+            fi
+          }
+
+          validate_immutable_image_reference() {
+            local image_reference="$1"
+            local image_repository="$2"
+            local expected_image_prefix="${image_repository}@sha256:"
+            local image_digest=""
+
+            if [[ "$image_reference" != "$expected_image_prefix"* ]]; then
+              echo "image_reference must use the configured Launchplane image repository and an immutable sha256 digest." >&2
+              exit 1
+            fi
+            image_digest="${image_reference#"$expected_image_prefix"}"
+            if [[ ! "$image_digest" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "image_reference must end with a lowercase sha256 digest." >&2
+              exit 1
+            fi
+          }
+
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            checkout_ref="$WORKFLOW_RUN_HEAD_SHA"
           else
-            checkout_ref="${{ github.sha }}"
+            checkout_ref="$WORKFLOW_SHA"
           fi
+          if [ -z "$checkout_ref" ]; then
+            echo "Could not resolve a checkout ref." >&2
+            exit 1
+          fi
+          validate_single_line_value "checkout ref" "$checkout_ref"
 
           image_repository="${LAUNCHPLANE_IMAGE_REPOSITORY}"
           if [ -z "$image_repository" ]; then
             image_repository="ghcr.io/${GITHUB_REPOSITORY,,}"
           fi
+          validate_single_line_value "Launchplane image repository" "$image_repository"
 
-          deploy_image_reference="${{ inputs.image_reference }}"
+          deploy_image_reference="$DISPATCH_IMAGE_REFERENCE"
           if [ -n "$deploy_image_reference" ]; then
+            validate_immutable_image_reference "$deploy_image_reference" "$image_repository"
             should_build="false"
           else
             should_build="true"
           fi
 
+          for omit_environment_variable in \
+            OMIT_EVERY_CODE_ENV \
+            OMIT_TERMINAL_AGENT_ENV \
+            OMIT_OWNER_AGENT_ENV \
+            OMIT_NPMPLUS_ENV; do
+            omit_environment_value="${!omit_environment_variable}"
+            if [ "$omit_environment_value" != "true" ] && [ "$omit_environment_value" != "false" ]; then
+              echo "${omit_environment_variable} must be true or false." >&2
+              exit 1
+            fi
+          done
+
           {
-            echo "checkout_ref=$checkout_ref"
-            echo "image_repository=$image_repository"
-            echo "should_build=$should_build"
-            echo "deploy_image_reference=$deploy_image_reference"
+            printf 'checkout_ref=%s\n' "$checkout_ref"
+            printf 'image_repository=%s\n' "$image_repository"
+            printf 'should_build=%s\n' "$should_build"
+            printf 'deploy_image_reference=%s\n' "$deploy_image_reference"
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate deploy configuration
@@ -258,13 +306,17 @@ jobs:
       - name: Resolve image reference
         id: image
         shell: bash
+        env:
+          BUILT_IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          DEPLOY_IMAGE_REFERENCE: ${{ steps.prep.outputs.deploy_image_reference }}
+          IMAGE_REPOSITORY: ${{ steps.prep.outputs.image_repository }}
         run: |
           set -euo pipefail
-          image_reference="${{ steps.prep.outputs.deploy_image_reference }}"
+          image_reference="$DEPLOY_IMAGE_REFERENCE"
           if [ -z "$image_reference" ]; then
-            image_reference="${{ steps.prep.outputs.image_repository }}@${{ steps.build.outputs.digest }}"
+            image_reference="${IMAGE_REPOSITORY}@${BUILT_IMAGE_DIGEST}"
           fi
-          echo "image_reference=$image_reference" >> "$GITHUB_OUTPUT"
+          printf 'image_reference=%s\n' "$image_reference" >> "$GITHUB_OUTPUT"
 
       - name: Read previous Launchplane runtime
         id: previous_runtime
@@ -284,12 +336,27 @@ jobs:
         id: self_deploy
         shell: bash
         env:
+          DEPLOY_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
+          IMAGE_REPOSITORY: ${{ steps.prep.outputs.image_repository }}
           PREVIOUS_RUNTIME_RESPONSE_FILE: ${{ runner.temp }}/launchplane-previous-runtime.json
         run: |
           set -euo pipefail
 
           previous_image_reference="$(jq -r '.runtime.docker_image_reference // empty' "$PREVIOUS_RUNTIME_RESPONSE_FILE" 2>/dev/null || true)"
-          echo "previous_image_reference=$previous_image_reference" >> "$GITHUB_OUTPUT"
+          if [[ "$previous_image_reference" =~ [[:cntrl:]] ]]; then
+            echo "Previous Launchplane image reference must not contain control characters." >&2
+            exit 1
+          fi
+          if [ -n "$previous_image_reference" ]; then
+            expected_image_prefix="${IMAGE_REPOSITORY}@sha256:"
+            image_digest="${previous_image_reference#"$expected_image_prefix"}"
+            if [[ "$previous_image_reference" != "$expected_image_prefix"* ]] ||
+              [[ ! "$image_digest" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "Previous Launchplane image reference must use the configured repository and an immutable sha256 digest." >&2
+              exit 1
+            fi
+          fi
+          printf 'previous_image_reference=%s\n' "$previous_image_reference" >> "$GITHUB_OUTPUT"
 
           service_env_json="$({
             jq -n \
@@ -326,10 +393,10 @@ jobs:
               --arg npmplus_base_url "${LAUNCHPLANE_NPMPLUS_BASE_URL:-}" \
               --arg npmplus_identity "${LAUNCHPLANE_NPMPLUS_IDENTITY:-}" \
               --arg npmplus_secret "${LAUNCHPLANE_NPMPLUS_SECRET:-}" \
-              --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
-              --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env || false }}' \
-              --argjson omit_owner_agent_env '${{ inputs.omit_owner_agent_env || false }}' \
-              --argjson omit_npmplus_env '${{ inputs.omit_npmplus_env || false }}' \
+              --argjson omit_every_code_env "$OMIT_EVERY_CODE_ENV" \
+              --argjson omit_terminal_agent_env "$OMIT_TERMINAL_AGENT_ENV" \
+              --argjson omit_owner_agent_env "$OMIT_OWNER_AGENT_ENV" \
+              --argjson omit_npmplus_env "$OMIT_NPMPLUS_ENV" \
               '(
                 {
                 LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
@@ -433,7 +500,7 @@ jobs:
           service_env_removals_json="$({
             jq -n \
               --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
-              --argjson omit_npmplus_env '${{ inputs.omit_npmplus_env || false }}' \
+              --argjson omit_npmplus_env "$OMIT_NPMPLUS_ENV" \
               '(
                 if $omit_npmplus_env then
                   [
@@ -457,7 +524,7 @@ jobs:
             jq -n \
               --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
               --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
-              --arg image_reference "${{ steps.image.outputs.image_reference }}" \
+              --arg image_reference "$DEPLOY_IMAGE_REFERENCE" \
               --argjson service_env "$service_env_json" \
               --argjson service_env_removals "$service_env_removals_json" \
               '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference} + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end) + (if ($service_env_removals | length) > 0 then {oauth_env_removals: $service_env_removals} else {} end))}'
@@ -608,24 +675,18 @@ jobs:
           response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-final.json
           log-response-body: "false"
 
-      - name: Capture failed Launchplane deploy diagnostics
-        if: failure()
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv run python scripts/deploy/capture-launchplane-deploy-diagnostics.py || true
-        env:
-          LAUNCHPLANE_EXPECTED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
-
       - name: Render Launchplane rollback request
         if: failure() && steps.self_deploy.outputs.previous_image_reference != ''
         id: rollback_request
         shell: bash
+        env:
+          DEPLOYED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
+          PREVIOUS_IMAGE_REFERENCE: ${{ steps.self_deploy.outputs.previous_image_reference }}
         run: |
           set -euo pipefail
 
-          previous_image_reference="${{ steps.self_deploy.outputs.previous_image_reference }}"
-          if [ -z "$previous_image_reference" ] || [ "$previous_image_reference" = "${{ steps.image.outputs.image_reference }}" ]; then
+          previous_image_reference="$PREVIOUS_IMAGE_REFERENCE"
+          if [ -z "$previous_image_reference" ] || [ "$previous_image_reference" = "$DEPLOYED_IMAGE_REFERENCE" ]; then
             echo "No distinct previous Launchplane image reference is available for rollback."
             exit 0
           fi
@@ -640,8 +701,8 @@ jobs:
 
           rollback_payload_file="$RUNNER_TEMP/launchplane-self-deploy-rollback-payload.json"
           printf '%s\n' "$rollback_payload" > "$rollback_payload_file"
-          echo "previous_image_reference=$previous_image_reference" >> "$GITHUB_OUTPUT"
-          echo "payload_file=$rollback_payload_file" >> "$GITHUB_OUTPUT"
+          printf 'previous_image_reference=%s\n' "$previous_image_reference" >> "$GITHUB_OUTPUT"
+          printf 'payload_file=%s\n' "$rollback_payload_file" >> "$GITHUB_OUTPUT"
 
       - name: Request Launchplane rollback through service
         if: >-
@@ -1166,6 +1227,8 @@ jobs:
   operator-authz-grants:
     if: >-
       github.event_name == 'workflow_dispatch' &&
+      github.ref_type == 'branch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       inputs.authz_grants_mode != 'none'
     permissions:
       contents: read
@@ -1186,7 +1249,6 @@ jobs:
         shell: bash
         env:
           REVIEWED_GRANTS_SHA256: ${{ inputs.authz_grants_expected_sha256 }}
-          DEPLOY_GIT_REF: ${{ inputs.git_ref }}
           DEPLOY_IMAGE_REFERENCE: ${{ inputs.image_reference }}
           OMIT_EVERY_CODE_ENV: ${{ inputs.omit_every_code_env }}
           OMIT_TERMINAL_AGENT_ENV: ${{ inputs.omit_terminal_agent_env }}
@@ -1199,8 +1261,8 @@ jobs:
           set -euo pipefail
           : "${LAUNCHPLANE_PUBLIC_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
           : "${LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON:?Missing LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON variable}"
-          if [ -n "$DEPLOY_GIT_REF" ] || [ -n "$DEPLOY_IMAGE_REFERENCE" ]; then
-            echo "Grant-only reconciliation cannot include deploy ref or image inputs." >&2
+          if [ -n "$DEPLOY_IMAGE_REFERENCE" ]; then
+            echo "Grant-only reconciliation cannot include a deploy image input." >&2
             exit 1
           fi
           if [ "$OMIT_EVERY_CODE_ENV" = "true" ] ||
@@ -1276,6 +1338,7 @@ jobs:
       - name: Verify and summarize authz grant results
         shell: bash
         env:
+          CONFIGURED_GRANTS_SHA256: ${{ steps.authz_grants.outputs.configured_grants_sha256 }}
           GRANTS_FILE: ${{ steps.authz_grants.outputs.github_actions_grants_file }}
           RESPONSES_FILE: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/github-actions-grants-responses.json
         run: |
@@ -1301,11 +1364,18 @@ jobs:
             echo "- Requests: $request_count"
             echo "- Changed: $changed_count"
             echo "- Already present: $unchanged_count"
-            echo "- Canonical grant-set SHA-256: ${{ steps.authz_grants.outputs.configured_grants_sha256 }}"
+            printf '%s\n' "- Canonical grant-set SHA-256: $CONFIGURED_GRANTS_SHA256"
           } >> "$GITHUB_STEP_SUMMARY"
 
   emergency-dokploy-rollback:
-    if: github.event_name == 'workflow_dispatch' && inputs.break_glass_confirm == 'ROLL BACK LAUNCHPLANE THROUGH DIRECT DOKPLOY'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref_type == 'branch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      inputs.break_glass_confirm == 'ROLL BACK LAUNCHPLANE THROUGH DIRECT DOKPLOY'
+    environment: launchplane-break-glass
+    permissions:
+      contents: read
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
@@ -1313,8 +1383,7 @@ jobs:
       LAUNCHPLANE_DOKPLOY_TARGET_ID: ${{ vars.LAUNCHPLANE_DOKPLOY_TARGET_ID }}
       LAUNCHPLANE_DOKPLOY_TARGET_TYPE: ${{ vars.LAUNCHPLANE_DOKPLOY_TARGET_TYPE }}
       LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS: ${{ vars.LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS }}
-      LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}
-      LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}
+      LAUNCHPLANE_IMAGE_REPOSITORY: ${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}
     steps:
       - uses: actions/checkout@v7
 
@@ -1324,6 +1393,8 @@ jobs:
         shell: bash
         env:
           AUTHZ_GRANTS_MODE: ${{ inputs.authz_grants_mode }}
+          BREAK_GLASS_IMAGE_REFERENCE: ${{ inputs.break_glass_image_reference }}
+          BREAK_GLASS_REASON: ${{ inputs.break_glass_reason }}
         run: |
           set -euo pipefail
           if [ "$AUTHZ_GRANTS_MODE" != "none" ]; then
@@ -1332,39 +1403,69 @@ jobs:
           fi
           : "${LAUNCHPLANE_DOKPLOY_TARGET_TYPE:?Missing LAUNCHPLANE_DOKPLOY_TARGET_TYPE variable}"
           : "${LAUNCHPLANE_DOKPLOY_TARGET_ID:?Missing LAUNCHPLANE_DOKPLOY_TARGET_ID variable}"
-          : "${LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST:?Missing LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST secret}"
-          : "${LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN:?Missing LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN secret}"
-          break_glass_image_reference="${{ inputs.break_glass_image_reference }}"
-          break_glass_reason="${{ inputs.break_glass_reason }}"
-          if [ -z "$break_glass_image_reference" ]; then
+          if [ -z "$BREAK_GLASS_IMAGE_REFERENCE" ]; then
             echo "break_glass_image_reference is required for direct Dokploy rollback." >&2
             exit 1
           fi
-          if [ -z "$break_glass_reason" ]; then
+          if [ -z "$BREAK_GLASS_REASON" ]; then
             echo "break_glass_reason is required for direct Dokploy rollback." >&2
+            exit 1
+          fi
+
+          image_repository="${LAUNCHPLANE_IMAGE_REPOSITORY:-}"
+          if [ -z "$image_repository" ]; then
+            image_repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          fi
+          if [[ "$image_repository" =~ [[:cntrl:]] ]]; then
+            echo "Launchplane image repository must not contain control characters." >&2
+            exit 1
+          fi
+
+          expected_image_prefix="${image_repository}@sha256:"
+          if [[ "$BREAK_GLASS_IMAGE_REFERENCE" != "$expected_image_prefix"* ]]; then
+            echo "break_glass_image_reference must use the configured Launchplane image repository and an immutable sha256 digest." >&2
+            exit 1
+          fi
+          image_digest="${BREAK_GLASS_IMAGE_REFERENCE#"$expected_image_prefix"}"
+          if [[ ! "$image_digest" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "break_glass_image_reference must end with a lowercase sha256 digest." >&2
+            exit 1
+          fi
+
+          if [ "${#BREAK_GLASS_REASON}" -lt 8 ] || [ "${#BREAK_GLASS_REASON}" -gt 500 ]; then
+            echo "break_glass_reason must be between 8 and 500 printable characters." >&2
+            exit 1
+          fi
+          if [[ "$BREAK_GLASS_REASON" =~ [[:cntrl:]] ]] || [[ ! "$BREAK_GLASS_REASON" =~ [^[:space:]] ]]; then
+            echo "break_glass_reason must be single-line, printable, and contain non-whitespace text." >&2
             exit 1
           fi
 
       - name: Run manual direct Dokploy rollback
         shell: bash
+        env:
+          LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}
+          LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}
+          LAUNCHPLANE_ROLLBACK_IMAGE_REFERENCE: ${{ inputs.break_glass_image_reference }}
+          LAUNCHPLANE_ROLLBACK_REASON: ${{ inputs.break_glass_reason }}
         run: |
           set -euo pipefail
+          : "${LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST:?Missing LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST secret}"
+          : "${LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN:?Missing LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN secret}"
           evidence_file="$RUNNER_TEMP/launchplane-break-glass-rollback.json"
           LAUNCHPLANE_ALLOW_DIRECT_DOKPLOY_FALLBACK=true \
-            LAUNCHPLANE_ROLLBACK_IMAGE_REFERENCE="${{ inputs.break_glass_image_reference }}" \
-            LAUNCHPLANE_ROLLBACK_REASON="${{ inputs.break_glass_reason }}" \
             LAUNCHPLANE_ROLLBACK_REQUEST_STATUS="manual-break-glass" \
             uv run python scripts/deploy/emergency-dokploy-rollback.py | tee "$evidence_file"
 
           {
-            echo "## Launchplane break-glass rollback"
-            echo
-            echo "- Fallback: direct Dokploy"
-            echo "- Reason: ${{ inputs.break_glass_reason }}"
-            echo "- Target type: $LAUNCHPLANE_DOKPLOY_TARGET_TYPE"
-            echo "- Target id: $LAUNCHPLANE_DOKPLOY_TARGET_ID"
-            echo "- Rollback image: ${{ inputs.break_glass_image_reference }}"
-            echo "- Evidence artifact: launchplane-break-glass-rollback"
+            printf '%s\n' "## Launchplane break-glass rollback"
+            printf '\n'
+            printf '%s\n' "- Fallback: direct Dokploy"
+            printf -- "- Reason: %s\n" "$LAUNCHPLANE_ROLLBACK_REASON"
+            printf -- "- Target type: %s\n" "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE"
+            printf -- "- Target id: %s\n" "$LAUNCHPLANE_DOKPLOY_TARGET_ID"
+            printf -- "- Rollback image: %s\n" "$LAUNCHPLANE_ROLLBACK_IMAGE_REFERENCE"
+            printf '%s\n' "- Evidence artifact: launchplane-break-glass-rollback"
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Upload break-glass rollback evidence

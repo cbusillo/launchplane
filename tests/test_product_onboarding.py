@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import textwrap
 from tempfile import TemporaryDirectory
@@ -1965,6 +1966,146 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("Evidence artifact: launchplane-break-glass-rollback", workflow_text)
         self.assertIn("manual break-glass only", workflow_text)
 
+    def test_deploy_launchplane_routes_dispatch_values_out_of_shell_source(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+        shell_blocks = re.findall(
+            r"(?ms)^        run: \|\n(.*?)(?=^        [a-zA-Z][a-zA-Z_-]*:|^      - |^  [a-zA-Z0-9_-]+:|\Z)",
+            workflow_text,
+        )
+        emergency_job = workflow_text.split("  emergency-dokploy-rollback:\n", 1)[1]
+
+        self.assertGreater(len(shell_blocks), 0)
+        self.assertNotIn("${{", "\n".join(shell_blocks))
+        self.assertNotIn("git_ref:", workflow_text)
+        self.assertGreaterEqual(
+            workflow_text.count(
+                "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+            ),
+            3,
+        )
+        self.assertGreaterEqual(workflow_text.count("github.ref_type == 'branch'"), 3)
+        self.assertIn(
+            "BREAK_GLASS_IMAGE_REFERENCE: ${{ inputs.break_glass_image_reference }}",
+            emergency_job,
+        )
+        self.assertIn("BREAK_GLASS_REASON: ${{ inputs.break_glass_reason }}", emergency_job)
+        self.assertIn(
+            "LAUNCHPLANE_ROLLBACK_IMAGE_REFERENCE: ${{ inputs.break_glass_image_reference }}",
+            emergency_job,
+        )
+        self.assertIn(
+            "LAUNCHPLANE_ROLLBACK_REASON: ${{ inputs.break_glass_reason }}",
+            emergency_job,
+        )
+        self.assertIn(
+            'printf -- "- Reason: %s\\n" "$LAUNCHPLANE_ROLLBACK_REASON"',
+            emergency_job,
+        )
+        self.assertIn(
+            'printf -- "- Rollback image: %s\\n" "$LAUNCHPLANE_ROLLBACK_IMAGE_REFERENCE"',
+            emergency_job,
+        )
+
+        validation_step = emergency_job.split("- name: Validate manual break-glass request", 1)[
+            1
+        ].split("- name: Run manual direct Dokploy rollback", 1)[0]
+        validation_script = textwrap.dedent(validation_step.split("        run: |\n", 1)[1])
+        image_reference = "ghcr.io/cbusillo/launchplane@sha256:" + ("a" * 64)
+
+        with TemporaryDirectory() as temporary_directory:
+            command_marker = Path(temporary_directory) / "command-substitution-ran"
+            rollback_reason = f'Restore after "review" $(touch {command_marker})'
+            subprocess.run(
+                ["bash", "-ceu", validation_script],
+                check=True,
+                env={
+                    **os.environ,
+                    "AUTHZ_GRANTS_MODE": "none",
+                    "BREAK_GLASS_IMAGE_REFERENCE": image_reference,
+                    "BREAK_GLASS_REASON": rollback_reason,
+                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                    "LAUNCHPLANE_DOKPLOY_TARGET_ID": "launchplane-target",
+                    "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
+                    "LAUNCHPLANE_IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
+                },
+                text=True,
+            )
+
+            self.assertFalse(command_marker.exists())
+
+    def test_deploy_launchplane_rejects_multiline_previous_image_output(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+        render_step = workflow_text.split("- name: Render Launchplane self deploy request", 1)[
+            1
+        ].split("- name: Request Launchplane self deploy", 1)[0]
+        render_script = textwrap.dedent(render_step.split("        run: |\n", 1)[1]).split(
+            "service_env_json=", 1
+        )[0]
+
+        with TemporaryDirectory() as temporary_directory:
+            response_file = Path(temporary_directory) / "runtime.json"
+            output_file = Path(temporary_directory) / "github-output"
+            response_file.write_text(
+                json.dumps(
+                    {
+                        "runtime": {
+                            "docker_image_reference": (
+                                "ghcr.io/cbusillo/launchplane@sha256:"
+                                + ("a" * 64)
+                                + "\nprevious_image_reference=attacker-controlled"
+                            )
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["bash", "-ceu", render_script],
+                check=False,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "DEPLOY_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:"
+                    + ("b" * 64),
+                    "GITHUB_OUTPUT": str(output_file),
+                    "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
+                    "PREVIOUS_RUNTIME_RESPONSE_FILE": str(response_file),
+                },
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must not contain control characters", result.stderr)
+            self.assertFalse(output_file.exists())
+
+    def test_deploy_launchplane_break_glass_limits_credentials_and_permissions(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+        deploy_job = workflow_text.split("  deploy:\n", 1)[1].split(
+            "  operator-authz-grants:\n", 1
+        )[0]
+        emergency_job = workflow_text.split("  emergency-dokploy-rollback:\n", 1)[1]
+        validation_step = emergency_job.split("- name: Validate manual break-glass request", 1)[
+            1
+        ].split("- name: Run manual direct Dokploy rollback", 1)[0]
+        rollback_step = emergency_job.split("- name: Run manual direct Dokploy rollback", 1)[
+            1
+        ].split("- name: Upload break-glass rollback evidence", 1)[0]
+
+        self.assertIn("environment: launchplane-break-glass", emergency_job)
+        self.assertIn("permissions:\n      contents: read", emergency_job)
+        self.assertNotIn("id-token:", emergency_job)
+        self.assertNotIn("packages:", emergency_job)
+        self.assertIn("uses: actions/checkout@v7", emergency_job)
+        self.assertIn("uses: actions/upload-artifact@v7", emergency_job)
+        self.assertNotIn("LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST", deploy_job)
+        self.assertNotIn("LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN", deploy_job)
+        self.assertNotIn("LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST", validation_step)
+        self.assertNotIn("LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN", validation_step)
+        self.assertIn("LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST", rollback_step)
+        self.assertIn("LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN", rollback_step)
+        self.assertIn("must use the configured Launchplane image repository", validation_step)
+        self.assertIn("between 8 and 500 printable characters", validation_step)
+
     def test_deploy_authz_grants_seed_local_admin_self_deploy_authority(self) -> None:
         script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
@@ -2197,10 +2338,11 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self_deploy_block = workflow_text.split("- name: Read previous Launchplane runtime", 1)[
             1
-        ].split("- name: Capture failed Launchplane deploy diagnostics", 1)[0]
+        ].split("- name: Render Launchplane rollback request", 1)[0]
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", self_deploy_block)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", self_deploy_block)
         self.assertNotIn("Authorization: Bearer", self_deploy_block)
+        self.assertNotIn("Capture failed Launchplane deploy diagnostics", workflow_text)
 
     def test_deploy_workflow_requests_rollback_through_shared_request(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")

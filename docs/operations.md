@@ -492,16 +492,21 @@ repository secrets for normal deploy execution. Automatic rollback also uses the
 Launchplane service route. If a failed rollout makes that route unable to accept
 its own rollback request, direct Dokploy rollback is available only through the
 manual break-glass inputs on the Deploy Launchplane workflow: provide the exact
-confirmation text, previous image reference, and operator reason.
+confirmation text, a previous immutable `@sha256` image reference from the
+configured Launchplane image repository, and an operator reason. The reason
+must be a single printable line from 8 to 500 characters and contain
+non-whitespace text. Configure the `launchplane-break-glass` GitHub environment
+with required reviewers and protected-branch deployment rules before enabling
+this path: its approval gate completes before the job receives the emergency
+Dokploy credentials, the workflow accepts manual dispatches only from the
+repository default branch, and the job validates the request before the
+credentials are scoped to the rollback step.
 Keep the workflow configured with break-glass
 `LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST` and
 `LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN` repository secrets for that manual
 emergency path. When direct Dokploy break-glass rollback runs, the workflow
 writes a redacted `launchplane-break-glass-rollback` artifact and summary so the
 provider mutation remains reviewable after the emergency.
-Before rollback, the workflow uses those same break-glass credentials to capture
-redacted Dokploy target, container, and recent log diagnostics for the failed
-rollout. Diagnostics failures are non-blocking so rollback remains the priority.
 
 Product onboarding manifests and runtime key-safety policies are DB-backed
 Launchplane records. Create or repair them through the Launchplane service API
