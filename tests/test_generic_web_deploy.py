@@ -286,11 +286,13 @@ def _runtime_secret_record(
 def _runtime_secret_version(
     *, secret_id: str, version_id: str, plaintext_value: str
 ) -> SecretVersion:
+    ciphertext, key_id = control_plane_secrets._encrypt_secret_value(plaintext_value)
     return SecretVersion(
         version_id=version_id,
         secret_id=secret_id,
         created_at="2026-04-30T22:00:00Z",
-        ciphertext=control_plane_secrets._encrypt_secret_value(plaintext_value),
+        ciphertext=ciphertext,
+        key_id=key_id,
     )
 
 

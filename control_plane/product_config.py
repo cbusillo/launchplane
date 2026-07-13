@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Literal, Protocol, TypedDict, cast
+
+import click
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -24,7 +25,6 @@ from control_plane.runtime_key_safety import (
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-MASTER_ENCRYPTION_KEY_ENV_KEYS = ("LAUNCHPLANE_MASTER_ENCRYPTION_KEY",)
 SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 ProductConfigMode = Literal["dry-run", "apply"]
 _VALID_SECRET_SCOPES: tuple[SecretScope, ...] = ("global", "context", "context_instance")
@@ -452,12 +452,14 @@ def _validate_product_config_target_alignment(
 def _require_product_config_master_key_if_needed(secrets: tuple[dict[str, object], ...]) -> None:
     if not secrets:
         return
-    if not any(os.environ.get(key, "").strip() for key in MASTER_ENCRYPTION_KEY_ENV_KEYS):
-        expected_keys = " or ".join(MASTER_ENCRYPTION_KEY_ENV_KEYS)
+    try:
+        control_plane_secrets.validate_secret_key_configuration()
+    except click.ClickException as error:
         raise ProductConfigError(
-            f"Product config secrets require {expected_keys} in the trusted Launchplane context.",
+            "Product config secrets require valid Launchplane secret-key configuration in the "
+            "trusted Launchplane context.",
             code="secret_configuration_required",
-        )
+        ) from error
 
 
 def _product_config_secret_current_action(
@@ -473,9 +475,9 @@ def _product_config_secret_current_action(
     if existing_record is None:
         return "created", ""
     current_version = record_store.read_secret_version(existing_record.current_version_id)
-    if control_plane_secrets._decrypt_secret_value(current_version.ciphertext) == str(
-        secret["value"]
-    ):
+    if control_plane_secrets._decrypt_secret_value(
+        current_version.ciphertext, current_version.key_id
+    ) == str(secret["value"]):
         return "unchanged", existing_record.secret_id
     return "rotated", existing_record.secret_id
 

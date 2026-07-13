@@ -124,3 +124,28 @@ class SecretAuditEvent(BaseModel):
         if not self.recorded_at.strip():
             raise ValueError("secret audit event requires recorded_at")
         return self
+
+
+class SecretRotationWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_current_version_id: str
+    record: SecretRecord
+    version: SecretVersion
+    audit_event: SecretAuditEvent
+
+    @model_validator(mode="after")
+    def _validate_record(self) -> "SecretRotationWrite":
+        if not self.expected_current_version_id.strip():
+            raise ValueError("secret rotation write requires expected_current_version_id")
+        if self.record.secret_id != self.version.secret_id:
+            raise ValueError("secret rotation record and version must reference the same secret")
+        if self.record.secret_id != self.audit_event.secret_id:
+            raise ValueError(
+                "secret rotation record and audit event must reference the same secret"
+            )
+        if self.record.current_version_id != self.version.version_id:
+            raise ValueError("secret rotation record must point to the new version")
+        if self.expected_current_version_id == self.version.version_id:
+            raise ValueError("secret rotation must create a new version")
+        return self
