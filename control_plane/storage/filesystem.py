@@ -241,6 +241,12 @@ class FilesystemRecordStore:
     def _recover_product_authority_bundle_stages(self) -> None:
         if self._recovering_product_authority_bundle:
             return
+        with self._exclusive_record_lock("product_authority_bundles", "global"):
+            self._recover_product_authority_bundle_stages_locked()
+
+    def _recover_product_authority_bundle_stages_locked(self) -> None:
+        if self._recovering_product_authority_bundle:
+            return
         stage_root = self._product_authority_bundle_stage_root()
         if not stage_root.exists():
             return
@@ -270,43 +276,44 @@ class FilesystemRecordStore:
     def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
         if not bundle.requires_write():
             return
-        self._recover_product_authority_bundle_stages()
-        stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
-        stage_dir = self._product_authority_bundle_stage_root() / stage_id
-        records_dir = stage_dir / "records"
-        records_dir.mkdir(parents=True, exist_ok=False)
-        entries: list[_AuthorityBundleStageEntry] = []
-        try:
-            self._stage_product_authority_bundle_entries(
-                bundle=bundle,
-                stage_dir=stage_dir,
-                entries=entries,
-            )
-            manifest = _AuthorityBundleStageManifest(
-                stage_id=stage_id,
-                state="ready",
-                entries=tuple(entries),
-            )
-            self._write_product_authority_bundle_stage_manifest(
-                stage_dir=stage_dir,
-                manifest=manifest,
-            )
-            self._after_product_authority_bundle_step("stage_product_authority_bundle")
-            publishing_manifest = manifest.model_copy(update={"state": "publishing"})
-            self._write_product_authority_bundle_stage_manifest(
-                stage_dir=stage_dir,
-                manifest=publishing_manifest,
-            )
-            self._after_product_authority_bundle_step("publish_product_authority_bundle")
-            self._publish_product_authority_bundle_stage(
-                manifest=publishing_manifest,
-                stage_dir=stage_dir,
-                recovering=False,
-            )
-        except Exception:
-            if not (stage_dir / "manifest.json").exists():
-                shutil.rmtree(stage_dir, ignore_errors=True)
-            raise
+        with self._exclusive_record_lock("product_authority_bundles", "global"):
+            self._recover_product_authority_bundle_stages_locked()
+            stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
+            stage_dir = self._product_authority_bundle_stage_root() / stage_id
+            records_dir = stage_dir / "records"
+            records_dir.mkdir(parents=True, exist_ok=False)
+            entries: list[_AuthorityBundleStageEntry] = []
+            try:
+                self._stage_product_authority_bundle_entries(
+                    bundle=bundle,
+                    stage_dir=stage_dir,
+                    entries=entries,
+                )
+                manifest = _AuthorityBundleStageManifest(
+                    stage_id=stage_id,
+                    state="ready",
+                    entries=tuple(entries),
+                )
+                self._write_product_authority_bundle_stage_manifest(
+                    stage_dir=stage_dir,
+                    manifest=manifest,
+                )
+                self._after_product_authority_bundle_step("stage_product_authority_bundle")
+                publishing_manifest = manifest.model_copy(update={"state": "publishing"})
+                self._write_product_authority_bundle_stage_manifest(
+                    stage_dir=stage_dir,
+                    manifest=publishing_manifest,
+                )
+                self._after_product_authority_bundle_step("publish_product_authority_bundle")
+                self._publish_product_authority_bundle_stage(
+                    manifest=publishing_manifest,
+                    stage_dir=stage_dir,
+                    recovering=False,
+                )
+            except Exception:
+                if not (stage_dir / "manifest.json").exists():
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+                raise
 
     def _stage_product_authority_bundle_entries(
         self,
@@ -566,7 +573,7 @@ class FilesystemRecordStore:
                     recovering=recovering,
                 )
             self._after_product_authority_bundle_step(entry.step_name)
-        shutil.rmtree(stage_dir, ignore_errors=False)
+        shutil.rmtree(stage_dir, ignore_errors=True)
 
     def _publish_product_authority_bundle_write_entry(
         self,
@@ -602,7 +609,8 @@ class FilesystemRecordStore:
                 f"Cannot {action} authority bundle delete for "
                 f"{entry.record_type}/{entry.record_id}; live record changed."
             )
-        final_path.unlink()
+        with suppress(FileNotFoundError):
+            final_path.unlink()
 
     @staticmethod
     def _write_json_file(path: Path, payload: dict[str, object]) -> None:

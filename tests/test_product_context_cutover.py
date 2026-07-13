@@ -799,6 +799,11 @@ class ProductContextCutoverTests(unittest.TestCase):
                     for record in store.list_dokploy_target_id_records()
                     if record.context == "sellyouroutboard-testing"
                 )
+                source_provider_targets = tuple(
+                    record
+                    for record in store.list_provider_target_records()
+                    if record.context == "sellyouroutboard-testing"
+                )
                 target = store.read_dokploy_target_record(
                     context_name="sellyouroutboard",
                     instance_name="prod",
@@ -841,6 +846,7 @@ class ProductContextCutoverTests(unittest.TestCase):
         self.assertEqual(target_secret.status, "configured")
         self.assertEqual(source_target_records, ())
         self.assertEqual(source_target_ids, ())
+        self.assertEqual(source_provider_targets, ())
         self.assertEqual(target.target_name, "syo-prod-app")
         self.assertEqual(len(delete_events), 2)
         self.assertEqual([event.event_type for event in audit_events], ["disabled"])

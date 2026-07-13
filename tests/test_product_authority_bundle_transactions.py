@@ -352,6 +352,7 @@ def _assert_write_bundle_published(
 ) -> None:
     test_case.assertEqual(len(store.list_product_profile_records()), 1)
     test_case.assertEqual(len(store.list_dokploy_target_records()), 1)
+    test_case.assertEqual(len(store.list_dokploy_target_id_records()), 1)
     test_case.assertEqual(len(store.list_provider_target_records()), 1)
     test_case.assertEqual(len(store.list_runtime_environment_records()), 1)
     test_case.assertEqual(len(store.list_secret_records()), 1)
