@@ -38,7 +38,9 @@ from control_plane.workflows.odoo_preview_runtime import (
     build_odoo_preview_apply_workflow_request,
     build_odoo_preview_artifact_publish_inputs_workflow_request,
     execute_odoo_preview_dokploy_apply,
+    observe_odoo_preview_dokploy_apply,
     _preview_runtime_bindings,
+    _rollback_created_runtime,
     _wait_for_smoke_check,
 )
 
@@ -337,6 +339,35 @@ def _patched_apply_inputs_runtime(*, dokploy_side_effect: object) -> Iterator[No
 
 
 class OdooPreviewDokployDryRunTests(unittest.TestCase):
+    def test_rollback_rechecks_fence_before_each_delete(self) -> None:
+        phases: list[str] = []
+
+        def checkpoint(phase: str) -> None:
+            phases.append(phase)
+            if phase == "rollback_compose_delete":
+                raise RuntimeError("reservation recovered")
+
+        with (
+            patch("control_plane.workflows.odoo_preview_runtime._delete_domain") as delete_domain,
+            patch("control_plane.workflows.odoo_preview_runtime._delete_compose") as delete_compose,
+            self.assertRaisesRegex(RuntimeError, "reservation recovered"),
+        ):
+            _rollback_created_runtime(
+                host="https://dokploy.example",
+                token="token",
+                domain_id="domain-one",
+                compose_id="compose-one",
+                delete_volumes=True,
+                provider_effect_checkpoint=checkpoint,
+            )
+
+        self.assertEqual(
+            phases,
+            ["rollback_domain_delete", "rollback_compose_delete"],
+        )
+        delete_domain.assert_called_once()
+        delete_compose.assert_not_called()
+
     def test_builds_artifact_publish_inputs_workflow_request_shape(self) -> None:
         request = build_odoo_preview_artifact_publish_inputs_workflow_request(
             facts=_workflow_facts()
@@ -1596,6 +1627,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         def _fake_dokploy_request(**kwargs: object) -> object:
             requests.append(dict(kwargs))
+            if kwargs["path"] == "/api/project.all":
+                return []
             if kwargs["path"] == "/api/compose.create":
                 return {"composeId": "compose-cm-pr-45"}
             return {}
@@ -1660,10 +1693,13 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertEqual(result.compose_id, "compose-cm-pr-45")
         self.assertTrue(result.created_compose)
-        self.assertEqual([request["path"] for request in requests], ["/api/compose.create"])
+        self.assertEqual(
+            [request["path"] for request in requests],
+            ["/api/project.all", "/api/compose.search", "/api/compose.create"],
+        )
         fetch_targets = [call.kwargs["target_id"] for call in fetch_target_payload.call_args_list]
         self.assertEqual(fetch_targets, ["compose-template", "compose-cm-pr-45"])
-        create_payload = requests[0]["payload"]
+        create_payload = requests[2]["payload"]
         self.assertIsInstance(create_payload, dict)
         assert isinstance(create_payload, dict)
         self.assertEqual(create_payload["environmentId"], "env-cm-preview")
@@ -1692,6 +1728,256 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         wait_deploy.assert_called_once()
         smoke_check.assert_called_once()
+
+    def test_observe_refresh_adopts_exact_terminal_deployment_marker(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        request = OdooPreviewDokployApplyRequest(
+            dry_run_plan=dry_run,
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            environment_values=_environment_values(),
+            smoke_check=False,
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._discover_odoo_preview_target",
+                return_value=_target(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy."
+                "deployment_for_target_by_title",
+                return_value={
+                    "deploymentId": "deployment-cm-pr-45",
+                    "title": "Launchplane operation abc",
+                    "status": "done",
+                },
+            ) as observe_deployment,
+        ):
+            observation = observe_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                context_name="cm-preview",
+                request=request,
+                database_url=None,
+                provider_operation_title="Launchplane operation abc",
+            )
+
+        self.assertEqual(observation.outcome, "present")
+        assert observation.result is not None
+        self.assertEqual(observation.result.status, "pass")
+        self.assertEqual(observation.result.compose_id, "compose-cm-pr-45")
+        observe_deployment.assert_called_once_with(
+            host="https://dokploy.example",
+            token="token",
+            target_type="compose",
+            target_id="compose-cm-pr-45",
+            title="Launchplane operation abc",
+        )
+
+    def test_apply_create_plan_adopts_existing_compose_before_retry(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=_endpoint_spec(),
+                environment_id="env-cm-preview",
+                template_compose_id="compose-template",
+            )
+        )
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            if kwargs["path"] == "/api/project.all":
+                return []
+            if kwargs["path"] == "/api/compose.search":
+                return [
+                    {
+                        "composeId": "compose-cm-pr-45-existing",
+                        "name": dry_run.compose_name,
+                        "environmentId": "env-cm-preview",
+                    }
+                ]
+            if kwargs["path"] == "/api/compose.create":
+                self.fail("existing compose must be adopted instead of recreated")
+            return {}
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                side_effect=(
+                    {
+                        "composeId": "compose-template",
+                        "environmentId": "env-cm-preview",
+                        "serverId": "server-nonprod",
+                    },
+                    {
+                        "composeId": "compose-cm-pr-45-existing",
+                        "environmentId": "env-cm-preview",
+                        "serverId": "server-nonprod",
+                    },
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.sync_dokploy_compose_raw_source",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.update_dokploy_target_env",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.ensure_compose_web_domain_route",
+                return_value="domain-cm-pr-45",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "before"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.trigger_deployment",
+            ) as trigger_deployment,
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.wait_for_target_deployment",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",
+            ),
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                request=OdooPreviewDokployApplyRequest(
+                    dry_run_plan=dry_run,
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    environment_values=_environment_values(),
+                ),
+                provider_operation_title="Launchplane operation retry",
+            )
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.compose_id, "compose-cm-pr-45-existing")
+        self.assertFalse(result.created_compose)
+        self.assertNotIn("compose_create", [step.name for step in result.steps])
+        trigger_deployment.assert_called_once_with(
+            host="https://dokploy.example",
+            token="token",
+            target_type="compose",
+            target_id="compose-cm-pr-45-existing",
+            no_cache=False,
+            title="Launchplane operation retry",
+        )
+
+    def test_observe_destroy_does_not_treat_domain_cleanup_as_compose_deletion(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        request = OdooPreviewDokployApplyRequest(dry_run_plan=dry_run)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={"composeId": "compose-cm-pr-45"},
+            ),
+        ):
+            observation = observe_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                context_name="cm-preview",
+                request=request,
+                database_url=None,
+                provider_operation_title="Launchplane operation destroy",
+            )
+
+        self.assertEqual(observation.outcome, "absent")
+        self.assertIsNone(observation.result)
+
+    def test_observe_destroy_adopts_exact_missing_compose(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        request = OdooPreviewDokployApplyRequest(dry_run_plan=dry_run)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                side_effect=click.ClickException(
+                    "Dokploy API GET /api/compose.one failed (404): Not Found"
+                ),
+            ),
+        ):
+            observation = observe_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                context_name="cm-preview",
+                request=request,
+                database_url=None,
+                provider_operation_title="Launchplane operation destroy",
+                provider_effect_phase="compose_destroy",
+            )
+
+        self.assertEqual(observation.outcome, "present")
+        assert observation.result is not None
+        self.assertEqual(observation.result.status, "pass")
+
+    def test_observe_refresh_does_not_retry_missing_marker_after_trigger_checkpoint(
+        self,
+    ) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        request = OdooPreviewDokployApplyRequest(
+            dry_run_plan=dry_run,
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            environment_values=_environment_values(),
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._discover_odoo_preview_target",
+                return_value=_target(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.deployment_for_target_by_title",
+                return_value=None,
+            ),
+        ):
+            observation = observe_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                context_name="cm-preview",
+                request=request,
+                database_url=None,
+                provider_operation_title="Launchplane operation deploy",
+                provider_effect_phase="deploy_trigger",
+            )
+
+        self.assertEqual(observation.outcome, "unknown")
+        self.assertFalse(observation.retry_safe)
 
     def test_apply_create_blocks_missing_template_compose_id_before_provider_fetch(
         self,
@@ -1841,6 +2127,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                return_value=[],
             ) as dokploy_request,
         ):
             result = execute_odoo_preview_dokploy_apply(
@@ -1854,7 +2141,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         self.assertEqual(result.status, "fail")
         self.assertIn("serverId", result.error_message)
-        dokploy_request.assert_not_called()
+        self.assertEqual(
+            [call.kwargs["path"] for call in dokploy_request.call_args_list],
+            ["/api/project.all", "/api/compose.search"],
+        )
 
     def test_apply_destroy_deletes_domain_then_compose_with_volumes(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(

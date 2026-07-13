@@ -1,4 +1,6 @@
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 import unittest
 from unittest.mock import patch
 
@@ -30,16 +32,28 @@ from control_plane.contracts.secret_record import (
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane import secrets as control_plane_secrets
+from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
+from control_plane.http_app import _GenericWebDeployProviderMutationAdapter
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     GenericWebDeployStore,
     GenericWebPostDeployContext,
+    GenericWebPostDeployGuard,
     execute_generic_web_deploy,
     normalize_generic_web_artifact_id,
+    record_observed_generic_web_deploy,
     resolve_generic_web_profile_lane,
 )
 from control_plane.workflows.generic_web_deploy_provider import DokployGenericWebDeployProvider
-from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebProviderDeploymentObservation,
+)
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebResolvedDeployTarget,
+    build_generic_web_provider_reconciliation_key,
+    resolve_generic_web_provider_reconciliation_target,
+)
+from control_plane.workflows.ship import build_deployment_record
 
 
 def _source_of_truth() -> DokploySourceOfTruth:
@@ -69,9 +83,23 @@ class _GenericWebDeployStore:
         return self.profile
 
     def write_deployment_record(self, record: DeploymentRecord) -> None:
+        self.deployments = [
+            existing for existing in self.deployments if existing.record_id != record.record_id
+        ]
         self.deployments.append(record)
 
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord:
+        for record in self.deployments:
+            if record.record_id == record_id:
+                return record
+        raise FileNotFoundError(record_id)
+
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
+        self.inventories = [
+            existing
+            for existing in self.inventories
+            if (existing.context, existing.instance) != (record.context, record.instance)
+        ]
         self.inventories.append(record)
 
 
@@ -325,12 +353,17 @@ def _missing_image_lane() -> ProductLaneProfile:
     )
 
 
-def _request(instance: str = "testing") -> GenericWebDeployRequest:
+def _request(
+    instance: str = "testing",
+    *,
+    timeout_seconds: int | None = None,
+) -> GenericWebDeployRequest:
     return GenericWebDeployRequest(
         product="sellyouroutboard",
         instance=instance,
         artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
         source_git_ref="abc123",
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -338,10 +371,22 @@ class _FakeGenericWebDeployProvider:
     provider_id = "fake-cloud"
     delegated_executor = "control-plane.fake-cloud"
 
-    def __init__(self, *, deploy_error: click.ClickException | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        deploy_error: click.ClickException | None = None,
+        observation: GenericWebProviderDeploymentObservation | None = None,
+        target_id: str = "target-123",
+        target_name: str = "sellyouroutboard-testing-app",
+    ) -> None:
         self.deploy_error = deploy_error
+        self.observation = observation or GenericWebProviderDeploymentObservation(outcome="unknown")
+        self.target_id = target_id
+        self.target_name = target_name
         self.resolved_targets: list[GenericWebResolvedDeployTarget] = []
         self.runtime_identities: list[RuntimeIdentity] = []
+        self.deployment_titles: list[str] = []
+        self.observed_target_ids: list[str] = []
 
     def resolve_deploy_target(
         self,
@@ -364,7 +409,7 @@ class _FakeGenericWebDeployProvider:
                 context=lane.context,
                 instance=lane.instance,
                 source_git_ref=request_source_git_ref,
-                target_name="sellyouroutboard-testing-app",
+                target_name=self.target_name,
                 target_type="application",
                 deploy_mode="fake-cloud-service-api",
                 provider_id=self.provider_id,
@@ -378,14 +423,14 @@ class _FakeGenericWebDeployProvider:
             ),
             resolved_target=ResolvedTargetEvidence(
                 target_type="application",
-                target_id="target-123",
-                target_name="sellyouroutboard-testing-app",
+                target_id=self.target_id,
+                target_name=self.target_name,
             ),
             deployed_target=DeployedTargetReference(
                 provider_id=self.provider_id,
                 target_category="service",
-                target_id="target-123",
-                display_name="sellyouroutboard-testing-app",
+                target_id=self.target_id,
+                display_name=self.target_name,
                 provider_target_type="managed-service",
             ),
             deploy_timeout_seconds=request_timeout_seconds or 600,
@@ -399,14 +444,76 @@ class _FakeGenericWebDeployProvider:
         control_plane_root: Path,
         resolved_deploy_target: GenericWebResolvedDeployTarget,
         runtime_identity: RuntimeIdentity,
+        deployment_title: str,
+        before_provider_mutation: Callable[[str], None],
+        effect_started: Callable[[], None],
     ) -> None:
         del control_plane_root, resolved_deploy_target
         self.runtime_identities.append(runtime_identity)
+        self.deployment_titles.append(deployment_title)
+        before_provider_mutation("deploy_trigger")
+        effect_started()
         if self.deploy_error is not None:
             raise self.deploy_error
 
+    def observe_artifact_deploy(
+        self,
+        *,
+        control_plane_root: Path,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+        deployment_title: str,
+    ) -> GenericWebProviderDeploymentObservation:
+        del control_plane_root, deployment_title
+        self.observed_target_ids.append(resolved_deploy_target.resolved_target.target_id)
+        return self.observation
+
 
 class GenericWebDeployTests(unittest.TestCase):
+    def _provider_mutation_adapter(
+        self,
+        *,
+        profile: LaunchplaneProductProfileRecord,
+        store: _GenericWebDeployStore,
+        provider: _FakeGenericWebDeployProvider,
+        deploy_request: GenericWebDeployRequest | None = None,
+    ) -> _GenericWebDeployProviderMutationAdapter:
+        adapter = _GenericWebDeployProviderMutationAdapter(
+            control_plane_root=Path("."),
+            record_store=store,
+            deploy_request=GenericWebDeployEnvelope(
+                product=profile.product,
+                deploy=deploy_request or _request(),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            trace_id="generic-web-provider-test",
+        )
+        adapter._deploy_provider = provider
+        return adapter
+
+    def test_provider_target_key_is_stable_across_request_timeout_changes(self) -> None:
+        profile = _profile()
+        store = _GenericWebDeployStore(profile)
+        provider = _FakeGenericWebDeployProvider()
+        short_timeout = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=provider,
+            deploy_request=_request(timeout_seconds=300),
+        )
+        long_timeout = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=provider,
+            deploy_request=_request(timeout_seconds=600),
+        )
+
+        self.assertEqual(short_timeout.target_key(), long_timeout.target_key())
+        self.assertNotEqual(
+            short_timeout.reconciliation_key(),
+            long_timeout.reconciliation_key(),
+        )
+
     def test_normalize_generic_web_artifact_id_qualifies_bare_release_tag(self) -> None:
         artifact_id = normalize_generic_web_artifact_id(
             profile=_profile(),
@@ -666,13 +773,18 @@ class GenericWebDeployTests(unittest.TestCase):
     ) -> None:
         store = _GenericWebDeployStore(_profile())
         contexts: list[GenericWebPostDeployContext] = []
+        effect_phases: list[str] = []
+        post_deploy_titles: list[str] = []
 
         def post_deploy(
             _root: Path,
             _store: GenericWebDeployStore,
             context: GenericWebPostDeployContext,
+            guard: GenericWebPostDeployGuard,
         ) -> PostDeployUpdateEvidence:
             contexts.append(context)
+            post_deploy_titles.append(guard.deployment_title)
+            guard.checkpoint_effect("post_deploy_schedule_trigger")
             return PostDeployUpdateEvidence(
                 attempted=True,
                 status="pass",
@@ -684,11 +796,24 @@ class GenericWebDeployTests(unittest.TestCase):
             record_store=store,
             request=_request(),
             post_deploy_executor=post_deploy,
-            deploy_provider=_FakeGenericWebDeployProvider(),
+            deploy_provider=_FakeGenericWebDeployProvider(
+                observation=GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status="success",
+                    deployment_id="deployment-provider-exact",
+                    started_at="2026-07-13T12:00:00Z",
+                    finished_at="2026-07-13T12:01:00Z",
+                )
+            ),
+            provider_operation_title="Launchplane operation generic-test",
+            provider_effect_checkpoint=effect_phases.append,
         )
 
         self.assertEqual(result.deploy_status, "pass")
         self.assertEqual(result.post_deploy_status, "pass")
+        self.assertEqual(result.deploy_started_at, "2026-07-13T12:00:00Z")
+        self.assertEqual(result.deploy_finished_at, "2026-07-13T12:01:00Z")
+        self.assertEqual(store.deployments[0].deploy.deployment_id, "deployment-provider-exact")
         self.assertEqual(store.deployments[0].post_deploy_update.status, "pass")
         self.assertEqual(store.inventories[0].post_deploy_update.status, "pass")
         self.assertEqual(len(contexts), 1)
@@ -699,6 +824,58 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(contexts[0].provider_id, "fake-cloud")
         self.assertEqual(contexts[0].provider_target_type, "managed-service")
         self.assertEqual(contexts[0].target_type, "application")
+        self.assertEqual(
+            effect_phases,
+            ["deploy_trigger", "post_deploy_started", "post_deploy_schedule_trigger"],
+        )
+        self.assertTrue(post_deploy_titles[0].startswith("Launchplane post-deploy "))
+
+    def test_execute_generic_web_deploy_canonicalizes_padded_lane_identity(self) -> None:
+        profile = _profile()
+        lane = profile.lanes[0]
+        padded_lane = lane.model_copy(
+            update={
+                "context": f"  {lane.context}  ",
+                "instance": f"  {lane.instance}  ",
+            }
+        )
+        store = _GenericWebDeployStore(profile)
+
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(),
+            profile=profile,
+            lane=padded_lane,
+            deploy_provider=_FakeGenericWebDeployProvider(
+                observation=GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status="success",
+                    deployment_id="deployment-canonical-lane",
+                    started_at="2026-07-13T12:00:00Z",
+                    finished_at="2026-07-13T12:01:00Z",
+                )
+            ),
+            provider_operation_title="Launchplane operation canonical-lane",
+        )
+
+        self.assertEqual(result.context, lane.context)
+        self.assertEqual(result.instance, lane.instance)
+        self.assertEqual(store.deployments[0].context, lane.context)
+        self.assertEqual(store.deployments[0].instance, lane.instance)
+        assert store.deployments[0].runtime_identity is not None
+        self.assertEqual(store.deployments[0].runtime_identity.context, lane.context)
+        self.assertEqual(store.deployments[0].runtime_identity.instance, lane.instance)
+
+    def test_durable_generic_web_deploy_requires_operation_title(self) -> None:
+        with self.assertRaisesRegex(ValueError, "require a provider operation title"):
+            execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=_GenericWebDeployStore(_profile()),
+                request=_request(),
+                deploy_provider=_FakeGenericWebDeployProvider(),
+                provider_effect_checkpoint=lambda _phase: None,
+            )
 
     def test_execute_generic_web_deploy_keeps_deploy_pass_when_post_deploy_extension_fails(
         self,
@@ -709,6 +886,7 @@ class GenericWebDeployTests(unittest.TestCase):
             _root: Path,
             _store: GenericWebDeployStore,
             _context: GenericWebPostDeployContext,
+            _guard: GenericWebPostDeployGuard,
         ) -> PostDeployUpdateEvidence:
             raise click.ClickException("post deploy failed")
 
@@ -745,6 +923,7 @@ class GenericWebDeployTests(unittest.TestCase):
             _root: Path,
             _store: GenericWebDeployStore,
             _context: GenericWebPostDeployContext,
+            _guard: GenericWebPostDeployGuard,
         ) -> PostDeployUpdateEvidence:
             raise RuntimeError("unexpected post deploy failure")
 
@@ -778,6 +957,7 @@ class GenericWebDeployTests(unittest.TestCase):
             _root: Path,
             _store: GenericWebDeployStore,
             _context: GenericWebPostDeployContext,
+            _guard: GenericWebPostDeployGuard,
         ) -> PostDeployUpdateEvidence:
             return PostDeployUpdateEvidence(
                 attempted=True,
@@ -935,7 +1115,324 @@ class GenericWebDeployTests(unittest.TestCase):
             )
 
         self.assertEqual(store.deployments, [])
-        self.assertEqual(store.inventories, [])
+
+    def test_record_observed_generic_web_deploy_repairs_missing_records(self) -> None:
+        profile = _profile(driver_id="odoo")
+        lane = profile.lanes[0]
+        store = _GenericWebDeployStore(profile)
+        provider = _FakeGenericWebDeployProvider()
+        request = _request()
+        resolved_target = provider.resolve_deploy_target(
+            control_plane_root=Path("."),
+            request_artifact_id=request.artifact_id,
+            request_source_git_ref=request.source_git_ref,
+            request_timeout_seconds=request.timeout_seconds,
+            request_no_cache=request.no_cache,
+            record_store=store,
+            profile=profile,
+            lane=lane,
+            normalized_artifact_id=request.artifact_id,
+            fallback_target_name="unused",
+        )
+
+        records, result = record_observed_generic_web_deploy(
+            record_store=store,
+            profile=profile,
+            lane=lane,
+            resolved_deploy_target=resolved_target,
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="success",
+                deployment_id="deployment-observed",
+                started_at="2026-07-13T12:00:00Z",
+                finished_at="2026-07-13T12:01:00Z",
+            ),
+            deployment_record_id="deployment-recovered",
+            post_deploy_unobserved=True,
+        )
+
+        self.assertEqual(records, {"deployment_record_id": "deployment-recovered"})
+        self.assertEqual(result["deploy_status"], "pass")
+        self.assertEqual(result["post_deploy_status"], "fail")
+        self.assertEqual(len(store.deployments), 1)
+        self.assertEqual(store.deployments[0].record_id, "deployment-recovered")
+        self.assertEqual(store.deployments[0].post_deploy_update.status, "fail")
+        self.assertEqual(len(store.inventories), 1)
+
+    def test_record_observed_generic_web_deploy_preserves_existing_post_deploy_evidence(
+        self,
+    ) -> None:
+        profile = _profile(driver_id="odoo")
+        lane = profile.lanes[0]
+        store = _GenericWebDeployStore(profile)
+        provider = _FakeGenericWebDeployProvider()
+        request = _request()
+
+        execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=request,
+            profile=profile,
+            lane=lane,
+            deploy_provider=provider,
+            deployment_record_id="deployment-existing",
+            post_deploy_executor=lambda _root, _store, _context, _guard: PostDeployUpdateEvidence(
+                attempted=True,
+                status="pass",
+                detail="post-deploy already completed",
+            ),
+        )
+        resolved_target = provider.resolved_targets[-1]
+        padded_lane = lane.model_copy(
+            update={
+                "context": f"  {lane.context}  ",
+                "instance": f"  {lane.instance}  ",
+            }
+        )
+
+        _, result = record_observed_generic_web_deploy(
+            record_store=store,
+            profile=profile,
+            lane=padded_lane,
+            resolved_deploy_target=resolved_target,
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="success",
+                deployment_id="deployment-observed",
+                started_at="2026-07-13T12:00:00Z",
+                finished_at="2026-07-13T12:01:00Z",
+            ),
+            deployment_record_id="deployment-existing",
+            post_deploy_unobserved=True,
+        )
+
+        self.assertEqual(result["post_deploy_status"], "pass")
+        self.assertEqual(result["context"], lane.context)
+        self.assertEqual(result["instance"], lane.instance)
+        self.assertEqual(result["error_message"], "")
+        self.assertEqual(len(store.deployments), 1)
+        self.assertEqual(store.deployments[0].post_deploy_update.status, "pass")
+        self.assertEqual(len(store.inventories), 1)
+
+    def test_provider_adapter_retries_absent_target_update_but_not_trigger(self) -> None:
+        profile = _profile()
+        store = _GenericWebDeployStore(profile)
+        provider = _FakeGenericWebDeployProvider(
+            observation=GenericWebProviderDeploymentObservation(outcome="absent")
+        )
+        adapter = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=provider,
+        )
+        reconciliation_key = adapter.reconciliation_key()
+
+        update_observation = adapter.observe(
+            "provider-operation:test",
+            "target_update",
+            reconciliation_key,
+        )
+        trigger_observation = adapter.observe(
+            "provider-operation:test",
+            "deploy_trigger",
+            reconciliation_key,
+        )
+
+        self.assertEqual(update_observation.outcome, "absent")
+        self.assertTrue(update_observation.retry_safe)
+        self.assertEqual(trigger_observation.outcome, "unknown")
+        self.assertFalse(trigger_observation.retry_safe)
+
+    def test_provider_adapter_rebinds_safe_retry_to_stored_target_snapshot(self) -> None:
+        profile = _profile()
+        store = _GenericWebDeployStore(profile)
+        original_provider = _FakeGenericWebDeployProvider(target_id="target-original")
+        original_adapter = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=original_provider,
+        )
+        original_key = original_adapter.reconciliation_key()
+        replacement_provider = _FakeGenericWebDeployProvider(
+            target_id="target-replacement",
+            observation=GenericWebProviderDeploymentObservation(outcome="absent"),
+        )
+        recovered_adapter = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=replacement_provider,
+        )
+        replacement_key = recovered_adapter.reconciliation_key()
+
+        observation = recovered_adapter.observe(
+            "provider-operation:test-rebind",
+            "target_update",
+            original_key,
+        )
+
+        self.assertNotEqual(replacement_key, original_key)
+        self.assertEqual(observation.outcome, "absent")
+        self.assertTrue(observation.retry_safe)
+        self.assertEqual(replacement_provider.observed_target_ids, ["target-original"])
+        self.assertEqual(recovered_adapter.reconciliation_key(), original_key)
+
+    def test_provider_adapter_repairs_failed_terminal_deployment_as_502(self) -> None:
+        profile = _profile()
+        store = _GenericWebDeployStore(profile)
+        provider = _FakeGenericWebDeployProvider(
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="failed",
+                deployment_id="deployment-failed",
+                started_at="2026-07-13T12:00:00Z",
+                finished_at="2026-07-13T12:01:00Z",
+                error_message="provider deployment failed",
+            )
+        )
+        adapter = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=provider,
+        )
+        reconciliation_key = adapter.reconciliation_key()
+
+        observation = adapter.observe(
+            "provider-operation:test-failed",
+            "deploy_trigger",
+            reconciliation_key,
+        )
+
+        self.assertEqual(observation.outcome, "present")
+        self.assertEqual(observation.response_status_code, 502)
+        result = cast(dict[str, object], observation.response_payload["result"])
+        self.assertEqual(result["deploy_status"], "fail")
+        self.assertEqual(result["error_message"], "provider deployment failed")
+        self.assertEqual(len(store.deployments), 1)
+        self.assertEqual(store.deployments[0].deploy.status, "fail")
+
+    def test_provider_adapter_repairs_placeholder_failure_with_observed_evidence(
+        self,
+    ) -> None:
+        profile = _profile()
+        store = _GenericWebDeployStore(profile)
+        provider = _FakeGenericWebDeployProvider(
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="failed",
+                deployment_id="deployment-failed-exact",
+                started_at="2026-07-13T12:00:00Z",
+                finished_at="2026-07-13T12:01:00Z",
+                error_message="provider deployment failed",
+            )
+        )
+        adapter = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=provider,
+        )
+        provider_operation_key = "provider-operation:test-failed-repair"
+        resolved_target = adapter._resolve_deploy_target()
+        deployment_record_id = adapter._deployment_record_id(provider_operation_key)
+        store.write_deployment_record(
+            build_deployment_record(
+                request=resolved_target.ship_request,
+                record_id=deployment_record_id,
+                deployment_id="control-plane-dokploy",
+                deployment_status="fail",
+                started_at="2026-07-13T11:59:00Z",
+                finished_at="2026-07-13T11:59:30Z",
+                resolved_target=resolved_target.resolved_target,
+                deployed_target=resolved_target.deployed_target,
+                delegated_executor=provider.delegated_executor,
+            )
+        )
+
+        observation = adapter.observe(
+            provider_operation_key,
+            "deploy_trigger",
+            adapter.reconciliation_key(),
+        )
+
+        self.assertEqual(observation.outcome, "present")
+        self.assertEqual(observation.response_status_code, 502)
+        repaired = store.read_deployment_record(deployment_record_id)
+        self.assertEqual(repaired.deploy.deployment_id, "deployment-failed-exact")
+        self.assertEqual(repaired.deploy.started_at, "2026-07-13T12:00:00Z")
+        self.assertEqual(repaired.deploy.finished_at, "2026-07-13T12:01:00Z")
+
+    def test_provider_adapter_keeps_post_deploy_phase_unknown_until_record_exists(
+        self,
+    ) -> None:
+        profile = _profile(driver_id="odoo")
+        store = _GenericWebDeployStore(profile)
+        provider = _FakeGenericWebDeployProvider(
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="success",
+                deployment_id="deployment-success",
+                started_at="2026-07-13T12:00:00Z",
+                finished_at="2026-07-13T12:01:00Z",
+            )
+        )
+        adapter = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=provider,
+        )
+        reconciliation_key = adapter.reconciliation_key()
+
+        observation = adapter.observe(
+            "provider-operation:test-post-deploy",
+            "post_deploy_schedule_trigger",
+            reconciliation_key,
+        )
+
+        self.assertEqual(observation.outcome, "unknown")
+        self.assertEqual(store.deployments, [])
+
+    def test_present_provider_observation_requires_exact_terminal_evidence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "deployment_id, started_at, finished_at"):
+            GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="failed",
+            )
+
+    def test_reconciliation_target_matches_canonicalized_lane_identity(self) -> None:
+        profile = _profile()
+        provider = _FakeGenericWebDeployProvider()
+        lane = profile.lanes[0]
+        request = _request()
+        resolved_target = provider.resolve_deploy_target(
+            control_plane_root=Path("."),
+            request_artifact_id=request.artifact_id,
+            request_source_git_ref=request.source_git_ref,
+            request_timeout_seconds=request.timeout_seconds,
+            request_no_cache=request.no_cache,
+            record_store=_GenericWebDeployStore(profile),
+            profile=profile,
+            lane=lane,
+            normalized_artifact_id=request.artifact_id,
+            fallback_target_name="unused",
+        )
+        padded_lane = lane.model_copy(
+            update={
+                "context": f"  {lane.context}  ",
+                "instance": f"  {lane.instance}  ",
+            }
+        )
+
+        recovered = resolve_generic_web_provider_reconciliation_target(
+            reconciliation_key=build_generic_web_provider_reconciliation_key(resolved_target),
+            request_artifact_id=request.artifact_id,
+            request_source_git_ref=request.source_git_ref,
+            request_timeout_seconds=request.timeout_seconds,
+            request_no_cache=request.no_cache,
+            normalized_artifact_id=request.artifact_id,
+            lane=padded_lane,
+        )
+
+        self.assertEqual(recovered.ship_request.context, lane.context)
+        self.assertEqual(recovered.ship_request.instance, lane.instance)
 
     def test_dokploy_provider_resolves_target_without_generic_web_dokploy_imports(
         self,
@@ -967,6 +1464,145 @@ class GenericWebDeployTests(unittest.TestCase):
         assert deployed_target is not None
         self.assertEqual(deployed_target.display_name, "provider-target-app")
         self.assertEqual(resolved.deploy_timeout_seconds, 45)
+
+    def test_dokploy_provider_observes_exact_terminal_operation_marker(self) -> None:
+        provider = DokployGenericWebDeployProvider()
+        store = _DokployGenericWebDeployStore(_profile())
+        resolved = provider.resolve_deploy_target(
+            control_plane_root=Path("."),
+            request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            request_source_git_ref="abc123",
+            request_timeout_seconds=45,
+            request_no_cache=True,
+            record_store=store,
+            profile=_profile(),
+            lane=_profile().lanes[0],
+            normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            fallback_target_name="fallback-target",
+        )
+        with (
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider."
+                "control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider."
+                "control_plane_dokploy.deployment_for_target_by_title",
+                return_value={
+                    "deploymentId": "deployment-123",
+                    "title": "Launchplane operation abc",
+                    "status": "done",
+                    "startedAt": "2026-07-13T01:00:00Z",
+                    "finishedAt": "2026-07-13T01:01:00Z",
+                },
+            ) as observe_deployment,
+        ):
+            observation = provider.observe_artifact_deploy(
+                control_plane_root=Path("."),
+                resolved_deploy_target=resolved,
+                deployment_title="Launchplane operation abc",
+            )
+
+        self.assertEqual(observation.outcome, "present")
+        self.assertEqual(observation.deployment_status, "done")
+        self.assertEqual(observation.deployment_id, "deployment-123")
+        observe_deployment.assert_called_once_with(
+            host="https://dokploy.example",
+            token="token",
+            target_type="application",
+            target_id="target-123",
+            title="Launchplane operation abc",
+        )
+
+    def test_dokploy_provider_reports_missing_operation_marker_as_absent(self) -> None:
+        provider = DokployGenericWebDeployProvider()
+        store = _DokployGenericWebDeployStore(_profile())
+        resolved = provider.resolve_deploy_target(
+            control_plane_root=Path("."),
+            request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            request_source_git_ref="abc123",
+            request_timeout_seconds=45,
+            request_no_cache=False,
+            record_store=store,
+            profile=_profile(),
+            lane=_profile().lanes[0],
+            normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            fallback_target_name="fallback-target",
+        )
+        with (
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider."
+                "control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider."
+                "control_plane_dokploy.deployment_for_target_by_title",
+                return_value=None,
+            ),
+        ):
+            observation = provider.observe_artifact_deploy(
+                control_plane_root=Path("."),
+                resolved_deploy_target=resolved,
+                deployment_title="Launchplane operation missing",
+            )
+
+        self.assertEqual(observation.outcome, "absent")
+
+    def test_reconciliation_key_reconstructs_original_target_after_authority_change(
+        self,
+    ) -> None:
+        profile = _profile()
+        lane = profile.lanes[0]
+        request = _request()
+        store = _DokployGenericWebDeployStore(profile)
+        provider = DokployGenericWebDeployProvider()
+        original = provider.resolve_deploy_target(
+            control_plane_root=Path("."),
+            request_artifact_id=request.artifact_id,
+            request_source_git_ref=request.source_git_ref,
+            request_timeout_seconds=request.timeout_seconds,
+            request_no_cache=request.no_cache,
+            record_store=store,
+            profile=profile,
+            lane=lane,
+            normalized_artifact_id=request.artifact_id,
+            fallback_target_name="fallback-target",
+        )
+        reconciliation_key = build_generic_web_provider_reconciliation_key(original)
+        store.provider_target = store.provider_target.model_copy(
+            update={"target_id": "target-replacement", "display_name": "replacement-target"}
+        )
+        store.dokploy_target_id = store.dokploy_target_id.model_copy(
+            update={"target_id": "target-replacement"}
+        )
+
+        current = provider.resolve_deploy_target(
+            control_plane_root=Path("."),
+            request_artifact_id=request.artifact_id,
+            request_source_git_ref=request.source_git_ref,
+            request_timeout_seconds=request.timeout_seconds,
+            request_no_cache=request.no_cache,
+            record_store=store,
+            profile=profile,
+            lane=lane,
+            normalized_artifact_id=request.artifact_id,
+            fallback_target_name="fallback-target",
+        )
+        recovered = resolve_generic_web_provider_reconciliation_target(
+            reconciliation_key=reconciliation_key,
+            request_artifact_id=request.artifact_id,
+            request_source_git_ref=request.source_git_ref,
+            request_timeout_seconds=request.timeout_seconds,
+            request_no_cache=request.no_cache,
+            normalized_artifact_id=request.artifact_id,
+            lane=lane,
+        )
+
+        self.assertEqual(current.resolved_target.target_id, "target-replacement")
+        self.assertEqual(recovered.resolved_target.target_id, "target-123")
+        self.assertEqual(recovered.resolved_target.target_name, "provider-target-app")
 
     def test_dokploy_provider_blocks_missing_provider_target_authority(self) -> None:
         class MissingProviderTargetStore(_DokployGenericWebDeployStore):

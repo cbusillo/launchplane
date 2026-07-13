@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from typing import Callable, Literal, Protocol, cast
 
@@ -18,8 +20,14 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.workflows.generic_web_deploy_provider import GenericWebDeployProvider
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebProviderDeploymentObservation,
+)
 from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
 from control_plane.workflows.generic_web_deploy_provider import default_generic_web_deploy_provider
+from control_plane.workflows.generic_web_deploy_provider import (
+    generic_web_provider_deployment_succeeded,
+)
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.ship import (
     build_deployment_record,
@@ -30,6 +38,8 @@ from control_plane.workflows.ship import (
 
 class GenericWebDeployStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...
 
@@ -75,6 +85,7 @@ class GenericWebDeployResult(BaseModel):
     target_category: DeployTargetCategory = "unknown"
     provider_id: str = ""
     provider_target_type: str = ""
+    provider_effect_attempted: bool = False
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     error_message: str = ""
 
@@ -147,8 +158,24 @@ class GenericWebPostDeployContext(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class GenericWebPostDeployGuard:
+    provider_effect_checkpoint: Callable[[str], None] | None = None
+    deployment_title: str = ""
+
+    def checkpoint_effect(self, phase: str) -> None:
+        if self.provider_effect_checkpoint is not None:
+            self.provider_effect_checkpoint(phase)
+
+
 GenericWebPostDeployExecutor = Callable[
-    [Path, GenericWebDeployStore, GenericWebPostDeployContext], PostDeployUpdateEvidence
+    [
+        Path,
+        GenericWebDeployStore,
+        GenericWebPostDeployContext,
+        GenericWebPostDeployGuard,
+    ],
+    PostDeployUpdateEvidence,
 ]
 
 
@@ -161,11 +188,21 @@ def resolve_generic_web_profile_lane(
             f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
             "not generic-web or a generic-web based driver."
         )
+    requested_instance = request.instance.strip()
     for lane in profile.lanes:
-        if lane.instance == request.instance:
-            return profile, lane
+        if lane.instance.strip() == requested_instance:
+            return profile, _canonical_generic_web_lane(lane)
     raise click.ClickException(
         f"Product {profile.product!r} has no generic-web lane for instance {request.instance!r}."
+    )
+
+
+def _canonical_generic_web_lane(lane: ProductLaneProfile) -> ProductLaneProfile:
+    return lane.model_copy(
+        update={
+            "context": lane.context.strip(),
+            "instance": lane.instance.strip(),
+        }
     )
 
 
@@ -360,7 +397,14 @@ def execute_generic_web_deploy(
     lane: ProductLaneProfile | None = None,
     post_deploy_executor: GenericWebPostDeployExecutor | None = None,
     deploy_provider: GenericWebDeployProvider | None = None,
+    resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    provider_operation_title: str = "",
+    deployment_record_id: str = "",
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> GenericWebDeployResult:
+    normalized_provider_operation_title = provider_operation_title.strip()
+    if provider_effect_checkpoint is not None and not normalized_provider_operation_title:
+        raise ValueError("Durable generic web deploys require a provider operation title.")
     resolved_deploy_provider = deploy_provider or default_generic_web_deploy_provider()
     resolved_profile = profile
     resolved_lane = lane
@@ -369,8 +413,9 @@ def execute_generic_web_deploy(
             record_store=record_store,
             request=request,
         )
+    resolved_lane = _canonical_generic_web_lane(resolved_lane)
 
-    record_id = generate_deployment_record_id(
+    record_id = deployment_record_id.strip() or generate_deployment_record_id(
         context_name=resolved_lane.context,
         instance_name=resolved_lane.instance,
     )
@@ -384,7 +429,7 @@ def execute_generic_web_deploy(
             lane=resolved_lane,
             deploy_provider=resolved_deploy_provider,
         )
-        resolved_deploy_target = _resolve_deploy_target(
+        prepared_deploy_target = resolved_deploy_target or _resolve_deploy_target(
             control_plane_root=control_plane_root,
             record_store=record_store,
             request=request,
@@ -392,8 +437,8 @@ def execute_generic_web_deploy(
             lane=resolved_lane,
             deploy_provider=resolved_deploy_provider,
         )
-        ship_request = resolved_deploy_target.ship_request
-        resolved_target = resolved_deploy_target.resolved_target
+        ship_request = prepared_deploy_target.ship_request
+        resolved_target = prepared_deploy_target.resolved_target
     except click.ClickException as exc:
         finished_at = utc_now_timestamp()
         if fallback_request is None:
@@ -429,18 +474,43 @@ def execute_generic_web_deploy(
         )
 
     deploy_completed = False
+    provider_effect_attempted = False
+    provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
     post_deploy_update = PostDeployUpdateEvidence()
+
+    def mark_provider_effect_started() -> None:
+        nonlocal provider_effect_attempted
+        provider_effect_attempted = True
+
     try:
         resolved_deploy_provider.execute_artifact_deploy(
             control_plane_root=control_plane_root,
-            resolved_deploy_target=resolved_deploy_target,
+            resolved_deploy_target=prepared_deploy_target,
             runtime_identity=_build_runtime_identity(
                 profile=resolved_profile,
                 lane=resolved_lane,
                 ship_request=ship_request,
                 deployment_record_id=record_id,
             ),
+            deployment_title=normalized_provider_operation_title,
+            before_provider_mutation=(provider_effect_checkpoint or (lambda _phase: None)),
+            effect_started=mark_provider_effect_started,
         )
+        if normalized_provider_operation_title:
+            provider_deployment_observation = resolved_deploy_provider.observe_artifact_deploy(
+                control_plane_root=control_plane_root,
+                resolved_deploy_target=prepared_deploy_target,
+                deployment_title=normalized_provider_operation_title,
+            )
+            if (
+                provider_deployment_observation.outcome != "present"
+                or not generic_web_provider_deployment_succeeded(
+                    provider_deployment_observation.deployment_status
+                )
+            ):
+                raise click.ClickException(
+                    "Generic web provider deployment did not return exact successful evidence."
+                )
         deploy_completed = True
         if post_deploy_executor is not None:
             post_deploy_update = _run_post_deploy_extension(
@@ -451,11 +521,17 @@ def execute_generic_web_deploy(
                     context=resolved_lane.context,
                     instance=resolved_lane.instance,
                     deployment_record_id=record_id,
-                    resolved_deploy_target=resolved_deploy_target,
+                    resolved_deploy_target=prepared_deploy_target,
                     artifact_id=ship_request.artifact_id,
                     source_git_ref=ship_request.source_git_ref,
                 ),
                 post_deploy_executor=post_deploy_executor,
+                guard=GenericWebPostDeployGuard(
+                    provider_effect_checkpoint=provider_effect_checkpoint,
+                    deployment_title=_generic_web_post_deploy_operation_title(
+                        normalized_provider_operation_title
+                    ),
+                ),
             )
             if post_deploy_update.status == "fail":
                 raise click.ClickException(
@@ -464,6 +540,21 @@ def execute_generic_web_deploy(
     except click.ClickException as exc:
         finished_at = utc_now_timestamp()
         deployment_status: Literal["pass", "fail"] = "pass" if deploy_completed else "fail"
+        recorded_deployment_id = (
+            provider_deployment_observation.deployment_id
+            if provider_deployment_observation is not None
+            else "control-plane-dokploy"
+        )
+        recorded_started_at = (
+            provider_deployment_observation.started_at
+            if provider_deployment_observation is not None
+            else started_at
+        )
+        recorded_finished_at = (
+            provider_deployment_observation.finished_at
+            if provider_deployment_observation is not None
+            else finished_at
+        )
         if deploy_completed and post_deploy_update.status == "skipped":
             post_deploy_update = PostDeployUpdateEvidence(
                 attempted=True,
@@ -476,7 +567,7 @@ def execute_generic_web_deploy(
                 lane=resolved_lane,
                 ship_request=ship_request,
                 deployment_record_id=record_id,
-                deployed_at=finished_at,
+                deployed_at=recorded_finished_at,
             )
             if deploy_completed
             else None
@@ -484,12 +575,12 @@ def execute_generic_web_deploy(
         deployment_record = build_deployment_record(
             request=ship_request,
             record_id=record_id,
-            deployment_id="control-plane-dokploy",
+            deployment_id=recorded_deployment_id,
             deployment_status=deployment_status,
-            started_at=started_at,
-            finished_at=finished_at,
+            started_at=recorded_started_at,
+            finished_at=recorded_finished_at,
             resolved_target=resolved_target,
-            deployed_target=resolved_deploy_target.deployed_target,
+            deployed_target=prepared_deploy_target.deployed_target,
             delegated_executor=resolved_deploy_provider.delegated_executor,
             post_deploy_update=post_deploy_update,
             runtime_identity=runtime_identity,
@@ -499,15 +590,15 @@ def execute_generic_web_deploy(
             record_store.write_environment_inventory(
                 build_environment_inventory(
                     deployment_record=deployment_record,
-                    updated_at=finished_at,
+                    updated_at=recorded_finished_at,
                 )
             )
-        target_fields = _deploy_result_target_fields(resolved_deploy_target=resolved_deploy_target)
+        target_fields = _deploy_result_target_fields(resolved_deploy_target=prepared_deploy_target)
         return GenericWebDeployResult(
             deployment_record_id=record_id,
             deploy_status=deployment_status,
-            deploy_started_at=started_at,
-            deploy_finished_at=finished_at,
+            deploy_started_at=recorded_started_at,
+            deploy_finished_at=recorded_finished_at,
             product=resolved_profile.product,
             context=resolved_lane.context,
             instance=resolved_lane.instance,
@@ -516,20 +607,36 @@ def execute_generic_web_deploy(
             target_category=target_fields.target_category,
             provider_id=target_fields.provider_id,
             provider_target_type=target_fields.provider_target_type,
+            provider_effect_attempted=provider_effect_attempted,
             post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
             error_message=str(exc),
         )
 
     finished_at = utc_now_timestamp()
+    recorded_deployment_id = (
+        provider_deployment_observation.deployment_id
+        if provider_deployment_observation is not None
+        else "control-plane-dokploy"
+    )
+    recorded_started_at = (
+        provider_deployment_observation.started_at
+        if provider_deployment_observation is not None
+        else started_at
+    )
+    recorded_finished_at = (
+        provider_deployment_observation.finished_at
+        if provider_deployment_observation is not None
+        else finished_at
+    )
     deployment_record = build_deployment_record(
         request=ship_request,
         record_id=record_id,
-        deployment_id="control-plane-dokploy",
+        deployment_id=recorded_deployment_id,
         deployment_status="pass",
-        started_at=started_at,
-        finished_at=finished_at,
+        started_at=recorded_started_at,
+        finished_at=recorded_finished_at,
         resolved_target=resolved_target,
-        deployed_target=resolved_deploy_target.deployed_target,
+        deployed_target=prepared_deploy_target.deployed_target,
         delegated_executor=resolved_deploy_provider.delegated_executor,
         post_deploy_update=post_deploy_update,
         runtime_identity=_build_runtime_identity(
@@ -537,22 +644,22 @@ def execute_generic_web_deploy(
             lane=resolved_lane,
             ship_request=ship_request,
             deployment_record_id=record_id,
-            deployed_at=finished_at,
+            deployed_at=recorded_finished_at,
         ),
     )
     record_store.write_deployment_record(deployment_record)
     record_store.write_environment_inventory(
         build_environment_inventory(
             deployment_record=deployment_record,
-            updated_at=finished_at,
+            updated_at=recorded_finished_at,
         )
     )
-    target_fields = _deploy_result_target_fields(resolved_deploy_target=resolved_deploy_target)
+    target_fields = _deploy_result_target_fields(resolved_deploy_target=prepared_deploy_target)
     return GenericWebDeployResult(
         deployment_record_id=record_id,
         deploy_status="pass",
-        deploy_started_at=started_at,
-        deploy_finished_at=finished_at,
+        deploy_started_at=recorded_started_at,
+        deploy_finished_at=recorded_finished_at,
         product=resolved_profile.product,
         context=resolved_lane.context,
         instance=resolved_lane.instance,
@@ -561,8 +668,114 @@ def execute_generic_web_deploy(
         target_category=target_fields.target_category,
         provider_id=target_fields.provider_id,
         provider_target_type=target_fields.provider_target_type,
+        provider_effect_attempted=provider_effect_attempted,
         post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
     )
+
+
+def record_observed_generic_web_deploy(
+    *,
+    record_store: GenericWebDeployStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    resolved_deploy_target: GenericWebResolvedDeployTarget,
+    observation: GenericWebProviderDeploymentObservation,
+    deployment_record_id: str,
+    post_deploy_unobserved: bool,
+) -> tuple[dict[str, object], dict[str, object]]:
+    if observation.outcome != "present":
+        raise ValueError("Observed generic web deploy evidence must be present.")
+    lane = _canonical_generic_web_lane(lane)
+    deploy_status: Literal["pass", "fail"] = (
+        "pass"
+        if generic_web_provider_deployment_succeeded(observation.deployment_status)
+        else "fail"
+    )
+    ship_request = resolved_deploy_target.ship_request
+    try:
+        existing_record = record_store.read_deployment_record(deployment_record_id)
+    except FileNotFoundError:
+        existing_record = None
+    if existing_record is not None and (
+        existing_record.context != lane.context
+        or existing_record.instance != lane.instance
+        or existing_record.source_git_ref != ship_request.source_git_ref
+    ):
+        raise ValueError("Observed generic web deployment record identity does not match.")
+    started_at = observation.started_at
+    finished_at = observation.finished_at
+    deployment_id = observation.deployment_id
+    post_deploy_update = (
+        existing_record.post_deploy_update
+        if existing_record is not None
+        else PostDeployUpdateEvidence()
+    )
+    if post_deploy_unobserved and post_deploy_update.status == "skipped":
+        post_deploy_update = PostDeployUpdateEvidence(
+            attempted=True,
+            status="fail",
+            detail="Post-deploy extension was not durably observed after provider recovery.",
+        )
+    runtime_identity = existing_record.runtime_identity if existing_record is not None else None
+    if deploy_status == "pass" and runtime_identity is None:
+        runtime_identity = _build_runtime_identity(
+            profile=profile,
+            lane=lane,
+            ship_request=ship_request,
+            deployment_record_id=deployment_record_id,
+            deployed_at=finished_at,
+        )
+    if deploy_status == "fail":
+        runtime_identity = None
+    deployment_record = build_deployment_record(
+        request=ship_request,
+        record_id=deployment_record_id,
+        deployment_id=deployment_id,
+        deployment_status=deploy_status,
+        started_at=started_at,
+        finished_at=finished_at,
+        resolved_target=resolved_deploy_target.resolved_target,
+        deployed_target=resolved_deploy_target.deployed_target,
+        delegated_executor=(
+            existing_record.delegated_executor
+            if existing_record is not None
+            else "control-plane.dokploy"
+        ),
+        post_deploy_update=post_deploy_update,
+        runtime_identity=runtime_identity,
+    )
+    record_store.write_deployment_record(deployment_record)
+    if deploy_status == "pass":
+        record_store.write_environment_inventory(
+            build_environment_inventory(
+                deployment_record=deployment_record,
+                updated_at=deployment_record.deploy.finished_at or finished_at,
+            )
+        )
+    target_fields = _deploy_result_target_fields(resolved_deploy_target=resolved_deploy_target)
+    result = GenericWebDeployResult(
+        deployment_record_id=deployment_record_id,
+        deploy_status=deploy_status,
+        deploy_started_at=deployment_record.deploy.started_at or started_at,
+        deploy_finished_at=deployment_record.deploy.finished_at or finished_at,
+        product=profile.product,
+        context=lane.context,
+        instance=lane.instance,
+        target_name=target_fields.target_name,
+        target_id=target_fields.target_id,
+        target_category=target_fields.target_category,
+        provider_id=target_fields.provider_id,
+        provider_target_type=target_fields.provider_target_type,
+        post_deploy_status=_generic_web_deploy_post_deploy_status(
+            deployment_record.post_deploy_update
+        ),
+        error_message=(
+            deployment_record.post_deploy_update.detail
+            if deployment_record.post_deploy_update.status == "fail"
+            else observation.error_message
+        ),
+    )
+    return {"deployment_record_id": deployment_record_id}, result.model_dump(mode="json")
 
 
 def _generic_web_deploy_post_deploy_status(
@@ -589,12 +802,22 @@ def _run_post_deploy_extension(
     record_store: GenericWebDeployStore,
     context: GenericWebPostDeployContext,
     post_deploy_executor: GenericWebPostDeployExecutor,
+    guard: GenericWebPostDeployGuard,
 ) -> PostDeployUpdateEvidence:
     try:
+        guard.checkpoint_effect("post_deploy_started")
         return _terminal_post_deploy_update(
-            post_deploy_executor(control_plane_root, record_store, context)
+            post_deploy_executor(control_plane_root, record_store, context, guard)
         )
     except click.ClickException:
         raise
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def _generic_web_post_deploy_operation_title(provider_operation_title: str) -> str:
+    normalized_title = provider_operation_title.strip()
+    if not normalized_title:
+        return ""
+    digest = hashlib.sha256(normalized_title.encode("utf-8")).hexdigest()[:24]
+    return f"Launchplane post-deploy {digest}"

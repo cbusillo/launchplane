@@ -96,6 +96,18 @@ from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
 )
+from control_plane.provider_operations import (
+    DurableProviderMutationAdapter,
+    DurableProviderOperationResult,
+    ProviderMutationOutcome,
+    ProviderMutationRejectedError,
+    ProviderMutationUnknownError,
+    ProviderObservation,
+    ProviderObservationOutcome,
+    ProviderOperationLease,
+    provider_operation_title,
+    run_durable_provider_operation,
+)
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import (
@@ -186,6 +198,23 @@ from control_plane.generic_web_deploy_http import (
     execute_generic_web_deploy_result,
     resolve_generic_web_deploy_lane,
     should_store_generic_web_deploy_idempotency,
+)
+from control_plane.workflows.generic_web_deploy import (
+    GenericWebDeployStore,
+    normalize_generic_web_artifact_id,
+    record_observed_generic_web_deploy,
+)
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebDeployProvider,
+    GenericWebResolvedDeployTarget,
+    build_generic_web_provider_reconciliation_key,
+    build_generic_web_provider_target_key,
+    default_generic_web_deploy_provider,
+    generic_web_provider_deployment_succeeded,
+    resolve_generic_web_provider_reconciliation_target,
+)
+from control_plane.workflows.odoo_generic_web_post_deploy import (
+    generic_web_post_deploy_executor_for_driver_id,
 )
 from control_plane.generic_web_promotion_http import (
     GENERIC_WEB_PROD_PROMOTION_ACTION,
@@ -343,6 +372,7 @@ from control_plane.odoo_preview_apply_http import (
     build_odoo_preview_apply_inputs_result,
     driver_result_contains_status,
     execute_odoo_preview_apply_result,
+    observe_odoo_preview_apply_result,
     resolve_odoo_preview_apply_profile,
 )
 from control_plane.odoo_post_deploy_http import (
@@ -460,6 +490,7 @@ from control_plane.contracts.product_onboarding_manifest import ProductOnboardin
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductExpectedConfigProfile,
+    ProductLaneProfile,
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
 )
@@ -2065,6 +2096,286 @@ class AcceptedEvidenceResponse(BaseModel):
     result: dict[str, object] | None = None
     replayed: bool | None = None
     original_trace_id: str | None = None
+
+
+def _provider_operation_response_payload(
+    *,
+    trace_id: str,
+    records: Mapping[str, object],
+    result: dict[str, object],
+) -> dict[str, object]:
+    return AcceptedEvidenceResponse(
+        trace_id=trace_id,
+        records=dict(records),
+        result=result,
+    ).model_dump(mode="json", exclude_none=True)
+
+
+class _OdooPreviewProviderMutationAdapter:
+    def __init__(
+        self,
+        *,
+        control_plane_root: FilePath,
+        record_store: object,
+        profile: LaunchplaneProductProfileRecord,
+        apply_request: OdooPreviewApplyEnvelope,
+        database_url: str | None,
+        trace_id: str,
+    ) -> None:
+        self._control_plane_root = control_plane_root
+        self._record_store = record_store
+        self._profile = profile
+        self._apply_request = apply_request
+        self._database_url = database_url
+        self._trace_id = trace_id
+
+    def reconciliation_key(self) -> str:
+        plan = self._apply_request.apply.dry_run_plan
+        return (
+            f"dokploy:compose:{self._profile.preview.context.strip()}:{plan.compose_name.strip()}"
+        )
+
+    def target_key(self) -> str:
+        reconciliation_key = self.reconciliation_key()
+        return f"dokploy-provider-target:{hashlib.sha256(reconciliation_key.encode('utf-8')).hexdigest()}"
+
+    def observe(
+        self,
+        provider_operation_key: str,
+        provider_effect_phase: str,
+        reconciliation_key: str,
+    ) -> ProviderObservation:
+        del reconciliation_key
+        observation_outcome, driver_result, retry_safe = observe_odoo_preview_apply_result(
+            control_plane_root_path=self._control_plane_root,
+            profile=self._profile,
+            request=self._apply_request,
+            database_url=self._database_url,
+            provider_operation_title=provider_operation_title(provider_operation_key),
+            provider_effect_phase=provider_effect_phase,
+        )
+        if driver_result is None:
+            return ProviderObservation(
+                outcome=cast(ProviderObservationOutcome, observation_outcome),
+                retry_safe=retry_safe,
+            )
+        driver_result.pop("provider_effect_attempted", None)
+        terminal_failure = str(driver_result.get("status", "")).strip() == "fail"
+        return ProviderObservation(
+            outcome="present",
+            response_status_code=502 if terminal_failure else 202,
+            response_payload=_provider_operation_response_payload(
+                trace_id=self._trace_id,
+                records={},
+                result=driver_result,
+            ),
+        )
+
+    def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        try:
+            driver_result = execute_odoo_preview_apply_result(
+                control_plane_root_path=self._control_plane_root,
+                record_store=self._record_store,
+                profile=self._profile,
+                request=self._apply_request,
+                database_url=self._database_url,
+                provider_operation_title=provider_operation_title(provider_operation_key),
+                provider_effect_checkpoint=lease.checkpoint_effect,
+                provider_lease_check=lease.assert_current,
+            )
+        except (
+            OdooPreviewApplyConfigError,
+            FileNotFoundError,
+            ValueError,
+            click.ClickException,
+        ) as error:
+            raise ProviderMutationRejectedError(error)
+        provider_effect_attempted = driver_result.pop("provider_effect_attempted", False) is True
+        driver_status = str(driver_result.get("status", "")).strip()
+        if driver_status == "fail" and provider_effect_attempted:
+            raise ProviderMutationUnknownError(
+                str(driver_result.get("error_message", "")).strip()
+                or "Odoo preview provider outcome requires reconciliation."
+            )
+        return ProviderMutationOutcome(
+            response_status_code=202,
+            response_payload=_provider_operation_response_payload(
+                trace_id=self._trace_id,
+                records={},
+                result=driver_result,
+            ),
+            durable=not driver_result_contains_status(driver_result, "blocked")
+            and driver_status != "fail",
+            provider_effect_performed=provider_effect_attempted,
+        )
+
+
+class _GenericWebDeployProviderMutationAdapter:
+    def __init__(
+        self,
+        *,
+        control_plane_root: FilePath,
+        record_store: object,
+        deploy_request: GenericWebDeployEnvelope,
+        profile: LaunchplaneProductProfileRecord,
+        lane: ProductLaneProfile,
+        trace_id: str,
+    ) -> None:
+        self._control_plane_root = control_plane_root
+        self._record_store = record_store
+        self._deploy_request = deploy_request
+        self._profile = profile
+        self._lane = lane
+        self._trace_id = trace_id
+        self._deploy_provider: GenericWebDeployProvider = default_generic_web_deploy_provider()
+        self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
+
+    def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
+        if self._resolved_deploy_target is None:
+            deploy = self._deploy_request.deploy
+            self._resolved_deploy_target = self._deploy_provider.resolve_deploy_target(
+                control_plane_root=self._control_plane_root,
+                request_artifact_id=deploy.artifact_id,
+                request_source_git_ref=deploy.source_git_ref,
+                request_timeout_seconds=deploy.timeout_seconds,
+                request_no_cache=deploy.no_cache,
+                record_store=self._record_store,
+                profile=self._profile,
+                lane=self._lane,
+                normalized_artifact_id=normalize_generic_web_artifact_id(
+                    profile=self._profile,
+                    artifact_id=deploy.artifact_id,
+                ),
+                fallback_target_name=f"{self._profile.product}-{self._lane.instance}",
+            )
+        return self._resolved_deploy_target
+
+    def reconciliation_key(self) -> str:
+        return build_generic_web_provider_reconciliation_key(self._resolve_deploy_target())
+
+    def target_key(self) -> str:
+        return build_generic_web_provider_target_key(self._resolve_deploy_target())
+
+    def observe(
+        self,
+        provider_operation_key: str,
+        provider_effect_phase: str,
+        reconciliation_key: str,
+    ) -> ProviderObservation:
+        try:
+            deploy = self._deploy_request.deploy
+            resolved_target = resolve_generic_web_provider_reconciliation_target(
+                reconciliation_key=reconciliation_key,
+                request_artifact_id=deploy.artifact_id,
+                request_source_git_ref=deploy.source_git_ref,
+                request_timeout_seconds=deploy.timeout_seconds,
+                request_no_cache=deploy.no_cache,
+                normalized_artifact_id=normalize_generic_web_artifact_id(
+                    profile=self._profile,
+                    artifact_id=deploy.artifact_id,
+                ),
+                lane=self._lane,
+            )
+            self._resolved_deploy_target = resolved_target
+            observation = self._deploy_provider.observe_artifact_deploy(
+                control_plane_root=self._control_plane_root,
+                resolved_deploy_target=resolved_target,
+                deployment_title=provider_operation_title(provider_operation_key),
+            )
+        except (FileNotFoundError, ValueError, click.ClickException):
+            return ProviderObservation(outcome="unknown")
+        if observation.outcome != "present":
+            if observation.outcome == "absent" and provider_effect_phase == "deploy_trigger":
+                return ProviderObservation(outcome="unknown")
+            return ProviderObservation(
+                outcome=observation.outcome,
+                retry_safe=(
+                    observation.outcome == "absent"
+                    and provider_effect_phase in {"", "target_update"}
+                ),
+            )
+        post_deploy_unobserved = (
+            generic_web_provider_deployment_succeeded(observation.deployment_status)
+            and generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
+        )
+        deployment_record_id = self._deployment_record_id(provider_operation_key)
+        if provider_effect_phase.startswith("post_deploy_"):
+            read_deployment_record = getattr(self._record_store, "read_deployment_record", None)
+            if not callable(read_deployment_record):
+                return ProviderObservation(outcome="unknown")
+            try:
+                read_deployment_record(deployment_record_id)
+            except FileNotFoundError:
+                return ProviderObservation(outcome="unknown")
+            post_deploy_unobserved = False
+        try:
+            records, driver_result = record_observed_generic_web_deploy(
+                record_store=cast(GenericWebDeployStore, self._record_store),
+                profile=self._profile,
+                lane=self._lane,
+                resolved_deploy_target=resolved_target,
+                observation=observation,
+                deployment_record_id=deployment_record_id,
+                post_deploy_unobserved=post_deploy_unobserved,
+            )
+        except (FileNotFoundError, ValueError, click.ClickException):
+            return ProviderObservation(outcome="unknown")
+        terminal_failure = str(driver_result.get("deploy_status", "")).strip() == "fail"
+        return ProviderObservation(
+            outcome="present",
+            response_status_code=502 if terminal_failure else 202,
+            response_payload=_provider_operation_response_payload(
+                trace_id=self._trace_id,
+                records=records,
+                result=driver_result,
+            ),
+        )
+
+    def _deployment_record_id(self, provider_operation_key: str) -> str:
+        operation_digest = hashlib.sha256(provider_operation_key.encode("utf-8")).hexdigest()[:24]
+        return (
+            f"deployment-provider-operation-{operation_digest}-"
+            f"{self._lane.context}-{self._lane.instance}"
+        )
+
+    def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        try:
+            records, result = execute_generic_web_deploy_result(
+                control_plane_root=self._control_plane_root,
+                record_store=self._record_store,
+                request=self._deploy_request,
+                profile=self._profile,
+                lane=self._lane,
+                provider_operation_title=provider_operation_title(provider_operation_key),
+                deployment_record_id=self._deployment_record_id(provider_operation_key),
+                deploy_provider=self._deploy_provider,
+                resolved_deploy_target=self._resolve_deploy_target(),
+                provider_effect_checkpoint=lease.checkpoint_effect,
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise ProviderMutationRejectedError(error)
+        except click.ClickException as error:
+            raise ProviderMutationUnknownError(str(error)) from error
+        provider_effect_attempted = result.pop("provider_effect_attempted", False) is True
+        if str(result.get("deploy_status", "")).strip() == "fail" and provider_effect_attempted:
+            raise ProviderMutationUnknownError(
+                str(result.get("error_message", "")).strip()
+                or "Generic web provider outcome requires reconciliation."
+            )
+        return ProviderMutationOutcome(
+            response_status_code=202,
+            response_payload=_provider_operation_response_payload(
+                trace_id=self._trace_id,
+                records=records,
+                result=result,
+            ),
+            durable=should_store_generic_web_deploy_idempotency(result),
+            provider_effect_performed=provider_effect_attempted,
+        )
 
 
 class ProductOnboardingApplyEnvelope(BaseModel):
@@ -4373,7 +4684,6 @@ def create_launchplane_fastapi_app(
 
     app = _LaunchplaneFastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(BoundedRequestBodyMiddleware)
-    odoo_preview_apply_lock = asyncio.Lock()
     resolved_oauth_login_state_store = (
         oauth_login_state_store if oauth_login_state_store is not None else OAuthLoginStateStore()
     )
@@ -7041,99 +7351,72 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
-        async with odoo_preview_apply_lock:
-            (
-                normalized_idempotency_key,
-                payload_fingerprint,
-                replay_response,
-            ) = await replay_apply_idempotency(
-                request=request,
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Odoo preview apply requests require an Idempotency-Key header.",
+            )
+        payload_fingerprint = idempotency_request_fingerprint(
+            route_path=_ODOO_PREVIEW_APPLY_ROUTE,
+            payload=cast(dict[str, object], raw_payload),
+        )
+        adapter = _OdooPreviewProviderMutationAdapter(
+            control_plane_root=resolved_control_plane_root,
+            record_store=record_store,
+            profile=product_profile,
+            apply_request=apply_request,
+            database_url=getattr(record_store, "database_url", None),
+            trace_id=trace_id,
+        )
+        try:
+            return await run_provider_mutation(
                 record_store=record_store,
                 identity=identity,
                 route_path=_ODOO_PREVIEW_APPLY_ROUTE,
-                idempotency_key=idempotency_key,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
                 trace_id=trace_id,
-                check_replay=bool(idempotency_key.strip()),
+                adapter=adapter,
+                in_progress_message=(
+                    "A matching Odoo preview apply is already running. "
+                    "Retry with the same Idempotency-Key."
+                ),
+                reconcile_message=("The Odoo preview apply requires reconciliation before retry."),
             )
-            if replay_response is not None:
-                return replay_response
-
-            async def execute_apply_and_store() -> AcceptedEvidenceResponse:
-                driver_result = await asyncio.to_thread(
-                    execute_odoo_preview_apply_result,
-                    control_plane_root_path=resolved_control_plane_root,
-                    record_store=record_store,
-                    profile=product_profile,
-                    request=apply_request,
-                    database_url=getattr(record_store, "database_url", None),
-                )
-                response = accepted_evidence_response(
-                    trace_id=trace_id,
-                    records={},
-                    result=driver_result,
-                )
-                if not driver_result_contains_status(driver_result, "blocked"):
-                    store_apply_idempotency(
-                        record_store=record_store,
-                        identity=identity,
-                        route_path=_ODOO_PREVIEW_APPLY_ROUTE,
-                        idempotency_key=normalized_idempotency_key,
-                        request_fingerprint_value=payload_fingerprint,
-                        trace_id=trace_id,
-                        response=response,
-                    )
-                return response
-
-            apply_task = asyncio.create_task(
-                execute_apply_and_store(),
-                name=f"odoo-preview-apply:{trace_id}",
-            )
-            try:
-                return await asyncio.shield(apply_task)
-            except asyncio.CancelledError as cancellation:
-                while not apply_task.done():
-                    try:
-                        await asyncio.shield(apply_task)
-                    except asyncio.CancelledError:
-                        continue
-                    except Exception:
-                        _LOGGER.exception(
-                            "Odoo preview apply failed after request cancellation",
-                            extra={"trace_id": trace_id},
-                        )
-                        break
-                raise cancellation
-            except OdooPreviewApplyConfigError as error:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "status": "rejected",
-                        "trace_id": trace_id,
-                        "error": {
-                            "code": "odoo_preview_runtime_config_incomplete",
-                            "message": "Odoo preview apply runtime environment is incomplete.",
-                        },
-                        "details": {
-                            "context": error.context,
-                            "instance": error.instance,
-                            "missing_keys": list(error.missing_keys),
-                        },
+        except OdooPreviewApplyConfigError as error:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "odoo_preview_runtime_config_incomplete",
+                        "message": "Odoo preview apply runtime environment is incomplete.",
                     },
-                )
-            except FileNotFoundError as error:
-                raise _launchplane_http_error(
-                    status_code=404,
-                    trace_id=trace_id,
-                    code="not_found",
-                    message=f"No Launchplane route for {_ODOO_PREVIEW_APPLY_ROUTE}.",
-                ) from error
-            except (ValueError, click.ClickException) as error:
-                raise _launchplane_http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="invalid_request",
-                    message="Request could not be completed.",
-                ) from error
+                    "details": {
+                        "context": error.context,
+                        "instance": error.instance,
+                        "missing_keys": list(error.missing_keys),
+                    },
+                },
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_ODOO_PREVIEW_APPLY_ROUTE}.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
 
     async def write_odoo_post_deploy(
         request: Request,
@@ -13388,6 +13671,140 @@ def create_launchplane_fastapi_app(
             }
         )
 
+    def require_provider_operation_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Durable provider operations require Launchplane database storage.",
+            )
+        return record_store
+
+    def provider_mutation_http_response(
+        *,
+        result: DurableProviderOperationResult,
+        trace_id: str,
+        route_path: str,
+        in_progress_message: str,
+        reconcile_message: str,
+    ) -> AcceptedEvidenceResponse:
+        if result.status in {"completed", "unstored", "adopted"}:
+            if result.response_status_code >= 400:
+                raise _launchplane_http_error(
+                    status_code=result.response_status_code,
+                    trace_id=trace_id,
+                    code="provider_mutation_failed",
+                    message=_provider_mutation_failure_message(result.response_payload),
+                )
+            return AcceptedEvidenceResponse.model_validate(result.response_payload)
+        if result.status == "replayed":
+            if result.record is None:
+                raise RuntimeError("Replayed provider mutation requires a stored record.")
+            if (result.record.response_status_code or 0) >= 400:
+                raise _launchplane_http_error(
+                    status_code=result.record.response_status_code or 502,
+                    trace_id=trace_id,
+                    code="provider_mutation_failed",
+                    message=_provider_mutation_failure_message(result.record.response_payload),
+                )
+            return replay_idempotent_response(
+                trace_id=trace_id,
+                stored_record=result.record,
+                route_path=route_path,
+            )
+        if result.status == "conflict":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message=(
+                    "Idempotency-Key was already used for a different "
+                    "Launchplane request payload on this route."
+                ),
+            )
+        if result.status in {"in_progress", "target_busy"}:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_in_progress",
+                message=in_progress_message,
+            )
+        if result.status == "reconcile_required":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_reconciliation_required",
+                message=reconcile_message,
+            )
+        raise RuntimeError(f"Unsupported provider mutation status: {result.status}")
+
+    def _provider_mutation_failure_message(response_payload: Mapping[str, object]) -> str:
+        result_payload = response_payload.get("result")
+        if isinstance(result_payload, Mapping):
+            error_message = str(result_payload.get("error_message") or "").strip()
+            if error_message:
+                return error_message
+        return "Provider mutation completed with terminal failure evidence."
+
+    async def run_provider_mutation(
+        *,
+        record_store: object,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        trace_id: str,
+        adapter: DurableProviderMutationAdapter,
+        in_progress_message: str,
+        reconcile_message: str,
+    ) -> AcceptedEvidenceResponse:
+        reservation_store = require_provider_operation_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+
+        def execute() -> DurableProviderOperationResult:
+            return run_durable_provider_operation(
+                store=reservation_store,
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                lease_owner=trace_id,
+                response_trace_id=trace_id,
+                adapter=adapter,
+            )
+
+        operation_task = asyncio.create_task(
+            asyncio.to_thread(execute),
+            name=f"provider-mutation:{trace_id}",
+        )
+        try:
+            result = await asyncio.shield(operation_task)
+        except asyncio.CancelledError as cancellation:
+            while not operation_task.done():
+                try:
+                    await asyncio.shield(operation_task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    _LOGGER.exception(
+                        "Provider mutation failed after request cancellation",
+                        extra={"trace_id": trace_id},
+                    )
+                    break
+            raise cancellation
+        return provider_mutation_http_response(
+            result=result,
+            trace_id=trace_id,
+            route_path=route_path,
+            in_progress_message=in_progress_message,
+            reconcile_message=reconcile_message,
+        )
+
     async def apply_product_config(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
@@ -16409,28 +16826,41 @@ def create_launchplane_fastapi_app(
                     " for the requested product/context."
                 ),
             )
-        (
-            normalized_key,
-            payload_fingerprint,
-            replayed_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
+        normalized_key = idempotency_key.strip()
+        if not normalized_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Generic web deploy requests require an Idempotency-Key header.",
+            )
+        raw_payload = await request.json()
+        payload_fingerprint = idempotency_request_fingerprint(
             route_path=_GENERIC_WEB_DEPLOY_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
+            payload=cast(dict[str, object], raw_payload),
         )
-        if replayed_response is not None:
-            return replayed_response
+        adapter = _GenericWebDeployProviderMutationAdapter(
+            control_plane_root=resolved_control_plane_root,
+            record_store=record_store,
+            deploy_request=deploy_request,
+            profile=profile,
+            lane=lane,
+            trace_id=trace_id,
+        )
         try:
-            records, result = execute_generic_web_deploy_result(
-                control_plane_root=resolved_control_plane_root,
+            return await run_provider_mutation(
                 record_store=record_store,
-                request=deploy_request,
-                profile=profile,
-                lane=lane,
+                identity=identity,
+                route_path=_GENERIC_WEB_DEPLOY_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+                trace_id=trace_id,
+                adapter=adapter,
+                in_progress_message=(
+                    "A matching generic web deploy is already running. "
+                    "Retry with the same Idempotency-Key."
+                ),
+                reconcile_message=("The generic web deploy requires reconciliation before retry."),
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -16446,22 +16876,6 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=records,
-            result=result,
-        )
-        if should_store_generic_web_deploy_idempotency(result):
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
-                route_path=_GENERIC_WEB_DEPLOY_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
-        return response
 
     async def apply_generic_web_prod_promotion(
         request: Request,

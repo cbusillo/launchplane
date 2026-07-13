@@ -6,6 +6,7 @@ from typing import Any, Literal
 from unittest.mock import patch
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -125,3 +126,47 @@ def _seed_tracked_target_records(
         )
     finally:
         store.close()
+
+
+def _seed_generic_web_deploy_target_records(
+    *,
+    store: PostgresRecordStore,
+    context: str,
+    instance: str,
+    target_id: str,
+    target_name: str,
+) -> None:
+    normalized_context = context.strip()
+    normalized_instance = instance.strip()
+    store.write_provider_target_record(
+        ProviderTargetRecord(
+            context=normalized_context,
+            instance=normalized_instance,
+            provider_id="dokploy",
+            target_category="application",
+            target_id=target_id,
+            display_name=target_name,
+            provider_target_type="application",
+            updated_at="2026-05-01T00:00:00Z",
+            source_label="test:generic-web-provider-target",
+        )
+    )
+    store.write_dokploy_target_record(
+        DokployTargetRecord(
+            context=normalized_context,
+            instance=normalized_instance,
+            target_type="application",
+            target_name=target_name,
+            updated_at="2026-05-01T00:00:00Z",
+            source_label="test:generic-web-provider-target",
+        )
+    )
+    store.write_dokploy_target_id_record(
+        DokployTargetIdRecord(
+            context=normalized_context,
+            instance=normalized_instance,
+            target_id=target_id,
+            updated_at="2026-05-01T00:00:00Z",
+            source_label="test:generic-web-provider-target",
+        )
+    )

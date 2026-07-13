@@ -1,4 +1,5 @@
 import unittest
+from collections.abc import Callable
 from unittest.mock import patch
 
 import click
@@ -25,6 +26,7 @@ def _run_destroy_with_fake_requests(
     delete_volumes: bool = False,
     continue_after_domain_cleanup_error: bool = True,
     missing_resource_is_clean: bool = False,
+    before_provider_mutation: Callable[[str], None] | None = None,
 ) -> PreviewResourceDestroyResult:
     def _fake_dokploy_request(**kwargs: object) -> object:
         requests.append(dict(kwargs))
@@ -46,6 +48,7 @@ def _run_destroy_with_fake_requests(
             delete_volumes=delete_volumes,
             continue_after_domain_cleanup_error=continue_after_domain_cleanup_error,
             missing_resource_is_clean=missing_resource_is_clean,
+            before_provider_mutation=before_provider_mutation,
         )
 
 
@@ -160,6 +163,34 @@ class PreviewResourceDestroyTests(unittest.TestCase):
         self.assertEqual(
             [step.name for step in result.steps],
             ["domain_lookup", "compose_delete"],
+        )
+
+    def test_destroy_rechecks_fence_before_each_provider_write(self) -> None:
+        requests: list[dict[str, object]] = []
+        phases: list[str] = []
+
+        def checkpoint(phase: str) -> None:
+            phases.append(phase)
+            if phase == "compose_destroy":
+                raise RuntimeError("reservation recovered")
+
+        with self.assertRaisesRegex(RuntimeError, "reservation recovered"):
+            _run_destroy_with_fake_requests(
+                requests=requests,
+                response_by_path={
+                    "/api/domain.byComposeId": [
+                        {"domainId": "domain-one", "host": "pr-45.example.test"}
+                    ]
+                },
+                resource_type="compose",
+                resource_id="compose-one",
+                before_provider_mutation=checkpoint,
+            )
+
+        self.assertEqual(phases, ["domain_delete", "compose_destroy"])
+        self.assertEqual(
+            [request["path"] for request in requests],
+            ["/api/domain.byComposeId", "/api/domain.delete"],
         )
 
 

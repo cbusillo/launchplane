@@ -202,6 +202,76 @@ actually closed after finding the marker, covering a crash between the marker
 comment and the close request. Email and Discord notification paths remain
 direct-delivery until they are explicitly migrated.
 
+## Durable Provider Operations
+
+Provider-backed routes that mutate an external system share the durable
+provider-operation runner (`control_plane/provider_operations.py`). The runner
+reserves and binds a deterministic provider reconciliation key before the effect
+begins, performs the effect through a provider adapter, and records terminal
+evidence only after the effect returns. Odoo preview apply
+(`/v1/drivers/odoo/preview-apply`) and generic web deploy
+(`/v1/drivers/generic-web/deploy`) are the first migrated provider routes; the
+former replaces the previous process-local apply lock. Both require an
+`Idempotency-Key` header and Launchplane database storage, and fail closed with
+`503 database_storage_required` on non-database stores.
+
+- A concurrent request with the same key while the effect runs returns `409
+  mutation_in_progress`; a completed effect replays; a different request
+  fingerprint returns `409 idempotency_key_reused`.
+- A stable provider-target key identifies the mutation target independently of
+  request timeout or deploy settings. A partial unique database fence allows
+  only one `running` or `reconcile_required` mutation for that target, including
+  requests that use a different `Idempotency-Key`. Completed operations release
+  the target fence. The separate reconciliation key can carry a richer
+  generic-web target snapshot, so recovery continues to observe the originally
+  selected target even if current authority records change before a restart.
+- Running effects renew their lease in the background. Completion uses the
+  latest fenced reservation snapshot; if the lease expires exactly as a
+  successful provider result returns, Launchplane adopts that direct terminal
+  evidence instead of repeating the effect.
+- Immediately before every provider write, the adapter checkpoints a named
+  provider-effect phase and renews the fenced reservation. A stale worker whose
+  claim was recovered cannot advance to another provider write because its next
+  checkpoint fails owner/reservation validation. Odoo preview create, update,
+  deploy, and destroy share one compose-name reconciliation key for the complete
+  lifecycle rather than changing the fence after Dokploy assigns a compose id.
+  Compensating rollback deletes and generic-web post-deploy environment,
+  deployment, schedule-upsert, and schedule-trigger writes use the same
+  per-write checkpoint rule.
+- A crash, timeout, or cancelled request after key binding leaves the durable
+  reservation in place. The next attempt sees the bound expired reservation as
+  `reconcile_required` and asks the provider adapter to observe the target. An
+  observed effect is adopted as terminal evidence without re-running. When the
+  adapter proves the exact operation marker is absent, Launchplane releases the
+  reconciled claim and retries once only when no provider effect was checkpointed
+  or the adapter explicitly marks the recorded phase safe to retry. Retry is an
+  atomic in-place attempt transition under the same target fence; stale
+  reconcilers cannot delete, retry, or adopt a newer attempt. A missing
+  marker after a deployment-trigger checkpoint remains unknown. Genuinely
+  unknown state stays `reconcile_required`; adapters are the only place
+  provider-specific reconciliation lives.
+- Migrated Dokploy adapters attach a deterministic, per-request operation title
+  to the provider deployment. Both the initial deployment wait and restart
+  reconciliation search for that exact marker; desired state or another recent
+  deployment is not treated as proof that this operation ran. Any generic-web
+  path that enables provider-effect checkpoints must supply this title before
+  provider work begins. A crash during a
+  checkpointed post-deploy phase stays `reconcile_required` unless the exact
+  provider marker can be observed; Launchplane does not synthesize terminal
+  success from the target's current desired state.
+- Odoo compose-create recovery checks both project inventory and compose search,
+  while destroy reconciliation reads the exact compose id. Generic-web recovery
+  repairs the deterministic deployment record and environment inventory before
+  adopting the operation, and preserves already-written post-deploy evidence.
+- An exact-marker deployment that finished failed, cancelled, unhealthy, or
+  timed out is terminal failure evidence, not a successful `202`. Launchplane
+  completes both fresh and recovered operations only with the provider
+  deployment id and provider start/finish timestamps, stores that evidence for
+  idempotent replay, and returns `502 provider_mutation_failed` for provider
+  failure. Incomplete terminal observations remain unknown.
+- Blocked plans and other non-durable results release the reservation instead of
+  storing replay evidence, so a corrected retry with the same key can proceed.
+
 ## Target Launchplane Ingress
 
 The target communication model is:

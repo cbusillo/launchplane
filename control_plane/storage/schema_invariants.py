@@ -8,7 +8,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-EXPECTED_ALEMBIC_HEAD_REVISION = "a2b4c6d8e0f2"
+EXPECTED_ALEMBIC_HEAD_REVISION = "b4d6f8a0c2e4"
 
 
 class SchemaInspectorProtocol(Protocol):
@@ -140,6 +140,13 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_idempotency_records",
         "launchplane_idempotency_state_lease_idx",
         ("state", "lease_expires_at", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_idempotency_records",
+        "launchplane_idempotency_active_reconciliation_idx",
+        ("provider_target_key",),
+        unique=True,
+        predicate_tokens=("provider_target_key", "running", "reconcile_required"),
     ),
     CriticalIndex(
         "launchplane_every_code_work_requests",

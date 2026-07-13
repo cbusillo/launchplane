@@ -150,6 +150,7 @@ from tests.support.profiles import (
     _generic_site_profile_payload,
 )
 from tests.support.stores import (
+    _seed_generic_web_deploy_target_records,
     _sqlite_database_url,
     _seed_tracked_target_records,
 )
@@ -7125,9 +7126,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_generic_web_deploy_route_uses_profile_lane_for_authorization(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            _seed_generic_web_deploy_target_records(
+                store=store,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-syo-testing",
+                target_name="syo-testing",
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
@@ -7146,6 +7157,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 }
             )
             app = create_launchplane_fastapi_test_app(
+                local_record_store_for_tests=store,
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -7185,11 +7197,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_generic_web_deploy_route_accepts_base_driver_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
             profile_payload = _product_profile_payload()
             profile_payload["driver_id"] = "odoo"
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            _seed_generic_web_deploy_target_records(
+                store=store,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-syo-testing",
+                target_name="syo-testing",
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
@@ -7208,6 +7230,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 }
             )
             app = create_launchplane_fastapi_test_app(
+                local_record_store_for_tests=store,
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -7263,9 +7286,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            _seed_generic_web_deploy_target_records(
+                store=store,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-syo-testing",
+                target_name="syo-testing",
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
@@ -7284,6 +7317,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 }
             )
             app = create_launchplane_fastapi_test_app(
+                local_record_store_for_tests=store,
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -7324,9 +7358,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            _seed_generic_web_deploy_target_records(
+                store=store,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-syo-testing",
+                target_name="syo-testing",
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
@@ -7345,6 +7389,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 }
             )
             app = create_launchplane_fastapi_test_app(
+                local_record_store_for_tests=store,
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -7412,9 +7457,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            _seed_generic_web_deploy_target_records(
+                store=store,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-syo-testing",
+                target_name="syo-testing",
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
@@ -7434,6 +7489,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             identity = _identity()
             app = create_launchplane_fastapi_test_app(
+                local_record_store_for_tests=store,
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7620,7 +7676,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
             profile_payload = _product_profile_payload()
             profile_payload["lanes"] = tuple(
                 {**lane, "context": f"  {lane['context']}  "}
@@ -7628,6 +7687,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            _seed_generic_web_deploy_target_records(
+                store=store,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-syo-testing",
+                target_name="syo-testing",
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
@@ -7646,6 +7712,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 }
             )
             app = create_launchplane_fastapi_test_app(
+                local_record_store_for_tests=store,
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -8257,11 +8324,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_generic_web_deploy_route_resolves_literal_generic_web_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(
                     _product_profile_payload("generic-web")
                 )
+            )
+            _seed_generic_web_deploy_target_records(
+                store=store,
+                context="generic-web-testing",
+                instance="testing",
+                target_id="app-generic-web-testing",
+                target_name="generic-web-testing",
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
@@ -8280,6 +8357,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 }
             )
             app = create_launchplane_fastapi_test_app(
+                local_record_store_for_tests=store,
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,

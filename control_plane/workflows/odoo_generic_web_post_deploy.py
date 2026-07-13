@@ -7,6 +7,7 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployContext,
     GenericWebPostDeployExecutor,
+    GenericWebPostDeployGuard,
 )
 from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
@@ -53,10 +54,13 @@ def execute_odoo_generic_web_post_deploy(
     control_plane_root: Path,
     record_store: GenericWebDeployStore,
     context: GenericWebPostDeployContext,
+    guard: GenericWebPostDeployGuard,
 ) -> PostDeployUpdateEvidence:
     result = execute_odoo_post_deploy(
         control_plane_root=control_plane_root,
         record_store=record_store,
         request=OdooPostDeployRequest(context=context.context, instance=context.instance),
+        provider_effect_checkpoint=guard.checkpoint_effect,
+        provider_operation_title=guard.deployment_title,
     )
     return post_deploy_evidence_from_odoo_result(result)

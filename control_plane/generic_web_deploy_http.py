@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Callable
 from typing import cast
 
 from control_plane.contracts.product_profile_record import (
@@ -16,6 +17,10 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     execute_generic_web_deploy,
     product_profile_uses_generic_web_base,
+)
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebDeployProvider,
+    GenericWebResolvedDeployTarget,
 )
 
 
@@ -76,6 +81,11 @@ def execute_generic_web_deploy_result(
     request: GenericWebDeployEnvelope,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
+    deploy_provider: GenericWebDeployProvider | None = None,
+    resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    provider_operation_title: str = "",
+    deployment_record_id: str = "",
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_generic_web_deploy(
         control_plane_root=control_plane_root,
@@ -84,6 +94,11 @@ def execute_generic_web_deploy_result(
         profile=profile,
         lane=lane,
         post_deploy_executor=_generic_web_post_deploy_executor_for_profile(profile),
+        deploy_provider=deploy_provider,
+        resolved_deploy_target=resolved_deploy_target,
+        provider_operation_title=provider_operation_title,
+        deployment_record_id=deployment_record_id,
+        provider_effect_checkpoint=provider_effect_checkpoint,
     )
     result = _scrub_retired_target_type_alias(driver_result.model_dump(mode="json"))
     return {"deployment_record_id": driver_result.deployment_record_id}, result
