@@ -34992,8 +34992,15 @@
                     "additionalProperties": true,
                     "properties": {
                       "binding_key": {
-                        "title": "Binding Key",
-                        "type": "string"
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Binding Key"
                       },
                       "context": {
                         "anyOf": [
@@ -35034,8 +35041,15 @@
                         "title": "Integration"
                       },
                       "name": {
-                        "title": "Name",
-                        "type": "string"
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Name"
                       },
                       "scope": {
                         "anyOf": [
@@ -35059,8 +35073,6 @@
                       }
                     },
                     "required": [
-                      "name",
-                      "binding_key",
                       "value"
                     ],
                     "title": "ProductConfigSecretInput",

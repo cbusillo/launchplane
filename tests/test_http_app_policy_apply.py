@@ -2468,6 +2468,41 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
         runtime_environment = response.json()["result"]["runtime_environment"]
         self.assertEqual(runtime_environment["keys"], ["CONTACT_EMAIL_MODE"])
 
+    async def test_product_config_accepts_legacy_secret_identity_shorthand(self) -> None:
+        for omitted_field in ("name", "binding_key"):
+            with self.subTest(omitted_field=omitted_field):
+                with TemporaryDirectory() as temporary_directory_name:
+                    root = Path(temporary_directory_name)
+                    database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+                    _write_runtime_key_safety_policy(database_url=database_url)
+                    app_store = PostgresRecordStore(database_url=database_url)
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(_identity()),
+                        authz_policy=_product_config_policy(action="product_config.plan"),
+                        record_store_factory=lambda: app_store,
+                    )
+                    payload = _product_config_payload()
+                    secret = _product_config_secrets(payload)[0]
+                    secret.pop(omitted_field)
+
+                    with patch.dict(
+                        os.environ,
+                        {
+                            control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: (
+                                "test-master-key"
+                            )
+                        },
+                        clear=True,
+                    ):
+                        response = await _post_product_config_apply(app, payload)
+                    app_store.close()
+
+                self.assertEqual(response.status_code, 202)
+                ProductConfigApplyResponse.model_validate(response.json())
+                secret_result = response.json()["result"]["secrets"][0]
+                self.assertEqual(secret_result["name"], "SMTP_PASSWORD")
+                self.assertEqual(secret_result["binding_key"], "SMTP_PASSWORD")
+
     async def test_product_config_requires_database_storage(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

@@ -1138,12 +1138,12 @@ export type ProductConfigRuntimeKeySafetyResult = {
 };
 
 export type ProductConfigSecretInput = {
-    binding_key: string;
+    binding_key?: string | null;
     context?: string | null;
     description?: string;
     instance?: string | null;
     integration?: string | null;
-    name: string;
+    name?: string | null;
     scope?: 'global' | 'context' | 'context_instance' | null;
     value: string;
     [key: string]: unknown;

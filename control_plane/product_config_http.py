@@ -35,10 +35,16 @@ class ProductConfigSecretInput(BaseModel):
     context: str | None = None
     instance: str | None = None
     integration: str | None = None
-    name: str
-    binding_key: str
+    name: str | None = None
+    binding_key: str | None = None
     value: str
     description: str = ""
+
+    @model_validator(mode="after")
+    def _require_secret_identity(self) -> "ProductConfigSecretInput":
+        if not (self.name or "").strip() and not (self.binding_key or "").strip():
+            raise ValueError("Product config secrets require name or binding_key.")
+        return self
 
 
 class ProductConfigRuntimeEnvironmentRecordSummary(BaseModel):

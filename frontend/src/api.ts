@@ -186,7 +186,7 @@ export function rankWorkGraphSnapshot(
   const request: RankWorkGraphSnapshotData = {
     url: "/v1/work-graph/rank",
     body: {
-      snapshot: snapshot as unknown as RankWorkGraphSnapshotData["body"]["snapshot"],
+      snapshot,
       limit,
     },
   };

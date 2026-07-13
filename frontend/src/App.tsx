@@ -1961,17 +1961,20 @@ function fixtureProductConfigApply(
       checked_binding_keys: [],
       findings: [],
     },
-    secrets: (payload.secrets ?? []).map((secret, index) => ({
-      action: "rotated",
-      scope:
-        secret.scope ?? secretScopeForTarget(context, instance),
-      context,
-      instance,
-      integration: secret.integration ?? "runtime_environment",
-      name: secret.name,
-      binding_key: secret.binding_key,
-      secret_id: `fixture-secret-${index + 1}`,
-    })),
+    secrets: (payload.secrets ?? []).map((secret, index) => {
+      const bindingKey = secret.binding_key ?? secret.name ?? "";
+      return {
+        action: "rotated",
+        scope:
+          secret.scope ?? secretScopeForTarget(context, instance),
+        context,
+        instance,
+        integration: secret.integration ?? "runtime_environment",
+        name: secret.name ?? bindingKey,
+        binding_key: bindingKey,
+        secret_id: `fixture-secret-${index + 1}`,
+      };
+    }),
     summary: {
       runtime_changed_key_count: runtimeKeys.length,
       secret_change_count: (payload.secrets ?? []).length,

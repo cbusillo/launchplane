@@ -25,6 +25,7 @@ import type {
   ReconcileWorkGraphIssueInboxResponse as GeneratedReconcileWorkGraphIssueInboxResponse,
   RepoProductMappingResponse as GeneratedRepoProductMappingResponse,
   WorkGraphIssueInboxResponse as GeneratedWorkGraphIssueInboxResponse,
+  WorkGraphSnapshot as GeneratedWorkGraphSnapshot,
   WorkGraphSnapshotResponse as GeneratedWorkGraphSnapshotResponse,
 } from "./generated/openapi.ts";
 
@@ -596,12 +597,7 @@ export interface WorkGraphIssueSnapshot {
   deploy_state?: "success" | "pending" | "failure" | "unknown";
 }
 
-export interface WorkGraphSnapshot {
-  schema_version?: number;
-  generated_at: string;
-  repos: WorkGraphRepoSnapshot[];
-  issues: WorkGraphIssueSnapshot[];
-}
+export type WorkGraphSnapshot = GeneratedWorkGraphSnapshot;
 
 export type WorkGraphSnapshotPayload = GeneratedWorkGraphSnapshotResponse;
 
