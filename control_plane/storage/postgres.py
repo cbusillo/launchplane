@@ -17,6 +17,7 @@ from sqlalchemy import (
     desc,
     func,
     inspect,
+    or_,
     text,
     select,
 )
@@ -80,6 +81,7 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
+from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -232,6 +234,26 @@ class RouteBindingMutationResult(NamedTuple):
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
+OutboxDeliveryClaimStatus = Literal["claimed", "empty"]
+OutboxDeliveryCompletionStatus = Literal[
+    "updated",
+    "missing",
+    "not_running",
+    "owner_mismatch",
+    "lease_expired",
+]
+
+
+class OutboxDeliveryClaimResult(NamedTuple):
+    status: OutboxDeliveryClaimStatus
+    record: OutboxDeliveryRecord | None = None
+
+
+class OutboxDeliveryCompletionResult(NamedTuple):
+    status: OutboxDeliveryCompletionStatus
+    record: OutboxDeliveryRecord | None = None
+
+
 @dataclass(frozen=True)
 class DbOnlyMutationRequest:
     scope: str
@@ -243,6 +265,12 @@ class DbOnlyMutationRequest:
     response_trace_id: str
     response_payload: dict[str, Any]
     lease_seconds: int = 300
+
+
+@dataclass(frozen=True)
+class OutboxWithIdempotencyRequest:
+    delivery: OutboxDeliveryRecord
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
 def _utc_now_timestamp() -> str:
@@ -1358,6 +1386,51 @@ class LaunchplaneIdempotencyRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneOutboxDeliveryRow(Base):
+    __tablename__ = "launchplane_outbox_deliveries"
+    __table_args__ = (
+        Index("launchplane_outbox_deliveries_dedupe_uidx", "dedupe_key", unique=True),
+        Index(
+            "launchplane_outbox_deliveries_claim_idx",
+            "state",
+            "next_attempt_at",
+            "lease_expires_at",
+            "created_at",
+        ),
+        Index(
+            "launchplane_outbox_deliveries_aggregate_idx",
+            "aggregate_type",
+            "aggregate_id",
+            desc("created_at"),
+        ),
+        Index(
+            "launchplane_outbox_deliveries_provider_key_idx",
+            "provider_operation_key",
+        ),
+    )
+
+    delivery_id: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    aggregate_type: Mapped[str] = mapped_column(String, nullable=False)
+    aggregate_id: Mapped[str] = mapped_column(String, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    next_attempt_at: Mapped[str] = mapped_column(String, nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="6")
+    provider_operation_key: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    provider_id: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    external_id: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    external_url: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    action: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    error_code: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneOdooStableBootstrapOperationRow(Base):
     __tablename__ = "launchplane_odoo_stable_bootstrap_operations"
     __table_args__ = (
@@ -2301,6 +2374,55 @@ class PostgresRecordStore(HumanSessionStore):
         row.recorded_at = record.recorded_at
         row.payload = self._payload_dict(record)
 
+    def _outbox_delivery_row(self, record: OutboxDeliveryRecord) -> LaunchplaneOutboxDeliveryRow:
+        return LaunchplaneOutboxDeliveryRow(
+            delivery_id=record.delivery_id,
+            kind=record.kind,
+            state=record.state,
+            aggregate_type=record.aggregate_type,
+            aggregate_id=record.aggregate_id,
+            dedupe_key=record.dedupe_key,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            next_attempt_at=record.next_attempt_at,
+            lease_owner=record.lease_owner,
+            lease_expires_at=record.lease_expires_at,
+            attempt=record.attempt,
+            max_attempts=record.max_attempts,
+            provider_operation_key=record.provider_operation_key,
+            provider_id=record.provider_id,
+            external_id=record.external_id,
+            external_url=record.external_url,
+            action=record.action,
+            error_code=record.error_code,
+            payload=self._payload_dict(record),
+        )
+
+    def _sync_outbox_delivery_row(
+        self,
+        row: LaunchplaneOutboxDeliveryRow,
+        record: OutboxDeliveryRecord,
+    ) -> None:
+        row.kind = record.kind
+        row.state = record.state
+        row.aggregate_type = record.aggregate_type
+        row.aggregate_id = record.aggregate_id
+        row.dedupe_key = record.dedupe_key
+        row.created_at = record.created_at
+        row.updated_at = record.updated_at
+        row.next_attempt_at = record.next_attempt_at
+        row.lease_owner = record.lease_owner
+        row.lease_expires_at = record.lease_expires_at
+        row.attempt = record.attempt
+        row.max_attempts = record.max_attempts
+        row.provider_operation_key = record.provider_operation_key
+        row.provider_id = record.provider_id
+        row.external_id = record.external_id
+        row.external_url = record.external_url
+        row.action = record.action
+        row.error_code = record.error_code
+        row.payload = self._payload_dict(record)
+
     def _idempotency_statement(
         self,
         *,
@@ -2382,6 +2504,15 @@ class PostgresRecordStore(HumanSessionStore):
         payload.update(updates)
         return LaunchplaneIdempotencyRecord.model_validate(payload)
 
+    def _updated_outbox_delivery_record(
+        self,
+        record: OutboxDeliveryRecord,
+        **updates: object,
+    ) -> OutboxDeliveryRecord:
+        payload = record.model_dump(mode="json")
+        payload.update(updates)
+        return OutboxDeliveryRecord.model_validate(payload)
+
     def _mutation_transition_identity(
         self,
         record: LaunchplaneIdempotencyRecord,
@@ -2414,6 +2545,283 @@ class PostgresRecordStore(HumanSessionStore):
                 "Running or reconcile-required reservations must use mutation reservation methods."
             )
         self._write_row(self._idempotency_row(record))
+
+    def write_outbox_delivery_record(self, record: OutboxDeliveryRecord) -> None:
+        self._write_row(self._outbox_delivery_row(record))
+
+    def enqueue_outbox_delivery_with_idempotency(
+        self, request: OutboxWithIdempotencyRequest
+    ) -> OutboxDeliveryRecord:
+        if (
+            request.idempotency_record is not None
+            and request.idempotency_record.state != "completed"
+        ):
+            raise ValueError("Outbox idempotency evidence must be completed replay evidence.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_outbox_dedupe_keys(
+                session,
+                dedupe_keys=(request.delivery.dedupe_key,),
+            )
+            existing_row = session.scalar(
+                select(LaunchplaneOutboxDeliveryRow)
+                .where(LaunchplaneOutboxDeliveryRow.dedupe_key == request.delivery.dedupe_key)
+                .limit(1)
+            )
+            if existing_row is None:
+                delivery = request.delivery
+                session.add(self._outbox_delivery_row(delivery))
+            else:
+                delivery = self._read_payload(
+                    model_type=OutboxDeliveryRecord,
+                    payload=existing_row.payload,
+                )
+            if request.idempotency_record is not None:
+                session.merge(self._idempotency_row(request.idempotency_record))
+            session.commit()
+            return delivery
+
+    def _lock_outbox_dedupe_keys(
+        self,
+        session: Any,
+        *,
+        dedupe_keys: tuple[str, ...],
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        for dedupe_key in sorted(set(dedupe_keys)):
+            session.execute(
+                text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                {"lock_name": f"launchplane:outbox:{dedupe_key}"},
+            )
+
+    def read_outbox_delivery_record(self, delivery_id: str) -> OutboxDeliveryRecord:
+        return self._read_model(
+            model_type=OutboxDeliveryRecord,
+            orm_model=LaunchplaneOutboxDeliveryRow,
+            filters=(LaunchplaneOutboxDeliveryRow.delivery_id == delivery_id,),
+        )
+
+    def list_outbox_delivery_records(
+        self,
+        *,
+        states: tuple[str, ...] = (),
+        kind: str = "",
+        aggregate_type: str = "",
+        aggregate_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[OutboxDeliveryRecord, ...]:
+        filters: list[object] = []
+        if states:
+            filters.append(LaunchplaneOutboxDeliveryRow.state.in_(states))
+        if kind:
+            filters.append(LaunchplaneOutboxDeliveryRow.kind == kind)
+        if aggregate_type:
+            filters.append(LaunchplaneOutboxDeliveryRow.aggregate_type == aggregate_type)
+        if aggregate_id:
+            filters.append(LaunchplaneOutboxDeliveryRow.aggregate_id == aggregate_id)
+        return self._list_models(
+            model_type=OutboxDeliveryRecord,
+            orm_model=LaunchplaneOutboxDeliveryRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneOutboxDeliveryRow.created_at.asc(),
+                LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
+            ),
+            limit=limit,
+        )
+
+    def claim_next_outbox_delivery_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_seconds: int = 300,
+        now: str = "",
+    ) -> OutboxDeliveryClaimResult:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("Outbox delivery claim requires lease_owner.")
+        observed_at = now.strip()
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            if not observed_at:
+                observed_at = self._database_mutation_timestamp(session)
+            lease_expires_at = self._mutation_lease_expiry(
+                observed_at=observed_at,
+                lease_seconds=lease_seconds,
+            )
+            statement = (
+                select(LaunchplaneOutboxDeliveryRow)
+                .where(
+                    LaunchplaneOutboxDeliveryRow.state.in_(
+                        ("pending", "running", "reconcile_required")
+                    ),
+                    LaunchplaneOutboxDeliveryRow.next_attempt_at <= observed_at,
+                    or_(
+                        LaunchplaneOutboxDeliveryRow.state == "pending",
+                        LaunchplaneOutboxDeliveryRow.state == "reconcile_required",
+                        LaunchplaneOutboxDeliveryRow.lease_expires_at == "",
+                        LaunchplaneOutboxDeliveryRow.lease_expires_at < observed_at,
+                    ),
+                )
+                .order_by(
+                    LaunchplaneOutboxDeliveryRow.next_attempt_at.asc(),
+                    LaunchplaneOutboxDeliveryRow.created_at.asc(),
+                    LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update(skip_locked=True)
+            row = session.scalar(statement)
+            if row is None:
+                return OutboxDeliveryClaimResult(status="empty")
+            record = self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
+            if record.state == "running" and record.provider_operation_key:
+                record = self._updated_outbox_delivery_record(
+                    record,
+                    state="reconcile_required",
+                    lease_owner="",
+                    lease_expires_at="",
+                    updated_at=observed_at,
+                    next_attempt_at=observed_at,
+                    error_code="lease_expired_after_provider_marker",
+                )
+            if record.attempt >= record.max_attempts:
+                failed_record = self._updated_outbox_delivery_record(
+                    record,
+                    state="failed",
+                    lease_owner="",
+                    lease_expires_at="",
+                    updated_at=observed_at,
+                    next_attempt_at=observed_at,
+                    error_code="max_attempts_exhausted",
+                )
+                self._sync_outbox_delivery_row(row, failed_record)
+                session.commit()
+                return OutboxDeliveryClaimResult(status="empty")
+            claimed_record = self._updated_outbox_delivery_record(
+                record,
+                state="running",
+                updated_at=observed_at,
+                lease_owner=normalized_lease_owner,
+                lease_expires_at=lease_expires_at,
+                attempt=record.attempt + 1,
+                error_code="",
+            )
+            self._sync_outbox_delivery_row(row, claimed_record)
+            session.commit()
+            return OutboxDeliveryClaimResult(status="claimed", record=claimed_record)
+
+    def mark_outbox_delivery_provider_started(
+        self,
+        *,
+        record: OutboxDeliveryRecord,
+        lease_owner: str,
+        provider_operation_key: str,
+        provider_id: str = "",
+        updated_at: str = "",
+    ) -> OutboxDeliveryCompletionResult:
+        normalized_provider_operation_key = provider_operation_key.strip()
+        if not normalized_provider_operation_key:
+            raise ValueError("Outbox provider start requires provider_operation_key.")
+        return self._update_running_outbox_delivery(
+            record=record,
+            lease_owner=lease_owner,
+            updates={
+                "provider_operation_key": normalized_provider_operation_key,
+                "provider_id": provider_id.strip(),
+                "updated_at": updated_at.strip(),
+            },
+        )
+
+    def complete_outbox_delivery_record(
+        self,
+        *,
+        record: OutboxDeliveryRecord,
+        lease_owner: str,
+    ) -> OutboxDeliveryCompletionResult:
+        return self._update_running_outbox_delivery(
+            record=record,
+            lease_owner=lease_owner,
+            updates=record.model_dump(mode="json"),
+            require_terminal=True,
+        )
+
+    def _update_running_outbox_delivery(
+        self,
+        *,
+        record: OutboxDeliveryRecord,
+        lease_owner: str,
+        updates: dict[str, object],
+        require_terminal: bool = False,
+    ) -> OutboxDeliveryCompletionResult:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("Outbox delivery update requires lease_owner.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_at = self._database_mutation_timestamp(session)
+            statement = (
+                select(LaunchplaneOutboxDeliveryRow)
+                .where(LaunchplaneOutboxDeliveryRow.delivery_id == record.delivery_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                return OutboxDeliveryCompletionResult(status="missing")
+            current_record = self._read_payload(
+                model_type=OutboxDeliveryRecord,
+                payload=row.payload,
+            )
+            if current_record.state != "running":
+                return OutboxDeliveryCompletionResult(status="not_running", record=current_record)
+            if current_record.lease_owner != normalized_lease_owner:
+                return OutboxDeliveryCompletionResult(
+                    status="owner_mismatch", record=current_record
+                )
+            if current_record.lease_expires_at <= observed_at:
+                return OutboxDeliveryCompletionResult(status="lease_expired", record=current_record)
+            next_updates = dict(updates)
+            if not str(next_updates.get("updated_at") or "").strip():
+                next_updates["updated_at"] = observed_at
+            if require_terminal:
+                next_updates["lease_owner"] = ""
+                next_updates["lease_expires_at"] = ""
+                if next_updates.get("state") in {"pending", "reconcile_required"}:
+                    retry_seconds = min(
+                        300,
+                        5 * (2 ** min(max(current_record.attempt - 1, 0), 6)),
+                    )
+                    next_updates["next_attempt_at"] = self._mutation_lease_expiry(
+                        observed_at=observed_at,
+                        lease_seconds=retry_seconds,
+                    )
+            else:
+                next_updates["state"] = "running"
+                next_updates["lease_owner"] = normalized_lease_owner
+                next_updates["lease_expires_at"] = current_record.lease_expires_at
+            updated_record = self._updated_outbox_delivery_record(current_record, **next_updates)
+            if require_terminal and updated_record.kind == "public_ingress_notification":
+                attempt_payload = updated_record.payload.get("attempt_result")
+                if isinstance(attempt_payload, dict):
+                    attempt = PublicIngressNotificationAttemptRecord.model_validate(attempt_payload)
+                    session.merge(
+                        LaunchplanePublicIngressNotificationAttemptRow(
+                            attempt_id=attempt.attempt_id,
+                            incident_id=attempt.incident_id,
+                            event=attempt.event,
+                            destination_kind=attempt.destination_kind,
+                            delivery_status=attempt.delivery_status,
+                            attempted_at=attempt.attempted_at,
+                            payload=self._payload_dict(attempt),
+                        )
+                    )
+            self._sync_outbox_delivery_row(row, updated_record)
+            session.commit()
+            return OutboxDeliveryCompletionResult(status="updated", record=updated_record)
 
     def read_idempotency_record(
         self,
@@ -6395,6 +6803,53 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=self._payload_dict(record),
             )
         )
+
+    def write_public_ingress_transition_with_outbox(
+        self,
+        *,
+        observation: PublicIngressObservationRecord,
+        incidents: tuple[PublicIngressIncidentRecord, ...],
+        outbox_deliveries: tuple[OutboxDeliveryRecord, ...] = (),
+    ) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_outbox_dedupe_keys(
+                session,
+                dedupe_keys=tuple(delivery.dedupe_key for delivery in outbox_deliveries),
+            )
+            session.merge(
+                LaunchplanePublicIngressObservationRow(
+                    record_id=observation.record_id,
+                    product=observation.product,
+                    context=observation.context,
+                    instance=observation.instance,
+                    status=observation.status,
+                    observed_at=observation.observed_at,
+                    payload=self._payload_dict(observation),
+                )
+            )
+            for incident in incidents:
+                session.merge(
+                    LaunchplanePublicIngressIncidentRow(
+                        incident_id=incident.incident_id,
+                        product=incident.product,
+                        context=incident.context,
+                        instance=incident.instance,
+                        status=incident.status,
+                        opened_at=incident.opened_at,
+                        latest_observed_at=incident.latest_observed_at,
+                        payload=self._payload_dict(incident),
+                    )
+                )
+            for delivery in outbox_deliveries:
+                existing_delivery = session.scalar(
+                    select(LaunchplaneOutboxDeliveryRow)
+                    .where(LaunchplaneOutboxDeliveryRow.dedupe_key == delivery.dedupe_key)
+                    .limit(1)
+                )
+                if existing_delivery is None:
+                    session.add(self._outbox_delivery_row(delivery))
+            session.commit()
 
     def list_public_ingress_incident_records(
         self,

@@ -102,6 +102,12 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
+from control_plane.contracts.outbox_delivery import (
+    OutboxDeliveryKind,
+    OutboxDeliveryRecord,
+    OutboxDeliveryState,
+    build_outbox_delivery_id,
+)
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import (
@@ -176,6 +182,7 @@ from control_plane.storage.postgres import (
     LaunchplaneIdempotencyRow,
     LaunchplaneProductProfileRow,
     MutationReservationResult,
+    OutboxWithIdempotencyRequest,
     PostgresRecordStore,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
@@ -248,6 +255,41 @@ def _mutation_reservation(
         lease_owner=lease_owner,
         lease_expires_at=lease_expires_at,
         reserved_at=reserved_at,
+    )
+
+
+def _outbox_delivery(
+    *,
+    kind: OutboxDeliveryKind = "github_workflow_dispatch",
+    dedupe_key: str = "github-workflow-dispatch:example/repo:deploy.yml:main:abc123",
+    state: OutboxDeliveryState = "pending",
+    created_at: str = "2026-07-13T00:00:00Z",
+    next_attempt_at: str = "2026-07-13T00:00:00Z",
+    provider_operation_key: str = "",
+    attempt: int = 0,
+    lease_owner: str = "",
+    lease_expires_at: str = "",
+) -> OutboxDeliveryRecord:
+    return OutboxDeliveryRecord(
+        delivery_id=build_outbox_delivery_id(kind=kind, dedupe_key=dedupe_key),
+        kind=kind,
+        state=state,
+        aggregate_type="generic_web_promotion_workflow",
+        aggregate_id="example-product:example-context",
+        dedupe_key=dedupe_key,
+        created_at=created_at,
+        updated_at=created_at,
+        next_attempt_at=next_attempt_at,
+        lease_owner=lease_owner,
+        lease_expires_at=lease_expires_at,
+        attempt=attempt,
+        provider_operation_key=provider_operation_key,
+        payload={
+            "repository": "example/repo",
+            "workflow_id": "deploy.yml",
+            "ref": "main",
+            "inputs": {"dry_run": "false"},
+        },
     )
 
 
@@ -2014,6 +2056,140 @@ class PostgresRecordStoreTests(unittest.TestCase):
             assert loaded is not None
             self.assertEqual(loaded.request_fingerprint, "fingerprint-123")
             self.assertEqual(loaded.response_payload["records"]["preview_id"], "preview-35")
+
+    def test_outbox_delivery_round_trip_claim_and_complete(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            delivery = _outbox_delivery()
+
+            store.write_outbox_delivery_record(delivery)
+            claimed = store.claim_next_outbox_delivery_record(
+                lease_owner="worker-a",
+                lease_seconds=300,
+                now="2026-07-13T00:00:10Z",
+            )
+            assert claimed.record is not None
+            delivered_record = claimed.record.model_copy(
+                update={
+                    "state": "delivered",
+                    "action": "dispatched_workflow",
+                    "external_id": "12345",
+                    "external_url": "https://github.example/actions/runs/12345",
+                }
+            )
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                return_value="2026-07-13T00:00:20Z",
+            ):
+                stale_completion = store.complete_outbox_delivery_record(
+                    record=delivered_record,
+                    lease_owner="worker-b",
+                )
+                completion = store.complete_outbox_delivery_record(
+                    record=delivered_record,
+                    lease_owner="worker-a",
+                )
+            loaded = store.read_outbox_delivery_record(delivery.delivery_id)
+            store.close()
+
+        self.assertEqual(claimed.status, "claimed")
+        self.assertEqual(claimed.record.state, "running")
+        self.assertEqual(claimed.record.lease_owner, "worker-a")
+        self.assertEqual(claimed.record.attempt, 1)
+        self.assertEqual(stale_completion.status, "owner_mismatch")
+        self.assertEqual(completion.status, "updated")
+        self.assertEqual(loaded.state, "delivered")
+        self.assertEqual(loaded.lease_owner, "")
+        self.assertEqual(loaded.external_id, "12345")
+
+    def test_outbox_enqueue_with_idempotency_commits_both_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            delivery = _outbox_delivery()
+            idempotency = LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_idempotency_record_id(
+                    response_trace_id="launchplane_req_outbox",
+                ),
+                scope="github-actions:outbox-test",
+                route_path="/v1/drivers/generic-web/prod-promotion-workflow",
+                idempotency_key="outbox-idempotency-key",
+                request_fingerprint="fingerprint-outbox",
+                response_status_code=202,
+                response_trace_id="launchplane_req_outbox",
+                recorded_at="2026-07-13T00:00:00Z",
+                response_payload={
+                    "status": "accepted",
+                    "records": {"outbox_delivery_id": delivery.delivery_id},
+                },
+            )
+
+            first = store.enqueue_outbox_delivery_with_idempotency(
+                OutboxWithIdempotencyRequest(
+                    delivery=delivery,
+                    idempotency_record=idempotency,
+                )
+            )
+            duplicate = store.enqueue_outbox_delivery_with_idempotency(
+                OutboxWithIdempotencyRequest(
+                    delivery=delivery.model_copy(update={"delivery_id": "ignored-duplicate"}),
+                    idempotency_record=None,
+                )
+            )
+            loaded_idempotency = store.read_idempotency_record(
+                scope=idempotency.scope,
+                route_path=idempotency.route_path,
+                idempotency_key=idempotency.idempotency_key,
+            )
+            outbox_rows = store.list_outbox_delivery_records(states=("pending",))
+            store.close()
+
+        self.assertEqual(first.delivery_id, delivery.delivery_id)
+        self.assertEqual(duplicate.delivery_id, delivery.delivery_id)
+        self.assertIsNotNone(loaded_idempotency)
+        assert loaded_idempotency is not None
+        self.assertEqual(
+            loaded_idempotency.response_payload["records"]["outbox_delivery_id"],
+            delivery.delivery_id,
+        )
+        self.assertEqual([row.delivery_id for row in outbox_rows], [delivery.delivery_id])
+
+    def test_outbox_claim_marks_expired_provider_marker_for_reconciliation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            delivery = _outbox_delivery(
+                state="running",
+                provider_operation_key="github-workflow-dispatch:example/repo:deploy.yml:main:abc123",
+                attempt=1,
+                lease_owner="worker-a",
+                lease_expires_at="2026-07-13T00:01:00Z",
+            )
+            store.write_outbox_delivery_record(delivery)
+
+            claimed = store.claim_next_outbox_delivery_record(
+                lease_owner="worker-b",
+                now="2026-07-13T00:02:00Z",
+            )
+            loaded = store.read_outbox_delivery_record(delivery.delivery_id)
+            store.close()
+
+        self.assertEqual(claimed.status, "claimed")
+        assert claimed.record is not None
+        self.assertEqual(claimed.record.state, "running")
+        self.assertEqual(claimed.record.lease_owner, "worker-b")
+        self.assertEqual(claimed.record.attempt, 2)
+        self.assertEqual(
+            claimed.record.provider_operation_key,
+            "github-workflow-dispatch:example/repo:deploy.yml:main:abc123",
+        )
+        self.assertEqual(loaded.state, "running")
+        self.assertEqual(loaded.lease_owner, "worker-b")
 
     def test_mutation_reservation_replays_conflicts_and_reclaims_expired_lease(
         self,

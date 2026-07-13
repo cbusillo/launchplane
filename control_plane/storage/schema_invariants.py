@@ -8,7 +8,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-EXPECTED_ALEMBIC_HEAD_REVISION = "f2a4c6e8b0d2"
+EXPECTED_ALEMBIC_HEAD_REVISION = "a2b4c6d8e0f2"
 
 
 class SchemaInspectorProtocol(Protocol):
@@ -110,6 +110,21 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "payload",
         ("jsonb",),
     ),
+    CriticalColumnType(
+        "launchplane_outbox_deliveries",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_outbox_deliveries",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_outbox_deliveries",
+        "max_attempts",
+        ("integer", "int4"),
+    ),
 )
 
 _ACTIVE_OPERATION_PREDICATE_TOKENS = ("status", "pending", "running")
@@ -186,6 +201,17 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_route_bindings",
         "launchplane_route_bindings_updated_idx",
         ("updated_at",),
+    ),
+    CriticalIndex(
+        "launchplane_outbox_deliveries",
+        "launchplane_outbox_deliveries_dedupe_uidx",
+        ("dedupe_key",),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_outbox_deliveries",
+        "launchplane_outbox_deliveries_claim_idx",
+        ("state", "next_attempt_at", "lease_expires_at", "created_at"),
     ),
 )
 

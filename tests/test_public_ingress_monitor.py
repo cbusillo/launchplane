@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from typing import Literal
 from unittest.mock import patch
@@ -11,6 +13,7 @@ from click.testing import CliRunner
 from control_plane.cli import main as launchplane_cli
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
@@ -35,10 +38,15 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
     PublicIngressNotificationDriverSet,
+    _gh_issue_client,
+    deliver_public_ingress_notification_outbox_delivery,
     discover_public_ingress_monitor_targets,
     run_public_ingress_monitor_once,
 )
 from control_plane.outbound_http import PublicHttpDestinationError
+from control_plane.outbox_worker import run_outbox_worker_once
+from control_plane.storage.postgres import PostgresRecordStore
+from tests.support.stores import _sqlite_database_url
 
 
 def _public_health_monitoring(
@@ -1120,6 +1128,307 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(github_calls[0][0], "create")
         self.assertEqual(email_subjects, ["[Launchplane] Public ingress opened: example-site/prod"])
         self.assertEqual(discord_posts[0][0], "https://discord.com/api/webhooks/test/webhook")
+
+    def test_postgres_monitor_writes_github_notifications_to_outbox(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            store.write_public_ingress_notification_policy_record(
+                _notification_policy(
+                    PublicIngressNotificationDestination(
+                        destination_id="github-main",
+                        kind="github_issue",
+                        github_repository="cbusillo/launchplane",
+                        github_label="public-ingress",
+                    )
+                )
+            )
+
+            result = run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at="2026-05-29T12:25:00Z",
+                http_get=lambda _url, _timeout: HttpObservation(
+                    status_code=503,
+                    final_url="https://example.test",
+                    redirect_count=0,
+                ),
+            )
+            outbox_rows = store.list_outbox_delivery_records(
+                states=("pending",), kind="public_ingress_notification"
+            )
+            attempts = store.list_public_ingress_notification_attempt_records()
+            observations = store.list_public_ingress_observation_records()
+            incidents = store.list_public_ingress_incident_records()
+            store.close()
+
+        self.assertEqual(result.open_incident_count, 1)
+        self.assertEqual(result.delivery_attempt_count, 0)
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(attempts, ())
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].aggregate_id, incidents[0].incident_id)
+        self.assertIn(
+            "launchplane-public-ingress-notification", str(outbox_rows[0].payload["body"])
+        )
+        self.assertEqual(
+            outbox_rows[0].payload["destination"],
+            {
+                "destination_id": "github-main",
+                "kind": "github_issue",
+                "status": "enabled",
+                "github_repository": "cbusillo/launchplane",
+                "github_issue_number": None,
+                "github_label": "public-ingress",
+            },
+        )
+
+    def test_postgres_mixed_notification_policy_keeps_direct_email_and_discord(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            store.write_public_ingress_notification_policy_record(
+                _notification_policy(
+                    PublicIngressNotificationDestination(
+                        destination_id="github-main",
+                        kind="github_issue",
+                        github_repository="cbusillo/launchplane",
+                        github_label="public-ingress",
+                    ),
+                    PublicIngressNotificationDestination(
+                        destination_id="email-ops",
+                        kind="email",
+                        email_to=("ops@example.test",),
+                        email_from="launchplane@example.test",
+                        smtp_host="smtp.example.test",
+                        smtp_username_secret="smtp-username",
+                        smtp_password_secret="smtp-password",
+                    ),
+                    PublicIngressNotificationDestination(
+                        destination_id="discord-ops",
+                        kind="discord",
+                        discord_webhook_secret="discord-webhook",
+                    ),
+                )
+            )
+            email_subjects: list[str] = []
+            discord_posts: list[tuple[str, dict[str, object]]] = []
+            drivers = PublicIngressNotificationDriverSet(
+                github_client=lambda _action, _payload: self.fail(
+                    "GitHub notifications must remain queued"
+                ),
+                email_sender=lambda _destination, message: email_subjects.append(
+                    str(message["Subject"])
+                ),
+                discord_sender=lambda webhook_url, payload: discord_posts.append(
+                    (webhook_url, payload)
+                ),
+                secret_resolver=lambda secret_name: {
+                    "discord-webhook": "https://discord.com/api/webhooks/test/webhook",
+                    "smtp-username": "launchplane",
+                    "smtp-password": "secret",
+                }.get(secret_name, ""),
+            )
+
+            result = run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at="2026-05-29T12:25:00Z",
+                http_get=lambda _url, _timeout: HttpObservation(
+                    status_code=503,
+                    final_url="https://example.test",
+                    redirect_count=0,
+                ),
+                notification_drivers=drivers,
+            )
+            outbox_rows = store.list_outbox_delivery_records(
+                states=("pending",),
+                kind="public_ingress_notification",
+            )
+            attempts = store.list_public_ingress_notification_attempt_records()
+            store.close()
+
+        self.assertEqual(result.delivery_attempt_count, 2)
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(
+            {attempt.destination_kind for attempt in attempts},
+            {"email", "discord"},
+        )
+        self.assertEqual(email_subjects, ["[Launchplane] Public ingress opened: example-site/prod"])
+        self.assertEqual(len(discord_posts), 1)
+
+    def test_close_reconciliation_ensures_issue_is_closed_after_marker_comment(self) -> None:
+        marker = "attempt-public-ingress-resolved"
+        record = OutboxDeliveryRecord(
+            delivery_id="outbox-public-ingress-close",
+            kind="public_ingress_notification",
+            state="running",
+            aggregate_type="public_ingress_incident",
+            aggregate_id="incident-example-site-prod",
+            dedupe_key=f"public_ingress_notification:{marker}",
+            created_at="2026-05-29T12:25:00Z",
+            updated_at="2026-05-29T12:25:01Z",
+            next_attempt_at="2026-05-29T12:25:00Z",
+            lease_owner="worker-b",
+            lease_expires_at="2026-05-29T12:30:00Z",
+            attempt=2,
+            provider_operation_key=f"public_ingress_notification:{marker}:close",
+            provider_id="github",
+            payload={
+                "attempt": {
+                    "attempt_id": marker,
+                    "incident_id": "incident-example-site-prod",
+                    "event": "resolved",
+                    "policy_id": "public-ingress-notifications-example-site",
+                    "destination_id": "github-main",
+                    "destination_kind": "github_issue",
+                    "attempted_at": "2026-05-29T12:25:00Z",
+                    "observation_id": "observation-example-site-prod",
+                },
+                "destination": {
+                    "destination_id": "github-main",
+                    "kind": "github_issue",
+                    "status": "enabled",
+                    "github_repository": "cbusillo/launchplane",
+                    "github_issue_number": None,
+                    "github_label": "public-ingress",
+                },
+                "body": f"Resolved\n<!-- launchplane-public-ingress-notification:{marker} -->",
+                "existing_issue_url": "https://github.com/cbusillo/launchplane/issues/123",
+                "marker": marker,
+            },
+        )
+        actions: list[str] = []
+
+        def github_client(action: str, _payload: dict[str, object]) -> dict[str, object]:
+            actions.append(action)
+            if action == "find_marker":
+                return {
+                    "url": "https://github.com/cbusillo/launchplane/issues/123#issuecomment-1",
+                    "id": "comment-1",
+                }
+            if action == "ensure_closed":
+                return {
+                    "url": "https://github.com/cbusillo/launchplane/issues/123",
+                    "id": "issue-123",
+                }
+            self.fail(f"unexpected GitHub action {action}")
+
+        result = deliver_public_ingress_notification_outbox_delivery(
+            record=record,
+            drivers=PublicIngressNotificationDriverSet(github_client=github_client),
+            mark_provider_started=lambda _provider_operation_key, _provider_id: self.fail(
+                "existing provider marker must not be replaced"
+            ),
+        )
+
+        self.assertEqual(actions, ["find_marker", "ensure_closed"])
+        self.assertEqual(result.state, "delivered")
+        self.assertEqual(result.action, "closed_issue")
+        self.assertEqual(result.external_id, "issue-123")
+
+    def test_github_ensure_closed_patches_open_issue_without_duplicate_comment(self) -> None:
+        with patch(
+            "control_plane.workflows.public_ingress_monitor._github_api_request",
+            side_effect=(
+                {
+                    "state": "open",
+                    "html_url": "https://github.com/cbusillo/launchplane/issues/123",
+                    "node_id": "issue-123",
+                },
+                {
+                    "state": "closed",
+                    "html_url": "https://github.com/cbusillo/launchplane/issues/123",
+                    "node_id": "issue-123",
+                },
+            ),
+        ) as request_mock:
+            response = _gh_issue_client(
+                "ensure_closed",
+                {
+                    "repository": "cbusillo/launchplane",
+                    "issue_url": "https://github.com/cbusillo/launchplane/issues/123",
+                },
+                token="github-token",
+            )
+
+        self.assertEqual(response["id"], "issue-123")
+        self.assertEqual(
+            [call.kwargs["method"] for call in request_mock.call_args_list],
+            ["GET", "PATCH"],
+        )
+        self.assertEqual(
+            request_mock.call_args_list[1].kwargs["body"],
+            {"state": "closed", "state_reason": "completed"},
+        )
+
+    def test_transient_github_notification_failure_schedules_retry(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            store.write_public_ingress_notification_policy_record(
+                _notification_policy(
+                    PublicIngressNotificationDestination(
+                        destination_id="github-main",
+                        kind="github_issue",
+                        github_repository="cbusillo/launchplane",
+                        github_label="public-ingress",
+                    )
+                )
+            )
+            run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at="2026-05-29T12:25:00Z",
+                http_get=lambda _url, _timeout: HttpObservation(
+                    status_code=503,
+                    final_url="https://example.test",
+                    redirect_count=0,
+                ),
+            )
+            delivery = store.list_outbox_delivery_records(
+                states=("pending",),
+                kind="public_ingress_notification",
+            )[0]
+
+            def github_client(
+                _action: str,
+                _payload: dict[str, object],
+            ) -> dict[str, object]:
+                raise RuntimeError("temporary GitHub failure")
+
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: "2026-05-29T12:25:01Z",
+            ):
+                worker_result = run_outbox_worker_once(
+                    record_store=store,
+                    control_plane_root=Path("."),
+                    lease_owner="worker-a",
+                    notification_drivers=PublicIngressNotificationDriverSet(
+                        github_client=github_client
+                    ),
+                )
+            loaded = store.read_outbox_delivery_record(delivery.delivery_id)
+            attempts = store.list_public_ingress_notification_attempt_records()
+            store.close()
+
+        self.assertEqual(worker_result.status, "pending")
+        self.assertEqual(loaded.state, "pending")
+        self.assertEqual(loaded.error_code, "github_provider_error")
+        self.assertEqual(loaded.next_attempt_at, "2026-05-29T12:25:06Z")
+        self.assertEqual(attempts, ())
 
     def test_notification_policies_can_scope_to_health_check_kind(self) -> None:
         lane = ProductLaneProfile(

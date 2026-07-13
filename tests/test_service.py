@@ -156,7 +156,6 @@ from tests.support.stores import (
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
 from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
 from control_plane.workflows.generic_web_rollback import GenericWebRollbackApplyResult
-from control_plane.workflows.generic_web_promotion_workflow import GenericWebPromotionWorkflowResult
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyResult,
     GenericWebPreviewInventoryItem,
@@ -9257,7 +9256,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
             session_manager = _fastapi_human_session_manager()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
@@ -9277,6 +9278,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             app = create_launchplane_fastapi_test_app(
                 state_dir=state_dir,
+                database_url=database_url,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
@@ -9284,21 +9286,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             cookie = _fastapi_signed_in_cookie(session_manager, role="admin")
 
-            with patch(
-                "control_plane.generic_web_promotion_http.dispatch_generic_web_promotion_workflow",
-                return_value=GenericWebPromotionWorkflowResult(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    repository="cbusillo/sellyouroutboard",
-                    workflow_id="promote-prod.yml",
-                    ref="main",
-                    dry_run=False,
-                    bump="patch",
-                    run_id=25237186636,
-                    run_url="https://github.com/cbusillo/sellyouroutboard/actions/runs/25237186636",
-                    run_status="queued",
-                ),
-            ) as dispatch_mock:
+            with (
+                patch(
+                    "control_plane.generic_web_promotion_http.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ) as token_mock,
+                patch(
+                    "control_plane.generic_web_promotion_http._workflow_dispatch_run_ids",
+                    return_value={25237186635},
+                ) as runs_mock,
+            ):
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
@@ -9318,15 +9315,24 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     authorization="",
                     headers=_fastapi_browser_mutation_headers(session_manager, cookie),
                 )
+            outbox_rows = store.list_outbox_delivery_records(states=("pending",))
+            store.close()
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["repository"], "cbusillo/sellyouroutboard")
         self.assertEqual(payload["result"]["workflow_id"], "promote-prod.yml")
         self.assertFalse(payload["result"]["dry_run"])
-        self.assertEqual(payload["result"]["run_id"], 25237186636)
-        self.assertEqual(payload["records"], {})
+        self.assertEqual(payload["result"]["dispatch_status"], "pending")
+        self.assertEqual(payload["result"]["run_id"], 0)
+        self.assertIn("outbox_delivery_id", payload["records"])
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].delivery_id, payload["records"]["outbox_delivery_id"])
+        self.assertEqual(outbox_rows[0].kind, "github_workflow_dispatch")
+        self.assertEqual(outbox_rows[0].payload["credential_context"], "sellyouroutboard-testing")
+        self.assertEqual(outbox_rows[0].payload["previous_run_ids"], [25237186635])
         GenericWebPromotionWorkflowResponse.model_validate(payload)
-        dispatch_mock.assert_called_once()
+        token_mock.assert_called_once()
+        runs_mock.assert_called_once()
 
     def test_human_session_dispatches_generic_web_promotion_workflow_with_padded_lane_context(
         self,
@@ -9334,7 +9340,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
             session_manager = _fastapi_human_session_manager()
             profile_payload = _product_profile_payload_with_prod()
             profile_payload["lanes"] = tuple(
@@ -9359,6 +9367,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             app = create_launchplane_fastapi_test_app(
                 state_dir=state_dir,
+                database_url=database_url,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
@@ -9366,21 +9375,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             cookie = _fastapi_signed_in_cookie(session_manager, role="admin")
 
-            with patch(
-                "control_plane.generic_web_promotion_http.dispatch_generic_web_promotion_workflow",
-                return_value=GenericWebPromotionWorkflowResult(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    repository="cbusillo/sellyouroutboard",
-                    workflow_id="promote-prod.yml",
-                    ref="main",
-                    dry_run=False,
-                    bump="patch",
-                    run_id=25237186636,
-                    run_url="https://github.com/cbusillo/sellyouroutboard/actions/runs/25237186636",
-                    run_status="queued",
+            with (
+                patch(
+                    "control_plane.generic_web_promotion_http.resolve_launchplane_github_token",
+                    return_value="github-token",
                 ),
-            ) as dispatch_mock:
+                patch(
+                    "control_plane.generic_web_promotion_http._workflow_dispatch_run_ids",
+                    return_value={25237186635},
+                ),
+            ):
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
@@ -9400,16 +9404,22 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     authorization="",
                     headers=_fastapi_browser_mutation_headers(session_manager, cookie),
                 )
+            outbox_rows = store.list_outbox_delivery_records(states=("pending",))
+            store.close()
 
         self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["run_id"], 25237186636)
-        dispatch_mock.assert_called_once()
+        self.assertEqual(payload["result"]["dispatch_status"], "pending")
+        self.assertEqual(payload["result"]["run_id"], 0)
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].aggregate_id, "sellyouroutboard:sellyouroutboard-testing")
 
     def test_generic_web_promotion_workflow_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
             )
@@ -9431,6 +9441,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             app = create_launchplane_fastapi_test_app(
                 state_dir=state_dir,
+                database_url=database_url,
                 verifier=_StubVerifier(
                     _identity(
                         repository="cbusillo/sellyouroutboard",
@@ -9455,21 +9466,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             }
 
-            with patch(
-                "control_plane.generic_web_promotion_http.dispatch_generic_web_promotion_workflow",
-                return_value=GenericWebPromotionWorkflowResult(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    repository="cbusillo/sellyouroutboard",
-                    workflow_id="promote-prod.yml",
-                    ref="main",
-                    dry_run=False,
-                    bump="patch",
-                    run_id=25237186636,
-                    run_url="https://github.com/cbusillo/sellyouroutboard/actions/runs/25237186636",
-                    run_status="queued",
-                ),
-            ) as dispatch_mock:
+            with (
+                patch(
+                    "control_plane.generic_web_promotion_http.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ) as token_mock,
+                patch(
+                    "control_plane.generic_web_promotion_http._workflow_dispatch_run_ids",
+                    return_value={25237186635},
+                ) as runs_mock,
+            ):
                 first_status_code, first_payload = _invoke_app(
                     app,
                     method="POST",
@@ -9484,14 +9490,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     payload=request_payload,
                     headers={"Idempotency-Key": "generic-web-promotion-workflow-replay"},
                 )
+            outbox_rows = store.list_outbox_delivery_records(states=("pending",))
+            store.close()
 
         self.assertEqual(first_status_code, 202)
         self.assertEqual(second_status_code, 202)
-        self.assertEqual(first_payload["records"], {})
-        self.assertEqual(second_payload["records"], {})
+        self.assertIn("outbox_delivery_id", first_payload["records"])
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].delivery_id, first_payload["records"]["outbox_delivery_id"])
         self.assertTrue(second_payload["replayed"])
         self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
-        dispatch_mock.assert_called_once()
+        token_mock.assert_called_once()
+        runs_mock.assert_called_once()
 
     def test_generic_web_promotion_workflow_rejects_terminal_agent_bearer(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -9513,29 +9524,25 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
             )
 
-            with patch(
-                "control_plane.generic_web_promotion_http.dispatch_generic_web_promotion_workflow"
-            ) as dispatch_mock:
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/drivers/generic-web/prod-promotion-workflow",
-                    payload={
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion-workflow",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "workflow": {
                         "schema_version": 1,
                         "product": "sellyouroutboard",
-                        "workflow": {
-                            "schema_version": 1,
-                            "product": "sellyouroutboard",
-                            "context": "sellyouroutboard-testing",
-                            "dry_run": False,
-                        },
+                        "context": "sellyouroutboard-testing",
+                        "dry_run": False,
                     },
-                    authorization="Bearer terminal-agent-token",
-                )
+                },
+                authorization="Bearer terminal-agent-token",
+            )
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
-        dispatch_mock.assert_not_called()
 
     def test_generic_web_promotion_workflow_rejects_unauthorized_human(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -9580,7 +9587,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
             profile_payload = _product_profile_payload_with_prod()
             profile_payload["driver_id"] = "odoo"
             store.write_product_profile_record(
@@ -9604,6 +9613,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             app = create_launchplane_fastapi_test_app(
                 state_dir=state_dir,
+                database_url=database_url,
                 verifier=_StubVerifier(
                     _identity(
                         repository="cbusillo/odoo-tenant-cm",
@@ -9618,21 +9628,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            with patch(
-                "control_plane.generic_web_promotion_http.dispatch_generic_web_promotion_workflow",
-                return_value=GenericWebPromotionWorkflowResult(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    repository="cbusillo/sellyouroutboard",
-                    workflow_id="promote-prod.yml",
-                    ref="main",
-                    dry_run=False,
-                    bump="patch",
-                    run_id=25237186636,
-                    run_url="https://github.com/cbusillo/sellyouroutboard/actions/runs/25237186636",
-                    run_status="queued",
+            with (
+                patch(
+                    "control_plane.generic_web_promotion_http.resolve_launchplane_github_token",
+                    return_value="github-token",
                 ),
-            ) as dispatch_mock:
+                patch(
+                    "control_plane.generic_web_promotion_http._workflow_dispatch_run_ids",
+                    return_value={25237186635},
+                ),
+            ):
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
@@ -9648,12 +9653,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         },
                     },
                 )
+            outbox_rows = store.list_outbox_delivery_records(states=("pending",))
+            store.close()
 
         self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["run_id"], 25237186636)
-        dispatch_mock.assert_called_once()
-        _, kwargs = dispatch_mock.call_args
-        self.assertEqual(kwargs["profile"].driver_id, "odoo")
+        self.assertEqual(payload["result"]["dispatch_status"], "pending")
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].aggregate_id, "sellyouroutboard:sellyouroutboard-testing")
 
     def test_generic_web_promotion_workflow_rejects_unowned_context_before_authz(
         self,
@@ -9688,30 +9694,26 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             cookie = _fastapi_signed_in_cookie(session_manager, role="admin")
 
-            with patch(
-                "control_plane.generic_web_promotion_http.dispatch_generic_web_promotion_workflow"
-            ) as dispatch_mock:
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/drivers/generic-web/prod-promotion-workflow",
-                    payload={
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion-workflow",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "workflow": {
                         "schema_version": 1,
                         "product": "sellyouroutboard",
-                        "workflow": {
-                            "schema_version": 1,
-                            "product": "sellyouroutboard",
-                            "context": "unowned-context",
-                            "dry_run": False,
-                        },
+                        "context": "unowned-context",
+                        "dry_run": False,
                     },
-                    authorization="",
-                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
-                )
+                },
+                authorization="",
+                headers=_fastapi_browser_mutation_headers(session_manager, cookie),
+            )
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
-        dispatch_mock.assert_not_called()
 
     def test_generic_web_promotion_workflow_rejects_token_unowned_context_before_authz(
         self,
@@ -9755,28 +9757,24 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            with patch(
-                "control_plane.generic_web_promotion_http.dispatch_generic_web_promotion_workflow"
-            ) as dispatch_mock:
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/drivers/generic-web/prod-promotion-workflow",
-                    payload={
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion-workflow",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "workflow": {
                         "schema_version": 1,
                         "product": "sellyouroutboard",
-                        "workflow": {
-                            "schema_version": 1,
-                            "product": "sellyouroutboard",
-                            "context": "unowned-context",
-                            "dry_run": False,
-                        },
+                        "context": "unowned-context",
+                        "dry_run": False,
                     },
-                )
+                },
+            )
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
-        dispatch_mock.assert_not_called()
 
     def test_generic_web_preview_inventory_route_writes_scan_from_driver_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

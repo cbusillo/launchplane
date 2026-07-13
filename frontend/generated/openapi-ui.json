@@ -5178,8 +5178,11 @@
             "type": "string"
           },
           "dispatch_status": {
-            "const": "dispatched",
-            "default": "dispatched",
+            "default": "pending",
+            "enum": [
+              "pending",
+              "dispatched"
+            ],
             "title": "Dispatch Status",
             "type": "string"
           },
