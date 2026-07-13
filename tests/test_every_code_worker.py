@@ -1114,8 +1114,13 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
     def test_session_name_is_stable_and_tmux_safe(self) -> None:
         session_name = every_code_tmux_session_name("every code/cbusillo/code#123 !")
+        fenced_session_name = every_code_tmux_session_name(
+            "every code/cbusillo/code#123 !",
+            fencing_token=2,
+        )
 
         self.assertEqual(session_name, "every-code-every-code-cbusillo-code-123")
+        self.assertEqual(fenced_session_name, "every-code-every-code-cbusillo-code-123-f2")
 
     def test_default_command_includes_issue_and_request(self) -> None:
         command = default_every_code_command(_queued_record())
@@ -2087,12 +2092,17 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
     def test_run_once_terminates_stale_session_before_relaunch(self) -> None:
         class StaleSessionRunner(_Runner):
+            stale_session_seen = False
+
             def __call__(
                 self, args: Sequence[str], env: Mapping[str, str] | None = None
             ) -> subprocess.CompletedProcess[str]:
                 if args[0] == "tmux" and args[1] == "has-session":
                     self.calls.append(tuple(args))
-                    return subprocess.CompletedProcess(args, 0, "", "")
+                    if not self.stale_session_seen:
+                        self.stale_session_seen = True
+                        return subprocess.CompletedProcess(args, 0, "", "")
+                    return subprocess.CompletedProcess(args, 1, "", "no session")
                 if args[0] == "tmux" and args[1] == "display-message":
                     self.calls.append(tuple(args))
                     return subprocess.CompletedProcess(args, 0, "4242\n", "")

@@ -838,9 +838,11 @@ class EveryCodeCleanupReconciliationResult:
         }
 
 
-def every_code_tmux_session_name(request_id: str) -> str:
+def every_code_tmux_session_name(request_id: str, *, fencing_token: int = 0) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
-    return f"every-code-{normalized or 'request'}"[:80]
+    suffix = f"-f{fencing_token}" if fencing_token > 0 else ""
+    prefix = f"every-code-{normalized or 'request'}"
+    return f"{prefix[: 80 - len(suffix)]}{suffix}"
 
 
 def every_code_session_state_path(*, state_dir: Path, request_id: str) -> Path:
@@ -1358,7 +1360,10 @@ def run_every_code_worker_once(
             issue_number=queued_record.issue_number,
         )
 
-    session_name = every_code_tmux_session_name(claimed_record.request_id)
+    session_name = every_code_tmux_session_name(
+        claimed_record.request_id,
+        fencing_token=claimed_record.fencing_token,
+    )
     run = runner or _run_subprocess
     claim_comment_failure: ChildProcessFailure | None = None
     try:
@@ -1457,92 +1462,93 @@ def run_every_code_worker_once(
             checkout_root=prepared_checkout.source_checkout_root,
         )
 
-    existing_session = _tmux_session_exists(
-        tmux_binary=tmux_binary,
-        session_name=session_name,
-        runner=run,
-    )
-    if existing_session is None:
-        return _block_every_code_request(
-            record_store=record_store,
-            record=claimed_record,
-            host=normalized_host,
-            detail=f"Could not inspect tmux session {session_name!r}.",
-            session_name=session_name,
-            checkout_root=prepared_checkout.source_checkout_root,
-        )
-    if existing_session and not _terminate_every_code_tmux_session(
-        tmux_binary=tmux_binary,
-        session_name=session_name,
-        runner=run,
+    for stale_session_name in dict.fromkeys(
+        (every_code_tmux_session_name(claimed_record.request_id), session_name)
     ):
+        existing_session = _tmux_session_exists(
+            tmux_binary=tmux_binary,
+            session_name=stale_session_name,
+            runner=run,
+        )
+        if existing_session is None:
+            return _block_every_code_request(
+                record_store=record_store,
+                record=claimed_record,
+                host=normalized_host,
+                detail=f"Could not inspect tmux session {stale_session_name!r}.",
+                session_name=session_name,
+                checkout_root=prepared_checkout.source_checkout_root,
+            )
+        if existing_session and not _terminate_every_code_tmux_session(
+            tmux_binary=tmux_binary,
+            session_name=stale_session_name,
+            runner=run,
+        ):
+            return _block_every_code_request(
+                record_store=record_store,
+                record=claimed_record,
+                host=normalized_host,
+                detail=f"Could not terminate stale tmux session {stale_session_name!r}.",
+                session_name=session_name,
+                checkout_root=prepared_checkout.source_checkout_root,
+            )
+    command = render_every_code_command(claimed_record, command_template=command_template)
+    if state_dir is not None:
+        command = build_every_code_session_command(
+            record=claimed_record,
+            command=command,
+            state_dir=state_dir,
+            database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
+            host=normalized_host,
+        )
+    try:
+        launch_result = run(
+            (
+                tmux_binary,
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-c",
+                str(resolved_checkout_root),
+                command,
+            ),
+            None,
+        )
+    except OSError as exc:
+        failure = normalize_child_process_failure(
+            operation="Launch Every Code tmux session",
+            tool="child_process",
+            exception=exc,
+        )
         return _block_every_code_request(
             record_store=record_store,
             record=claimed_record,
             host=normalized_host,
-            detail=f"Could not terminate stale tmux session {session_name!r}.",
+            detail=failure.detail,
+            failure=failure,
             session_name=session_name,
             checkout_root=prepared_checkout.source_checkout_root,
         )
-    existing_session = False
-    if not existing_session:
-        command = render_every_code_command(claimed_record, command_template=command_template)
-        if state_dir is not None:
-            command = build_every_code_session_command(
-                record=claimed_record,
-                command=command,
-                state_dir=state_dir,
-                database_url=database_url,
-                service_url=service_url,
-                worker_token_env=worker_token_env,
-                host=normalized_host,
-            )
-        try:
-            launch_result = run(
-                (
-                    tmux_binary,
-                    "new-session",
-                    "-d",
-                    "-s",
-                    session_name,
-                    "-c",
-                    str(resolved_checkout_root),
-                    command,
-                ),
-                None,
-            )
-        except OSError as exc:
-            failure = normalize_child_process_failure(
-                operation="Launch Every Code tmux session",
-                tool="child_process",
-                exception=exc,
-            )
-            return _block_every_code_request(
-                record_store=record_store,
-                record=claimed_record,
-                host=normalized_host,
-                detail=failure.detail,
-                failure=failure,
-                session_name=session_name,
-                checkout_root=prepared_checkout.source_checkout_root,
-            )
-        if launch_result.returncode != 0:
-            failure = normalize_child_process_failure(
-                operation="Launch Every Code tmux session",
-                tool="child_process",
-                returncode=launch_result.returncode,
-                stdout=launch_result.stdout,
-                stderr=launch_result.stderr,
-            )
-            return _block_every_code_request(
-                record_store=record_store,
-                record=claimed_record,
-                host=normalized_host,
-                detail=failure.detail,
-                failure=failure,
-                session_name=session_name,
-                checkout_root=prepared_checkout.source_checkout_root,
-            )
+    if launch_result.returncode != 0:
+        failure = normalize_child_process_failure(
+            operation="Launch Every Code tmux session",
+            tool="child_process",
+            returncode=launch_result.returncode,
+            stdout=launch_result.stdout,
+            stderr=launch_result.stderr,
+        )
+        return _block_every_code_request(
+            record_store=record_store,
+            record=claimed_record,
+            host=normalized_host,
+            detail=failure.detail,
+            failure=failure,
+            session_name=session_name,
+            checkout_root=prepared_checkout.source_checkout_root,
+        )
     if state_dir is not None:
         write_every_code_session_state(
             state_dir=state_dir,
