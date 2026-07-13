@@ -4226,6 +4226,12 @@
       "EveryCodeWorkRequestRecord": {
         "additionalProperties": false,
         "properties": {
+          "attempt": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Attempt",
+            "type": "integer"
+          },
           "claimed_at": {
             "default": "",
             "title": "Claimed At",
@@ -4240,6 +4246,12 @@
             "default": "",
             "title": "Error Message",
             "type": "string"
+          },
+          "fencing_token": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Fencing Token",
+            "type": "integer"
           },
           "finished_at": {
             "default": "",
@@ -4263,6 +4275,11 @@
           },
           "issue_url": {
             "title": "Issue Url",
+            "type": "string"
+          },
+          "lease_expires_at": {
+            "default": "",
+            "title": "Lease Expires At",
             "type": "string"
           },
           "lifecycle_id": {
@@ -4338,14 +4355,17 @@
           }
         },
         "required": [
+          "attempt",
           "claimed_at",
           "claimed_by_host",
           "error_message",
+          "fencing_token",
           "finished_at",
           "github_delivery_id",
           "issue_number",
           "issue_title",
           "issue_url",
+          "lease_expires_at",
           "lifecycle_id",
           "queued_at",
           "repository",

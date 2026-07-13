@@ -24,6 +24,10 @@ from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation,
     complete_launchplane_mutation_reservation,
 )
+from control_plane.contracts.every_code_work_request import (
+    EveryCodeWorkRequestRecord,
+    EveryCodeWorkRequestStatusUpdate,
+)
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapRequest
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
@@ -168,6 +172,20 @@ def _idempotency_record(
         response_trace_id=response_trace_id,
         recorded_at="2026-07-01T00:00:00Z",
         response_payload={"status": "accepted", "trace_id": response_trace_id},
+    )
+
+
+def _every_code_work_request() -> EveryCodeWorkRequestRecord:
+    return EveryCodeWorkRequestRecord(
+        request_id="every-code-cbusillo-code-1693-test",
+        source="manual",
+        state="queued",
+        repository="cbusillo/code",
+        issue_number=1693,
+        issue_url="https://github.com/cbusillo/code/issues/1693",
+        trigger_label="every-code",
+        queued_at="2026-07-13T09:00:00Z",
+        updated_at="2026-07-13T09:00:00Z",
     )
 
 
@@ -541,6 +559,175 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_every_code_two_workers_claim_exactly_once(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def claim(
+                active_store: PostgresRecordStore, host: str
+            ) -> EveryCodeWorkRequestRecord | None:
+                barrier.wait(timeout=5)
+                return active_store.claim_every_code_work_request_record(
+                    request_id=record.request_id,
+                    host=host,
+                    claimed_at="2026-07-13T09:01:00Z",
+                )
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = (
+                        executor.submit(claim, store, "worker-a"),
+                        executor.submit(claim, second_store, "worker-b"),
+                    )
+                    results = tuple(future.result(timeout=10) for future in futures)
+                loaded = store.read_every_code_work_request_record(record.request_id)
+            finally:
+                second_store.close()
+
+        claims = tuple(result for result in results if result is not None)
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(loaded.claimed_by_host, claims[0].claimed_by_host)
+        self.assertEqual(loaded.fencing_token, 1)
+        self.assertEqual(loaded.attempt, 1)
+
+    def test_every_code_heartbeat_and_stale_recovery_are_fenced(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-a",
+                claimed_at="2026-07-13T09:01:00Z",
+                lease_seconds=60,
+            )
+            assert claimed is not None
+            stale_snapshot = store.list_stale_every_code_work_request_records(
+                as_of="2026-07-13T09:03:00Z"
+            )[0]
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def heartbeat() -> bool:
+                barrier.wait(timeout=5)
+                return store.heartbeat_every_code_work_request_record(
+                    request_id=record.request_id,
+                    host="worker-a",
+                    fencing_token=claimed.fencing_token,
+                    heartbeat_at="2026-07-13T09:02:30Z",
+                    lease_expires_at="2026-07-13T09:12:30Z",
+                )
+
+            def recover() -> EveryCodeWorkRequestRecord | None:
+                barrier.wait(timeout=5)
+                return second_store.recover_stale_every_code_work_request_record(
+                    expected_record=stale_snapshot,
+                    recovered_at="2026-07-13T09:03:00Z",
+                )
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    heartbeat_future = executor.submit(heartbeat)
+                    recover_future = executor.submit(recover)
+                    heartbeat_result = heartbeat_future.result(timeout=10)
+                    recovery_result = recover_future.result(timeout=10)
+                loaded = store.read_every_code_work_request_record(record.request_id)
+            finally:
+                second_store.close()
+
+        self.assertNotEqual(heartbeat_result, recovery_result is not None)
+        if heartbeat_result:
+            self.assertIsNone(recovery_result)
+            self.assertEqual(loaded.state, "claimed")
+            self.assertEqual(loaded.lease_expires_at, "2026-07-13T09:12:30Z")
+        else:
+            self.assertIsNotNone(recovery_result)
+            self.assertEqual(loaded.state, "queued")
+
+    def test_every_code_status_update_rejects_stale_fencing_token(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-a",
+                claimed_at="2026-07-13T09:01:00Z",
+            )
+            assert claimed is not None
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            try:
+                with self.assertRaisesRegex(ValueError, "fencing token"):
+                    second_store.update_every_code_work_request_status_record(
+                        request_id=record.request_id,
+                        update=EveryCodeWorkRequestStatusUpdate(
+                            state="done",
+                            host="worker-a",
+                            fencing_token=claimed.fencing_token + 1,
+                            updated_at="2026-07-13T09:02:00Z",
+                            result_summary="stale completion",
+                        ),
+                    )
+                completed = store.update_every_code_work_request_status_record(
+                    request_id=record.request_id,
+                    update=EveryCodeWorkRequestStatusUpdate(
+                        state="done",
+                        host="worker-a",
+                        fencing_token=claimed.fencing_token,
+                        updated_at="2026-07-13T09:02:00Z",
+                        result_summary="completed",
+                    ),
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(completed.state, "done")
+
+    def test_every_code_claim_commits_replay_evidence_atomically(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            def idempotency_record_factory(
+                claimed_record: EveryCodeWorkRequestRecord,
+            ) -> LaunchplaneIdempotencyRecord:
+                return LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(
+                        response_trace_id="trace-every-code-claim"
+                    ),
+                    scope="terminal-agent:every-code-worker",
+                    route_path="/v1/every-code/work-requests/claim",
+                    idempotency_key="every-code-claim-1693",
+                    request_fingerprint="every-code-claim-fingerprint",
+                    response_status_code=202,
+                    response_trace_id="trace-every-code-claim",
+                    recorded_at="2026-07-13T09:01:00Z",
+                    response_payload={
+                        "status": "accepted",
+                        "result": {"request": claimed_record.model_dump(mode="json")},
+                    },
+                )
+
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-a",
+                claimed_at="2026-07-13T09:01:00Z",
+                idempotency_record_factory=idempotency_record_factory,
+            )
+            replay_evidence = store.read_idempotency_record(
+                scope="terminal-agent:every-code-worker",
+                route_path="/v1/every-code/work-requests/claim",
+                idempotency_key="every-code-claim-1693",
+            )
+            loaded = store.read_every_code_work_request_record(record.request_id)
+
+        self.assertIsNotNone(claimed)
+        self.assertIsNotNone(replay_evidence)
+        self.assertEqual(loaded.state, "claimed")
+        assert replay_evidence is not None
+        self.assertEqual(replay_evidence.state, "completed")
+
     def test_two_connections_claim_exactly_one_pending_operation_and_recover_lease(
         self,
     ) -> None:

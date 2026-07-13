@@ -1446,6 +1446,58 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(promoted["created_at"], "2026-07-12T00:00:00Z")
         self.assertEqual(promoted["updated_at"], "2026-07-12T00:00:00Z")
 
+    def test_every_code_lease_migration_blocks_legacy_active_requests_for_review(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            config = _alembic_config(database_url)
+            alembic_command.upgrade(config, "e1f3a5c7b9d1")
+            legacy_record = _every_code_work_request(state="running")
+            legacy_payload = legacy_record.model_dump(mode="json")
+            for field_name in ("lease_expires_at", "fencing_token", "attempt"):
+                legacy_payload.pop(field_name, None)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_every_code_work_requests "
+                        "(request_id, source, state, repository, issue_number, trigger_label, "
+                        "updated_at, claimed_by_host, payload) "
+                        "VALUES (:request_id, :source, :state, :repository, :issue_number, "
+                        ":trigger_label, :updated_at, :claimed_by_host, :payload)"
+                    ),
+                    {
+                        "request_id": legacy_record.request_id,
+                        "source": legacy_record.source,
+                        "state": legacy_record.state,
+                        "repository": legacy_record.repository,
+                        "issue_number": legacy_record.issue_number,
+                        "trigger_label": legacy_record.trigger_label,
+                        "updated_at": legacy_record.updated_at,
+                        "claimed_by_host": legacy_record.claimed_by_host,
+                        "payload": json.dumps(legacy_payload),
+                    },
+                )
+            engine.dispose()
+
+            alembic_command.upgrade(config, "head")
+            store = PostgresRecordStore(database_url=database_url)
+            migrated = store.read_every_code_work_request_record(legacy_record.request_id)
+            recovered = store.recover_stale_every_code_work_request_record(
+                expected_record=migrated,
+                recovered_at="2026-07-13T00:00:00Z",
+            )
+            store.close()
+
+        self.assertEqual(migrated.fencing_token, 4)
+        self.assertEqual(migrated.attempt, 4)
+        self.assertEqual(migrated.lease_expires_at, "1970-01-01T00:00:00Z")
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(recovered.state, "blocked")
+        self.assertIn("manual review required", recovered.error_message)
+
     def test_verify_schema_rejects_empty_database_without_creating_tables(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
@@ -2273,6 +2325,347 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(claimed.claimed_by_host, "Chris-Studio")
         self.assertIsNone(second_claim)
         self.assertEqual(loaded.state, "claimed")
+
+    def test_every_code_work_request_claim_sets_lease_and_fencing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=600,
+            )
+
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertEqual(claimed.fencing_token, 1)
+        self.assertEqual(claimed.attempt, 1)
+        self.assertEqual(claimed.lease_expires_at, "2026-05-05T22:11:00Z")
+
+    def test_every_code_work_request_two_worker_only_one_claims(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            first_claim = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            second_claim = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-2",
+                claimed_at="2026-05-05T22:01:01Z",
+            )
+            loaded = store.read_every_code_work_request_record(record.request_id)
+
+        self.assertIsNotNone(first_claim)
+        self.assertIsNone(second_claim)
+        assert first_claim is not None
+        self.assertEqual(loaded.claimed_by_host, "worker-1")
+        self.assertEqual(loaded.fencing_token, 1)
+
+    def test_every_code_work_request_stale_owner_rejected_by_fencing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            assert claimed is not None
+            stale_fencing_token = 99
+
+            from control_plane.contracts.every_code_work_request import (
+                EveryCodeWorkRequestStatusUpdate,
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                store.update_every_code_work_request_status_record(
+                    request_id=claimed.request_id,
+                    update=EveryCodeWorkRequestStatusUpdate(
+                        state="done",
+                        host="worker-1",
+                        updated_at="2026-05-05T22:05:00Z",
+                        fencing_token=stale_fencing_token,
+                        result_summary="done",
+                    ),
+                )
+            with self.assertRaises(ValueError):
+                store.update_every_code_work_request_status_record(
+                    request_id=claimed.request_id,
+                    update=EveryCodeWorkRequestStatusUpdate(
+                        state="done",
+                        host="worker-1",
+                        fencing_token=claimed.fencing_token + 1,
+                        updated_at="2026-05-05T22:05:00Z",
+                        result_summary="done",
+                    ),
+                )
+        self.assertIn("fencing token", str(ctx.exception))
+
+    def test_every_code_work_request_heartbeat_extends_lease(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=600,
+            )
+            assert claimed is not None
+
+            accepted = store.heartbeat_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                fencing_token=claimed.fencing_token,
+                heartbeat_at="2026-05-05T22:05:00Z",
+                lease_expires_at="2026-05-05T22:15:00Z",
+            )
+            refreshed = store.read_every_code_work_request_record(record.request_id)
+
+        self.assertTrue(accepted)
+        self.assertEqual(refreshed.lease_expires_at, "2026-05-05T22:15:00Z")
+
+    def test_every_code_work_request_heartbeat_rejects_wrong_fencing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            assert claimed is not None
+
+            rejected = store.heartbeat_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                fencing_token=99,
+                heartbeat_at="2026-05-05T22:05:00Z",
+                lease_expires_at="2026-05-05T22:35:00Z",
+            )
+
+        self.assertFalse(rejected)
+
+    def test_every_code_work_request_heartbeat_rejects_wrong_host(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            assert claimed is not None
+
+            rejected = store.heartbeat_every_code_work_request_record(
+                request_id=record.request_id,
+                host="attacker-2",
+                fencing_token=claimed.fencing_token,
+                heartbeat_at="2026-05-05T22:05:00Z",
+                lease_expires_at="2026-05-05T22:35:00Z",
+            )
+
+        self.assertFalse(rejected)
+
+    def test_every_code_work_request_stale_lease_listed_for_recovery(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=600,
+            )
+            assert claimed is not None
+
+            fresh_stale = store.list_stale_every_code_work_request_records(
+                as_of="2026-05-05T22:05:00Z",
+            )
+            expired_stale = store.list_stale_every_code_work_request_records(
+                as_of="2026-05-05T23:00:00Z",
+            )
+
+        self.assertEqual(len(fresh_stale), 0)
+        self.assertEqual(len(expired_stale), 1)
+        self.assertEqual(expired_stale[0].request_id, record.request_id)
+
+    def test_every_code_work_request_stale_recovery_safe_requeues(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=600,
+            )
+            assert claimed is not None
+
+            requeued = store.recover_stale_every_code_work_request_record(
+                expected_record=claimed,
+                recovered_at="2026-05-05T23:00:00Z",
+            )
+            loaded = store.read_every_code_work_request_record(record.request_id)
+
+        self.assertIsNotNone(requeued)
+        self.assertEqual(loaded.state, "queued")
+        self.assertEqual(loaded.fencing_token, 0)
+
+    def test_every_code_work_request_stale_recovery_rejects_heartbeated_snapshot(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=60,
+            )
+            assert claimed is not None
+            stale_snapshot = store.list_stale_every_code_work_request_records(
+                as_of="2026-05-05T22:03:00Z"
+            )[0]
+            heartbeat_accepted = store.heartbeat_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                fencing_token=claimed.fencing_token,
+                heartbeat_at="2026-05-05T22:02:30Z",
+                lease_expires_at="2026-05-05T22:12:30Z",
+            )
+
+            recovered = store.recover_stale_every_code_work_request_record(
+                expected_record=stale_snapshot,
+                recovered_at="2026-05-05T22:03:00Z",
+            )
+            loaded = store.read_every_code_work_request_record(record.request_id)
+
+        self.assertTrue(heartbeat_accepted)
+        self.assertIsNone(recovered)
+        self.assertEqual(loaded.state, "claimed")
+        self.assertEqual(loaded.lease_expires_at, "2026-05-05T22:12:30Z")
+
+    def test_every_code_work_request_process_death_recovery_increments_attempt(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            first = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=600,
+            )
+            assert first is not None
+            self.assertEqual(first.attempt, 1)
+            requeued = store.recover_stale_every_code_work_request_record(
+                expected_record=first,
+                recovered_at="2026-05-05T23:00:00Z",
+            )
+            assert requeued is not None
+
+            second = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-2",
+                claimed_at="2026-05-05T23:01:00Z",
+                lease_seconds=600,
+            )
+
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertEqual(second.attempt, 2)
+        self.assertEqual(second.fencing_token, 2)
+        self.assertEqual(second.claimed_by_host, "worker-2")
+
+    def test_every_code_work_request_lost_response_replay_uses_idempotent_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            def idempotency_record_factory(
+                claimed_record: EveryCodeWorkRequestRecord,
+            ) -> LaunchplaneIdempotencyRecord:
+                return LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(
+                        response_trace_id="trace-every-code-claim"
+                    ),
+                    scope="terminal-agent:every-code-worker",
+                    route_path="/v1/every-code/work-requests/claim",
+                    idempotency_key="every-code-claim-test",
+                    request_fingerprint="claim-fingerprint",
+                    response_status_code=202,
+                    response_trace_id="trace-every-code-claim",
+                    recorded_at="2026-05-05T22:01:00Z",
+                    response_payload={
+                        "status": "accepted",
+                        "result": {"request": claimed_record.model_dump(mode="json")},
+                    },
+                )
+
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                idempotency_record_factory=idempotency_record_factory,
+            )
+            assert claimed is not None
+            stored_idempotency = store.read_idempotency_record(
+                scope="terminal-agent:every-code-worker",
+                route_path="/v1/every-code/work-requests/claim",
+                idempotency_key="every-code-claim-test",
+            )
+
+            second_claim_attempt = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:02:00Z",
+            )
+
+        self.assertIsNone(second_claim_attempt)
+        self.assertEqual(claimed.fencing_token, 1)
+        self.assertIsNotNone(stored_idempotency)
+        assert stored_idempotency is not None
+        self.assertEqual(stored_idempotency.state, "completed")
 
     def test_every_code_pr_feedback_round_trip_and_filter(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

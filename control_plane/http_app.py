@@ -88,7 +88,7 @@ from control_plane.contracts.every_code_summary_read_model import (
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
-    apply_every_code_work_request_status,
+    _add_seconds_to_timestamp as _add_lease_seconds,
     requeue_every_code_work_request,
 )
 from control_plane.contracts.idempotency_record import (
@@ -773,6 +773,8 @@ _AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
+_EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE = "/v1/every-code/work-requests/heartbeat"
+_EVERY_CODE_WORK_REQUEST_RECOVER_STALE_ROUTE = "/v1/every-code/work-requests/recover-stale"
 _AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
 _DB_ONLY_MUTATION_LEASE = timedelta(minutes=5)
 
@@ -1670,6 +1672,7 @@ class EveryCodeWorkRequestClaimEnvelope(BaseModel):
 
     request_id: str
     host: str
+    lease_seconds: int = Field(default=1800, ge=60, le=86400)
 
     @model_validator(mode="after")
     def _validate_claim(self) -> "EveryCodeWorkRequestClaimEnvelope":
@@ -1680,12 +1683,30 @@ class EveryCodeWorkRequestClaimEnvelope(BaseModel):
         return self
 
 
+class EveryCodeWorkRequestHeartbeatEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    host: str
+    fencing_token: int = Field(ge=1)
+    lease_seconds: int = Field(default=1800, ge=60, le=86400)
+
+    @model_validator(mode="after")
+    def _validate_heartbeat(self) -> "EveryCodeWorkRequestHeartbeatEnvelope":
+        if not self.request_id.strip():
+            raise ValueError("Every Code heartbeat requires request_id")
+        if not self.host.strip():
+            raise ValueError("Every Code heartbeat requires host")
+        return self
+
+
 class EveryCodeWorkRequestStatusEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
     host: str
     state: Literal["running", "done", "blocked"]
+    fencing_token: int = Field(ge=1)
     result_pr_url: str = ""
     result_summary: str = ""
     error_message: str = ""
@@ -2852,17 +2873,48 @@ class _EveryCodeWorkRequestClaimStore(Protocol):
         request_id: str,
         host: str,
         claimed_at: str,
+        lease_seconds: int = 1800,
+        idempotency_record_factory: (
+            Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
+        ) = None,
+    ) -> EveryCodeWorkRequestRecord | None: ...
+
+
+class _EveryCodeWorkRequestHeartbeatStore(Protocol):
+    def heartbeat_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        fencing_token: int,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool: ...
+
+
+class _EveryCodeWorkRequestStaleStore(Protocol):
+    def list_stale_every_code_work_request_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
+
+    def recover_stale_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        recovered_at: str,
     ) -> EveryCodeWorkRequestRecord | None: ...
 
 
 class _EveryCodeWorkRequestStatusStore(Protocol):
-    def read_every_code_work_request_record(
-        self, request_id: str
+    def update_every_code_work_request_status_record(
+        self,
+        *,
+        request_id: str,
+        update: EveryCodeWorkRequestStatusUpdate,
     ) -> EveryCodeWorkRequestRecord: ...
-
-    def write_every_code_work_request_record(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> object: ...
 
 
 class _EveryCodeWorkRequestRerunStore(Protocol):
@@ -2870,9 +2922,13 @@ class _EveryCodeWorkRequestRerunStore(Protocol):
         self, request_id: str
     ) -> EveryCodeWorkRequestRecord: ...
 
-    def write_every_code_work_request_record(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> object: ...
+    def compare_and_write_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        record: EveryCodeWorkRequestRecord,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> Literal["updated", "changed", "missing"]: ...
 
 
 class _AgentWriteIntentRecordReadStore(Protocol):
@@ -5457,15 +5513,35 @@ def create_launchplane_fastapi_app(
         )
         return cast(_EveryCodeWorkRequestClaimStore, record_store)
 
+    def require_every_code_work_request_heartbeat_store(
+        record_store: object,
+    ) -> _EveryCodeWorkRequestHeartbeatStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("heartbeat_every_code_work_request_record",),
+            capability="Every Code work request heartbeat writes",
+        )
+        return cast(_EveryCodeWorkRequestHeartbeatStore, record_store)
+
+    def require_every_code_work_request_stale_store(
+        record_store: object,
+    ) -> _EveryCodeWorkRequestStaleStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=(
+                "list_stale_every_code_work_request_records",
+                "recover_stale_every_code_work_request_record",
+            ),
+            capability="Every Code stale work request recovery",
+        )
+        return cast(_EveryCodeWorkRequestStaleStore, record_store)
+
     def require_every_code_work_request_status_store(
         record_store: object,
     ) -> _EveryCodeWorkRequestStatusStore:
         require_every_code_read_methods(
             record_store,
-            required_methods=(
-                "read_every_code_work_request_record",
-                "write_every_code_work_request_record",
-            ),
+            required_methods=("update_every_code_work_request_status_record",),
             capability="Every Code work request status writes",
         )
         return cast(_EveryCodeWorkRequestStatusStore, record_store)
@@ -5477,7 +5553,7 @@ def create_launchplane_fastapi_app(
             record_store,
             required_methods=(
                 "read_every_code_work_request_record",
-                "write_every_code_work_request_record",
+                "compare_and_write_every_code_work_request_record",
             ),
             capability="Every Code work request rerun writes",
         )
@@ -9913,6 +9989,17 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        idempotency_identity = identity or (
+            TerminalAgentIdentity(
+                subject="every-code-worker",
+                token_label="every-code-worker-token",
+            )
+            if worker_token_authorized
+            else None
+        )
         if identity is not None:
             if not resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
@@ -9926,10 +10013,17 @@ def create_launchplane_fastapi_app(
                     code="authorization_denied",
                     message="Workflow cannot claim Every Code work requests.",
                 )
-            _, _, replayed_response = await replay_apply_idempotency(
+        normalized_idempotency_key = ""
+        payload_fingerprint = ""
+        if idempotency_identity is not None:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replayed_response,
+            ) = await replay_apply_idempotency(
                 request=request,
                 record_store=record_store,
-                identity=identity,
+                identity=idempotency_identity,
                 route_path="/v1/every-code/work-requests/claim",
                 idempotency_key=idempotency_key,
                 trace_id=trace_id,
@@ -9955,11 +10049,39 @@ def create_launchplane_fastapi_app(
                 code="invalid_payload",
                 message=str(error),
             ) from error
+
+        def claim_response(record: EveryCodeWorkRequestRecord) -> AcceptedEvidenceResponse:
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={"request_id": record.request_id, "state": record.state},
+                result={"request": record.model_dump(mode="json")},
+            )
+
+        def claim_idempotency_record(
+            record: EveryCodeWorkRequestRecord,
+        ) -> LaunchplaneIdempotencyRecord:
+            if idempotency_identity is None:
+                raise RuntimeError("Every Code claim idempotency requires an identity.")
+            return build_apply_idempotency_record(
+                identity=idempotency_identity,
+                route_path="/v1/every-code/work-requests/claim",
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=claim_response(record),
+            )
+
         try:
             claimed_record = every_code_store.claim_every_code_work_request_record(
                 request_id=claim_request.request_id.strip(),
                 host=claim_request.host.strip(),
                 claimed_at=utc_now_timestamp(),
+                lease_seconds=claim_request.lease_seconds,
+                idempotency_record_factory=(
+                    claim_idempotency_record
+                    if idempotency_identity is not None and normalized_idempotency_key
+                    else None
+                ),
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -9969,16 +10091,160 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         if claimed_record is None:
+            if idempotency_identity is not None and normalized_idempotency_key:
+                _, _, replayed_response = await replay_apply_idempotency(
+                    request=request,
+                    record_store=record_store,
+                    identity=idempotency_identity,
+                    route_path="/v1/every-code/work-requests/claim",
+                    idempotency_key=normalized_idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                )
+                if replayed_response is not None:
+                    return replayed_response
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="work_request_already_claimed",
                 message="Every Code work request is not queued for claim.",
             )
+        return claim_response(claimed_record)
+
+    async def write_every_code_work_request_heartbeat(
+        request: Request,
+        payload: dict[str, object],
+        identity: Annotated[
+            LaunchplaneIdentity | None,
+            Depends(read_every_code_work_request_worker_write_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        if identity is None and not worker_token_authorized:
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=trace_id,
+                code="unauthorized",
+                message="Every Code heartbeat requires authorization.",
+            )
+        try:
+            heartbeat_store = require_every_code_work_request_heartbeat_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            heartbeat_request = EveryCodeWorkRequestHeartbeatEnvelope.model_validate(payload)
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=str(error),
+            ) from error
+        now = utc_now_timestamp()
+        new_lease_expires_at = _add_lease_seconds(now, heartbeat_request.lease_seconds)
+        accepted = heartbeat_store.heartbeat_every_code_work_request_record(
+            request_id=heartbeat_request.request_id.strip(),
+            host=heartbeat_request.host.strip(),
+            fencing_token=heartbeat_request.fencing_token,
+            heartbeat_at=now,
+            lease_expires_at=new_lease_expires_at,
+        )
+        if not accepted:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="heartbeat_rejected",
+                message="Every Code heartbeat rejected: wrong owner, fencing token, or terminal state.",
+            )
         return accepted_evidence_response(
             trace_id=trace_id,
-            records={"request_id": claimed_record.request_id, "state": claimed_record.state},
-            result={"request": claimed_record.model_dump(mode="json")},
+            records={
+                "request_id": heartbeat_request.request_id.strip(),
+                "fencing_token": heartbeat_request.fencing_token,
+            },
+            result={
+                "request_id": heartbeat_request.request_id.strip(),
+                "lease_expires_at": new_lease_expires_at,
+            },
+        )
+
+    async def recover_stale_every_code_work_requests(
+        request: Request,
+        payload: dict[str, object],
+        identity: Annotated[
+            LaunchplaneIdentity | None,
+            Depends(read_every_code_work_request_worker_write_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        if identity is None and not worker_token_authorized:
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=trace_id,
+                code="unauthorized",
+                message="Every Code stale recovery requires authorization.",
+            )
+        if identity is not None and not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="every_code_work_request.update",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot recover stale Every Code work requests.",
+            )
+        try:
+            stale_store = require_every_code_work_request_stale_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        now = utc_now_timestamp()
+        stale_records = stale_store.list_stale_every_code_work_request_records(
+            as_of=now,
+            limit=20,
+        )
+        requeued: list[str] = []
+        flagged: list[str] = []
+        for stale in stale_records:
+            recovered = stale_store.recover_stale_every_code_work_request_record(
+                expected_record=stale,
+                recovered_at=now,
+            )
+            if recovered is None:
+                continue
+            if recovered.state == "queued":
+                requeued.append(recovered.request_id)
+            elif recovered.state == "blocked":
+                flagged.append(recovered.request_id)
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "checked": len(stale_records),
+                "requeued": len(requeued),
+                "flagged": len(flagged),
+            },
+            result={"requeued": requeued, "flagged": flagged},
         )
 
     async def write_every_code_work_request_status(
@@ -10053,8 +10319,17 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         try:
-            existing_record = every_code_store.read_every_code_work_request_record(
-                status_request.request_id.strip()
+            updated_record = every_code_store.update_every_code_work_request_status_record(
+                request_id=status_request.request_id.strip(),
+                update=EveryCodeWorkRequestStatusUpdate(
+                    state=status_request.state,
+                    host=status_request.host,
+                    updated_at=status_request.updated_at.strip() or utc_now_timestamp(),
+                    fencing_token=status_request.fencing_token,
+                    result_pr_url=status_request.result_pr_url,
+                    result_summary=status_request.result_summary,
+                    error_message=status_request.error_message,
+                ),
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -10063,18 +10338,6 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=str(error),
             ) from error
-        try:
-            updated_record = apply_every_code_work_request_status(
-                existing_record,
-                EveryCodeWorkRequestStatusUpdate(
-                    state=status_request.state,
-                    host=status_request.host,
-                    updated_at=status_request.updated_at.strip() or utc_now_timestamp(),
-                    result_pr_url=status_request.result_pr_url,
-                    result_summary=status_request.result_summary,
-                    error_message=status_request.error_message,
-                ),
-            )
         except (ValueError, ValidationError) as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -10082,7 +10345,6 @@ def create_launchplane_fastapi_app(
                 code="invalid_payload",
                 message=str(error),
             ) from error
-        every_code_store.write_every_code_work_request_record(updated_record)
         notification_attempts: tuple[EveryCodeNotificationAttemptRecord, ...] = ()
         if updated_record.state == "blocked":
             notification_attempts = deliver_every_code_blocked_notifications(
@@ -10128,6 +10390,17 @@ def create_launchplane_fastapi_app(
         normalized_idempotency_key = ""
         intent_idempotency_key = idempotency_key.strip()
         payload_fingerprint = ""
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        idempotency_identity = identity or (
+            TerminalAgentIdentity(
+                subject="every-code-worker",
+                token_label="every-code-worker-token",
+            )
+            if worker_token_authorized
+            else None
+        )
         if identity is not None:
             if not resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
@@ -10141,6 +10414,7 @@ def create_launchplane_fastapi_app(
                     code="authorization_denied",
                     message="Workflow cannot rerun Every Code work requests.",
                 )
+        if idempotency_identity is not None:
             (
                 normalized_idempotency_key,
                 payload_fingerprint,
@@ -10148,7 +10422,7 @@ def create_launchplane_fastapi_app(
             ) = await replay_apply_idempotency(
                 request=request,
                 record_store=record_store,
-                identity=identity,
+                identity=idempotency_identity,
                 route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
                 idempotency_key=idempotency_key,
                 trace_id=trace_id,
@@ -10234,7 +10508,6 @@ def create_launchplane_fastapi_app(
                 code="invalid_payload",
                 message=str(error),
             ) from error
-        every_code_store.write_every_code_work_request_record(requeued_record)
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={
@@ -10244,15 +10517,46 @@ def create_launchplane_fastapi_app(
             },
             result={"request": requeued_record.model_dump(mode="json")},
         )
-        if identity is not None:
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
+        idempotency_record = None
+        if idempotency_identity is not None and normalized_idempotency_key:
+            idempotency_record = build_apply_idempotency_record(
+                identity=idempotency_identity,
                 route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
                 idempotency_key=normalized_idempotency_key,
                 request_fingerprint_value=payload_fingerprint,
                 trace_id=trace_id,
                 response=response,
+            )
+        write_status = every_code_store.compare_and_write_every_code_work_request_record(
+            expected_record=existing_record,
+            record=requeued_record,
+            idempotency_record=idempotency_record,
+        )
+        if write_status == "missing":
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"Every Code work request {rerun_request.request_id!r} was not found.",
+            )
+        if write_status == "changed":
+            if idempotency_identity is not None and normalized_idempotency_key:
+                _, _, replayed_response = await replay_apply_idempotency(
+                    request=request,
+                    record_store=record_store,
+                    identity=idempotency_identity,
+                    route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                )
+                if replayed_response is not None:
+                    return replayed_response
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="work_request_changed",
+                message="Every Code work request changed while the rerun was being prepared.",
             )
         return response
 
@@ -21381,6 +21685,48 @@ def create_launchplane_fastapi_app(
             }
         },
         responses=every_code_worker_status_error_responses,
+    )
+
+    app.add_api_route(
+        _EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE,
+        write_every_code_work_request_heartbeat,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_every_code_work_request_heartbeat",
+        summary="Heartbeat Every Code work request lease",
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(EveryCodeWorkRequestHeartbeatEnvelope)
+                    }
+                },
+            }
+        },
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _EVERY_CODE_WORK_REQUEST_RECOVER_STALE_ROUTE,
+        recover_stale_every_code_work_requests,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="recover_stale_every_code_work_requests",
+        summary="Recover stale Every Code work requests",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(

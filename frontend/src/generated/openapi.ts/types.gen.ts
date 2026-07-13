@@ -353,14 +353,17 @@ export type EveryCodeSummaryResponse = {
 };
 
 export type EveryCodeWorkRequestRecord = {
+    attempt: number;
     claimed_at: string;
     claimed_by_host: string;
     error_message: string;
+    fencing_token: number;
     finished_at: string;
     github_delivery_id: string;
     issue_number: number;
     issue_title: string;
     issue_url: string;
+    lease_expires_at: string;
     lifecycle_id: string;
     queued_at: string;
     repository: string;

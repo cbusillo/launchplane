@@ -1162,15 +1162,52 @@ preflights.
 - State is `queued`, `claimed`, `running`, `done`, or `blocked`. Workers claim a
   queued request before reporting progress. Terminal states are immutable through
   the service status route.
+- Every claim is atomic and sets three lease fields: `lease_expires_at` (ISO
+  timestamp when the lease lapses), `fencing_token` (monotonically increasing
+  integer equal to the cumulative claim count for this request id), and `attempt`
+  (same value, kept separately for readability). The fencing token starts at 1 on
+  the first claim and increments on every subsequent requeue-and-reclaim cycle.
+  Once a record has a non-zero fence, service status updates must carry that
+  exact `fencing_token`; missing and stale tokens are rejected before the row is
+  changed. Heartbeats enforce the same host-and-fence match, preventing
+  stale-owner writes after a lease expires and a new worker reclaims.
+- Workers send periodic heartbeats through `POST /v1/every-code/work-requests/heartbeat`
+  to extend `lease_expires_at` before it lapses. A heartbeat is rejected (409)
+  when the host or fencing token does not match, or when the request is already
+  terminal. Workers that die without heartbeating leave the record with an expired
+  lease and the recovery path handles it.
+- `POST /v1/every-code/work-requests/recover-stale` scans for claimed or running
+  records whose `lease_expires_at` has passed and applies a recovery policy:
+  `safe_requeue` (attempt ≤ 3) resets the record to `queued` with all lease
+  fields cleared so another worker can pick it up; `manual_review` (attempt > 3)
+  marks the record `blocked` with an error message requiring operator inspection
+  before any requeue. Recovery locks and compares the exact stale snapshot, so a
+  concurrent heartbeat or status transition wins cleanly instead of being
+  overwritten by a stale recovery decision.
+- Service-backed workers invoke the same recovery route during their polling
+  loop. Filesystem-backed workers serialize claim, heartbeat, status, and
+  recovery transitions with per-request process locks and publish JSON records
+  through atomic replacement.
+- Requests that were already active before lease fields existed migrate with an
+  expired lease and an exhausted safe-retry attempt. Their first recovery marks
+  them `blocked` for manual review instead of risking duplicate execution.
+- Worker-token claim and rerun requests use a stable synthetic idempotency scope.
+  PostgreSQL claim commits the claimed record and completed replay evidence in
+  one transaction; rerun uses compare-and-write with the completed response in
+  the same transaction. Same-key retries replay the original response, changed
+  payloads conflict, and a lost HTTP response does not permit a second claim or
+  rerun mutation.
 - The local worker handoff is `uv run launchplane every-code run` for polling or
   `uv run launchplane every-code run-once` for a single scan. Each pass applies
   trusted PR feedback, reconciles preview gates and ready preview labels, removes
   stale source-issue queue labels for closed requests that can no longer reach
   preview readiness, routes failed checks back to the owning session, then claims
-  at most one queued request. Request handoff opens or reuses deterministic
-  visible tmux sessions for local checkouts, records `running` or immediate
-  `blocked` status, and wraps the visible command so terminal success or failure
-  calls `uv run launchplane every-code finish`.
+  at most one queued request. Request handoff terminates any stale deterministic
+  tmux session before launching a newly claimed attempt, records `running` or
+  immediate `blocked` status, and wraps the visible command so terminal success
+  or failure calls `uv run launchplane every-code finish` with the fencing token
+  captured at launch. A recovered or superseded session therefore cannot read a
+  newer token and finish as the new owner.
 - A Mac host can leave the poller running with
   `uv run launchplane every-code start`, inspect it with
   `uv run launchplane every-code status`, and stop it with

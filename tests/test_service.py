@@ -862,6 +862,7 @@ def _update_every_code_work_request_status_record(
             state=state,
             host=host,
             updated_at=updated_at,
+            fencing_token=record.fencing_token,
             result_pr_url=result_pr_url,
             result_summary=result_summary,
             error_message=error_message,
