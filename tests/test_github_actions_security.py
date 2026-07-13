@@ -4,6 +4,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest import TestCase
 
+from tests.support.workflows import WorkflowInvariantViolation
+from tests.support.workflows import check_security_policy_runs_for_all_pull_requests
+from tests.support.workflows import load_workflow
+
+
+def _assert_no_workflow_violations(
+    test_case: TestCase,
+    violations: tuple[WorkflowInvariantViolation, ...],
+) -> None:
+    test_case.assertEqual([], [str(violation) for violation in violations])
+
 
 USES_LINE_PATTERN = re.compile(
     r"^\s*(?:-\s+)?uses:\s*(?P<reference>[^#\s]+)(?:\s+#\s*(?P<provenance>.+?))?\s*$"
@@ -227,10 +238,12 @@ class GitHubActionsSecurityTests(TestCase):
         self.assertSetEqual(set(APPROVED_CONTAINER_IMAGES), observed_sources)
 
     def test_security_gate_runs_action_pinning_policy_for_all_pull_requests(self) -> None:
-        security_workflow = Path(".github/workflows/security.yml").read_text(encoding="utf-8")
+        security_workflow = load_workflow(".github/workflows/security.yml")
 
-        self.assertEqual(2, security_workflow.count("tests.test_github_actions_security"))
-        self.assertEqual(2, security_workflow.count("Enforce immutable GitHub Action references"))
+        _assert_no_workflow_violations(
+            self,
+            check_security_policy_runs_for_all_pull_requests(security_workflow),
+        )
 
     def test_documentation_and_dependabot_preserve_reviewable_pin_updates(self) -> None:
         docs_index = Path("docs/README.md").read_text(encoding="utf-8")
