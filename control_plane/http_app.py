@@ -4324,6 +4324,19 @@ def create_launchplane_fastapi_app(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
         cookie: Annotated[str, Header(alias="Cookie")] = "",
     ) -> LaunchplaneIdentity:
+        bearer_identity = resolve_bearer_identity(authorization)
+        if bearer_identity is not None:
+            return bearer_identity
+        human_identity = read_human_session_identity(
+            cookie_header=cookie,
+            request=request,
+            response=response,
+        )
+        if human_identity is not None:
+            return human_identity
+        raise _authentication_required_error("Authorization header is required.")
+
+    def resolve_bearer_identity(authorization: str) -> LaunchplaneIdentity | None:
         header = authorization.strip()
         if header:
             scheme, _, token = header.partition(" ")
@@ -4342,13 +4355,14 @@ def create_launchplane_fastapi_app(
                     return verifier.verify(bearer_token)
                 except (InvalidTokenError, ValueError) as error:
                     raise _authentication_required_error(str(error)) from error
-        human_identity = read_human_session_identity(
-            cookie_header=cookie,
-            request=request,
-            response=response,
-        )
-        if human_identity is not None:
-            return human_identity
+        return None
+
+    def read_bearer_identity(
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+    ) -> LaunchplaneIdentity:
+        identity = resolve_bearer_identity(authorization)
+        if identity is not None:
+            return identity
         raise _authentication_required_error("Authorization header is required.")
 
     def read_browser_mutation_identity(
@@ -12745,7 +12759,7 @@ def create_launchplane_fastapi_app(
 
     async def reencrypt_managed_secrets(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:

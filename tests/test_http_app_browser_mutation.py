@@ -49,7 +49,9 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "read_browser_mutation_identity",
             "read_browser_work_graph_rank_identity",
         }
+        expected_bearer_only_routes = {"/v1/secrets/reencrypt"}
         actual_routes = {"/auth/logout"}
+        actual_bearer_only_routes: set[str] = set()
         unprotected_cookie_routes: set[str] = set()
         for route in app.routes:
             if (
@@ -65,10 +67,13 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             }
             if dependency_names & browser_dependency_names:
                 actual_routes.add(route.path)
+            if "read_bearer_identity" in dependency_names:
+                actual_bearer_only_routes.add(route.path)
             if dependency_names & {"read_identity", "read_work_graph_rank_identity"}:
                 unprotected_cookie_routes.add(route.path)
 
         self.assertEqual(actual_routes, expected_routes)
+        self.assertEqual(actual_bearer_only_routes, expected_bearer_only_routes)
         self.assertEqual(unprotected_cookie_routes, set())
 
     def _human_app(

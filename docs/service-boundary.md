@@ -427,7 +427,9 @@ origin, fetch-metadata, and CSRF checks exactly as before; a cookie does not
 weaken or replace bearer verification. The operator UI therefore exposes only
 the cookie-capable writes. In particular, GitHub issue inbox reconciliation is
 displayed as unavailable because it remains a GitHub Actions OIDC service
-operation.
+operation. Managed-secret root re-encryption is explicitly bearer-only even
+when a valid human session cookie is present; rotating the service root is not a
+browser mutation surface.
 
 Trusted Launchplane CLI clients that are explicitly given `--session-cookie`
 preserve compatibility by reading `/v1/auth/session` immediately before the
