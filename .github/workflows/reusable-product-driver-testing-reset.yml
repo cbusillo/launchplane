@@ -59,7 +59,7 @@ permissions:
 
 jobs:
   verify-before-reset:
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-runtime-verification.yml@main
+    uses: ./.github/workflows/reusable-product-driver-runtime-verification.yml
     with:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}
@@ -74,7 +74,7 @@ jobs:
 
   reset-testing:
     needs: verify-before-reset
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-app-maintenance.yml@main
+    uses: ./.github/workflows/reusable-product-driver-app-maintenance.yml
     with:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}
@@ -90,7 +90,7 @@ jobs:
 
   verify-after-reset:
     needs: reset-testing
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-runtime-verification.yml@main
+    uses: ./.github/workflows/reusable-product-driver-runtime-verification.yml
     with:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}

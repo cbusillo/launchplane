@@ -752,7 +752,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
                 self.assertIn("runs-on: ubuntu-latest", workflow_text)
                 self.assertIn(
-                    "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+                    "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
                     workflow_text,
                 )
                 self.assertIn(f"route-path: {route_path}", workflow_text)
@@ -785,7 +785,7 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertIn("runs-on: ubuntu-latest", stable_bootstrap_workflow)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             stable_bootstrap_workflow,
         )
         self.assertIn(
@@ -857,7 +857,7 @@ class ProductOnboardingTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("runs-on: ubuntu-latest", target_apply_workflow)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             target_apply_workflow,
         )
         self.assertIn(
@@ -1013,7 +1013,7 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertIn("fail-fast: false", provider_target_workflow)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             provider_target_workflow,
         )
         self.assertIn(
@@ -1066,13 +1066,11 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("environment:.value.environment", workflow_text)
         self.assertIn("fail-fast: false", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertEqual(
-            workflow_text.count(
-                "uses: cbusillo/launchplane/.github/actions/launchplane-request@main"
-            ),
+            workflow_text.count("uses: cbusillo/launchplane/.github/actions/launchplane-request@"),
             2,
         )
         self.assertIn("launchplane-url: ${{ env.LAUNCHPLANE_URL }}", workflow_text)
@@ -1127,7 +1125,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn("runs-on: ubuntu-latest", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
@@ -1182,7 +1180,7 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}", workflow_text)
@@ -1253,7 +1251,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("needs.validate.outputs.pr_url", workflow_text)
         self.assertIn("needs.validate.outputs.source_git_ref", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main",
+            "uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@",
             workflow_text,
         )
         self.assertEqual(workflow_text.count("          request-kind: artifact-publish-inputs"), 1)
@@ -1269,7 +1267,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("preview-refresh-feedback:", workflow_text)
         self.assertIn("preview-destroy-feedback:", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@main",
+            "uses: ./.github/workflows/reusable-preview-feedback-status.yml",
             workflow_text,
         )
         self.assertIn("source_access_probe_repository", workflow_text)
@@ -1518,7 +1516,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn("runs-on: ubuntu-latest", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
@@ -1627,7 +1625,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn("runs-on: ubuntu-latest", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn(
@@ -1677,7 +1675,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn("runs-on: ubuntu-latest", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}", workflow_text)
@@ -1709,7 +1707,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("- self-hosted", workflow_text)
         self.assertIn("- ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("launchplane-url: ${{ env.LAUNCHPLANE_URL }}", workflow_text)
@@ -1741,7 +1739,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn("runs-on: ubuntu-latest", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn(
@@ -1962,7 +1960,7 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertIn("launchplane-break-glass-rollback.json", workflow_text)
         self.assertIn("name: launchplane-break-glass-rollback", workflow_text)
-        self.assertIn("uses: actions/upload-artifact@v7", workflow_text)
+        self.assertIn("uses: actions/upload-artifact@", workflow_text)
         self.assertIn("Evidence artifact: launchplane-break-glass-rollback", workflow_text)
         self.assertIn("manual break-glass only", workflow_text)
 
@@ -2065,8 +2063,7 @@ class ProductOnboardingTests(unittest.TestCase):
                 capture_output=True,
                 env={
                     **os.environ,
-                    "DEPLOY_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:"
-                    + ("b" * 64),
+                    "DEPLOY_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:" + ("b" * 64),
                     "GITHUB_OUTPUT": str(output_file),
                     "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
                     "PREVIOUS_RUNTIME_RESPONSE_FILE": str(response_file),
@@ -2095,8 +2092,8 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("permissions:\n      contents: read", emergency_job)
         self.assertNotIn("id-token:", emergency_job)
         self.assertNotIn("packages:", emergency_job)
-        self.assertIn("uses: actions/checkout@v7", emergency_job)
-        self.assertIn("uses: actions/upload-artifact@v7", emergency_job)
+        self.assertIn("uses: actions/checkout@", emergency_job)
+        self.assertIn("uses: actions/upload-artifact@", emergency_job)
         self.assertNotIn("LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST", deploy_job)
         self.assertNotIn("LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN", deploy_job)
         self.assertNotIn("LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST", validation_step)
@@ -2227,7 +2224,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("id: deployed_runtime", workflow_text)
         self.assertIn("continue-on-error: true", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("route-path: /v1/service/runtime", workflow_text)
@@ -2353,7 +2350,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("id: rollback_request_action", workflow_text)
         self.assertIn("continue-on-error: true", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("route-path: /v1/drivers/launchplane/self-deploy", workflow_text)
@@ -2437,7 +2434,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn("runs-on: ubuntu-latest", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
@@ -2475,7 +2472,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn("runs-on: ubuntu-latest", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
@@ -2513,7 +2510,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("context/instance or target_type/target_id is required.", workflow_text)
         self.assertIn('echo "route_path=/v1/dokploy-targets/inspect?${query}"', workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)

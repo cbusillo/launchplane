@@ -216,7 +216,7 @@ jobs:
     steps:
       - name: Request Launchplane generic-web preview refresh
         id: lp
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -266,7 +266,7 @@ jobs:
     steps:
       - name: Request Launchplane generic-web preview destroy
         id: lp
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -310,7 +310,7 @@ jobs:
     steps:
       - name: Request Launchplane unsupported preview feedback
         id: lp
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}

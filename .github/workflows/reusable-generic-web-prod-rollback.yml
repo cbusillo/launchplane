@@ -189,7 +189,7 @@ jobs:
 
       - name: Request Launchplane generic-web prod rollback
         id: lp
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}

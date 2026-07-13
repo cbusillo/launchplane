@@ -66,7 +66,7 @@ jobs:
     steps:
       - name: Resolve preview request notice
         id: notice
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           PREVIEW_LABEL: ${{ inputs.preview_label }}
           RUN_URL: >-
@@ -153,7 +153,7 @@ jobs:
   feedback:
     if: ${{ needs.resolve.outputs.should_record == 'true' }}
     needs: resolve
-    uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main
+    uses: ./.github/workflows/reusable-preview-pr-feedback.yml
     with:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}

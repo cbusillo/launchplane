@@ -81,7 +81,7 @@ permissions:
 
 jobs:
   resolve-prod-environment:
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-stable-environment.yml@main
+    uses: ./.github/workflows/reusable-product-driver-stable-environment.yml
     with:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}
@@ -94,7 +94,7 @@ jobs:
 
   verify-prod-runtime:
     needs: resolve-prod-environment
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-driver-runtime-verification.yml@main
+    uses: ./.github/workflows/reusable-product-driver-runtime-verification.yml
     with:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}

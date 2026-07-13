@@ -223,7 +223,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertIn("value=\"${value//$'\\n'/ }\"", workflow)
         self.assertNotIn("LAUNCHPLANE_FAILURE_SUMMARY", workflow)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main",
+            "uses: ./.github/workflows/reusable-preview-pr-feedback.yml",
             workflow,
         )
         self.assertIn("status: ${{ needs.resolve.outputs.status }}", workflow)
@@ -250,7 +250,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
             r"uses: actions/github-script@(?:v\d+(?:\.\d+){0,2}|[0-9a-f]{40})(?:\s|$)",
         )
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main",
+            "uses: ./.github/workflows/reusable-preview-pr-feedback.yml",
             workflow,
         )
         self.assertIn("status: ${{ needs.resolve.outputs.status }}", workflow)
