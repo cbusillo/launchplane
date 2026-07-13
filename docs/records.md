@@ -155,7 +155,11 @@ version, binding, audit evidence, required runtime-environment changes, and
 applicable idempotency completion are in the same transaction. Cleanup deletes
 compare the current row payload with the planned expected record under the
 storage boundary and fail closed on missing or drifted authority instead of
-publishing a partial graph.
+publishing a partial graph. Provider-target writes likewise carry an
+expected-current or expected-absent precondition so a concurrent route owner
+cannot be overwritten after planning. Lane-summary reads hold a shared bundle
+guard while assembling their multi-record view, so a bundle commit cannot split
+one response across the old and new authority graphs.
 
 Filesystem storage remains local rehearsal state, not shared runtime authority.
 Its product authority bundle path stages every replacement under
@@ -166,6 +170,8 @@ resumable: the next store access completes remaining `os.replace` writes and
 expected-payload deletes from the manifest, then removes the stage. If live data
 changed from the manifest while recovery was pending, recovery fails closed and
 leaves the stage for operator inspection rather than guessing at authority.
+Ordinary filesystem reads, writes, creates, deletes, and composite promotion
+evidence rollback hold the same bundle lock through their live-file access.
 
 Provider-backed routes must durably reserve first, bind their stable provider
 operation or reconciliation key before invoking the provider, and complete only

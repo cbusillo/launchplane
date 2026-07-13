@@ -110,8 +110,11 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
-from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
-from control_plane.storage.product_authority_bundle import RuntimeEnvironmentDelete
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProviderTargetWrite,
+    RuntimeEnvironmentDelete,
+)
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
@@ -420,16 +423,17 @@ class FilesystemRecordStore:
                 model=target_id_record,
                 step_name="write_dokploy_target_id",
             )
-        for provider_target_record in bundle.provider_targets:
+        for provider_target_write in bundle.provider_target_writes:
+            self._validate_provider_target_write(provider_target_write)
             self._stage_product_authority_bundle_write(
                 stage_dir=stage_dir,
                 entries=entries,
                 record_type="launchplane_provider_targets",
                 record_id=_context_instance_record_id(
-                    provider_target_record.context,
-                    provider_target_record.instance,
+                    provider_target_write.record.context,
+                    provider_target_write.record.instance,
                 ),
-                model=provider_target_record,
+                model=provider_target_write.record,
                 step_name="write_provider_target",
             )
         for runtime_record in bundle.runtime_environments:
@@ -531,6 +535,25 @@ class FilesystemRecordStore:
         )
         entries.append(entry)
         self._after_product_authority_bundle_step(f"stage_{step_name}")
+
+    def _validate_provider_target_write(self, write: ProviderTargetWrite) -> None:
+        record_path = self._record_path(
+            "launchplane_provider_targets",
+            _context_instance_record_id(write.record.context, write.record.instance),
+        )
+        current_payload = self._read_json_file(record_path)
+        if write.expected_absent:
+            if current_payload is not None:
+                raise ValueError(
+                    "Provider target record was created after authority bundle planning."
+                )
+            return
+        expected_record = write.expected_record
+        if expected_record is None:
+            raise ValueError("Provider target write expectation is missing.")
+        expected_payload = expected_record.model_dump(mode="json", exclude_none=True)
+        if current_payload != expected_payload:
+            raise ValueError("Provider target record changed after authority bundle planning.")
 
     def _stage_product_authority_bundle_delete(
         self,
@@ -2830,19 +2853,30 @@ class FilesystemRecordStore:
         promotion_record: PromotionRecord,
         inventory: EnvironmentInventory,
     ) -> Path:
-        promotion_path = self._record_path("promotions", promotion_record.record_id)
-        inventory_path = self._record_path("inventory", f"{inventory.context}-{inventory.instance}")
-        previous_promotion = promotion_path.read_bytes() if promotion_path.exists() else None
-        previous_inventory = inventory_path.read_bytes() if inventory_path.exists() else None
-        try:
-            self.write_environment_inventory(inventory)
-            return self.write_promotion_record(promotion_record)
-        except Exception:
-            with suppress(Exception):
-                self._restore_record_path(promotion_path, previous_promotion)
-            with suppress(Exception):
-                self._restore_record_path(inventory_path, previous_inventory)
-            raise
+        with self._product_authority_bundle_lock():
+            promotion_path = self._record_path("promotions", promotion_record.record_id)
+            inventory_path = self._record_path(
+                "inventory", f"{inventory.context}-{inventory.instance}"
+            )
+            previous_promotion = promotion_path.read_bytes() if promotion_path.exists() else None
+            previous_inventory = inventory_path.read_bytes() if inventory_path.exists() else None
+            try:
+                self._write_model_locked(
+                    "inventory",
+                    f"{inventory.context}-{inventory.instance}",
+                    inventory,
+                )
+                return self._write_model_locked(
+                    "promotions",
+                    promotion_record.record_id,
+                    promotion_record,
+                )
+            except Exception:
+                with suppress(Exception):
+                    self._restore_record_path(promotion_path, previous_promotion)
+                with suppress(Exception):
+                    self._restore_record_path(inventory_path, previous_inventory)
+                raise
 
     @staticmethod
     def _restore_record_path(record_path: Path, payload: bytes | None) -> None:

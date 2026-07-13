@@ -74,8 +74,8 @@ class _ProductOnboardingStore:
             self.write_dokploy_target_record(target_record)
         for target_id_record in bundle.dokploy_target_ids:
             self.write_dokploy_target_id_record(target_id_record)
-        for provider_target_record in bundle.provider_targets:
-            self.write_provider_target_record(provider_target_record)
+        for provider_target_write in bundle.provider_target_writes:
+            self.write_provider_target_record(provider_target_write.record)
         for runtime_record in bundle.runtime_environments:
             self.write_runtime_environment_record(runtime_record)
         for binding in bundle.secret_bindings:

@@ -20,8 +20,11 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
-from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
-from control_plane.storage.product_authority_bundle import ProductAuthorityBundleStore
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProductAuthorityBundleStore,
+    ProviderTargetWrite,
+)
 from control_plane.workflows.provider_target_dual_write import (
     prepare_provider_target_from_dokploy_records,
 )
@@ -351,6 +354,10 @@ def plan_product_onboarding_authority_bundle(
         provider_targets=provider_targets,
         provider_target_ids=provider_target_ids,
     )
+    current_provider_targets = {
+        (record.context, record.instance): record
+        for record in record_store.list_physical_provider_target_records()
+    }
     runtime_environments = build_runtime_environment_records(
         manifest=manifest, updated_at=recorded_at
     )
@@ -392,7 +399,14 @@ def plan_product_onboarding_authority_bundle(
         product_profiles=(product_profile,),
         dokploy_targets=provider_targets,
         dokploy_target_ids=provider_target_ids,
-        provider_targets=physical_provider_targets,
+        provider_target_writes=tuple(
+            ProviderTargetWrite(
+                record=record,
+                expected_record=current_provider_targets.get((record.context, record.instance)),
+                expected_absent=(record.context, record.instance) not in current_provider_targets,
+            )
+            for record in physical_provider_targets
+        ),
         runtime_environments=runtime_environments,
         secret_bindings=(*secret_bindings, *secret_binding_plan.retired_bindings),
     )

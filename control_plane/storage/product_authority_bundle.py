@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -30,13 +30,34 @@ class RuntimeEnvironmentDelete(BaseModel):
     event: RuntimeEnvironmentDeleteEvent
 
 
+class ProviderTargetWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record: ProviderTargetRecord
+    expected_record: ProviderTargetRecord | None = None
+    expected_absent: bool = False
+
+    @model_validator(mode="after")
+    def validate_expectation(self) -> ProviderTargetWrite:
+        if (self.expected_record is None) == (not self.expected_absent):
+            raise ValueError(
+                "Provider target writes require exactly one current-record expectation."
+            )
+        if self.expected_record is not None and (
+            self.expected_record.context != self.record.context
+            or self.expected_record.instance != self.record.instance
+        ):
+            raise ValueError("Provider target write expectation must identify the same route.")
+        return self
+
+
 class ProductAuthorityBundle(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
     dokploy_targets: tuple[DokployTargetRecord, ...] = ()
     dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
-    provider_targets: tuple[ProviderTargetRecord, ...] = ()
+    provider_target_writes: tuple[ProviderTargetWrite, ...] = ()
     runtime_environments: tuple[RuntimeEnvironmentRecord, ...] = ()
     secret_records: tuple[SecretRecord, ...] = ()
     secret_versions: tuple[SecretVersion, ...] = ()
@@ -56,7 +77,7 @@ class ProductAuthorityBundle(BaseModel):
                 self.product_profiles,
                 self.dokploy_targets,
                 self.dokploy_target_ids,
-                self.provider_targets,
+                self.provider_target_writes,
                 self.runtime_environments,
                 self.secret_records,
                 self.secret_versions,

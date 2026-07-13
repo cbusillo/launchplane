@@ -24,6 +24,7 @@ from control_plane.contracts.secret_record import (
 )
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundleStore
+from control_plane.storage.product_authority_bundle import ProviderTargetWrite
 from control_plane.storage.product_authority_bundle import RuntimeEnvironmentDelete
 from control_plane.workflows.provider_target_dual_write import (
     prepare_provider_target_from_dokploy_records,
@@ -665,6 +666,10 @@ def plan_product_context_cutover_authority_bundle(
     final_target_records = {**target_target_records, **planned_target_records}
     final_target_id_records = {**target_id_records, **planned_target_id_records}
     affected_target_instances = sorted(set(planned_target_records) | set(planned_target_id_records))
+    current_provider_targets = {
+        (record.context, record.instance): record
+        for record in record_store.list_physical_provider_target_records()
+    }
     planned_provider_target_records: dict[str, ProviderTargetRecord] = {}
     for instance in affected_target_instances:
         target_record = final_target_records.get(instance)
@@ -859,7 +864,14 @@ def plan_product_context_cutover_authority_bundle(
         product_profiles=profile_records,
         dokploy_targets=tuple(planned_target_records.values()),
         dokploy_target_ids=tuple(planned_target_id_records.values()),
-        provider_targets=tuple(planned_provider_target_records.values()),
+        provider_target_writes=tuple(
+            ProviderTargetWrite(
+                record=record,
+                expected_record=current_provider_targets.get((record.context, record.instance)),
+                expected_absent=(record.context, record.instance) not in current_provider_targets,
+            )
+            for record in planned_provider_target_records.values()
+        ),
         runtime_environments=tuple(runtime_records),
         secret_versions=tuple(secret_versions),
         secret_records=tuple(secret_records),

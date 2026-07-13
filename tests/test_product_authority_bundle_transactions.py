@@ -30,6 +30,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
+    ProviderTargetWrite,
     RuntimeEnvironmentDelete,
 )
 
@@ -258,7 +259,9 @@ def _write_bundle() -> ProductAuthorityBundle:
         product_profiles=(_product_profile(),),
         dokploy_targets=(_dokploy_target(),),
         dokploy_target_ids=(_dokploy_target_id(),),
-        provider_targets=(_provider_target(),),
+        provider_target_writes=(
+            ProviderTargetWrite(record=_provider_target(), expected_absent=True),
+        ),
         runtime_environments=(_runtime_environment(),),
         secret_versions=(_secret_version(),),
         secret_records=(_secret_record(),),
@@ -414,6 +417,57 @@ def _assert_write_bundle_absent(
 
 
 class ProductAuthorityBundleTransactionTests(unittest.TestCase):
+    def test_postgres_authority_bundle_rejects_stale_provider_target_absence(self) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            store = _FailingPostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_dir) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            concurrent_target = _provider_target(target_id="concurrent-app")
+            store.write_provider_target_record(concurrent_target)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "created after authority bundle planning",
+            ):
+                store.write_product_authority_bundle(_write_bundle())
+
+            self.assertEqual(store.list_provider_target_records(), (concurrent_target,))
+            self.assertEqual(store.list_product_profile_records(), ())
+            self.assertEqual(store.list_runtime_environment_records(), ())
+            self.assertIsNone(
+                store.read_idempotency_record(
+                    scope="test-suite",
+                    route_path="/v1/test/authority-bundle/apply",
+                    idempotency_key="authority-bundle-key",
+                )
+            )
+
+    def test_filesystem_authority_bundle_rejects_stale_provider_target_absence(self) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            state_dir = Path(temporary_dir)
+            store = FilesystemRecordStore(state_dir)
+            concurrent_target = _provider_target(target_id="concurrent-app")
+            store.write_provider_target_record(concurrent_target)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "created after authority bundle planning",
+            ):
+                store.write_product_authority_bundle(_write_bundle())
+
+            self.assertEqual(store.list_provider_target_records(), (concurrent_target,))
+            self.assertEqual(store.list_product_profile_records(), ())
+            self.assertEqual(store.list_runtime_environment_records(), ())
+            self.assertIsNone(
+                store.read_idempotency_record(
+                    scope="test-suite",
+                    route_path="/v1/test/authority-bundle/apply",
+                    idempotency_key="authority-bundle-key",
+                )
+            )
+            self.assertFalse((state_dir / ".product_authority_bundle_stages").exists())
+
     def test_postgres_authority_bundle_rolls_back_after_each_write_step(self) -> None:
         write_steps = (
             "write_product_profile",

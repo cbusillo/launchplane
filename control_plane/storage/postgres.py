@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast
@@ -129,7 +130,10 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 from control_plane.service_auth import GitHubHumanIdentity
 from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProviderTargetWrite,
+)
 from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
@@ -1898,6 +1902,7 @@ class PostgresRecordStore(HumanSessionStore):
             return
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             for delete_item in bundle.delete_runtime_environments:
                 row = session.scalar(
                     self._runtime_environment_statement(
@@ -1983,11 +1988,10 @@ class PostgresRecordStore(HumanSessionStore):
                     self._dokploy_target_id_row(target_id_record),
                     step_name="write_dokploy_target_id",
                 )
-            for provider_target_record in bundle.provider_targets:
-                self._merge_authority_row(
-                    session,
-                    self._provider_target_row(provider_target_record),
-                    step_name="write_provider_target",
+            for provider_target_write in bundle.provider_target_writes:
+                self._write_provider_target_with_expectation(
+                    session=session,
+                    write=provider_target_write,
                 )
             for runtime_record in bundle.runtime_environments:
                 self._merge_authority_row(
@@ -2036,6 +2040,54 @@ class PostgresRecordStore(HumanSessionStore):
                     step_name="write_idempotency",
                 )
             session.commit()
+
+    def _write_provider_target_with_expectation(
+        self,
+        *,
+        session: Any,
+        write: ProviderTargetWrite,
+    ) -> None:
+        statement = (
+            select(LaunchplaneProviderTargetRow)
+            .where(
+                LaunchplaneProviderTargetRow.context == write.record.context,
+                LaunchplaneProviderTargetRow.instance == write.record.instance,
+            )
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        row = session.scalar(statement)
+        if write.expected_absent:
+            if row is not None:
+                raise ValueError(
+                    "Provider target record was created after authority bundle planning."
+                )
+            session.add(self._provider_target_row(write.record))
+            try:
+                session.flush()
+            except IntegrityError as error:
+                raise ValueError(
+                    "Provider target record was created after authority bundle planning."
+                ) from error
+            self._after_product_authority_bundle_step("write_provider_target")
+            return
+        expected_record = write.expected_record
+        if expected_record is None:
+            raise ValueError("Provider target write expectation is missing.")
+        if row is None:
+            raise ValueError("Provider target record changed after authority bundle planning.")
+        current_record = self._read_payload(
+            model_type=ProviderTargetRecord,
+            payload=row.payload,
+        )
+        if self._payload_dict(current_record) != self._payload_dict(expected_record):
+            raise ValueError("Provider target record changed after authority bundle planning.")
+        self._merge_authority_row(
+            session,
+            self._provider_target_row(write.record),
+            step_name="write_provider_target",
+        )
 
     def _delete_current_authority_row(
         self,
@@ -2273,6 +2325,29 @@ class PostgresRecordStore(HumanSessionStore):
     def _begin_serialized_write(self, session: Any) -> None:
         if self.database_url.startswith("sqlite"):
             session.execute(text("BEGIN IMMEDIATE"))
+
+    def _lock_product_authority_bundle_write(self, session: Any) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "launchplane:product-authority-bundle"},
+        )
+
+    @contextmanager
+    def _product_authority_bundle_read_guard(self) -> Iterator[None]:
+        with self._session_factory() as session:
+            if self.database_url.startswith("sqlite"):
+                session.execute(text("BEGIN IMMEDIATE"))
+            else:
+                session.execute(
+                    text("select pg_advisory_xact_lock_shared(hashtextextended(:lock_name, 0))"),
+                    {"lock_name": "launchplane:product-authority-bundle"},
+                )
+            try:
+                yield
+            finally:
+                session.rollback()
 
     def _database_mutation_timestamp(self, session: Any) -> str:
         if self.database_url.startswith("sqlite"):
@@ -6789,6 +6864,15 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def read_lane_summary(self, *, context_name: str, instance_name: str) -> LaunchplaneLaneSummary:
+        with self._product_authority_bundle_read_guard():
+            return self._read_lane_summary_unlocked(
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+
+    def _read_lane_summary_unlocked(
+        self, *, context_name: str, instance_name: str
+    ) -> LaunchplaneLaneSummary:
         runtime_environment_records = (
             *self.list_runtime_environment_records(scope="global"),
             *self.list_runtime_environment_records(scope="context", context_name=context_name),
