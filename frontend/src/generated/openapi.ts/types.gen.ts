@@ -100,6 +100,7 @@ export type AuthSessionRequiredResponse = {
 };
 
 export type AuthSessionResponse = {
+    csrf_token: string;
     identity: GitHubHumanIdentityResponse;
     status: 'ok';
     trace_id: string;

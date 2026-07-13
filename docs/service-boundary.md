@@ -380,6 +380,63 @@ response shape, renews expiring signed session cookies, and returns
 exists. Logout deletes the cookie-backed session when auth is configured and
 always emits the Launchplane session clearing cookie.
 
+### Browser Mutation Boundary
+
+`SameSite=Lax` remains defense-in-depth; it is not the authorization or CSRF
+contract. A request that resolves to a GitHub human session may use a mutation
+route only when all of these browser facts validate before route authorization
+or mutation logic runs:
+
+- exactly one `Origin` matches the normalized origin of
+  `LAUNCHPLANE_PUBLIC_URL`; forwarded host headers are not origin authority
+- exactly one `Sec-Fetch-Site: same-origin`, one fetch mode of `cors` or
+  `same-origin`, and one `Sec-Fetch-Dest: empty` are present
+- exactly one `X-CSRF-Token` matches the current HMAC-bound session generation
+
+`GET /v1/auth/session` returns the current `csrf_token` with
+`Cache-Control: no-store`. Each accepted token is consumed atomically before the
+route handler runs and advances the generation stored with the human session.
+The old token is then stale and cannot be replayed, including when later route
+authorization or request handling rejects the operation. Browser clients must
+serialize writes and acquire the current token before each attempt. Existing
+signed sessions remain compatible: records written before this boundary begin
+at generation zero and receive a token through the normal session read instead
+of forcing a logout.
+
+The cookie-capable mutation inventory is intentionally limited to:
+
+- `POST /auth/logout`
+- `POST /v1/work-graph/rank`
+- `POST /v1/agent/write-intents/evaluate`
+- `POST /v1/drivers/generic-web/prod-promotion`
+- `POST /v1/drivers/generic-web/prod-promotion-workflow`
+- `POST /v1/product-config/apply`
+- `POST /v1/merge-train/policies/import`
+- `POST /v1/authz-policies/github-actions/grants`
+- `POST /v1/authz-policies/github-actions/removals`
+- `POST /v1/authz-policies/github-humans/grants`
+- `POST /v1/authz-policies/terminal-agents/grants`
+- `POST /v1/authz-policies/local-operators/grants`
+- `POST /v1/authz-policies/local-admins/grants`
+
+Every other authenticated mutation route intentionally rejects session-cookie
+authentication and continues to require its existing GitHub Actions OIDC,
+local-operator/admin bearer, Every Code worker, or webhook boundary. A valid
+`Authorization: Bearer` identity on the routes above also bypasses browser
+origin, fetch-metadata, and CSRF checks exactly as before; a cookie does not
+weaken or replace bearer verification. The operator UI therefore exposes only
+the cookie-capable writes. In particular, GitHub issue inbox reconciliation is
+displayed as unavailable because it remains a GitHub Actions OIDC service
+operation. Managed-secret root re-encryption is explicitly bearer-only even
+when a valid human session cookie is present; rotating the service root is not a
+browser mutation surface.
+
+Trusted Launchplane CLI clients that are explicitly given `--session-cookie`
+preserve compatibility by reading `/v1/auth/session` immediately before the
+write and sending the same strict origin/fetch-metadata headers plus the returned
+single-use token. Bearer-token CLI requests do not perform that preflight and
+retain their existing request shape.
+
 Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
 deployment/promotion/preview lifecycle evidence over HTTP, and executes the
 current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,
@@ -640,7 +697,8 @@ base-branch movement before merging, relies on GitHub's SHA guard for each PR
 head, and records stale landing evidence before returning the normal stale-state
 response. When landing a collapsed stack root, the route validates the linked
 stack-collapse record before the root merge and then writes stack-child
-disposition evidence after the landing record is persisted and accepted calls support optional `Idempotency-Key` replay/conflict handling.
+disposition evidence after the landing record is persisted and accepted calls
+support optional `Idempotency-Key` replay/conflict handling.
 
 `.github/workflows/merge-train-runner.yml` is the first external scheduler for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
@@ -1869,9 +1927,9 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/generic-web/prod-rollback` (native FastAPI)
 - `POST /v1/drivers/verireel/...` (native FastAPI)
 
-Driver route metadata remains descriptor-backed for UI/action discovery. VeriReel testing
-verification, stable environment, runtime verification, preview inventory, and
-preview verification are native FastAPI routes; their
+Driver route metadata remains descriptor-backed for UI/action discovery.
+VeriReel testing verification, stable environment, runtime verification,
+preview inventory, and preview verification are native FastAPI routes; their
 descriptors remain discoverable.
 
 `Odoo Driver Route Smoke` is the Launchplane-owned route exposure gate for Odoo
@@ -1888,13 +1946,13 @@ for those artifact-publish inputs are classified as
 requests. The artifact-publish and artifact-publish inputs routes are owned by
 native FastAPI; product-specific artifact publish calls validate the requested
 context and instance against the DB-backed product profile lane before
-authorization. Native FastAPI owns the paths. Failed publish evidence is not cached as
-an idempotent success. Odoo post-deploy, config-parameter override, and
+authorization. Native FastAPI owns the paths. Failed publish evidence is not
+cached as an idempotent success. Odoo post-deploy, config-parameter override, and
 website-bootstrap override are native FastAPI routes too. They preserve
 product-profile driver validation, lane-scoped authorization, optional
 `Idempotency-Key` replay/conflict behavior, post-deploy transition records, and
-Odoo instance override record merge behavior. Odoo preview apply inputs and preview apply are also owned by
-native FastAPI. They preserve preview-context authorization,
+Odoo instance override record merge behavior. Odoo preview apply inputs and
+preview apply are also owned by native FastAPI. They preserve preview-context authorization,
 runtime-environment dependency classification, and the
 `odoo_preview_runtime_config_incomplete` details envelope for apply requests
 whose template runtime records are incomplete. Preview apply inputs remains

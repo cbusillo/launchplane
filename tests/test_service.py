@@ -133,6 +133,7 @@ from control_plane.service_human_auth import (
     HumanSessionManager,
     HumanSessionStore,
     InMemoryHumanSessionStore,
+    build_browser_mutation_request_headers,
     load_github_oauth_config_from_env,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -1255,6 +1256,21 @@ def _fastapi_signed_in_cookie(
 ) -> str:
     human_session = session_manager.issue(_human_identity(role=role))
     return session_manager.session_cookie_header(human_session)
+
+
+def _fastapi_browser_mutation_headers(
+    session_manager: HumanSessionManager,
+    cookie: str,
+) -> dict[str, str]:
+    human_session = session_manager.read_cookie(cookie)
+    assert human_session is not None
+    return {
+        "Cookie": cookie,
+        **build_browser_mutation_request_headers(
+            origin=session_manager.public_origin,
+            csrf_token=session_manager.csrf_token(human_session),
+        ),
+    }
 
 
 def _authz_policy_record_by_id(
@@ -3100,6 +3116,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 repository="cbusillo/codex-skills",
                 record_id="merge-train-policy-codex-skills-human-import",
             )
+            cookie = session_manager.session_cookie_header(human_session)
 
             status_code, payload = _invoke_app(
                 app,
@@ -3114,7 +3131,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": session_manager.session_cookie_header(human_session),
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "merge-train-policy:human-import",
                 },
             )
@@ -10402,7 +10419,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         },
                     },
                     authorization="",
-                    headers={"Cookie": cookie},
+                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
                 )
 
         self.assertEqual(status_code, 202)
@@ -10459,7 +10476,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 },
                 authorization="",
-                headers={"Cookie": cookie},
+                headers=_fastapi_browser_mutation_headers(session_manager, cookie),
             )
 
         self.assertEqual(status_code, 403)
@@ -10535,7 +10552,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 path="/v1/drivers/generic-web/prod-promotion",
                 payload=request_payload,
                 authorization="",
-                headers={"Cookie": cookie, "Idempotency-Key": idempotency_key},
+                headers={
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
+                    "Idempotency-Key": idempotency_key,
+                },
             )
 
         self.assertEqual(status_code, 403)
@@ -10604,7 +10624,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         },
                     },
                     authorization="",
-                    headers={"Cookie": cookie},
+                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
                 )
 
         self.assertEqual(status_code, 202)
@@ -10685,7 +10705,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         },
                     },
                     authorization="",
-                    headers={"Cookie": cookie},
+                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
                 )
 
         self.assertEqual(status_code, 202)
@@ -10857,7 +10877,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 },
                 authorization="",
-                headers={"Cookie": cookie},
+                headers=_fastapi_browser_mutation_headers(session_manager, cookie),
             )
 
         self.assertEqual(status_code, 403)
@@ -10993,7 +11013,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         },
                     },
                     authorization="",
-                    headers={"Cookie": cookie},
+                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
                 )
 
         self.assertEqual(status_code, 403)
@@ -13705,7 +13725,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-grant:human-admin",
                 },
             )
@@ -13781,7 +13801,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-human-grant:dispatch",
                 },
             )
@@ -13809,7 +13829,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-human-grant:dispatch-repeat",
                 },
             )
@@ -13914,7 +13934,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-human-grant:dry-run",
                 },
             )
@@ -14002,7 +14022,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-terminal-agent-grant:syo-read",
                 },
             )
@@ -14027,7 +14047,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-terminal-agent-grant:syo-read-repeat",
                 },
             )
@@ -14119,7 +14139,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-terminal-agent-grant:dry-run",
                 },
             )
@@ -14201,7 +14221,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-local-operator-grant:ingress",
                 },
             )
@@ -14226,7 +14246,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-local-operator-grant:ingress-repeat",
                 },
             )
@@ -14312,7 +14332,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="",
                 headers={
-                    "Cookie": cookie,
+                    **_fastapi_browser_mutation_headers(session_manager, cookie),
                     "Idempotency-Key": "authz-local-admin-grant:self-deploy",
                 },
             )
