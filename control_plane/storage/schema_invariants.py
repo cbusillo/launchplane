@@ -8,7 +8,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-EXPECTED_ALEMBIC_HEAD_REVISION = "c9d1e3f5a7b9"
+EXPECTED_ALEMBIC_HEAD_REVISION = "d0e2f4a6b8c0"
 
 
 class SchemaInspectorProtocol(Protocol):
@@ -44,6 +44,11 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     CriticalColumnType(
         "launchplane_idempotency_records",
         "response_status_code",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_idempotency_records",
+        "attempt",
         ("integer", "int4"),
     ),
     CriticalColumnType(
@@ -86,6 +91,11 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_idempotency_scope_route_key_idx",
         ("scope", "route_path", "idempotency_key"),
         unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_idempotency_records",
+        "launchplane_idempotency_state_lease_idx",
+        ("state", "lease_expires_at", "updated_at"),
     ),
     CriticalIndex(
         "launchplane_odoo_stable_bootstrap_operations",
@@ -210,8 +220,7 @@ def critical_index_errors(
         observed_index = indexes_by_name.get(expected_index.index_name)
         if observed_index is None:
             errors.append(
-                f"{expected_index.table_name} missing required index "
-                f"{expected_index.index_name}"
+                f"{expected_index.table_name} missing required index {expected_index.index_name}"
             )
             continue
         observed_unique = bool(observed_index.get("unique", False))
@@ -236,9 +245,7 @@ def critical_index_errors(
                 ),
             )
             missing_tokens = [
-                token
-                for token in expected_index.predicate_tokens
-                if token not in predicate_text
+                token for token in expected_index.predicate_tokens if token not in predicate_text
             ]
             if missing_tokens:
                 errors.append(
@@ -279,8 +286,7 @@ def postgres_index_definitions(engine: Engine) -> dict[tuple[str, str], str]:
             )
         ).mappings()
         return {
-            (str(row["tablename"]), str(row["indexname"])): str(row["indexdef"])
-            for row in rows
+            (str(row["tablename"]), str(row["indexname"])): str(row["indexdef"]) for row in rows
         }
 
 
