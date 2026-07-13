@@ -1,9 +1,11 @@
 import hashlib
 import json
 import os
+import fcntl
+import tempfile
 import time
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Literal, TypeVar
@@ -116,11 +118,38 @@ class FilesystemRecordStore:
     def _write_model(self, record_type: str, record_id: str, model: BaseModel) -> Path:
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
-        record_path.write_text(
-            json.dumps(model.model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True),
-            encoding="utf-8",
+        descriptor, temporary_path = tempfile.mkstemp(
+            dir=record_path.parent,
+            prefix=f".{record_path.name}.",
+            suffix=".tmp",
         )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as record_file:
+                record_file.write(
+                    json.dumps(
+                        model.model_dump(mode="json", exclude_none=True),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                record_file.flush()
+                os.fsync(record_file.fileno())
+            os.replace(temporary_path, record_path)
+        finally:
+            Path(temporary_path).unlink(missing_ok=True)
         return record_path
+
+    @contextmanager
+    def _exclusive_record_lock(self, record_type: str, record_id: str) -> Iterator[None]:
+        lock_digest = hashlib.sha256(record_id.encode("utf-8")).hexdigest()
+        lock_path = self.state_dir / ".locks" / record_type / f"{lock_digest}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _create_model_if_absent(self, record_type: str, record_id: str, model: BaseModel) -> bool:
         record_path = self._record_path(record_type, record_id)
@@ -511,7 +540,9 @@ class FilesystemRecordStore:
         return tuple(records)
 
     def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> Path:
-        return self._write_model("launchplane_every_code_work_requests", record.request_id, record)
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, record.request_id):
+            return self._write_model(record_type, record.request_id, record)
 
     def create_every_code_work_request_record_if_absent(
         self, record: EveryCodeWorkRequestRecord
@@ -569,16 +600,18 @@ class FilesystemRecordStore:
             Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
         ) = None,
     ) -> EveryCodeWorkRequestRecord | None:
-        record = self.read_every_code_work_request_record(request_id)
-        claimed_record = claim_every_code_work_request(
-            record, host=host, claimed_at=claimed_at, lease_seconds=lease_seconds
-        )
-        if claimed_record is None:
-            return None
-        self.write_every_code_work_request_record(claimed_record)
-        if idempotency_record_factory is not None:
-            self.write_idempotency_record(idempotency_record_factory(claimed_record))
-        return claimed_record
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, request_id):
+            record = self.read_every_code_work_request_record(request_id)
+            claimed_record = claim_every_code_work_request(
+                record, host=host, claimed_at=claimed_at, lease_seconds=lease_seconds
+            )
+            if claimed_record is None:
+                return None
+            self._write_model(record_type, request_id, claimed_record)
+            if idempotency_record_factory is not None:
+                self.write_idempotency_record(idempotency_record_factory(claimed_record))
+            return claimed_record
 
     def heartbeat_every_code_work_request_record(
         self,
@@ -591,23 +624,25 @@ class FilesystemRecordStore:
         lease_seconds: int = 1800,
     ) -> bool:
         del lease_seconds
-        try:
-            record = self.read_every_code_work_request_record(request_id)
-        except FileNotFoundError:
-            return False
-        updated = heartbeat_every_code_work_request(
-            record,
-            EveryCodeWorkRequestHeartbeat(
-                host=host,
-                fencing_token=fencing_token,
-                heartbeat_at=heartbeat_at,
-                lease_expires_at=lease_expires_at,
-            ),
-        )
-        if updated is None:
-            return False
-        self.write_every_code_work_request_record(updated)
-        return True
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, request_id):
+            try:
+                record = self.read_every_code_work_request_record(request_id)
+            except FileNotFoundError:
+                return False
+            updated = heartbeat_every_code_work_request(
+                record,
+                EveryCodeWorkRequestHeartbeat(
+                    host=host,
+                    fencing_token=fencing_token,
+                    heartbeat_at=heartbeat_at,
+                    lease_expires_at=lease_expires_at,
+                ),
+            )
+            if updated is None:
+                return False
+            self._write_model(record_type, request_id, updated)
+            return True
 
     def update_every_code_work_request_status_record(
         self,
@@ -615,15 +650,17 @@ class FilesystemRecordStore:
         request_id: str,
         update: EveryCodeWorkRequestStatusUpdate,
     ) -> EveryCodeWorkRequestRecord:
-        record = self.read_every_code_work_request_record(request_id)
-        if record.fencing_token > 0 and update.fencing_token != record.fencing_token:
-            raise ValueError(
-                f"Every Code status update fencing token {update.fencing_token} "
-                f"does not match record fencing token {record.fencing_token}"
-            )
-        updated = apply_every_code_work_request_status(record, update)
-        self.write_every_code_work_request_record(updated)
-        return updated
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, request_id):
+            record = self.read_every_code_work_request_record(request_id)
+            if record.fencing_token > 0 and update.fencing_token != record.fencing_token:
+                raise ValueError(
+                    f"Every Code status update fencing token {update.fencing_token} "
+                    f"does not match record fencing token {record.fencing_token}"
+                )
+            updated = apply_every_code_work_request_status(record, update)
+            self._write_model(record_type, request_id, updated)
+            return updated
 
     def compare_and_write_every_code_work_request_record(
         self,
@@ -634,16 +671,18 @@ class FilesystemRecordStore:
     ) -> Literal["updated", "changed", "missing"]:
         if expected_record.request_id != record.request_id:
             raise ValueError("Every Code compare-and-write requires matching request IDs")
-        try:
-            current = self.read_every_code_work_request_record(expected_record.request_id)
-        except FileNotFoundError:
-            return "missing"
-        if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
-            return "changed"
-        self.write_every_code_work_request_record(record)
-        if idempotency_record is not None:
-            self.write_idempotency_record(idempotency_record)
-        return "updated"
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, expected_record.request_id):
+            try:
+                current = self.read_every_code_work_request_record(expected_record.request_id)
+            except FileNotFoundError:
+                return "missing"
+            if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
+                return "changed"
+            self._write_model(record_type, record.request_id, record)
+            if idempotency_record is not None:
+                self.write_idempotency_record(idempotency_record)
+            return "updated"
 
     def list_stale_every_code_work_request_records(
         self,
@@ -671,20 +710,22 @@ class FilesystemRecordStore:
         expected_record: EveryCodeWorkRequestRecord,
         recovered_at: str,
     ) -> EveryCodeWorkRequestRecord | None:
-        try:
-            current = self.read_every_code_work_request_record(expected_record.request_id)
-        except FileNotFoundError:
-            return None
-        if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
-            return None
-        if not current.lease_expires_at or current.lease_expires_at >= recovered_at:
-            return None
-        recovered = recover_stale_every_code_work_request(
-            current,
-            recovered_at=recovered_at,
-        )
-        self.write_every_code_work_request_record(recovered)
-        return recovered
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, expected_record.request_id):
+            try:
+                current = self.read_every_code_work_request_record(expected_record.request_id)
+            except FileNotFoundError:
+                return None
+            if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
+                return None
+            if not current.lease_expires_at or current.lease_expires_at >= recovered_at:
+                return None
+            recovered = recover_stale_every_code_work_request(
+                current,
+                recovered_at=recovered_at,
+            )
+            self._write_model(record_type, recovered.request_id, recovered)
+            return recovered
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> Path:
         return self._write_model("launchplane_every_code_pr_feedback", record.feedback_id, record)
