@@ -85,6 +85,11 @@ export function GitHubIssueInboxPanel({
           type="button"
           onClick={() => void runReconcile("dry_run")}
           disabled={!canReconcile || runningMode !== null}
+          title={
+            reconcile
+              ? undefined
+              : "Reconciliation requires the GitHub Actions OIDC service boundary."
+          }
         >
           <SearchCheck size={15} aria-hidden="true" />
           Dry run
@@ -93,6 +98,11 @@ export function GitHubIssueInboxPanel({
           type="button"
           onClick={() => void runReconcile("apply")}
           disabled={!canReconcile || runningMode !== null}
+          title={
+            reconcile
+              ? undefined
+              : "Reconciliation requires the GitHub Actions OIDC service boundary."
+          }
         >
           <PlusCircle size={15} aria-hidden="true" />
           Apply

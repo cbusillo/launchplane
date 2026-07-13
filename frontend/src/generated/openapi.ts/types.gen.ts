@@ -100,6 +100,7 @@ export type AuthSessionRequiredResponse = {
 };
 
 export type AuthSessionResponse = {
+    csrf_token: string;
     identity: GitHubHumanIdentityResponse;
     status: 'ok';
     trace_id: string;
@@ -560,37 +561,6 @@ export type GitHubIssueInboxReadModel = {
     repository_count: number;
     schema_version: number;
     stale_project_item_count: number;
-};
-
-export type GitHubIssueInboxReconcileItem = {
-    action: 'would_add' | 'added' | 'already_present' | 'failed' | 'skipped';
-    detail: string;
-    error_code: string;
-    error_correlation_id: string;
-    key: string;
-    number: number;
-    repository: string;
-    title: string;
-    url: string;
-};
-
-export type GitHubIssueInboxReconcileRequest = {
-    mode?: 'dry_run' | 'apply';
-    schema_version?: number;
-};
-
-export type GitHubIssueInboxReconcileResult = {
-    added_count: number;
-    already_present_count: number;
-    failed_count: number;
-    generated_at: string;
-    issue_count: number;
-    items: Array<GitHubIssueInboxReconcileItem>;
-    mode: 'dry_run' | 'apply';
-    repository_count: number;
-    schema_version: number;
-    skipped_count: number;
-    would_add_count: number;
 };
 
 export type GitHubIssueInboxRepositoryGroup = {
@@ -1639,19 +1609,6 @@ export type StructuredHealthEvidence = {
     version: string;
 };
 
-export type WorkGraphIssueInboxReconcileResponse = {
-    records: {
-        [key: string]: string;
-    };
-    result: WorkGraphIssueInboxReconcileResponseResult;
-    status: 'accepted';
-    trace_id: string;
-};
-
-export type WorkGraphIssueInboxReconcileResponseResult = {
-    reconcile: GitHubIssueInboxReconcileResult;
-};
-
 export type WorkGraphIssueInboxResponse = {
     configured: boolean;
     inbox: GitHubIssueInboxReadModel;
@@ -2393,30 +2350,6 @@ export type ApplyProductConfigResponses = {
 };
 
 export type ApplyProductConfigResponse = ApplyProductConfigResponses[keyof ApplyProductConfigResponses];
-
-export type ReconcileWorkGraphIssueInboxData = {
-    body: GitHubIssueInboxReconcileRequest;
-    headers?: {
-        Authorization?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/work-graph/github/issues/reconcile';
-};
-
-export type ReconcileWorkGraphIssueInboxErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-};
-
-export type ReconcileWorkGraphIssueInboxError = ReconcileWorkGraphIssueInboxErrors[keyof ReconcileWorkGraphIssueInboxErrors];
-
-export type ReconcileWorkGraphIssueInboxResponses = {
-    202: WorkGraphIssueInboxReconcileResponse;
-};
-
-export type ReconcileWorkGraphIssueInboxResponse = ReconcileWorkGraphIssueInboxResponses[keyof ReconcileWorkGraphIssueInboxResponses];
 
 export type RankWorkGraphSnapshotData = {
     body: WorkGraphRankEnvelope;

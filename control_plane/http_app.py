@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
-from typing import Annotated, Any, Literal, Protocol, cast
+from typing import Annotated, Any, Literal, NoReturn, Protocol, cast
 from uuid import uuid4
 import click
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
@@ -569,12 +569,14 @@ from control_plane.service_auth import (
     bearer_identity_from_token,
 )
 from control_plane.service_human_auth import (
+    BROWSER_CSRF_HEADER_NAME,
     HumanSessionManager,
     LaunchplaneHumanSession,
     OAuthLoginState,
     OAuthLoginStateStore,
     build_pkce_verifier,
     safe_oauth_return_to,
+    validate_browser_mutation_request_headers,
 )
 from control_plane.launchplane_mutations import (
     LaunchplaneDestroyPreviewStore,
@@ -923,6 +925,7 @@ class AuthSessionResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     identity: GitHubHumanIdentityResponse
+    csrf_token: str
 
 
 class AuthSessionRequiredResponse(BaseModel):
@@ -4154,6 +4157,7 @@ def create_launchplane_fastapi_app(
             session_cookie_header = human_session_manager.session_cookie_header(session)
             response.headers.append("Set-Cookie", session_cookie_header)
             request.state.launchplane_renewed_session_cookie = session_cookie_header
+        request.state.launchplane_human_session = session
         return session.identity
 
     def human_identity_response(identity: GitHubHumanIdentity) -> GitHubHumanIdentityResponse:
@@ -4186,15 +4190,20 @@ def create_launchplane_fastapi_app(
             return JSONResponse(
                 status_code=401,
                 content=payload.model_dump(mode="json"),
+                headers={"Cache-Control": "no-store"},
             )
         session, was_renewed = session_result
         if was_renewed and human_session_manager is not None:
             session_cookie_header = human_session_manager.session_cookie_header(session)
             response.headers.append("Set-Cookie", session_cookie_header)
             request.state.launchplane_renewed_session_cookie = session_cookie_header
+        if human_session_manager is None:
+            raise RuntimeError("Launchplane human session manager is not initialized.")
+        response.headers["Cache-Control"] = "no-store"
         return AuthSessionResponse(
             trace_id=trace_id,
             identity=human_identity_response(session.identity),
+            csrf_token=human_session_manager.csrf_token(session),
         )
 
     def reject_github_oauth_not_configured(trace_id: str) -> JSONResponse:
@@ -4286,12 +4295,50 @@ def create_launchplane_fastapi_app(
             headers={"Set-Cookie": human_session_manager.session_cookie_header(session)},
         )
 
+    def reject_browser_mutation() -> NoReturn:
+        raise _launchplane_http_error(
+            status_code=403,
+            trace_id=next_trace_id(),
+            code="browser_mutation_denied",
+            message="Browser mutation request failed origin, fetch metadata, or CSRF validation.",
+        )
+
+    def consume_browser_mutation_request(
+        *,
+        request: Request,
+        session: LaunchplaneHumanSession,
+    ) -> LaunchplaneHumanSession:
+        session_manager = human_session_manager
+        if session_manager is None:
+            reject_browser_mutation()
+        try:
+            csrf_token = validate_browser_mutation_request_headers(
+                expected_origin=session_manager.public_origin,
+                origin_values=tuple(request.headers.getlist("Origin")),
+                sec_fetch_site_values=tuple(request.headers.getlist("Sec-Fetch-Site")),
+                sec_fetch_mode_values=tuple(request.headers.getlist("Sec-Fetch-Mode")),
+                sec_fetch_dest_values=tuple(request.headers.getlist("Sec-Fetch-Dest")),
+                csrf_token_values=tuple(request.headers.getlist(BROWSER_CSRF_HEADER_NAME)),
+            )
+        except (PermissionError, ValueError):
+            reject_browser_mutation()
+        rotated_session = session_manager.consume_csrf_token(session, csrf_token)
+        if rotated_session is None:
+            reject_browser_mutation()
+        request.state.launchplane_human_session = rotated_session
+        return rotated_session
+
     def logout_auth_session(
+        request: Request,
         response: Response,
         cookie: Annotated[str, Header(alias="Cookie")] = "",
     ) -> AuthLogoutResponse:
         trace_id = next_trace_id()
         if human_session_manager is not None:
+            session_result = read_human_session(cookie_header=cookie)
+            if session_result is not None:
+                session, _was_renewed = session_result
+                consume_browser_mutation_request(request=request, session=session)
             human_session_manager.delete_cookie_session(cookie)
             clear_cookie = human_session_manager.clear_cookie_header()
         else:
@@ -4305,6 +4352,19 @@ def create_launchplane_fastapi_app(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
         cookie: Annotated[str, Header(alias="Cookie")] = "",
     ) -> LaunchplaneIdentity:
+        bearer_identity = resolve_bearer_identity(authorization)
+        if bearer_identity is not None:
+            return bearer_identity
+        human_identity = read_human_session_identity(
+            cookie_header=cookie,
+            request=request,
+            response=response,
+        )
+        if human_identity is not None:
+            return human_identity
+        raise _authentication_required_error("Authorization header is required.")
+
+    def resolve_bearer_identity(authorization: str) -> LaunchplaneIdentity | None:
         header = authorization.strip()
         if header:
             scheme, _, token = header.partition(" ")
@@ -4323,14 +4383,35 @@ def create_launchplane_fastapi_app(
                     return verifier.verify(bearer_token)
                 except (InvalidTokenError, ValueError) as error:
                     raise _authentication_required_error(str(error)) from error
-        human_identity = read_human_session_identity(
-            cookie_header=cookie,
+        return None
+
+    def read_bearer_identity(
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+    ) -> LaunchplaneIdentity:
+        identity = resolve_bearer_identity(authorization)
+        if identity is not None:
+            return identity
+        raise _authentication_required_error("Authorization header is required.")
+
+    def read_browser_mutation_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        identity = read_identity(
             request=request,
             response=response,
+            authorization=authorization,
+            cookie=cookie,
         )
-        if human_identity is not None:
-            return human_identity
-        raise _authentication_required_error("Authorization header is required.")
+        if not isinstance(identity, GitHubHumanIdentity):
+            return identity
+        session: object = getattr(request.state, "launchplane_human_session", None)
+        if not isinstance(session, LaunchplaneHumanSession):
+            reject_browser_mutation()
+        consume_browser_mutation_request(request=request, session=session)
+        return identity
 
     def read_work_graph_rank_identity(
         request: Request,
@@ -4370,6 +4451,26 @@ def create_launchplane_fastapi_app(
             return verifier.verify(bearer_token)
         except (InvalidTokenError, ValueError) as error:
             raise _authentication_required_error(str(error)) from error
+
+    def read_browser_work_graph_rank_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> GitHubActionsIdentity | GitHubHumanIdentity:
+        identity = read_work_graph_rank_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+        )
+        if not isinstance(identity, GitHubHumanIdentity):
+            return identity
+        session: object = getattr(request.state, "launchplane_human_session", None)
+        if not isinstance(session, LaunchplaneHumanSession):
+            reject_browser_mutation()
+        consume_browser_mutation_request(request=request, session=session)
+        return identity
 
     def every_code_worker_token_authorized(authorization: str) -> bool:
         if bearer_identity_config is None:
@@ -5630,7 +5731,7 @@ def create_launchplane_fastapi_app(
         payload: WorkGraphRankEnvelope,
         identity: Annotated[
             GitHubActionsIdentity | GitHubHumanIdentity,
-            Depends(read_work_graph_rank_identity),
+            Depends(read_browser_work_graph_rank_identity),
         ],
     ) -> WorkGraphRankResponse:
         trace_id = next_trace_id()
@@ -9427,7 +9528,7 @@ def create_launchplane_fastapi_app(
     async def evaluate_agent_write_intent_route(
         request: Request,
         intent_request: AgentWriteIntentRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -12526,7 +12627,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_config(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> ProductConfigApplyResponse:
@@ -12686,7 +12787,7 @@ def create_launchplane_fastapi_app(
 
     async def reencrypt_managed_secrets(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -12912,7 +13013,7 @@ def create_launchplane_fastapi_app(
 
     async def import_merge_train_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13156,7 +13257,7 @@ def create_launchplane_fastapi_app(
 
     async def grant_github_actions_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13173,7 +13274,7 @@ def create_launchplane_fastapi_app(
 
     async def remove_github_actions_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13190,7 +13291,7 @@ def create_launchplane_fastapi_app(
 
     async def grant_github_human_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13207,7 +13308,7 @@ def create_launchplane_fastapi_app(
 
     async def grant_terminal_agent_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13224,7 +13325,7 @@ def create_launchplane_fastapi_app(
 
     async def grant_local_operator_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -13241,7 +13342,7 @@ def create_launchplane_fastapi_app(
 
     async def grant_local_admin_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -15298,7 +15399,7 @@ def create_launchplane_fastapi_app(
     async def apply_generic_web_prod_promotion(
         request: Request,
         promotion_request: GenericWebProdPromotionEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> GenericWebProdPromotionResponse | JSONResponse:
@@ -15420,7 +15521,7 @@ def create_launchplane_fastapi_app(
     async def dispatch_generic_web_prod_promotion_workflow(
         request: Request,
         workflow_request: GenericWebPromotionWorkflowEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> GenericWebPromotionWorkflowResponse | JSONResponse:

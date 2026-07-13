@@ -171,7 +171,6 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/rank": "rank_work_graph_snapshot",
-    "/v1/work-graph/github/issues/reconcile": "reconcile_work_graph_issue_inbox",
     "/v1/product-config/apply": "apply_product_config",
     "/v1/drivers/generic-web/prod-promotion": "apply_generic_web_prod_promotion",
     "/v1/drivers/generic-web/prod-promotion-workflow": (

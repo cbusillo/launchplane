@@ -29,19 +29,19 @@ class DocsContractsTests(TestCase):
         testing_docs = Path("docs/style/testing.md").read_text(encoding="utf-8")
 
         self.assertEqual(
-            "uv run launchplane ci unittest-shard local",
+            "uv run --extra dev launchplane ci unittest-shard local",
             metadata["qualityGate"]["test"]["default"],
         )
         self.assertEqual(
-            "uv run python -m unittest {modules}",
+            "uv run --extra dev python -m unittest {modules}",
             metadata["qualityGate"]["test"]["targeted"],
         )
         self.assertIn(
-            "uv run launchplane ci postgres-integration",
+            "uv run --extra dev launchplane ci postgres-integration",
             metadata["qualityGate"]["test"]["postgresIntegration"],
         )
-        self.assertIn("uv run launchplane ci unittest-shard local", testing_docs)
-        self.assertIn("uv run launchplane ci postgres-integration", testing_docs)
+        self.assertIn("uv run --extra dev launchplane ci unittest-shard local", testing_docs)
+        self.assertIn("uv run --extra dev launchplane ci postgres-integration", testing_docs)
         self.assertIn("12 shards with a 20-test/30-second split threshold", testing_docs)
         self.assertIn("GitHub Actions remains the source of truth", testing_docs)
         self.assertIn("  postgres_integration:", ci_workflow)
@@ -127,18 +127,19 @@ class DocsContractsTests(TestCase):
             "GeneratedApplyGenericWebProdPromotionResponse",
             frontend_types,
         )
-        self.assertIn(
-            "GeneratedReconcileWorkGraphIssueInboxResponse",
-            frontend_types,
+        self.assertIn("export interface GitHubIssueInboxReconcilePayload", frontend_types)
+        self.assertNotIn(
+            "/v1/work-graph/github/issues/reconcile",
+            write_operations,
         )
         for operation_data_type in (
             "ApplyGenericWebProdPromotionData",
             "ApplyProductConfigData",
             "DispatchGenericWebProdPromotionWorkflowData",
             "RankWorkGraphSnapshotData",
-            "ReconcileWorkGraphIssueInboxData",
         ):
             self.assertIn(operation_data_type, frontend_api)
+        self.assertNotIn("ReconcileWorkGraphIssueInboxData", frontend_api)
         self.assertIn("requestGeneratedPost", frontend_api)
 
     def test_post_v2_transition_plans_are_issue_backed(self) -> None:

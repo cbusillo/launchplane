@@ -1,7 +1,6 @@
 import hashlib
 import json
-from collections.abc import Callable, MutableMapping
-from dataclasses import dataclass
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -9,6 +8,7 @@ from unittest.mock import patch
 from urllib.parse import urlencode
 
 from fastapi import FastAPI
+from httpx2 import AsyncClient, Response
 from jwt import InvalidTokenError
 
 from control_plane import secrets as control_plane_secrets
@@ -110,15 +110,22 @@ from control_plane.service_auth import (
 )
 from control_plane.service_human_auth import (
     GitHubOAuthConfig,
+    HumanSessionManager,
+    LaunchplaneHumanSession,
+    build_browser_mutation_request_headers,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
-from tests.test_service import (
+from tests.support.auth import _identity
+from tests.support.http import get as http_get
+from tests.support.http import request as http_request
+from tests.support.merge_train import (
     _FakeMergeTrainGitHubClient,
     _FakeMergeTrainSnapshotReader,
     _FakeStackedMergeTrainSnapshotReader,
+)
+from tests.support.profiles import (
     _generic_site_profile_payload,
-    _identity,
     _product_profile_payload_with_prod,
 )
 
@@ -2824,6 +2831,19 @@ def _github_human_identity(*, role: Literal["read_only", "admin"] = "admin") -> 
     )
 
 
+def _browser_mutation_headers(
+    session_manager: HumanSessionManager,
+    session: LaunchplaneHumanSession,
+) -> dict[str, str]:
+    return {
+        "Cookie": session_manager.session_cookie_header(session),
+        **build_browser_mutation_request_headers(
+            origin=session_manager.public_origin,
+            csrf_token=session_manager.csrf_token(session),
+        ),
+    }
+
+
 def _local_operator_bearer_config(*, token_label: str = "local-owner-read") -> BearerIdentityConfig:
     return BearerIdentityConfig(
         local_operator_token="local-operator-token",
@@ -2832,14 +2852,7 @@ def _local_operator_bearer_config(*, token_label: str = "local-owner-read") -> B
     )
 
 
-@dataclass(frozen=True)
-class _AsgiResponse:
-    status_code: int
-    headers: "_CaseInsensitiveHeaders"
-    body: bytes
-
-    def json(self) -> Any:
-        return json.loads(self.body.decode("utf-8"))
+type _AsgiResponse = Response
 
 
 async def _get_config_status(
@@ -4833,94 +4846,33 @@ async def _post_deployment_evidence(
 
 
 async def _asgi_get(
-    app: FastAPI, path: str, *, headers: dict[str, str] | None = None
+    target: FastAPI | AsyncClient,
+    path: str,
+    *,
+    headers: dict[str, str] | None = None,
 ) -> _AsgiResponse:
-    return await _asgi_request(app, "GET", path, headers=headers)
+    return await http_get(target, path, headers=headers)
 
 
 async def _asgi_request(
-    app: FastAPI,
+    target: FastAPI | AsyncClient,
     method: str,
     path: str,
     *,
     headers: dict[str, str] | None = None,
-    extra_headers: list[tuple[str, str]] | None = None,
     payload: dict[str, object] | None = None,
     raw_body: bytes | None = None,
-    set_content_length: bool = True,
     capture_server_error_response: bool = False,
 ) -> _AsgiResponse:
-    request_path, separator, raw_query_string = path.partition("?")
-    request_headers_dict = dict(headers or {})
-    body = b""
-    if raw_body is not None:
-        body = raw_body
-    elif payload is not None:
-        body = json.dumps(payload).encode("utf-8")
-        request_headers_dict.setdefault("Content-Type", "application/json")
-    if set_content_length:
-        request_headers_dict.setdefault("Content-Length", str(len(body)))
-    request_headers = [
-        (key.lower().encode("ascii"), value.encode("latin-1"))
-        for key, value in request_headers_dict.items()
-    ]
-    request_headers.extend(
-        (key.lower().encode("ascii"), value.encode("latin-1")) for key, value in extra_headers or []
+    return await http_request(
+        target,
+        method,
+        path,
+        headers=headers,
+        payload=payload,
+        raw_body=raw_body,
+        capture_server_error_response=capture_server_error_response,
     )
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "method": method,
-        "scheme": "http",
-        "path": request_path,
-        "raw_path": request_path.encode("ascii"),
-        "query_string": raw_query_string.encode("ascii") if separator else b"",
-        "headers": request_headers,
-        "client": ("testclient", 50000),
-        "server": ("testserver", 80),
-    }
-    messages = [
-        {"type": "http.request", "body": body, "more_body": False},
-    ]
-    sent: list[MutableMapping[str, Any]] = []
-
-    async def receive() -> dict[str, Any]:
-        if messages:
-            return messages.pop(0)
-        return {"type": "http.disconnect"}
-
-    async def send(message: MutableMapping[str, Any]) -> None:
-        sent.append(message)
-
-    try:
-        await app(scope, receive, send)
-    except Exception:
-        if not capture_server_error_response or not any(
-            message["type"] == "http.response.start" for message in sent
-        ):
-            raise
-
-    start = next(message for message in sent if message["type"] == "http.response.start")
-    body = b"".join(
-        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
-    )
-    response_headers = _CaseInsensitiveHeaders(
-        {key.decode("latin-1"): value.decode("latin-1") for key, value in start.get("headers", [])}
-    )
-    return _AsgiResponse(
-        status_code=start["status"],
-        headers=response_headers,
-        body=body,
-    )
-
-
-class _CaseInsensitiveHeaders(dict[str, str]):
-    def __init__(self, headers: dict[str, str]) -> None:
-        super().__init__((key.lower(), value) for key, value in headers.items())
-
-    def __getitem__(self, key: str) -> str:
-        return super().__getitem__(key.lower())
 
 
 class _StubFastApiGitHubOAuthClient:

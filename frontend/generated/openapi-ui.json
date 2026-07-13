@@ -2262,76 +2262,6 @@
         "summary": "Plan or apply product config"
       }
     },
-    "/v1/work-graph/github/issues/reconcile": {
-      "post": {
-        "operationId": "reconcile_work_graph_issue_inbox",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GitHubIssueInboxReconcileRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphIssueInboxReconcileResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          }
-        },
-        "summary": "Reconcile Launchplane GitHub issue inbox"
-      }
-    },
     "/v1/work-graph/rank": {
       "post": {
         "operationId": "rank_work_graph_snapshot",
@@ -2887,6 +2817,10 @@
       "AuthSessionResponse": {
         "additionalProperties": false,
         "properties": {
+          "csrf_token": {
+            "title": "Csrf Token",
+            "type": "string"
+          },
           "identity": {
             "$ref": "#/components/schemas/GitHubHumanIdentityResponse"
           },
@@ -2902,6 +2836,7 @@
           }
         },
         "required": [
+          "csrf_token",
           "identity",
           "status",
           "trace_id"
@@ -5500,181 +5435,6 @@
           "stale_project_item_count"
         ],
         "title": "GitHubIssueInboxReadModel",
-        "type": "object"
-      },
-      "GitHubIssueInboxReconcileItem": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "enum": [
-              "would_add",
-              "added",
-              "already_present",
-              "failed",
-              "skipped"
-            ],
-            "title": "Action",
-            "type": "string"
-          },
-          "detail": {
-            "default": "",
-            "title": "Detail",
-            "type": "string"
-          },
-          "error_code": {
-            "default": "",
-            "title": "Error Code",
-            "type": "string"
-          },
-          "error_correlation_id": {
-            "default": "",
-            "title": "Error Correlation Id",
-            "type": "string"
-          },
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "number": {
-            "minimum": 1,
-            "title": "Number",
-            "type": "integer"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "title": {
-            "default": "",
-            "title": "Title",
-            "type": "string"
-          },
-          "url": {
-            "default": "",
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "action",
-          "detail",
-          "error_code",
-          "error_correlation_id",
-          "key",
-          "number",
-          "repository",
-          "title",
-          "url"
-        ],
-        "title": "GitHubIssueInboxReconcileItem",
-        "type": "object"
-      },
-      "GitHubIssueInboxReconcileRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "mode": {
-            "default": "dry_run",
-            "enum": [
-              "dry_run",
-              "apply"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "title": "GitHubIssueInboxReconcileRequest",
-        "type": "object"
-      },
-      "GitHubIssueInboxReconcileResult": {
-        "additionalProperties": false,
-        "properties": {
-          "added_count": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Added Count",
-            "type": "integer"
-          },
-          "already_present_count": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Already Present Count",
-            "type": "integer"
-          },
-          "failed_count": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Failed Count",
-            "type": "integer"
-          },
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "issue_count": {
-            "minimum": 0,
-            "title": "Issue Count",
-            "type": "integer"
-          },
-          "items": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/GitHubIssueInboxReconcileItem"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "mode": {
-            "enum": [
-              "dry_run",
-              "apply"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "repository_count": {
-            "minimum": 0,
-            "title": "Repository Count",
-            "type": "integer"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "skipped_count": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Skipped Count",
-            "type": "integer"
-          },
-          "would_add_count": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Would Add Count",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "added_count",
-          "already_present_count",
-          "failed_count",
-          "generated_at",
-          "issue_count",
-          "items",
-          "mode",
-          "repository_count",
-          "schema_version",
-          "skipped_count",
-          "would_add_count"
-        ],
-        "title": "GitHubIssueInboxReconcileResult",
         "type": "object"
       },
       "GitHubIssueInboxRepositoryGroup": {
@@ -11499,52 +11259,6 @@
           "status",
           "version"
         ]
-      },
-      "WorkGraphIssueInboxReconcileResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "records": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Records",
-            "type": "object"
-          },
-          "result": {
-            "$ref": "#/components/schemas/WorkGraphIssueInboxReconcileResponseResult"
-          },
-          "status": {
-            "const": "accepted",
-            "default": "accepted",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "records",
-          "result",
-          "status",
-          "trace_id"
-        ],
-        "title": "WorkGraphIssueInboxReconcileResponse",
-        "type": "object"
-      },
-      "WorkGraphIssueInboxReconcileResponseResult": {
-        "additionalProperties": false,
-        "properties": {
-          "reconcile": {
-            "$ref": "#/components/schemas/GitHubIssueInboxReconcileResult"
-          }
-        },
-        "required": [
-          "reconcile"
-        ],
-        "title": "WorkGraphIssueInboxReconcileResponseResult",
-        "type": "object"
       },
       "WorkGraphIssueInboxResponse": {
         "additionalProperties": false,

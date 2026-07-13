@@ -750,12 +750,17 @@ def _secret_audit_event(*, event_id: str, secret_id: str, recorded_at: str) -> S
     )
 
 
-def _human_session(*, session_id: str = "session-1") -> LaunchplaneHumanSession:
+def _human_session(
+    *,
+    session_id: str = "session-1",
+    csrf_generation: int = 0,
+) -> LaunchplaneHumanSession:
     created_at = datetime.now(timezone.utc).replace(microsecond=0)
     return LaunchplaneHumanSession(
         session_id=session_id,
         created_at=created_at,
         expires_at=created_at + timedelta(hours=12),
+        csrf_generation=csrf_generation,
         identity=GitHubHumanIdentity(
             login="alice",
             github_id=123,
@@ -1883,7 +1888,33 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded.identity.login, "alice")
         self.assertEqual(loaded.identity.role, "admin")
         self.assertEqual(loaded.identity.teams, frozenset({"shinycomputers/launchplane-admins"}))
+        self.assertEqual(loaded.csrf_generation, 0)
         self.assertIsNone(deleted)
+
+    def test_human_session_csrf_generation_compare_and_write_is_atomic(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            original_session = _human_session()
+            rotated_session = _human_session(csrf_generation=1)
+            store.write_session(original_session)
+
+            rotated = store.write_session_if_csrf_generation(
+                rotated_session,
+                expected_generation=0,
+            )
+            replayed = store.write_session_if_csrf_generation(
+                rotated_session,
+                expected_generation=0,
+            )
+            loaded = store.read_session(original_session.session_id)
+
+        self.assertTrue(rotated)
+        self.assertFalse(replayed)
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.csrf_generation, 1)
 
     def test_expired_human_session_reads_as_missing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

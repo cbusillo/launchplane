@@ -9,6 +9,8 @@ from control_plane.service_human_auth import (
     HumanSessionManager,
     InMemoryHumanSessionStore,
     LaunchplaneHumanSession,
+    build_browser_mutation_request_headers,
+    validate_browser_mutation_request_headers,
 )
 
 
@@ -111,6 +113,108 @@ class HumanSessionManagerTests(unittest.TestCase):
 
         self.assertIsNone(manager.read_cookie(cookie))
         self.assertIsNone(store.read_session(expired_session.session_id))
+
+    def test_csrf_token_is_session_bound_single_use_and_rotates(self) -> None:
+        store = InMemoryHumanSessionStore()
+        manager = HumanSessionManager(config=_config(), session_store=store)
+        session = manager.issue(_identity())
+        csrf_token = manager.csrf_token(session)
+
+        rotated_session = manager.consume_csrf_token(session, csrf_token)
+
+        self.assertIsNotNone(rotated_session)
+        assert rotated_session is not None
+        self.assertEqual(rotated_session.csrf_generation, 1)
+        self.assertNotEqual(manager.csrf_token(rotated_session), csrf_token)
+        self.assertIsNone(manager.consume_csrf_token(session, csrf_token))
+
+    def test_csrf_token_rejects_other_session_and_stale_generation(self) -> None:
+        store = InMemoryHumanSessionStore()
+        manager = HumanSessionManager(config=_config(), session_store=store)
+        first_session = manager.issue(_identity())
+        second_session = manager.issue(_identity())
+        first_token = manager.csrf_token(first_session)
+
+        self.assertIsNone(manager.consume_csrf_token(second_session, first_token))
+        rotated_session = manager.consume_csrf_token(first_session, first_token)
+        assert rotated_session is not None
+        self.assertIsNone(manager.consume_csrf_token(rotated_session, first_token))
+        self.assertIsNone(
+            manager.consume_csrf_token(
+                rotated_session,
+                f"v1.{'9' * 5000}.signature",
+            )
+        )
+
+    def test_session_renewal_cannot_roll_back_concurrent_csrf_rotation(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        store = InMemoryHumanSessionStore()
+        manager = HumanSessionManager(
+            config=_config(),
+            session_store=store,
+            now=lambda: now,
+        )
+        stale_session = LaunchplaneHumanSession(
+            session_id="renewal-csrf-race",
+            identity=_identity(),
+            created_at=now - timedelta(days=13),
+            expires_at=now + timedelta(hours=1),
+        )
+        store.write_session(stale_session)
+        token = manager.csrf_token(stale_session)
+        rotated_session = manager.consume_csrf_token(stale_session, token)
+
+        renewed_session = manager.renew_if_needed(stale_session)
+        stored_session = store.read_session(stale_session.session_id)
+
+        self.assertIsNotNone(rotated_session)
+        self.assertIsNotNone(renewed_session)
+        self.assertIsNotNone(stored_session)
+        assert renewed_session is not None
+        assert stored_session is not None
+        self.assertEqual(renewed_session.csrf_generation, 1)
+        self.assertEqual(stored_session.csrf_generation, 1)
+        self.assertIsNone(manager.consume_csrf_token(stored_session, token))
+
+    def test_browser_mutation_headers_require_exact_same_origin_fetch_metadata(self) -> None:
+        manager = HumanSessionManager(config=_config(), session_store=InMemoryHumanSessionStore())
+        headers = build_browser_mutation_request_headers(
+            origin="https://launchplane.example/operator",
+            csrf_token="csrf-token",
+        )
+
+        csrf_token = validate_browser_mutation_request_headers(
+            expected_origin=manager.public_origin,
+            origin_values=(headers["Origin"],),
+            sec_fetch_site_values=(headers["Sec-Fetch-Site"],),
+            sec_fetch_mode_values=(headers["Sec-Fetch-Mode"],),
+            sec_fetch_dest_values=(headers["Sec-Fetch-Dest"],),
+            csrf_token_values=(headers["X-CSRF-Token"],),
+        )
+
+        self.assertEqual(csrf_token, "csrf-token")
+        for overrides in (
+            {"origin_values": ()},
+            {"origin_values": ("https://attacker.example",)},
+            {"sec_fetch_site_values": ("cross-site",)},
+            {"sec_fetch_mode_values": ("navigate",)},
+            {"sec_fetch_dest_values": ("document",)},
+            {"csrf_token_values": ()},
+            {"csrf_token_values": ("one", "two")},
+        ):
+            values: dict[str, tuple[str, ...]] = {
+                "origin_values": (headers["Origin"],),
+                "sec_fetch_site_values": (headers["Sec-Fetch-Site"],),
+                "sec_fetch_mode_values": (headers["Sec-Fetch-Mode"],),
+                "sec_fetch_dest_values": (headers["Sec-Fetch-Dest"],),
+                "csrf_token_values": (headers["X-CSRF-Token"],),
+            }
+            values.update(overrides)
+            with self.subTest(overrides=overrides), self.assertRaises(PermissionError):
+                validate_browser_mutation_request_headers(
+                    expected_origin=manager.public_origin,
+                    **values,
+                )
 
 
 if __name__ == "__main__":

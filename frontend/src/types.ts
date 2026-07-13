@@ -21,8 +21,6 @@ import type {
   ProductConfigRuntimeInput as GeneratedProductConfigRuntimeInput,
   PreviewReadinessResponse as GeneratedPreviewReadinessResponse,
   RankWorkGraphSnapshotResponse as GeneratedRankWorkGraphSnapshotResponse,
-  ReconcileWorkGraphIssueInboxData as GeneratedReconcileWorkGraphIssueInboxData,
-  ReconcileWorkGraphIssueInboxResponse as GeneratedReconcileWorkGraphIssueInboxResponse,
   RepoProductMappingResponse as GeneratedRepoProductMappingResponse,
   WorkGraphIssueInboxResponse as GeneratedWorkGraphIssueInboxResponse,
   WorkGraphSnapshot as GeneratedWorkGraphSnapshot,
@@ -690,17 +688,48 @@ export interface GitHubIssueInbox {
 
 export type GitHubIssueInboxPayload = GeneratedWorkGraphIssueInboxResponse;
 
-export type GitHubIssueInboxReconcileMode = NonNullable<
-  GeneratedReconcileWorkGraphIssueInboxData["body"]["mode"]
->;
-export type GitHubIssueInboxReconcilePayload =
-  GeneratedReconcileWorkGraphIssueInboxResponse;
-export type GitHubIssueInboxReconcileSummary =
-  GitHubIssueInboxReconcilePayload["result"]["reconcile"];
-export type GitHubIssueInboxReconcileItem =
-  GitHubIssueInboxReconcileSummary["items"][number];
+export type GitHubIssueInboxReconcileMode = "dry_run" | "apply";
 export type GitHubIssueInboxReconcileAction =
-  GitHubIssueInboxReconcileItem["action"];
+  | "would_add"
+  | "added"
+  | "already_present"
+  | "failed"
+  | "skipped";
+
+export interface GitHubIssueInboxReconcileItem {
+  key: string;
+  repository: string;
+  number: number;
+  title: string;
+  url: string;
+  action: GitHubIssueInboxReconcileAction;
+  detail: string;
+  error_code: string;
+  error_correlation_id: string;
+}
+
+export interface GitHubIssueInboxReconcileSummary {
+  schema_version: number;
+  generated_at: string;
+  mode: GitHubIssueInboxReconcileMode;
+  repository_count: number;
+  issue_count: number;
+  added_count: number;
+  already_present_count: number;
+  skipped_count: number;
+  failed_count: number;
+  would_add_count: number;
+  items: GitHubIssueInboxReconcileItem[];
+}
+
+export interface GitHubIssueInboxReconcilePayload {
+  status: "accepted";
+  trace_id: string;
+  records: Record<string, string>;
+  result: {
+    reconcile: GitHubIssueInboxReconcileSummary;
+  };
+}
 
 export interface MergeTrainAdmissionDecision {
   schema_version: number;

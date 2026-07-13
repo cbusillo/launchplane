@@ -37,6 +37,7 @@ from control_plane.work_graph_service import (
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
+    _browser_mutation_headers,
     _get_agent_context,
     _get_config_status,
     _get_product,
@@ -80,15 +81,14 @@ from tests.http_app_test_support import (
     _terminal_agent_work_graph_rank_policy,
     _work_graph_read_policy,
 )
-from tests.test_protected_artifacts import _seed_store as seed_protected_artifact_store
-from tests.test_service import (
+from tests.support.protected_artifacts import seed_protected_artifact_store
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.profiles import (
     _generic_site_profile_payload,
-    _identity,
     _product_profile_payload,
-    _sqlite_database_url,
-    _StubVerifier,
-    _work_graph_snapshot_payload,
 )
+from tests.support.stores import _sqlite_database_url
+from tests.support.work_graph import _work_graph_snapshot_payload
 
 
 def _product_expected_config_payload() -> dict[str, object]:
@@ -808,7 +808,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             app,
             payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
             authorization="",
-            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            headers=_browser_mutation_headers(session_manager, human_session),
         )
 
         self.assertEqual(response.status_code, 202)
