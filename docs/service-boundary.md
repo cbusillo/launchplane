@@ -355,6 +355,20 @@ New or changed service route families must preserve the completed HTTP boundary:
 typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
+Frontend read-contract generation uses the same boundary. Run
+`uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`
+to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
+without live credentials, managed-secret values, or runtime-authority examples.
+The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
+and checked `frontend/src/generated/openapi.ts/` types from that canonical
+export. `pnpm --dir frontend check:openapi-drift` regenerates those artifacts in
+temporary paths and fails when the checked schema or generated types drift from
+the backend contract. The canonical `x-launchplane-ui-read-operations` manifest
+owns each selected GET path and stable operation id; slicing fails closed when a
+route, operation id, success response, or referenced schema drifts. Generated
+response envelopes are the API boundary consumed by the UI. Handwritten
+frontend types remain only for write requests and explicit UI normalization.
+
 The human auth/session family uses FastAPI routes in the production service:
 `GET /auth/github/login`, `GET /auth/github/callback`, `GET /v1/auth/session`,
 and `POST /auth/logout`. GitHub OAuth login preserves PKCE state, same-origin
@@ -1316,11 +1330,22 @@ target. It reuses the same planner/writer as `launchplane product-config apply`,
 returns only actions, keys, counts, actor/source metadata, and secret IDs, uses
 generic validation messages for rejected requests, and fails closed when the
 record store is not DB-backed, when a secret bundle is submitted without
-`LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane runtime, or when
+valid `LAUNCHPLANE_SECRET_KEYS_JSON` (or the migration-only legacy
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`) in the trusted Launchplane runtime, or when
 there is no active runtime key-safety policy that allows the requested managed
 secret binding for the target runtime class. Request bodies for this route must
 not be copied into logs, issues, docs, or workflow artifacts because they can
 contain plaintext secret values.
+
+`POST /v1/secrets/reencrypt` owns shared and production managed-secret root
+rotation. The route requires JSON with a bounded body, exact
+`secret.reencrypt.dry-run` or `secret.reencrypt.apply` authority, a reason, and
+DB-backed storage. Apply additionally requires the matching dry-run digest and
+an `Idempotency-Key`. Version, current-pointer, and audit writes commit in one
+transaction; the audit operation token provides retry recovery if idempotency
+evidence cannot be persisted after that transaction. Terminal-agent read
+credentials cannot call the route, and responses expose key IDs and counts but
+never plaintext or ciphertext.
 
 #### Product-config secret source contract
 

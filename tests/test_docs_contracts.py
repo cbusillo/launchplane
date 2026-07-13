@@ -63,6 +63,53 @@ class DocsContractsTests(TestCase):
             ),
         )
 
+    def test_frontend_openapi_codegen_gates_are_documented_and_wired(self) -> None:
+        metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
+        ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        service_boundary = Path("docs/service-boundary.md").read_text(encoding="utf-8")
+        canonical_openapi = json.loads(
+            Path("frontend/generated/openapi-canonical.json").read_text(encoding="utf-8")
+        )
+        ui_openapi = json.loads(
+            Path("frontend/generated/openapi-ui.json").read_text(encoding="utf-8")
+        )
+        frontend_types = Path("frontend/src/types.ts").read_text(encoding="utf-8")
+
+        self.assertEqual(
+            "uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json",
+            metadata["qualityGate"]["openapi"]["export"],
+        )
+        self.assertEqual(
+            "pnpm --dir frontend generate:openapi",
+            metadata["qualityGate"]["openapi"]["frontendGenerate"],
+        )
+        self.assertEqual(
+            "pnpm --dir frontend check:openapi-drift",
+            metadata["qualityGate"]["openapi"]["frontendDrift"],
+        )
+        self.assertIn(
+            "`uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`",
+            service_boundary,
+        )
+        self.assertIn("`pnpm --dir frontend check:openapi-drift`", service_boundary)
+        self.assertIn("Install uv", ci_workflow)
+        self.assertIn("Install Python", ci_workflow)
+        read_operations = canonical_openapi["x-launchplane-ui-read-operations"]
+        self.assertEqual(set(read_operations), set(ui_openapi["paths"]))
+        for route_path, operation_id in read_operations.items():
+            self.assertEqual(set(ui_openapi["paths"][route_path]), {"get"})
+            self.assertEqual(
+                ui_openapi["paths"][route_path]["get"]["operationId"], operation_id
+            )
+        self.assertIn(
+            "export type DriverListPayload = GeneratedDriverDescriptorsResponse",
+            frontend_types,
+        )
+        self.assertIn(
+            "export type WorkGraphSnapshotPayload = GeneratedWorkGraphSnapshotResponse",
+            frontend_types,
+        )
+
     def test_post_v2_transition_plans_are_issue_backed(self) -> None:
         docs_index = Path("docs/README.md").read_text(encoding="utf-8")
         service_boundary = Path("docs/service-boundary.md").read_text(encoding="utf-8")
@@ -105,7 +152,7 @@ class DocsContractsTests(TestCase):
 
         self.assertIn("Capture v2 deployed smoke evidence", deploy_workflow)
         self.assertIn("launchplane-v2-deployed-smoke.json", deploy_workflow)
-        self.assertIn("actions/upload-artifact@v7", deploy_workflow)
+        self.assertIn("actions/upload-artifact@", deploy_workflow)
         self.assertIn("/v1/health", deploy_workflow)
         self.assertIn("/v1/service/runtime", deploy_workflow)
         self.assertIn("/openapi.json", deploy_workflow)
@@ -389,7 +436,7 @@ class DocsContractsTests(TestCase):
         self.assertIn("workflow_call:", preview_feedback_status_workflow)
         self.assertIn("mode:", preview_feedback_status_workflow)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main",
+            "uses: ./.github/workflows/reusable-preview-pr-feedback.yml",
             preview_feedback_status_workflow,
         )
         self.assertIn(

@@ -16,6 +16,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from control_plane.child_process_errors import (
+    ChildProcessFailure,
+    normalize_child_process_failure,
+    redact_untrusted_text,
+)
 from control_plane.contracts.every_code_pr_feedback_record import (
     EveryCodePrFeedbackRecord,
     EveryCodePrFeedbackStatus,
@@ -105,9 +110,7 @@ class EveryCodeWorkerStore(Protocol):
     ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
 
 
-Runner = Callable[
-    [Sequence[str], Mapping[str, str] | None], subprocess.CompletedProcess[str]
-]
+Runner = Callable[[Sequence[str], Mapping[str, str] | None], subprocess.CompletedProcess[str]]
 EVERY_CODE_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN"
 EVERY_CODE_GITHUB_ACTOR_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR"
 
@@ -121,6 +124,12 @@ ProcessLauncher = Callable[[Sequence[str], Path, Path], DaemonProcess]
 
 class EveryCodeWorkerApiError(RuntimeError):
     pass
+
+
+class EveryCodeWorkerChildProcessError(RuntimeError):
+    def __init__(self, failure: ChildProcessFailure) -> None:
+        super().__init__(failure.operator_message())
+        self.failure = failure
 
 
 def _try_every_code_worker_maintenance(
@@ -379,6 +388,8 @@ class EveryCodeWorkerHandoffResult:
     checkout_root: str = ""
     worktree_root: str = ""
     worktree_branch: str = ""
+    error_code: str = ""
+    error_correlation_id: str = ""
 
     def with_detail_suffix(self, suffix: str) -> EveryCodeWorkerHandoffResult:
         normalized_suffix = suffix.strip()
@@ -394,10 +405,12 @@ class EveryCodeWorkerHandoffResult:
             checkout_root=self.checkout_root,
             worktree_root=self.worktree_root,
             worktree_branch=self.worktree_branch,
+            error_code=self.error_code,
+            error_correlation_id=self.error_correlation_id,
         )
 
     def as_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "status": self.status,
             "detail": self.detail,
             "request_id": self.request_id,
@@ -408,6 +421,11 @@ class EveryCodeWorkerHandoffResult:
             "worktree_root": self.worktree_root,
             "worktree_branch": self.worktree_branch,
         }
+        if self.error_code:
+            payload["error_code"] = self.error_code
+        if self.error_correlation_id:
+            payload["error_correlation_id"] = self.error_correlation_id
+        return payload
 
 
 @dataclass(frozen=True)
@@ -511,15 +529,22 @@ class EveryCodePrFeedbackApplyResult:
     feedback_id: str = ""
     request_id: str = ""
     session_name: str = ""
+    error_code: str = ""
+    error_correlation_id: str = ""
 
     def as_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "status": self.status,
             "detail": self.detail,
             "feedback_id": self.feedback_id,
             "request_id": self.request_id,
             "session_name": self.session_name,
         }
+        if self.error_code:
+            payload["error_code"] = self.error_code
+        if self.error_correlation_id:
+            payload["error_correlation_id"] = self.error_correlation_id
+        return payload
 
 
 @dataclass(frozen=True)
@@ -725,16 +750,18 @@ def _post_every_code_claim_comment(
     runner: Runner,
     github_token_env: str = EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
     github_actor_env: str = EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
-) -> str:
+) -> ChildProcessFailure | None:
     repository = record.repository.strip()
     if not repository or record.issue_number <= 0:
-        return ""
+        return None
     try:
         github_env = _every_code_github_env(
             github_token_env=github_token_env,
             github_actor_env=github_actor_env,
             runner=runner,
         )
+    except EveryCodeWorkerChildProcessError as error:
+        return error.failure
     except RuntimeError as exc:
         raise RuntimeError(f"Could not verify GitHub claim-comment actor: {exc}") from exc
     body = every_code_claim_comment_body(
@@ -757,11 +784,20 @@ def _post_every_code_claim_comment(
             github_env,
         )
     except OSError as exc:
-        return f"Could not post GitHub working comment: {exc}"
+        return normalize_child_process_failure(
+            operation="Could not post GitHub working comment",
+            tool="github_cli",
+            exception=exc,
+        )
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "gh issue comment failed"
-        return f"Could not post GitHub working comment: {detail}"
-    return ""
+        return normalize_child_process_failure(
+            operation="Could not post GitHub working comment",
+            tool="github_cli",
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+    return None
 
 
 def _every_code_github_env(
@@ -779,24 +815,34 @@ def _every_code_github_env(
     github_env = {"GH_TOKEN": github_token, "GITHUB_TOKEN": github_token}
     expected_actor_env_key = github_actor_env.strip()
     expected_actor = (
-        os.environ.get(expected_actor_env_key, "").strip()
-        if expected_actor_env_key
-        else ""
+        os.environ.get(expected_actor_env_key, "").strip() if expected_actor_env_key else ""
     )
     try:
         actor_result = runner(("gh", "api", "user", "--jq", ".login"), github_env)
     except OSError as exc:
-        raise RuntimeError(f"Could not verify GitHub actor: {exc}") from exc
+        raise EveryCodeWorkerChildProcessError(
+            normalize_child_process_failure(
+                operation="Verify Every Code GitHub actor",
+                tool="github_cli",
+                exception=exc,
+            )
+        ) from exc
     if actor_result.returncode != 0:
-        detail = actor_result.stderr.strip() or actor_result.stdout.strip() or "gh api user failed"
-        raise RuntimeError(f"Could not verify GitHub actor: {detail}")
+        raise EveryCodeWorkerChildProcessError(
+            normalize_child_process_failure(
+                operation="Verify Every Code GitHub actor",
+                tool="github_cli",
+                returncode=actor_result.returncode,
+                stdout=actor_result.stdout,
+                stderr=actor_result.stderr,
+            )
+        )
     actual_actor = actor_result.stdout.strip()
     if not actual_actor:
         raise RuntimeError("Could not verify GitHub actor: empty login")
     if expected_actor and actual_actor.casefold() != expected_actor.casefold():
         raise RuntimeError(
-            "Every Code GitHub actor mismatch: "
-            f"expected {expected_actor!r}, got {actual_actor!r}"
+            f"Every Code GitHub actor mismatch: expected {expected_actor!r}, got {actual_actor!r}"
         )
     return github_env
 
@@ -817,8 +863,13 @@ def _remove_every_code_source_issue_labels(
             github_actor_env=github_actor_env,
             runner=runner,
         )
+    except EveryCodeWorkerChildProcessError as error:
+        return error.failure.operator_message()
     except RuntimeError as exc:
-        return str(exc)
+        return redact_untrusted_text(
+            str(exc),
+            fallback="Could not verify Every Code GitHub label-cleanup actor.",
+        )
     errors: list[str] = []
     for label in (record.trigger_label.strip(), "preview-ready"):
         if not label:
@@ -838,11 +889,22 @@ def _remove_every_code_source_issue_labels(
                 github_env,
             )
         except OSError as exc:
-            errors.append(f"{label}: {exc}")
+            failure = normalize_child_process_failure(
+                operation="Remove Every Code source issue label",
+                tool="github_cli",
+                exception=exc,
+            )
+            errors.append(f"{label}: {failure.operator_message()}")
             continue
         if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "gh issue edit failed"
-            errors.append(f"{label}: {detail}")
+            failure = normalize_child_process_failure(
+                operation="Remove Every Code source issue label",
+                tool="github_cli",
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+            errors.append(f"{label}: {failure.operator_message()}")
     if errors:
         return "Could not remove Every Code source issue labels: " + "; ".join(errors)
     return ""
@@ -1129,9 +1191,9 @@ def run_every_code_worker_once(
 
     session_name = every_code_tmux_session_name(claimed_record.request_id)
     run = runner or _run_subprocess
-    claim_comment_warning = ""
+    claim_comment_failure: ChildProcessFailure | None = None
     try:
-        claim_comment_warning = _post_every_code_claim_comment(
+        claim_comment_failure = _post_every_code_claim_comment(
             record=claimed_record,
             host=normalized_host,
             session_name=session_name,
@@ -1152,12 +1214,13 @@ def run_every_code_worker_once(
                 checkout_root=checkout_root,
             ),
         )
-    if claim_comment_warning:
+    if claim_comment_failure is not None:
         return _block_every_code_request(
             record_store=record_store,
             record=claimed_record,
             host=normalized_host,
-            detail=claim_comment_warning,
+            detail=claim_comment_failure.detail,
+            failure=claim_comment_failure,
             session_name=session_name,
             checkout_root=resolve_every_code_checkout_root(
                 claimed_record,
@@ -1175,6 +1238,21 @@ def run_every_code_worker_once(
             checkout_root=checkout_root,
             state_dir=resolved_worktree_state_dir,
             runner=run,
+        )
+    except EveryCodeWorkerChildProcessError as error:
+        fallback_checkout_root = resolve_every_code_checkout_root(
+            claimed_record,
+            workspace_root=workspace_root,
+            checkout_root=checkout_root,
+        )
+        return _block_every_code_request(
+            record_store=record_store,
+            record=claimed_record,
+            host=normalized_host,
+            detail=error.failure.detail,
+            failure=error.failure,
+            session_name=session_name,
+            checkout_root=fallback_checkout_root,
         )
     except RuntimeError as exc:
         fallback_checkout_root = resolve_every_code_checkout_root(
@@ -1251,20 +1329,34 @@ def run_every_code_worker_once(
                 None,
             )
         except OSError as exc:
+            failure = normalize_child_process_failure(
+                operation="Launch Every Code tmux session",
+                tool="child_process",
+                exception=exc,
+            )
             return _block_every_code_request(
                 record_store=record_store,
                 record=claimed_record,
                 host=normalized_host,
-                detail=f"Could not launch tmux session: {exc}",
+                detail=failure.detail,
+                failure=failure,
                 session_name=session_name,
                 checkout_root=prepared_checkout.source_checkout_root,
             )
         if launch_result.returncode != 0:
+            failure = normalize_child_process_failure(
+                operation="Launch Every Code tmux session",
+                tool="child_process",
+                returncode=launch_result.returncode,
+                stdout=launch_result.stdout,
+                stderr=launch_result.stderr,
+            )
             return _block_every_code_request(
                 record_store=record_store,
                 record=claimed_record,
                 host=normalized_host,
-                detail=f"tmux launch failed: {launch_result.stderr.strip()}",
+                detail=failure.detail,
+                failure=failure,
                 session_name=session_name,
                 checkout_root=prepared_checkout.source_checkout_root,
             )
@@ -1289,7 +1381,6 @@ def run_every_code_worker_once(
                 for part in (
                     f"Visible tmux session: {session_name}",
                     f"Worktree: {resolved_checkout_root}",
-                    claim_comment_warning,
                 )
                 if part
             ),
@@ -2334,23 +2425,51 @@ def _apply_every_code_pr_feedback_record(
             ),
             None,
         )
-    except OSError:
+    except OSError as exc:
         _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="confused", runner=runner)
+        failure = normalize_child_process_failure(
+            operation="Relaunch Every Code tmux session for PR feedback",
+            tool="child_process",
+            exception=exc,
+        )
+        _persist_every_code_pr_feedback_failure(
+            record_store=record_store,
+            request_id=feedback.request_id,
+            host=host,
+            failure=failure,
+        )
         return EveryCodePrFeedbackApplyResult(
             status="blocked",
-            detail=f"Could not relaunch tmux session {session_name!r} for PR feedback.",
+            detail=failure.detail,
             feedback_id=feedback.feedback_id,
             request_id=feedback.request_id,
             session_name=session_name,
+            error_code=failure.code,
+            error_correlation_id=failure.correlation_id,
         )
     if launch_result.returncode != 0:
         _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="confused", runner=runner)
+        failure = normalize_child_process_failure(
+            operation="Relaunch Every Code tmux session for PR feedback",
+            tool="child_process",
+            returncode=launch_result.returncode,
+            stdout=launch_result.stdout,
+            stderr=launch_result.stderr,
+        )
+        _persist_every_code_pr_feedback_failure(
+            record_store=record_store,
+            request_id=feedback.request_id,
+            host=host,
+            failure=failure,
+        )
         return EveryCodePrFeedbackApplyResult(
             status="blocked",
-            detail=f"tmux relaunch failed: {launch_result.stderr.strip()}",
+            detail=failure.detail,
             feedback_id=feedback.feedback_id,
             request_id=feedback.request_id,
             session_name=session_name,
+            error_code=failure.code,
+            error_correlation_id=failure.correlation_id,
         )
     _mark_every_code_pr_feedback(record_store, feedback=feedback, status="applied")
     _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="rocket", runner=runner)
@@ -2361,6 +2480,28 @@ def _apply_every_code_pr_feedback_record(
         request_id=feedback.request_id,
         session_name=session_name,
     )
+
+
+def _persist_every_code_pr_feedback_failure(
+    *,
+    record_store: EveryCodeWorkerStore,
+    request_id: str,
+    host: str,
+    failure: ChildProcessFailure,
+) -> None:
+    record = record_store.read_every_code_work_request_record(request_id)
+    if record.state in TERMINAL_EVERY_CODE_STATES:
+        return
+    blocked_record = apply_every_code_work_request_status(
+        record,
+        EveryCodeWorkRequestStatusUpdate(
+            state="blocked",
+            host=host,
+            updated_at=utc_now_timestamp(),
+            error_message=failure.operator_message(),
+        ),
+    )
+    record_store.write_every_code_work_request_record(blocked_record)
 
 
 def _acknowledge_every_code_pr_feedback(
@@ -3732,10 +3873,19 @@ def request_every_code_pr_preview_label(
             None,
         )
     except OSError as exc:
-        return f"Could not request Launchplane preview: {exc}"
+        return normalize_child_process_failure(
+            operation="Request Launchplane preview label",
+            tool="github_cli",
+            exception=exc,
+        ).operator_message()
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "gh pr edit failed"
-        return f"Could not request Launchplane preview: {detail}"
+        return normalize_child_process_failure(
+            operation="Request Launchplane preview label",
+            tool="github_cli",
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        ).operator_message()
     return f"Requested Launchplane preview with `{preview_label}`."
 
 
@@ -3891,13 +4041,26 @@ def _git_branch_exists(source_checkout_root: Path, *, branch: str, runner: Runne
             None,
         )
     except OSError as exc:
-        raise RuntimeError(f"Could not inspect Every Code worktree branch: {exc}") from exc
+        raise EveryCodeWorkerChildProcessError(
+            normalize_child_process_failure(
+                operation="Inspect Every Code worktree branch",
+                tool="child_process",
+                exception=exc,
+            )
+        ) from exc
     if result.returncode == 0:
         return True
     if result.returncode == 1:
         return False
-    message = result.stderr.strip() or result.stdout.strip() or "git show-ref failed"
-    raise RuntimeError(f"Could not inspect Every Code worktree branch: {message}")
+    raise EveryCodeWorkerChildProcessError(
+        normalize_child_process_failure(
+            operation="Inspect Every Code worktree branch",
+            tool="child_process",
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+    )
 
 
 def _git_output(args: Sequence[str], *, runner: Runner, detail: str) -> str:
@@ -3911,10 +4074,23 @@ def _git_checked(
     try:
         result = runner(args, None)
     except OSError as exc:
-        raise RuntimeError(f"Could not {detail}: {exc}") from exc
+        raise EveryCodeWorkerChildProcessError(
+            normalize_child_process_failure(
+                operation=f"Git operation: {detail}",
+                tool="child_process",
+                exception=exc,
+            )
+        ) from exc
     if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip() or f"{args[0]} failed"
-        raise RuntimeError(f"Could not {detail}: {message}")
+        raise EveryCodeWorkerChildProcessError(
+            normalize_child_process_failure(
+                operation=f"Git operation: {detail}",
+                tool="child_process",
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+        )
     return result
 
 
@@ -4071,25 +4247,39 @@ def _block_every_code_request(
     record: EveryCodeWorkRequestRecord,
     host: str,
     detail: str,
+    failure: ChildProcessFailure | None = None,
     session_name: str,
     checkout_root: Path,
 ) -> EveryCodeWorkerHandoffResult:
+    safe_detail = (
+        failure.detail
+        if failure is not None
+        else redact_untrusted_text(
+            detail,
+            fallback="Every Code work request was blocked.",
+        )
+    )
+    error_code = failure.code if failure is not None else ""
+    error_correlation_id = failure.correlation_id if failure is not None else ""
+    persisted_error = failure.operator_message() if failure is not None else safe_detail
     blocked_record = apply_every_code_work_request_status(
         record_store.read_every_code_work_request_record(record.request_id),
         EveryCodeWorkRequestStatusUpdate(
             state="blocked",
             host=host,
             updated_at=utc_now_timestamp(),
-            error_message=detail,
+            error_message=persisted_error,
         ),
     )
     record_store.write_every_code_work_request_record(blocked_record)
     return EveryCodeWorkerHandoffResult(
         status="blocked",
-        detail=detail,
+        detail=safe_detail,
         request_id=blocked_record.request_id,
         repository=blocked_record.repository,
         issue_number=blocked_record.issue_number,
         session_name=session_name,
         checkout_root=str(checkout_root),
+        error_code=error_code,
+        error_correlation_id=error_correlation_id,
     )

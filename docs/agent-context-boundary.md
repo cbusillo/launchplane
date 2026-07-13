@@ -114,6 +114,11 @@ webhook delivery ids, issue bodies, or prompt text. Managed secret evidence is
 metadata-only: binding keys, runtime destinations, policy ids/digests, and safe
 finding codes.
 
+Child-process failures that reach durable records, API responses, or operator
+output must use a stable error code, a correlation id, and a bounded redacted
+detail. Do not persist or log raw child-process stdout or stderr; logs may retain
+only the safe error code, correlation id, and exit status needed for diagnosis.
+
 Every agent-facing authorization response should include an `agent_audit`
 envelope with decision, safe reason code, subject, action, product, context,
 policy source, policy digest, and authz-policy source kind. Read models should

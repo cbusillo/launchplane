@@ -107,6 +107,7 @@ from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
     SecretRecord,
+    SecretRotationWrite,
     SecretVersion,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
@@ -5507,6 +5508,59 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=self._payload_dict(event),
             )
         )
+
+    def write_secret_rotations(self, rotations: tuple[SecretRotationWrite, ...]) -> None:
+        ordered_rotations = tuple(sorted(rotations, key=lambda item: item.record.secret_id))
+        with self._session_factory() as session:
+            for rotation in ordered_rotations:
+                statement = (
+                    select(LaunchplaneSecretRow)
+                    .where(LaunchplaneSecretRow.secret_id == rotation.record.secret_id)
+                    .with_for_update()
+                )
+                current_row = session.scalar(statement)
+                if current_row is None:
+                    raise FileNotFoundError(
+                        f"No Launchplane secret record found for {rotation.record.secret_id!r}"
+                    )
+                if current_row.current_version_id != rotation.expected_current_version_id:
+                    raise ValueError("Managed secret changed after rotation preflight.")
+            for rotation in ordered_rotations:
+                version = rotation.version
+                record = rotation.record
+                event = rotation.audit_event
+                session.merge(
+                    LaunchplaneSecretVersionRow(
+                        version_id=version.version_id,
+                        secret_id=version.secret_id,
+                        created_at=version.created_at,
+                        payload=self._payload_dict(version),
+                    )
+                )
+                session.merge(
+                    LaunchplaneSecretRow(
+                        secret_id=record.secret_id,
+                        scope=record.scope,
+                        integration=record.integration,
+                        name=record.name,
+                        context=record.context,
+                        instance=record.instance,
+                        status=record.status,
+                        current_version_id=record.current_version_id,
+                        updated_at=record.updated_at,
+                        payload=self._payload_dict(record),
+                    )
+                )
+                session.merge(
+                    LaunchplaneSecretAuditEventRow(
+                        event_id=event.event_id,
+                        secret_id=event.secret_id,
+                        event_type=event.event_type,
+                        recorded_at=event.recorded_at,
+                        payload=self._payload_dict(event),
+                    )
+                )
+            session.commit()
 
     def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]:
         return self._list_models(

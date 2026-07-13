@@ -9,6 +9,7 @@ import click
 
 from control_plane import every_code_reconciliation as control_plane_every_code_reconciliation
 from control_plane import every_code_webhooks as control_plane_every_code_webhooks
+from control_plane.child_process_errors import normalize_child_process_failure
 from control_plane.every_code_reconciliation import (
     EveryCodeReconciliationStore,
     EveryCodeRerunStore,
@@ -108,9 +109,13 @@ def _gh_current_user_login() -> str:
             capture_output=True,
             check=True,
         )
-    except subprocess.CalledProcessError as error:
-        detail = (error.stderr or error.stdout or str(error)).strip()
-        raise click.ClickException(detail) from error
+    except (OSError, subprocess.CalledProcessError) as error:
+        failure = normalize_child_process_failure(
+            operation="Determine current GitHub user",
+            tool="github_cli",
+            exception=error,
+        )
+        raise click.ClickException(failure.operator_message()) from error
     login = result.stdout.strip()
     if not login:
         raise click.ClickException("Could not determine GitHub user login from gh.")
@@ -869,7 +874,7 @@ def every_code_sync_webhooks(
             webhook_url=resolved_webhook_url,
             topic=topic,
         )
-    except (ValueError, subprocess.CalledProcessError) as error:
+    except (ValueError, control_plane_every_code_webhooks.EveryCodeWebhookSyncError) as error:
         raise click.ClickException(str(error)) from error
     failed = [result for result in results if result.status == "error"]
     click.echo(

@@ -103,6 +103,8 @@ from control_plane.contracts.ingress_route_audit_record import (
     build_ingress_route_audit_record_id,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
+from control_plane.contracts.merge_train_policy import MergeTrainServiceAuthz
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -110,6 +112,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.merge_train_admission import (
+    MergeTrainControllerStatusReadModel,
     MergeTrainRunHistoryStore,
     build_merge_train_controller_status_read_model,
     evaluate_merge_train_admission_from_store,
@@ -496,6 +499,7 @@ from control_plane.contracts.runner_lane_registration_evidence import (
     RunnerLaneRegistrationAuditEvidenceEnvelope,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
+from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
@@ -658,8 +662,12 @@ _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
 _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
+_PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
+_SECRET_REENCRYPT_ROUTE = "/v1/secrets/reencrypt"
 _EVIDENCE_INGRESS_MAX_BODY_BYTES = 2 * 1024 * 1024
 _GITHUB_WEBHOOK_MAX_BODY_BYTES = 2 * 1024 * 1024
+_PRODUCT_CONFIG_MAX_BODY_BYTES = 2 * 1024 * 1024
+_SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _EVIDENCE_INGRESS_ROUTES = frozenset(
     {
         _DEPLOYMENT_EVIDENCE_ROUTE,
@@ -680,6 +688,18 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
         "GitHub webhook",
         _GITHUB_WEBHOOK_MAX_BODY_BYTES,
         False,
+        True,
+    ),
+    _PRODUCT_CONFIG_APPLY_ROUTE: (
+        "Product config",
+        _PRODUCT_CONFIG_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _SECRET_REENCRYPT_ROUTE: (
+        "Managed-secret re-encryption",
+        _SECRET_REENCRYPT_MAX_BODY_BYTES,
+        True,
         True,
     ),
 }
@@ -713,7 +733,6 @@ _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/app
 _PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
-_PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
 _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_GITHUB_ACTIONS_GRANTS_ROUTE = "/v1/authz-policies/github-actions/grants"
@@ -1406,7 +1425,25 @@ class MergeTrainControllerStatusResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    controller_status: dict[str, object]
+    controller_status: MergeTrainControllerStatusReadModel
+
+
+class MergeTrainPolicySummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_id: str
+    updated_at: str
+    policy_sha256: str
+
+
+class MergeTrainPolicyTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
+    base_branch: str
+    policy_key: str
+    scheduler: MergeTrainSchedulerPolicy
+    service_authz: MergeTrainServiceAuthz
 
 
 class MergeTrainPolicyTargetsResponse(BaseModel):
@@ -1414,8 +1451,8 @@ class MergeTrainPolicyTargetsResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    policy: dict[str, object]
-    targets: list[dict[str, object]]
+    policy: MergeTrainPolicySummary
+    targets: tuple[MergeTrainPolicyTarget, ...]
 
 
 class DokployTargetInspectResponse(BaseModel):
@@ -5798,7 +5835,7 @@ def create_launchplane_fastapi_app(
         )
         return MergeTrainControllerStatusResponse(
             trace_id=trace_id,
-            controller_status=read_model.model_dump(mode="json"),
+            controller_status=read_model,
         )
 
     def read_merge_train_policy_targets(
@@ -5810,7 +5847,7 @@ def create_launchplane_fastapi_app(
             policy_record = resolve_merge_train_policy_record(record_store)
         except MergeTrainPolicyStoreMissingError as error:
             raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
-        targets: list[dict[str, object]] = []
+        targets: list[MergeTrainPolicyTarget] = []
         local_operator_can_read_targets = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="merge_train.policy_targets",
@@ -5827,23 +5864,23 @@ def create_launchplane_fastapi_app(
             if not service_authz_allowed and not local_operator_can_read_targets:
                 continue
             targets.append(
-                {
-                    "repository": repository_policy.repository,
-                    "base_branch": repository_policy.base_branch,
-                    "policy_key": repository_policy.policy_key,
-                    "scheduler": repository_policy.scheduler.model_dump(mode="json"),
-                    "service_authz": repository_policy.service_authz.model_dump(mode="json"),
-                }
+                MergeTrainPolicyTarget(
+                    repository=repository_policy.repository,
+                    base_branch=repository_policy.base_branch,
+                    policy_key=repository_policy.policy_key,
+                    scheduler=repository_policy.scheduler,
+                    service_authz=repository_policy.service_authz,
+                )
             )
-        targets.sort(key=lambda target: (str(target["repository"]), str(target["base_branch"])))
+        targets.sort(key=lambda target: (target.repository, target.base_branch))
         return MergeTrainPolicyTargetsResponse(
             trace_id=trace_id,
-            policy={
-                "record_id": policy_record.record_id,
-                "updated_at": policy_record.updated_at,
-                "policy_sha256": policy_record.policy_sha256,
-            },
-            targets=targets,
+            policy=MergeTrainPolicySummary(
+                record_id=policy_record.record_id,
+                updated_at=policy_record.updated_at,
+                policy_sha256=policy_record.policy_sha256,
+            ),
+            targets=tuple(targets),
         )
 
     async def write_merge_train_batch_candidate_run_once(
@@ -12204,6 +12241,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_secret_reencryption_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Managed-secret re-encryption requires DB-backed Launchplane storage.",
+            )
+        return record_store
+
     def require_product_onboarding_database_store(
         *, record_store: object, trace_id: str
     ) -> PostgresRecordStore:
@@ -12606,6 +12655,130 @@ def create_launchplane_fastapi_app(
             response=product_config_response,
         )
         return product_config_response
+
+    async def reencrypt_managed_secrets(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if isinstance(identity, TerminalAgentIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials cannot rotate managed-secret roots.",
+            )
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Managed-secret re-encryption request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Managed-secret re-encryption request failed validation.",
+            )
+        request_payload = cast(dict[str, object], raw_payload)
+        try:
+            reencryption_request = SecretReencryptionRequest.model_validate(request_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Managed-secret re-encryption request failed validation.",
+            ) from error
+        action = f"secret.reencrypt.{reencryption_request.mode}"
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product="launchplane",
+            context="launchplane",
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot re-encrypt Launchplane managed secrets.",
+            )
+        if reencryption_request.mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Managed-secret re-encryption apply requires Idempotency-Key.",
+            )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_SECRET_REENCRYPT_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=reencryption_request.mode == "apply",
+        )
+        if replay_response is not None:
+            return replay_response
+        database_store = require_secret_reencryption_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        actor = product_config_identity_actor(identity)
+        operation_token = ""
+        if reencryption_request.mode == "apply":
+            operation_token = hashlib.sha256(
+                "\x1f".join((actor, normalized_idempotency_key, payload_fingerprint)).encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+        try:
+            result = control_plane_secrets.reencrypt_secrets(
+                record_store=database_store,
+                apply=reencryption_request.mode == "apply",
+                expected_plan_digest=reencryption_request.expected_plan_digest,
+                operation_token=operation_token,
+                actor=actor,
+                source_label=reencryption_request.source_label,
+                reason=reencryption_request.reason,
+            )
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="secret_key_configuration_invalid",
+                message="Managed-secret key configuration is unavailable or invalid.",
+            ) from error
+        if reencryption_request.mode == "apply" and result["status"] != "ok":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="secret_reencryption_conflict",
+                message="Managed-secret state no longer matches the approved dry-run.",
+            )
+        response = accepted_evidence_response(trace_id=trace_id, records={}, result=result)
+        if reencryption_request.mode == "apply":
+            store_apply_idempotency(
+                record_store=database_store,
+                identity=identity,
+                route_path=_SECRET_REENCRYPT_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
 
     async def apply_product_onboarding(
         request: Request,
@@ -20626,6 +20799,32 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _SECRET_REENCRYPT_ROUTE,
+        reencrypt_managed_secrets,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": _openapi_model_schema(SecretReencryptionRequest)}
+                },
+            }
+        },
+        operation_id="reencrypt_managed_secrets",
+        summary="Dry-run or apply managed-secret root re-encryption",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _PRODUCT_ONBOARDING_APPLY_ROUTE,
         apply_product_onboarding,
         methods=["POST"],
@@ -21276,6 +21475,7 @@ def create_launchplane_fastapi_app(
         "/v1/products/{product}/environments/{environment}/config-status",
         read_product_environment_config_status,
         methods=["GET"],
+        operation_id="read_product_environment_config_status",
         response_model=ProductEnvironmentConfigStatusResponse,
         responses={
             400: {"model": LaunchplaneErrorResponse},

@@ -25,6 +25,7 @@
     "operations": "docs/operations.md",
     "records": "docs/records.md",
     "secrets": "docs/secrets.md",
+    "githubActionsSecurity": "docs/github-actions-security.md",
     "publicReadiness": "docs/public-readiness.md",
     "style": ["docs/style/python.md", "docs/style/testing.md"],
     "policies": ["docs/policies/coding-standards.md"]
@@ -52,6 +53,11 @@
     "build": {
       "frontend": "pnpm --dir frontend validate",
       "container": "docker build -t launchplane-ci:test ."
+    },
+    "openapi": {
+      "export": "uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json",
+      "frontendGenerate": "pnpm --dir frontend generate:openapi",
+      "frontendDrift": "pnpm --dir frontend check:openapi-drift"
     },
     "audit": {
       "pythonDependencies": "uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183",

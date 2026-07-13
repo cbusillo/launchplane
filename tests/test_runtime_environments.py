@@ -10,6 +10,7 @@ from typing import cast
 from unittest.mock import patch
 
 from click.testing import CliRunner
+from cryptography.fernet import Fernet
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.cli import main
@@ -2056,7 +2057,12 @@ ODOO_DB_PASSWORD = "file-secret"
                 os.environ,
                 {
                     "LAUNCHPLANE_DATABASE_URL": database_url,
-                    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key",
+                    "LAUNCHPLANE_SECRET_KEYS_JSON": json.dumps(
+                        {
+                            "active_key_id": "test-key",
+                            "keys": {"test-key": Fernet.generate_key().decode()},
+                        }
+                    ),
                 },
                 clear=True,
             ):
@@ -2445,7 +2451,8 @@ ODOO_DB_PASSWORD = "file-secret"
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn(
-            "Product config secrets require LAUNCHPLANE_MASTER_ENCRYPTION_KEY", result.output
+            "Product config secrets require valid Launchplane secret-key configuration",
+            result.output,
         )
         self.assertNotIn("smtp-secret-value", result.output)
 
