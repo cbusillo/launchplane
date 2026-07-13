@@ -158,6 +158,7 @@ MutationReservationDecision = Literal[
     "acquired",
     "replayed",
     "conflict",
+    "target_busy",
     "in_progress",
     "reconcile_required",
 ]
@@ -200,6 +201,29 @@ RouteBindingMutationStatus = Literal[
     "reservation_mismatch",
     "reservation_expired",
     "reconciliation_required",
+]
+MutationReservationAdoptionStatus = Literal[
+    "adopted",
+    "replayed",
+    "missing",
+    "conflict",
+    "not_reconcile_required",
+    "reservation_mismatch",
+]
+MutationReservationReleaseStatus = Literal[
+    "released",
+    "missing",
+    "not_running",
+    "owner_mismatch",
+    "reservation_mismatch",
+]
+MutationReconciliationRetryStatus = Literal[
+    "acquired",
+    "replayed",
+    "missing",
+    "conflict",
+    "not_reconcile_required",
+    "reservation_mismatch",
 ]
 
 
@@ -252,6 +276,21 @@ class OutboxDeliveryClaimResult(NamedTuple):
 class OutboxDeliveryCompletionResult(NamedTuple):
     status: OutboxDeliveryCompletionStatus
     record: OutboxDeliveryRecord | None = None
+
+
+class MutationReservationAdoptionResult(NamedTuple):
+    status: MutationReservationAdoptionStatus
+    record: LaunchplaneIdempotencyRecord | None = None
+
+
+class MutationReservationReleaseResult(NamedTuple):
+    status: MutationReservationReleaseStatus
+    record: LaunchplaneIdempotencyRecord | None = None
+
+
+class MutationReconciliationRetryResult(NamedTuple):
+    status: MutationReconciliationRetryStatus
+    record: LaunchplaneIdempotencyRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -1366,6 +1405,17 @@ class LaunchplaneIdempotencyRow(Base):
             "lease_expires_at",
             "updated_at",
         ),
+        Index(
+            "launchplane_idempotency_active_reconciliation_idx",
+            "provider_target_key",
+            unique=True,
+            postgresql_where=text(
+                "provider_target_key <> '' AND state IN ('running', 'reconcile_required')"
+            ),
+            sqlite_where=text(
+                "provider_target_key <> '' AND state IN ('running', 'reconcile_required')"
+            ),
+        ),
     )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1378,6 +1428,7 @@ class LaunchplaneIdempotencyRow(Base):
     lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     reconciliation_key: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    provider_target_key: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     created_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     updated_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     response_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -2348,6 +2399,7 @@ class PostgresRecordStore(HumanSessionStore):
             lease_expires_at=record.lease_expires_at,
             attempt=record.attempt,
             reconciliation_key=record.reconciliation_key,
+            provider_target_key=record.provider_target_key,
             created_at=record.created_at,
             updated_at=record.updated_at,
             response_status_code=record.response_status_code,
@@ -2367,6 +2419,7 @@ class PostgresRecordStore(HumanSessionStore):
         row.lease_expires_at = record.lease_expires_at
         row.attempt = record.attempt
         row.reconciliation_key = record.reconciliation_key
+        row.provider_target_key = record.provider_target_key
         row.created_at = record.created_at
         row.updated_at = record.updated_at
         row.response_status_code = record.response_status_code
@@ -2437,6 +2490,24 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneIdempotencyRow.scope == scope,
                 LaunchplaneIdempotencyRow.route_path == route_path,
                 LaunchplaneIdempotencyRow.idempotency_key == idempotency_key,
+            )
+            .limit(1)
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return statement
+
+    def _active_provider_target_statement(
+        self,
+        *,
+        provider_target_key: str,
+        for_update: bool = False,
+    ) -> Any:
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(
+                LaunchplaneIdempotencyRow.provider_target_key == provider_target_key,
+                LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
             )
             .limit(1)
         )
@@ -2527,6 +2598,9 @@ class PostgresRecordStore(HumanSessionStore):
             record.lease_expires_at,
             record.attempt,
             record.reconciliation_key,
+            record.provider_target_key,
+            record.provider_effect_phase,
+            record.provider_effect_started_at,
             record.created_at,
         )
 
@@ -2934,7 +3008,43 @@ class PostgresRecordStore(HumanSessionStore):
         lease_owner: str,
         lease_seconds: int = 300,
         reconciliation_key: str = "",
+        provider_target_key: str = "",
     ) -> MutationReservationResult:
+        return self._reserve_mutation(
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+            reconciliation_key=reconciliation_key,
+            provider_target_key=provider_target_key,
+            retry_missing_collision=True,
+        )
+
+    def _reserve_mutation(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        lease_owner: str,
+        lease_seconds: int,
+        reconciliation_key: str,
+        provider_target_key: str,
+        retry_missing_collision: bool,
+    ) -> MutationReservationResult:
+        normalized_scope = scope.strip()
+        normalized_route_path = route_path.strip()
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_request_fingerprint = request_fingerprint.strip()
+        normalized_reconciliation_key = reconciliation_key.strip()
+        normalized_provider_target_key = (
+            provider_target_key.strip() or normalized_reconciliation_key
+        )
+        if normalized_provider_target_key and not normalized_reconciliation_key:
+            raise ValueError("Provider target keys require a reconciliation key.")
         insert_error: IntegrityError | None = None
         try:
             with self._session_factory() as session:
@@ -2952,6 +3062,7 @@ class PostgresRecordStore(HumanSessionStore):
                     ),
                     reserved_at=observed_at,
                     reconciliation_key=reconciliation_key,
+                    provider_target_key=normalized_provider_target_key,
                 )
                 session.add(self._idempotency_row(reservation))
                 session.commit()
@@ -2963,20 +3074,68 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             row = session.scalar(
                 self._idempotency_statement(
-                    scope=scope.strip(),
-                    route_path=route_path.strip(),
-                    idempotency_key=idempotency_key.strip(),
+                    scope=normalized_scope,
+                    route_path=normalized_route_path,
+                    idempotency_key=normalized_idempotency_key,
                     for_update=True,
                 )
             )
+            target_collision = False
+            if row is None and normalized_provider_target_key:
+                row = session.scalar(
+                    self._active_provider_target_statement(
+                        provider_target_key=normalized_provider_target_key,
+                        for_update=True,
+                    )
+                )
+                target_collision = row is not None
             if row is None:
+                if retry_missing_collision:
+                    session.rollback()
+                    return self._reserve_mutation(
+                        scope=scope,
+                        route_path=route_path,
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        lease_owner=lease_owner,
+                        lease_seconds=lease_seconds,
+                        reconciliation_key=reconciliation_key,
+                        provider_target_key=provider_target_key,
+                        retry_missing_collision=False,
+                    )
                 assert insert_error is not None
                 raise insert_error
             current_record = self._read_payload(
                 model_type=LaunchplaneIdempotencyRecord,
                 payload=row.payload,
             )
-            if current_record.request_fingerprint != request_fingerprint.strip():
+            if target_collision:
+                if current_record.state == "running":
+                    observed_at = self._database_mutation_timestamp(session)
+                    if parse_launchplane_mutation_timestamp(
+                        current_record.lease_expires_at,
+                        field_name="lease_expires_at",
+                    ) <= parse_launchplane_mutation_timestamp(
+                        observed_at,
+                        field_name="observed_at",
+                    ):
+                        reconcile_record = self._updated_idempotency_record(
+                            current_record,
+                            state="reconcile_required",
+                            updated_at=observed_at,
+                            response_status_code=None,
+                            response_trace_id="",
+                            recorded_at="",
+                            response_payload={},
+                        )
+                        self._sync_idempotency_row(row, reconcile_record)
+                        session.commit()
+                        return MutationReservationResult(
+                            status="target_busy",
+                            record=reconcile_record,
+                        )
+                return MutationReservationResult(status="target_busy", record=current_record)
+            if current_record.request_fingerprint != normalized_request_fingerprint:
                 return MutationReservationResult(status="conflict", record=current_record)
             if current_record.state == "completed":
                 return MutationReservationResult(status="replayed", record=current_record)
@@ -3020,6 +3179,7 @@ class PostgresRecordStore(HumanSessionStore):
                 ),
                 attempt=current_record.attempt + 1,
                 reconciliation_key=reconciliation_key.strip(),
+                provider_target_key=normalized_provider_target_key,
                 updated_at=observed_at,
                 response_status_code=None,
                 response_trace_id="",
@@ -3142,6 +3302,78 @@ class PostgresRecordStore(HumanSessionStore):
             self._sync_idempotency_row(row, renewed_record)
             session.commit()
             return MutationReservationUpdateResult(status="updated", record=renewed_record)
+
+    def checkpoint_mutation_provider_effect(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+        effect_phase: str,
+        lease_seconds: int = 300,
+    ) -> MutationReservationUpdateResult:
+        normalized_effect_phase = effect_phase.strip()
+        if reservation.state != "running" or not normalized_effect_phase:
+            raise ValueError("Provider effect checkpoints require a running reservation and phase.")
+        if not reservation.reconciliation_key:
+            raise ValueError("Provider effect checkpoints require a reconciliation key.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if row is None:
+                return MutationReservationUpdateResult(status="missing")
+            current_record = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=row.payload,
+            )
+            if current_record.state != "running":
+                return MutationReservationUpdateResult(
+                    status="not_running",
+                    record=current_record,
+                )
+            if current_record.lease_owner != reservation.lease_owner:
+                return MutationReservationUpdateResult(
+                    status="owner_mismatch",
+                    record=current_record,
+                )
+            if not self._mutation_reservation_matches(current_record, reservation):
+                return MutationReservationUpdateResult(
+                    status="reservation_mismatch",
+                    record=current_record,
+                )
+            checkpointed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_record.lease_expires_at,
+                field_name="lease_expires_at",
+            ) <= parse_launchplane_mutation_timestamp(
+                checkpointed_at,
+                field_name="checkpointed_at",
+            ):
+                return MutationReservationUpdateResult(
+                    status="lease_expired",
+                    record=current_record,
+                )
+            checkpointed_record = self._updated_idempotency_record(
+                current_record,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=checkpointed_at,
+                    lease_seconds=lease_seconds,
+                ),
+                provider_effect_phase=normalized_effect_phase,
+                provider_effect_started_at=checkpointed_at,
+                updated_at=checkpointed_at,
+            )
+            self._sync_idempotency_row(row, checkpointed_record)
+            session.commit()
+            return MutationReservationUpdateResult(
+                status="updated",
+                record=checkpointed_record,
+            )
 
     def bind_mutation_reconciliation_key(
         self,
@@ -3321,16 +3553,6 @@ class PostgresRecordStore(HumanSessionStore):
                     status="replayed",
                     record=current_record,
                 )
-            if current_record.state == "reconcile_required":
-                return MutationReservationCompletionResult(
-                    status="reconcile_required",
-                    record=current_record,
-                )
-            if current_record.state != "running":
-                return MutationReservationCompletionResult(
-                    status="not_running",
-                    record=current_record,
-                )
             if current_record.lease_owner != completion.lease_owner:
                 return MutationReservationCompletionResult(
                     status="owner_mismatch",
@@ -3339,6 +3561,16 @@ class PostgresRecordStore(HumanSessionStore):
             if not self._mutation_reservation_matches(current_record, completion):
                 return MutationReservationCompletionResult(
                     status="reservation_mismatch",
+                    record=current_record,
+                )
+            if current_record.state == "reconcile_required":
+                return MutationReservationCompletionResult(
+                    status="reconcile_required",
+                    record=current_record,
+                )
+            if current_record.state != "running":
+                return MutationReservationCompletionResult(
+                    status="not_running",
                     record=current_record,
                 )
             completed_at = self._database_mutation_timestamp(session)
@@ -3375,6 +3607,190 @@ class PostgresRecordStore(HumanSessionStore):
             return MutationReservationCompletionResult(
                 status="completed",
                 record=stored_completion,
+            )
+
+    def adopt_reconciled_mutation(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+        response_status_code: int,
+        response_trace_id: str,
+        response_payload: dict[str, Any],
+    ) -> MutationReservationAdoptionResult:
+        normalized_response_trace_id = response_trace_id.strip()
+        if not reservation.reconciliation_key or not normalized_response_trace_id:
+            raise ValueError(
+                "Reconciled mutation adoption requires reservation evidence and trace."
+            )
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if row is None:
+                return MutationReservationAdoptionResult(status="missing")
+            current_record = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=row.payload,
+            )
+            if current_record.request_fingerprint != reservation.request_fingerprint:
+                return MutationReservationAdoptionResult(
+                    status="conflict",
+                    record=current_record,
+                )
+            if current_record.state == "completed":
+                return MutationReservationAdoptionResult(
+                    status="replayed",
+                    record=current_record,
+                )
+            if current_record.state != "reconcile_required":
+                return MutationReservationAdoptionResult(
+                    status="not_reconcile_required",
+                    record=current_record,
+                )
+            if not self._mutation_reservation_matches(current_record, reservation):
+                return MutationReservationAdoptionResult(
+                    status="reservation_mismatch",
+                    record=current_record,
+                )
+            adopted_at = self._database_mutation_timestamp(session)
+            adopted_record = self._updated_idempotency_record(
+                current_record,
+                state="completed",
+                updated_at=adopted_at,
+                response_status_code=response_status_code,
+                response_trace_id=normalized_response_trace_id,
+                recorded_at=adopted_at,
+                response_payload=response_payload,
+            )
+            self._sync_idempotency_row(row, adopted_record)
+            session.commit()
+            return MutationReservationAdoptionResult(
+                status="adopted",
+                record=adopted_record,
+            )
+
+    def release_reserved_mutation(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+    ) -> MutationReservationReleaseResult:
+        if reservation.state != "running":
+            raise ValueError("Only running mutation reservations can be released.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if row is None:
+                return MutationReservationReleaseResult(status="missing")
+            current_record = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=row.payload,
+            )
+            if current_record.state != "running":
+                return MutationReservationReleaseResult(
+                    status="not_running",
+                    record=current_record,
+                )
+            if current_record.lease_owner != reservation.lease_owner:
+                return MutationReservationReleaseResult(
+                    status="owner_mismatch",
+                    record=current_record,
+                )
+            if not self._mutation_reservation_matches(current_record, reservation):
+                return MutationReservationReleaseResult(
+                    status="reservation_mismatch",
+                    record=current_record,
+                )
+            session.delete(row)
+            session.commit()
+            return MutationReservationReleaseResult(
+                status="released",
+                record=current_record,
+            )
+
+    def retry_reconciled_mutation(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+        lease_owner: str,
+        lease_seconds: int = 300,
+    ) -> MutationReconciliationRetryResult:
+        if reservation.state != "reconcile_required":
+            raise ValueError("Reconciled mutation retry requires reconcile-required state.")
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("Reconciled mutation retry requires a lease owner.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if row is None:
+                return MutationReconciliationRetryResult(status="missing")
+            current_record = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=row.payload,
+            )
+            if current_record.request_fingerprint != reservation.request_fingerprint:
+                return MutationReconciliationRetryResult(
+                    status="conflict",
+                    record=current_record,
+                )
+            if current_record.state == "completed":
+                return MutationReconciliationRetryResult(
+                    status="replayed",
+                    record=current_record,
+                )
+            if current_record.state != "reconcile_required":
+                return MutationReconciliationRetryResult(
+                    status="not_reconcile_required",
+                    record=current_record,
+                )
+            if not self._mutation_reservation_matches(current_record, reservation):
+                return MutationReconciliationRetryResult(
+                    status="reservation_mismatch",
+                    record=current_record,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            retried_record = self._updated_idempotency_record(
+                current_record,
+                state="running",
+                lease_owner=normalized_lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=lease_seconds,
+                ),
+                attempt=current_record.attempt + 1,
+                provider_effect_phase="",
+                provider_effect_started_at="",
+                updated_at=observed_at,
+                response_status_code=None,
+                response_trace_id="",
+                recorded_at="",
+                response_payload={},
+            )
+            self._sync_idempotency_row(row, retried_record)
+            session.commit()
+            return MutationReconciliationRetryResult(
+                status="acquired",
+                record=retried_record,
             )
 
     def write_odoo_stable_bootstrap_operation_record(

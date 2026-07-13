@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 import click
@@ -18,6 +19,8 @@ def update_dokploy_target_artifact(
     target_id: str,
     artifact_id: str,
     runtime_identity: RuntimeIdentity | None = None,
+    before_provider_mutation: Callable[[str], None] | None = None,
+    effect_started: Callable[[], None] | None = None,
 ) -> None:
     target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
         host=host,
@@ -37,6 +40,10 @@ def update_dokploy_target_artifact(
                 str(target_payload.get("env") or ""),
                 updates=runtime_identity_env(runtime_identity),
             )
+            if before_provider_mutation is not None:
+                before_provider_mutation("target_update")
+            if effect_started is not None:
+                effect_started()
             control_plane_dokploy.update_dokploy_target_env(
                 host=host,
                 token=token,
@@ -45,6 +52,10 @@ def update_dokploy_target_artifact(
                 target_payload=target_payload,
                 env_text=env_text,
             )
+        if before_provider_mutation is not None:
+            before_provider_mutation("target_update")
+        if effect_started is not None:
+            effect_started()
         control_plane_dokploy.dokploy_request(
             host=host,
             token=token,
@@ -68,6 +79,10 @@ def update_dokploy_target_artifact(
                 **(runtime_identity_env(runtime_identity) if runtime_identity is not None else {}),
             },
         )
+        if before_provider_mutation is not None:
+            before_provider_mutation("target_update")
+        if effect_started is not None:
+            effect_started()
         control_plane_dokploy.update_dokploy_target_env(
             host=host,
             token=token,
@@ -173,6 +188,9 @@ def execute_dokploy_artifact_deploy(
     resolved_target: ResolvedTargetEvidence,
     deploy_timeout_seconds: int,
     runtime_identity: RuntimeIdentity | None = None,
+    deployment_title: str = "",
+    before_provider_mutation: Callable[[str], None] | None = None,
+    effect_started: Callable[[], None] | None = None,
 ) -> None:
     latest_before = control_plane_dokploy.latest_deployment_for_target(
         host=host,
@@ -187,19 +205,37 @@ def execute_dokploy_artifact_deploy(
         target_id=resolved_target.target_id,
         artifact_id=ship_request.artifact_id,
         runtime_identity=runtime_identity,
+        before_provider_mutation=before_provider_mutation,
+        effect_started=effect_started,
     )
+    if before_provider_mutation is not None:
+        before_provider_mutation("deploy_trigger")
+    if effect_started is not None:
+        effect_started()
     control_plane_dokploy.trigger_deployment(
         host=host,
         token=token,
         target_type=resolved_target.target_type,
         target_id=resolved_target.target_id,
         no_cache=ship_request.no_cache,
+        title=deployment_title,
     )
-    control_plane_dokploy.wait_for_target_deployment(
-        host=host,
-        token=token,
-        target_type=resolved_target.target_type,
-        target_id=resolved_target.target_id,
-        before_key=control_plane_dokploy.deployment_key(latest_before),
-        timeout_seconds=deploy_timeout_seconds,
-    )
+    if deployment_title:
+        control_plane_dokploy.wait_for_target_deployment(
+            host=host,
+            token=token,
+            target_type=resolved_target.target_type,
+            target_id=resolved_target.target_id,
+            before_key=control_plane_dokploy.deployment_key(latest_before),
+            timeout_seconds=deploy_timeout_seconds,
+            deployment_title=deployment_title,
+        )
+    else:
+        control_plane_dokploy.wait_for_target_deployment(
+            host=host,
+            token=token,
+            target_type=resolved_target.target_type,
+            target_id=resolved_target.target_id,
+            before_key=control_plane_dokploy.deployment_key(latest_before),
+            timeout_seconds=deploy_timeout_seconds,
+        )

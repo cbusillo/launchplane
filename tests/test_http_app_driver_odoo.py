@@ -18,7 +18,7 @@ from control_plane.contracts.odoo_instance_override_record import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -813,6 +813,14 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             event_name="workflow_dispatch",
         )
 
+    def _reservation_store(self, root: Path) -> PostgresRecordStore:
+        store = PostgresRecordStore(database_url=_sqlite_database_url(root / "launchplane.sqlite3"))
+        store.ensure_schema()
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        )
+        return store
+
     def _profile_store(
         self,
         database_url: str,
@@ -1379,10 +1387,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_preview_apply_keeps_health_responsive_during_provider_wait(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
+            store = self._reservation_store(root)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(
                     self._identity(
@@ -1428,7 +1433,11 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=blocking_apply,
             ):
                 apply_task = asyncio.create_task(
-                    _post_odoo_preview_apply(app, _ready_odoo_preview_apply_payload())
+                    _post_odoo_preview_apply(
+                        app,
+                        _ready_odoo_preview_apply_payload(),
+                        idempotency_key="odoo-preview-apply:odoo-tenant-cm:pr-42:refresh:health",
+                    )
                 )
                 try:
                     self.assertTrue(await asyncio.to_thread(apply_started.wait, 5))
@@ -1448,10 +1457,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_preview_apply_records_result_after_caller_cancellation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
+            store = self._reservation_store(root)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(
                     self._identity(
@@ -1509,24 +1515,21 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.1)
                 self.assertFalse(first_apply_task.done())
                 first_apply_task.cancel()
-                second_apply_task = asyncio.create_task(
-                    _post_odoo_preview_apply(
-                        app,
-                        _ready_odoo_preview_apply_payload(),
-                        idempotency_key=idempotency_key,
-                    )
+                in_progress_response = await _post_odoo_preview_apply(
+                    app,
+                    _ready_odoo_preview_apply_payload(),
+                    idempotency_key=idempotency_key,
                 )
-                try:
-                    await asyncio.sleep(0.1)
-                    self.assertFalse(first_apply_task.done())
-                    self.assertFalse(second_apply_task.done())
-                    self.assertEqual(apply_driver.call_count, 1)
-                finally:
-                    release_apply.set()
+                self.assertEqual(in_progress_response.status_code, 409)
+                self.assertEqual(
+                    in_progress_response.json()["error"]["code"],
+                    "mutation_in_progress",
+                )
+                self.assertEqual(apply_driver.call_count, 1)
+                release_apply.set()
 
                 with self.assertRaises(asyncio.CancelledError):
                     await asyncio.wait_for(first_apply_task, timeout=5)
-                second_response = await asyncio.wait_for(second_apply_task, timeout=5)
                 replay_response = await _post_odoo_preview_apply(
                     app,
                     _ready_odoo_preview_apply_payload(),
@@ -1535,10 +1538,133 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(apply_wait_timed_out.is_set())
         self.assertEqual(apply_driver.call_count, 1)
-        self.assertEqual(second_response.status_code, 202)
-        self.assertTrue(second_response.json()["replayed"])
         self.assertEqual(replay_response.status_code, 202)
         self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(replay_response.json()["result"]["status"], "pass")
+
+    async def test_odoo_preview_post_dispatch_failure_requires_reconciliation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._reservation_store(root)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    self._identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=self._policy(
+                    actions=("odoo_preview_apply.execute",),
+                    repository="cbusillo/launchplane",
+                    workflow_ref=(
+                        "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                        "@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            failed_result = {
+                "status": "fail",
+                "operation": "refresh",
+                "product": "odoo-tenant-cm",
+                "repository": "cbusillo/odoo-tenant-cm",
+                "preview_slug": "pr-42",
+                "preview_url": "https://pr-42.cm-preview.example.test",
+                "domain_host": "pr-42.cm-preview.example.test",
+                "compose_name": "cm-odoo-preview-pr-42",
+                "provider_effect_attempted": True,
+                "error_message": "Timed out waiting for Dokploy deployment status.",
+            }
+            first_key = "odoo-preview-apply:odoo-tenant-cm:pr-42:refresh:timeout"
+            with patch(
+                "control_plane.http_app.execute_odoo_preview_apply_result",
+                return_value=failed_result,
+            ) as apply_driver:
+                first_response = await _post_odoo_preview_apply(
+                    app,
+                    _ready_odoo_preview_apply_payload(),
+                    idempotency_key=first_key,
+                )
+                second_payload = _ready_odoo_preview_apply_payload()
+                second_plan = cast(
+                    dict[str, object],
+                    cast(dict[str, object], second_payload["apply"])["dry_run_plan"],
+                )
+                second_plan["compose_ref"] = "compose-cm-pr-42-existing"
+                second_plan["environment_id"] = ""
+                second_response = await _post_odoo_preview_apply(
+                    app,
+                    second_payload,
+                    idempotency_key="odoo-preview-apply:odoo-tenant-cm:pr-42:refresh:second",
+                )
+
+            reconcile_stored = store.read_idempotency_record(
+                scope=idempotency_scope(
+                    self._identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                route_path="/v1/drivers/odoo/preview-apply",
+                idempotency_key=first_key,
+            )
+            observed_failure = dict(failed_result)
+            observed_failure.pop("provider_effect_attempted", None)
+            with patch(
+                "control_plane.http_app.observe_odoo_preview_apply_result",
+                return_value=("present", observed_failure, False),
+            ) as observe_driver:
+                recovered_response = await _post_odoo_preview_apply(
+                    app,
+                    _ready_odoo_preview_apply_payload(),
+                    idempotency_key=first_key,
+                )
+                replayed_failure_response = await _post_odoo_preview_apply(
+                    app,
+                    _ready_odoo_preview_apply_payload(),
+                    idempotency_key=first_key,
+                )
+            stored = store.read_idempotency_record(
+                scope=idempotency_scope(
+                    self._identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                route_path="/v1/drivers/odoo/preview-apply",
+                idempotency_key=first_key,
+            )
+
+        self.assertEqual(first_response.status_code, 409)
+        self.assertEqual(
+            first_response.json()["error"]["code"],
+            "mutation_reconciliation_required",
+        )
+        self.assertEqual(second_response.status_code, 409)
+        self.assertEqual(second_response.json()["error"]["code"], "mutation_in_progress")
+        self.assertEqual(apply_driver.call_count, 1)
+        assert reconcile_stored is not None
+        self.assertEqual(reconcile_stored.state, "reconcile_required")
+        self.assertEqual(recovered_response.status_code, 502)
+        self.assertEqual(
+            recovered_response.json()["error"]["code"],
+            "provider_mutation_failed",
+        )
+        self.assertEqual(replayed_failure_response.status_code, 502)
+        self.assertEqual(observe_driver.call_count, 1)
+        assert stored is not None
+        self.assertEqual(stored.state, "completed")
+        self.assertEqual(stored.response_status_code, 502)
 
     async def test_odoo_preview_destroy_apply_allows_missing_image_reference(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1616,10 +1742,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_preview_apply_does_not_replay_blocked_idempotency(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
+            store = self._reservation_store(root)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(
                     self._identity(
@@ -1711,10 +1834,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_preview_apply_replays_non_blocked_idempotency(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
+            store = self._reservation_store(root)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(
                     self._identity(
@@ -1805,10 +1925,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_preview_apply_handler_file_miss_is_not_found(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
+            store = self._reservation_store(root)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(
                     self._identity(
@@ -1858,6 +1975,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                             "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
                         },
                     },
+                    idempotency_key="odoo-preview-apply:odoo-tenant-cm:pr-42:refresh:file-miss",
                 )
 
         self.assertEqual(response.status_code, 404)

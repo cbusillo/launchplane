@@ -2264,6 +2264,241 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(replayed.record.state, "completed")
         self.assertEqual(replayed.record.response_trace_id, "trace-mutation-completed")
 
+    def test_active_reconciliation_key_fences_other_idempotency_keys(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                first = store.reserve_mutation(
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:first",
+                    request_fingerprint="mutation-fingerprint-a",
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    reconciliation_key="dokploy:compose:target-123",
+                )
+                blocked = store.reserve_mutation(
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:second",
+                    request_fingerprint="mutation-fingerprint-b",
+                    lease_owner="worker-b",
+                    lease_seconds=300,
+                    reconciliation_key="dokploy:compose:target-123",
+                )
+                completion = complete_launchplane_mutation_reservation(
+                    first.record,
+                    response_status_code=202,
+                    response_trace_id="trace-target-first",
+                    completed_at=clock["now"],
+                    response_payload={"status": "accepted"},
+                )
+                completed = store.complete_mutation_reservation(completion=completion)
+                later = store.reserve_mutation(
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:third",
+                    request_fingerprint="mutation-fingerprint-c",
+                    lease_owner="worker-c",
+                    lease_seconds=300,
+                    reconciliation_key="dokploy:compose:target-123",
+                )
+            store.close()
+
+        self.assertEqual(first.status, "acquired")
+        self.assertEqual(blocked.status, "target_busy")
+        self.assertEqual(blocked.record.idempotency_key, "mutation:target:first")
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(later.status, "acquired")
+
+    def test_provider_effect_checkpoint_fences_stale_reservation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            reservation = store.reserve_mutation(
+                scope="github-actions:mutation-test",
+                route_path="/v1/test/mutation",
+                idempotency_key="mutation:effect-checkpoint",
+                request_fingerprint="mutation-fingerprint-a",
+                lease_owner="worker-a",
+                lease_seconds=300,
+                reconciliation_key="dokploy:compose:target-checkpoint",
+            ).record
+            checkpointed = store.checkpoint_mutation_provider_effect(
+                reservation=reservation,
+                effect_phase="deploy_trigger",
+                lease_seconds=300,
+            )
+            stale_renewal = store.renew_mutation_reservation(
+                reservation=reservation,
+                lease_seconds=300,
+            )
+            store.close()
+
+        self.assertEqual(checkpointed.status, "updated")
+        assert checkpointed.record is not None
+        self.assertEqual(checkpointed.record.provider_effect_phase, "deploy_trigger")
+        self.assertTrue(checkpointed.record.provider_effect_started_at)
+        self.assertEqual(stale_renewal.status, "reservation_mismatch")
+
+    def test_stale_completion_cannot_adopt_newer_reconcile_required_attempt(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            first = store.reserve_mutation(
+                scope="github-actions:mutation-test",
+                route_path="/v1/test/mutation",
+                idempotency_key="mutation:late-completion",
+                request_fingerprint="mutation-fingerprint-a",
+                lease_owner="worker-a",
+                lease_seconds=300,
+                reconciliation_key="dokploy:compose:target-late-completion",
+            ).record
+            first_reconcile = store.mark_mutation_reconcile_required(
+                reservation=first,
+                reconciliation_key=first.reconciliation_key,
+            )
+            assert first_reconcile.record is not None
+            retried = store.retry_reconciled_mutation(
+                reservation=first_reconcile.record,
+                lease_owner="worker-b",
+                lease_seconds=300,
+            )
+            assert retried.record is not None
+            second = retried.record
+            second_reconcile = store.mark_mutation_reconcile_required(
+                reservation=second,
+                reconciliation_key=second.reconciliation_key,
+            )
+            stale_retry = store.retry_reconciled_mutation(
+                reservation=first_reconcile.record,
+                lease_owner="worker-c",
+                lease_seconds=300,
+            )
+            stale_completion = complete_launchplane_mutation_reservation(
+                first,
+                response_status_code=202,
+                response_trace_id="trace-worker-a",
+                completed_at=first.updated_at,
+                response_payload={"status": "accepted"},
+            )
+            completion_result = store.complete_mutation_reservation(completion=stale_completion)
+            store.close()
+
+        self.assertEqual(retried.status, "acquired")
+        self.assertEqual(second.attempt, first.attempt + 1)
+        self.assertEqual(second_reconcile.status, "updated")
+        self.assertEqual(stale_retry.status, "reservation_mismatch")
+        self.assertEqual(completion_result.status, "owner_mismatch")
+        assert completion_result.record is not None
+        self.assertEqual(completion_result.record.lease_owner, "worker-b")
+        self.assertEqual(completion_result.record.state, "reconcile_required")
+
+    def test_reservation_retries_when_active_collision_completes_before_lookup(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            owner_store = PostgresRecordStore(database_url=database_url)
+            owner_store.ensure_schema()
+            contender_store = PostgresRecordStore(database_url=database_url)
+            incumbent = owner_store.reserve_mutation(
+                scope="github-actions:mutation-test",
+                route_path="/v1/test/mutation",
+                idempotency_key="mutation:collision:first",
+                request_fingerprint="mutation-fingerprint-a",
+                lease_owner="worker-a",
+                lease_seconds=300,
+                reconciliation_key="dokploy:compose:target-collision",
+            ).record
+            original_begin = contender_store._begin_serialized_write
+            begin_calls = 0
+
+            def begin_after_incumbent_release(session: object) -> None:
+                nonlocal begin_calls
+                begin_calls += 1
+                if begin_calls == 2:
+                    released = owner_store.release_reserved_mutation(reservation=incumbent)
+                    self.assertEqual(released.status, "released")
+                original_begin(session)
+
+            with patch.object(
+                contender_store,
+                "_begin_serialized_write",
+                side_effect=begin_after_incumbent_release,
+            ):
+                acquired = contender_store.reserve_mutation(
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:collision:second",
+                    request_fingerprint="mutation-fingerprint-b",
+                    lease_owner="worker-b",
+                    lease_seconds=300,
+                    reconciliation_key="dokploy:compose:target-collision",
+                )
+            owner_store.close()
+            contender_store.close()
+
+        self.assertEqual(acquired.status, "acquired")
+        self.assertEqual(acquired.record.idempotency_key, "mutation:collision:second")
+        self.assertGreaterEqual(begin_calls, 3)
+
+    def test_reconcile_required_target_stays_fenced(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            first = store.reserve_mutation(
+                scope="github-actions:mutation-test",
+                route_path="/v1/test/mutation",
+                idempotency_key="mutation:target:unknown",
+                request_fingerprint="mutation-fingerprint-a",
+                lease_owner="worker-a",
+                lease_seconds=300,
+                reconciliation_key="dokploy:compose:target-unknown",
+            )
+            marked = store.mark_mutation_reconcile_required(
+                reservation=first.record,
+                reconciliation_key="dokploy:compose:target-unknown",
+            )
+            blocked = store.reserve_mutation(
+                scope="github-actions:mutation-test",
+                route_path="/v1/test/mutation",
+                idempotency_key="mutation:target:replacement",
+                request_fingerprint="mutation-fingerprint-b",
+                lease_owner="worker-b",
+                lease_seconds=300,
+                reconciliation_key="dokploy:compose:target-unknown",
+            )
+            store.close()
+
+        self.assertEqual(marked.status, "updated")
+        self.assertEqual(blocked.status, "target_busy")
+        self.assertEqual(blocked.record.state, "reconcile_required")
+
     def test_db_only_mutation_preflight_releases_expired_unbound_reservation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

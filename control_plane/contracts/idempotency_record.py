@@ -28,6 +28,9 @@ class LaunchplaneIdempotencyRecord(BaseModel):
     lease_expires_at: str = ""
     attempt: int = Field(default=1, ge=1)
     reconciliation_key: str = ""
+    provider_target_key: str = ""
+    provider_effect_phase: str = ""
+    provider_effect_started_at: str = ""
     created_at: str = ""
     updated_at: str = ""
     response_status_code: int | None = Field(default=None, ge=100, le=599)
@@ -64,6 +67,21 @@ class LaunchplaneIdempotencyRecord(BaseModel):
             required=False,
         )
         self.reconciliation_key = self.reconciliation_key.strip()
+        self.provider_target_key = self.provider_target_key.strip()
+        if self.provider_target_key and not self.reconciliation_key:
+            raise ValueError("Provider target keys require a reconciliation key.")
+        self.provider_effect_phase = self.provider_effect_phase.strip()
+        self.provider_effect_started_at = _normalize_mutation_timestamp(
+            self.provider_effect_started_at,
+            field_name="provider_effect_started_at",
+            required=False,
+        )
+        if bool(self.provider_effect_phase) != bool(self.provider_effect_started_at):
+            raise ValueError(
+                "Provider effect checkpoints require both phase and started_at evidence."
+            )
+        if self.provider_effect_phase and not self.reconciliation_key:
+            raise ValueError("Provider effect checkpoints require a reconciliation key.")
         recorded_at = self.recorded_at.strip()
         self.created_at = _normalize_mutation_timestamp(
             self.created_at.strip() or recorded_at,
@@ -146,6 +164,7 @@ def build_launchplane_mutation_reservation(
     lease_expires_at: str,
     reserved_at: str,
     reconciliation_key: str = "",
+    provider_target_key: str = "",
 ) -> LaunchplaneIdempotencyRecord:
     normalized_scope = _normalize_required(scope, "Mutation reservation requires scope.")
     normalized_route_path = _normalize_required(
@@ -175,6 +194,7 @@ def build_launchplane_mutation_reservation(
         lease_owner=lease_owner,
         lease_expires_at=lease_expires_at,
         reconciliation_key=reconciliation_key,
+        provider_target_key=provider_target_key,
         created_at=reserved_at,
         updated_at=reserved_at,
     )

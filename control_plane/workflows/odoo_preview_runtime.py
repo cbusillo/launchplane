@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
@@ -1062,6 +1063,7 @@ class OdooPreviewDokployApplyResult(BaseModel):
     compose_id: str = ""
     compose_name: str
     created_compose: bool = False
+    provider_effect_attempted: bool = False
     domain_id: str = ""
     steps: tuple[OdooPreviewDokployApplyStep, ...] = ()
     rollback_errors: tuple[str, ...] = ()
@@ -1076,6 +1078,14 @@ class OdooPreviewDokployApplyResult(BaseModel):
         if self.status in {"blocked", "fail"} and not self.error_message:
             raise ValueError("blocked or failed Odoo preview apply result requires error_message")
         return self
+
+
+class OdooPreviewDokployObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["present", "absent", "unknown"]
+    result: OdooPreviewDokployApplyResult | None = None
+    retry_safe: bool = False
 
 
 def build_odoo_preview_dokploy_dry_run(
@@ -1170,6 +1180,9 @@ def execute_odoo_preview_dokploy_apply(
     control_plane_root: Path,
     request: OdooPreviewDokployApplyRequest,
     database_url: str | None = None,
+    provider_operation_title: str = "",
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
+    provider_lease_check: Callable[[], None] | None = None,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     if plan.status != "ready":
@@ -1197,8 +1210,124 @@ def execute_odoo_preview_dokploy_apply(
         database_url=database_url,
     )
     if plan.operation == "destroy":
-        return _execute_destroy(host=host, token=token, request=request)
-    return _execute_refresh(host=host, token=token, request=request)
+        return _execute_destroy(
+            host=host,
+            token=token,
+            request=request,
+            provider_effect_checkpoint=provider_effect_checkpoint,
+        )
+    return _execute_refresh(
+        host=host,
+        token=token,
+        request=request,
+        provider_operation_title=provider_operation_title,
+        provider_effect_checkpoint=provider_effect_checkpoint,
+        provider_lease_check=provider_lease_check,
+    )
+
+
+def observe_odoo_preview_dokploy_apply(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    request: OdooPreviewDokployApplyRequest,
+    database_url: str | None,
+    provider_operation_title: str,
+    provider_effect_phase: str = "",
+) -> OdooPreviewDokployObservation:
+    plan = request.dry_run_plan
+    try:
+        host, token = control_plane_dokploy.read_dokploy_config(
+            control_plane_root=control_plane_root,
+            database_url=database_url,
+        )
+        if plan.operation == "destroy":
+            compose_still_exists = _compose_exists_by_id(
+                host=host,
+                token=token,
+                compose_id=plan.compose_ref,
+            )
+            if compose_still_exists:
+                retry_safe_phases = {"", "domain_delete"}
+                return OdooPreviewDokployObservation(
+                    outcome=("absent" if provider_effect_phase in retry_safe_phases else "unknown"),
+                    retry_safe=provider_effect_phase in retry_safe_phases,
+                )
+            return OdooPreviewDokployObservation(
+                outcome="present",
+                result=_apply_result(request=request, status="pass", compose_id=plan.compose_ref),
+            )
+        target = _discover_odoo_preview_target(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+            preview_slug=plan.preview_slug,
+            preview_url=plan.preview_url,
+            compose_name=plan.compose_name,
+            database_url=database_url,
+        )
+        if target is None:
+            retry_safe_phases = {"", "rollback_complete"}
+            return OdooPreviewDokployObservation(
+                outcome=("absent" if provider_effect_phase in retry_safe_phases else "unknown"),
+                retry_safe=provider_effect_phase in retry_safe_phases,
+            )
+        deployment = control_plane_dokploy.deployment_for_target_by_title(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=target.target_id,
+            title=provider_operation_title,
+        )
+        status = control_plane_dokploy.deployment_status(deployment)
+        if deployment is None:
+            retry_safe_phases = {"", "compose_create", "compose_update", "domain_ensure"}
+            return OdooPreviewDokployObservation(
+                outcome=("absent" if provider_effect_phase in retry_safe_phases else "unknown"),
+                retry_safe=provider_effect_phase in retry_safe_phases,
+            )
+        if status in {"", "pending", "queued", "running"}:
+            return OdooPreviewDokployObservation(outcome="unknown")
+        if status in {"success", "succeeded", "done", "completed", "healthy", "finished"}:
+            if request.smoke_check:
+                _wait_for_smoke_check(
+                    preview_url=plan.preview_url,
+                    health_path=request.health_path,
+                    timeout_seconds=request.timeout_seconds,
+                )
+            return OdooPreviewDokployObservation(
+                outcome="present",
+                result=_apply_result(
+                    request=request,
+                    status="pass",
+                    compose_id=target.target_id,
+                ),
+            )
+        if status in {
+            "failed",
+            "error",
+            "canceled",
+            "cancelled",
+            "killed",
+            "unhealthy",
+            "timeout",
+        }:
+            error_message = str(
+                (deployment or {}).get("errorMessage")
+                or (deployment or {}).get("error_message")
+                or f"Dokploy deployment finished with status {status}."
+            ).strip()
+            return OdooPreviewDokployObservation(
+                outcome="present",
+                result=_apply_result(
+                    request=request,
+                    status="fail",
+                    compose_id=target.target_id,
+                    error_message=error_message,
+                ),
+            )
+    except click.ClickException:
+        return OdooPreviewDokployObservation(outcome="unknown")
+    return OdooPreviewDokployObservation(outcome="unknown")
 
 
 def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tuple[str, ...]:
@@ -1234,14 +1363,29 @@ def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tupl
 
 
 def _execute_refresh(
-    *, host: str, token: str, request: OdooPreviewDokployApplyRequest
+    *,
+    host: str,
+    token: str,
+    request: OdooPreviewDokployApplyRequest,
+    provider_operation_title: str,
+    provider_effect_checkpoint: Callable[[str], None] | None,
+    provider_lease_check: Callable[[], None] | None,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     creating_compose = plan.compose_ref.startswith("${created.composeId:")
     created_compose_id = ""
     resolved_compose_id = ""
     domain_id = ""
+    deploy_triggered = False
+    provider_effect_attempted = False
     steps: list[OdooPreviewDokployApplyStep] = []
+
+    def checkpoint_provider_effect(phase: str) -> None:
+        nonlocal provider_effect_attempted
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint(phase)
+        provider_effect_attempted = True
+
     try:
         if creating_compose and not plan.template_compose_id:
             raise click.ClickException("Odoo preview compose create requires template_compose_id.")
@@ -1252,15 +1396,16 @@ def _execute_refresh(
             target_type="compose",
             target_id=source_compose_id,
         )
-        compose_id = _resolve_or_create_compose(
+        compose_id, created_compose = _resolve_or_create_compose(
             host=host,
             token=token,
             plan=plan,
             template_payload=target_payload,
             steps=steps,
+            provider_effect_checkpoint=checkpoint_provider_effect,
         )
         resolved_compose_id = compose_id
-        created_compose_id = compose_id if creating_compose else ""
+        created_compose_id = compose_id if created_compose else ""
         if creating_compose:
             target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
                 host=host,
@@ -1275,6 +1420,7 @@ def _execute_refresh(
             publish_host_ports=False,
             domain_certificate_type=plan.domain_certificate_type,
         )
+        checkpoint_provider_effect("compose_update")
         control_plane_dokploy.sync_dokploy_compose_raw_source(
             host=host,
             token=token,
@@ -1286,6 +1432,7 @@ def _execute_refresh(
         steps.append(_step("compose_update_raw_source", compose_id))
 
         env_text = control_plane_dokploy.serialize_dokploy_env_text(request.environment_values)
+        checkpoint_provider_effect("compose_update")
         control_plane_dokploy.update_dokploy_target_env(
             host=host,
             token=token,
@@ -1296,6 +1443,7 @@ def _execute_refresh(
         )
         steps.append(_step("compose_update_env", compose_id))
 
+        checkpoint_provider_effect("domain_ensure")
         domain_id = control_plane_dokploy.ensure_compose_web_domain_route(
             host=host,
             token=token,
@@ -1312,23 +1460,46 @@ def _execute_refresh(
             target_type="compose",
             target_id=compose_id,
         )
-        control_plane_dokploy.trigger_deployment(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=compose_id,
-            no_cache=plan.no_cache,
-        )
-        steps.append(_step("compose_deploy", compose_id))
-        if request.wait_for_deploy:
-            control_plane_dokploy.wait_for_target_deployment(
+        checkpoint_provider_effect("deploy_trigger")
+        deploy_triggered = True
+        if provider_operation_title:
+            control_plane_dokploy.trigger_deployment(
                 host=host,
                 token=token,
                 target_type="compose",
                 target_id=compose_id,
-                before_key=control_plane_dokploy.deployment_key(latest_before),
-                timeout_seconds=request.timeout_seconds,
+                no_cache=plan.no_cache,
+                title=provider_operation_title,
             )
+        else:
+            control_plane_dokploy.trigger_deployment(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                no_cache=plan.no_cache,
+            )
+        steps.append(_step("compose_deploy", compose_id))
+        if request.wait_for_deploy:
+            if provider_operation_title:
+                control_plane_dokploy.wait_for_target_deployment(
+                    host=host,
+                    token=token,
+                    target_type="compose",
+                    target_id=compose_id,
+                    before_key=control_plane_dokploy.deployment_key(latest_before),
+                    timeout_seconds=request.timeout_seconds,
+                    deployment_title=provider_operation_title,
+                )
+            else:
+                control_plane_dokploy.wait_for_target_deployment(
+                    host=host,
+                    token=token,
+                    target_type="compose",
+                    target_id=compose_id,
+                    before_key=control_plane_dokploy.deployment_key(latest_before),
+                    timeout_seconds=request.timeout_seconds,
+                )
         if request.smoke_check:
             _wait_for_smoke_check(
                 preview_url=plan.preview_url,
@@ -1342,16 +1513,30 @@ def _execute_refresh(
             compose_id=compose_id,
             domain_id=domain_id,
             created_compose=bool(created_compose_id),
+            provider_effect_attempted=provider_effect_attempted,
             steps=tuple(steps),
         )
     except click.ClickException as exc:
-        rollback_errors = _rollback_created_runtime(
-            host=host,
-            token=token,
-            domain_id=domain_id if created_compose_id else "",
-            compose_id=created_compose_id,
-            delete_volumes=plan.delete_volumes,
-        )
+        rollback_errors: tuple[str, ...] = ()
+        if not deploy_triggered:
+            if created_compose_id and provider_effect_checkpoint is not None:
+                provider_effect_checkpoint("rollback_started")
+            elif provider_lease_check is not None:
+                provider_lease_check()
+            rollback_errors = _rollback_created_runtime(
+                host=host,
+                token=token,
+                domain_id=domain_id if created_compose_id else "",
+                compose_id=created_compose_id,
+                delete_volumes=plan.delete_volumes,
+                provider_effect_checkpoint=provider_effect_checkpoint,
+            )
+            if (
+                created_compose_id
+                and not rollback_errors
+                and provider_effect_checkpoint is not None
+            ):
+                provider_effect_checkpoint("rollback_complete")
         return _apply_result(
             request=request,
             status="fail",
@@ -1359,13 +1544,18 @@ def _execute_refresh(
             domain_id=domain_id,
             compose_id=resolved_compose_id,
             created_compose=bool(created_compose_id),
+            provider_effect_attempted=provider_effect_attempted,
             steps=tuple(steps),
             rollback_errors=rollback_errors,
         )
 
 
 def _execute_destroy(
-    *, host: str, token: str, request: OdooPreviewDokployApplyRequest
+    *,
+    host: str,
+    token: str,
+    request: OdooPreviewDokployApplyRequest,
+    provider_effect_checkpoint: Callable[[str], None] | None,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     compose_id = plan.compose_ref
@@ -1378,6 +1568,7 @@ def _execute_destroy(
         delete_volumes=plan.delete_volumes,
         continue_after_domain_cleanup_error=False,
         missing_resource_is_clean=True,
+        before_provider_mutation=provider_effect_checkpoint,
     )
     steps = tuple(
         _step(cast("OdooPreviewDokployOperationName", step.name), step.target)
@@ -1390,6 +1581,7 @@ def _execute_destroy(
             status="pass",
             compose_id=compose_id,
             domain_id=domain_id,
+            provider_effect_attempted=True,
             steps=steps,
         )
     return _apply_result(
@@ -1398,6 +1590,7 @@ def _execute_destroy(
         error_message="; ".join(destroy_result.cleanup_errors),
         compose_id=compose_id,
         domain_id=domain_id,
+        provider_effect_attempted=True,
         steps=steps,
     )
 
@@ -1409,16 +1602,26 @@ def _resolve_or_create_compose(
     plan: OdooPreviewDokployDryRunPlan,
     template_payload: JsonObject,
     steps: list[OdooPreviewDokployApplyStep],
-) -> str:
+    provider_effect_checkpoint: Callable[[str], None],
+) -> tuple[str, bool]:
     if not plan.compose_ref.startswith("${created.composeId:"):
-        return plan.compose_ref
+        return plan.compose_ref, False
     if not plan.environment_id:
         raise click.ClickException("Odoo preview compose create requires environment_id.")
+    existing_compose_id = _find_compose_id_by_environment_and_name(
+        host=host,
+        token=token,
+        environment_id=plan.environment_id,
+        compose_name=plan.compose_name,
+    )
+    if existing_compose_id:
+        return existing_compose_id, False
     server_id = str(template_payload.get("serverId") or "").strip()
     if not server_id:
         raise click.ClickException(
             "Odoo preview compose create requires the template compose serverId."
         )
+    provider_effect_checkpoint("compose_create")
     created = control_plane_dokploy.dokploy_request(
         host=host,
         token=token,
@@ -1440,7 +1643,109 @@ def _resolve_or_create_compose(
             f"Dokploy did not return composeId for Odoo preview compose {plan.compose_name!r}."
         )
     steps.append(_step("compose_create", plan.compose_name))
-    return compose_id
+    return compose_id, True
+
+
+def _find_compose_id_by_environment_and_name(
+    *,
+    host: str,
+    token: str,
+    environment_id: str,
+    compose_name: str,
+) -> str:
+    raw_projects = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/project.all",
+    )
+    if not isinstance(raw_projects, list):
+        raise click.ClickException(
+            "Dokploy project inventory returned an invalid response payload."
+        )
+    matches: list[str] = []
+    for raw_project in raw_projects:
+        project = control_plane_dokploy.as_json_object(raw_project)
+        if project is None:
+            continue
+        raw_environments = project.get("environments")
+        if not isinstance(raw_environments, list):
+            continue
+        for raw_environment in raw_environments:
+            environment = control_plane_dokploy.as_json_object(raw_environment)
+            if environment is None:
+                continue
+            observed_environment_id = str(
+                environment.get("environmentId") or environment.get("id") or ""
+            ).strip()
+            if observed_environment_id != environment_id:
+                continue
+            raw_composes = environment.get("composes")
+            if not isinstance(raw_composes, list):
+                continue
+            for raw_compose in raw_composes:
+                compose = control_plane_dokploy.as_json_object(raw_compose)
+                if compose is None or str(compose.get("name") or "").strip() != compose_name:
+                    continue
+                compose_id = str(compose.get("composeId") or compose.get("id") or "").strip()
+                if compose_id and compose_id not in matches:
+                    matches.append(compose_id)
+    if not matches:
+        raw_search_matches = control_plane_dokploy.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/compose.search",
+            query={"q": compose_name, "limit": 25},
+        )
+        for compose in _iter_dokploy_search_composes(raw_search_matches):
+            if str(compose.get("name") or "").strip() != compose_name:
+                continue
+            compose_id = str(compose.get("composeId") or compose.get("id") or "").strip()
+            if not compose_id:
+                continue
+            observed_environment_id = _compose_environment_id(compose)
+            if not observed_environment_id:
+                compose_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+                    host=host,
+                    token=token,
+                    target_type="compose",
+                    target_id=compose_id,
+                )
+                observed_environment_id = _compose_environment_id(compose_payload)
+            if observed_environment_id == environment_id and compose_id not in matches:
+                matches.append(compose_id)
+    if len(matches) > 1:
+        raise OdooPreviewTargetDiscoveryAmbiguousError(
+            f"Discovered multiple Odoo preview composes named {compose_name!r}."
+        )
+    return matches[0] if matches else ""
+
+
+def _compose_environment_id(compose: JsonObject) -> str:
+    environment = control_plane_dokploy.as_json_object(compose.get("environment"))
+    return str(
+        compose.get("environmentId")
+        or (environment or {}).get("environmentId")
+        or (environment or {}).get("id")
+        or ""
+    ).strip()
+
+
+def _compose_exists_by_id(*, host: str, token: str, compose_id: str) -> bool:
+    try:
+        payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+        )
+    except click.ClickException as error:
+        if "failed (404):" in str(error):
+            return False
+        raise
+    observed_compose_id = str(payload.get("composeId") or payload.get("id") or "").strip()
+    if observed_compose_id != compose_id:
+        raise click.ClickException("Dokploy compose lookup returned the wrong compose.")
+    return True
 
 
 def _compose_domains(*, host: str, token: str, compose_id: str) -> tuple[JsonObject, ...]:
@@ -1481,16 +1786,26 @@ def _delete_compose(*, host: str, token: str, compose_id: str, delete_volumes: b
 
 
 def _rollback_created_runtime(
-    *, host: str, token: str, domain_id: str, compose_id: str, delete_volumes: bool
+    *,
+    host: str,
+    token: str,
+    domain_id: str,
+    compose_id: str,
+    delete_volumes: bool,
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> tuple[str, ...]:
     errors: list[str] = []
     if domain_id:
         try:
+            if provider_effect_checkpoint is not None:
+                provider_effect_checkpoint("rollback_domain_delete")
             _delete_domain(host=host, token=token, domain_id=domain_id)
         except click.ClickException as exc:
             errors.append(f"domain rollback failed: {exc}")
     if compose_id:
         try:
+            if provider_effect_checkpoint is not None:
+                provider_effect_checkpoint("rollback_compose_delete")
             _delete_compose(
                 host=host,
                 token=token,
@@ -1560,6 +1875,7 @@ def _apply_result(
     compose_id: str = "",
     domain_id: str = "",
     created_compose: bool = False,
+    provider_effect_attempted: bool = False,
     steps: tuple[OdooPreviewDokployApplyStep, ...] = (),
     rollback_errors: tuple[str, ...] = (),
     error_message: str = "",
@@ -1576,6 +1892,7 @@ def _apply_result(
         compose_id=compose_id,
         compose_name=plan.compose_name,
         created_compose=created_compose,
+        provider_effect_attempted=provider_effect_attempted,
         domain_id=domain_id,
         steps=steps,
         rollback_errors=rollback_errors,

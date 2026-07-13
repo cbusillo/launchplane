@@ -114,6 +114,16 @@ unique in PostgreSQL. The typed lifecycle is:
   now unknown; automatic re-execution is forbidden until domain reconciliation
   proves the provider state.
 
+Provider-operation reservations additionally retain a stable
+`provider_target_key`, plus `provider_effect_phase` and
+`provider_effect_started_at`, in the typed payload.
+The phase is checkpointed under the current lease immediately before a provider
+write. It is part of transition identity, so a reservation snapshot from before
+the checkpoint cannot renew, complete, release, or advance provider work after a
+newer owner recovers the claim. The same rule covers compensating rollback
+deletes and multi-write post-deploy work; each external write advances the phase
+before dispatch instead of treating the enclosing workflow as one effect.
+
 Reservation attempts return typed `acquired`, `replayed`, `conflict`,
 `in_progress`, or `reconcile_required` decisions. A different request
 fingerprint always conflicts, including while the first request is running. An
@@ -218,6 +228,47 @@ Workflow dispatches only adopt an observed run when reclaiming an existing
 provider marker; a first attempt records its marker and sends rather than
 claiming an unrelated concurrent run. Resolved public-ingress notifications
 also ensure the GitHub issue is closed after marker reconciliation.
+
+## Durable Provider Operations
+
+The shared durable provider-operation runner (`control_plane/provider_operations`)
+implements this contract for external-effect routes. It reserves with the
+deterministic provider reconciliation key bound from the start, so `acquired`
+always means a brand-new attempt with no prior effect, while an expired bound
+reservation always resolves to `reconcile_required`. On the reconcile path the
+runner asks a provider adapter to observe the target: an observed effect is
+adopted into a completed reservation through `adopt_reconciled_mutation`. The
+adoption compares the exact observed attempt, phase, target key, and reservation
+identity, so a second instance can adopt another instance's effect without a
+stale observer completing a newer attempt. An unknown observation stays
+`reconcile_required`. A proven-absent observation may instead atomically advance
+the same reservation to a new attempt only when no provider phase was
+checkpointed or the adapter explicitly proves the recorded phase is retry-safe.
+An unknown observation never retries. A pre-effect rejection releases the fresh
+reservation through `release_reserved_mutation` (owner- and identity-fenced) so
+no poisoned claim is left behind. Odoo preview apply and generic web deploy are
+the first migrated provider routes; both require an `Idempotency-Key` and a
+database store. Provider-specific observation and reconciliation stay behind
+the adapter boundary.
+
+The `launchplane_idempotency_active_reconciliation_idx` partial unique index
+fences each provider target while its reservation is `running` or
+`reconcile_required`, regardless of caller idempotency key, using the promoted
+`provider_target_key` rather than the richer reconciliation snapshot. Migration
+backfills previously bound keys and aborts with an explicit reconciliation error
+if duplicate active claims would make the target fence ambiguous. The runner renews
+the bounded lease during blocking provider work and always completes from the
+latest reservation snapshot. Generic-web reconciliation keys embed a versioned
+snapshot of the resolved provider target, so restart recovery remains bound to
+the original target even if current authority records change. Provider operation
+markers are derived from the durable request identity and written into Dokploy
+deployment titles; both the initial wait and later observation use that exact
+marker rather than inferring success from similar target state. Adoption may
+store terminal failure response evidence as well as success, but only after the
+provider supplies the exact deployment id and start/finish timestamps. Fresh
+completion has the same evidence requirement as restart adoption; completed
+means the provider outcome is durable and replayable, not that the external
+deployment passed.
 
 ## ORM Query Boundary
 

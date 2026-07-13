@@ -52,6 +52,13 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingSource,
     RouteBindingTls,
 )
+from control_plane.provider_operations import (
+    DurableProviderOperationResult,
+    ProviderMutationOutcome,
+    ProviderObservation,
+    ProviderOperationLease,
+    run_durable_provider_operation,
+)
 from control_plane.storage.postgres import (
     DbOnlyMutationRequest,
     MutationReservationResult,
@@ -408,6 +415,16 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             idempotency_indexes["launchplane_idempotency_scope_route_key_idx"]["unique"]
         )
         self.assertFalse(idempotency_indexes["launchplane_idempotency_state_lease_idx"]["unique"])
+        self.assertTrue(
+            idempotency_indexes["launchplane_idempotency_active_reconciliation_idx"]["unique"]
+        )
+        self.assertEqual(
+            idempotency_indexes["launchplane_idempotency_active_reconciliation_idx"][
+                "column_names"
+            ],
+            ["provider_target_key"],
+        )
+        self.assertIn("provider_target_key", idempotency_columns)
         self.assertTrue(indexes["launchplane_odoo_bootstrap_active_lane_uidx"]["unique"])
 
     def test_mutation_reservation_migration_backfills_existing_postgres_rows(self) -> None:
@@ -482,6 +499,145 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(promoted["attempt"], 1)
         self.assertEqual(promoted["created_at"], "2026-07-12T00:00:00Z")
         self.assertEqual(promoted["updated_at"], "2026-07-12T00:00:00Z")
+
+    def test_provider_target_fence_migration_backfills_existing_active_rows(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            alembic_command.upgrade(_alembic_config(database_url), "a2b4c6d8e0f2")
+            reconciliation_key = "dokploy:compose:existing-provider-target"
+            payload = {
+                "schema_version": 2,
+                "record_id": "mutation-reservation-existing-provider-target",
+                "scope": "github-actions:provider-target-migration",
+                "route_path": "/v1/test/provider-target",
+                "idempotency_key": "provider-target-existing",
+                "request_fingerprint": "provider-target-fingerprint",
+                "state": "reconcile_required",
+                "lease_owner": "worker-a",
+                "lease_expires_at": "",
+                "attempt": 1,
+                "reconciliation_key": reconciliation_key,
+                "provider_effect_phase": "",
+                "provider_effect_started_at": "",
+                "created_at": "2026-07-12T00:00:00Z",
+                "updated_at": "2026-07-12T00:00:00Z",
+                "response_status_code": None,
+                "response_trace_id": "",
+                "recorded_at": "",
+                "response_payload": {},
+            }
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_idempotency_records "
+                        "(record_id, scope, route_path, idempotency_key, request_fingerprint, "
+                        "state, lease_owner, lease_expires_at, attempt, reconciliation_key, "
+                        "created_at, updated_at, response_status_code, response_trace_id, "
+                        "recorded_at, payload) VALUES "
+                        "(:record_id, :scope, :route_path, :idempotency_key, "
+                        ":request_fingerprint, 'reconcile_required', 'worker-a', '', 1, "
+                        ":reconciliation_key, :created_at, :updated_at, NULL, '', '', "
+                        "CAST(:payload AS jsonb))"
+                    ),
+                    {
+                        "record_id": payload["record_id"],
+                        "scope": payload["scope"],
+                        "route_path": payload["route_path"],
+                        "idempotency_key": payload["idempotency_key"],
+                        "request_fingerprint": payload["request_fingerprint"],
+                        "reconciliation_key": reconciliation_key,
+                        "created_at": payload["created_at"],
+                        "updated_at": payload["updated_at"],
+                        "payload": json.dumps(payload),
+                    },
+                )
+            engine.dispose()
+
+            _upgrade_empty_database_to_head(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.verify_schema()
+                loaded = store.read_idempotency_record(
+                    scope=str(payload["scope"]),
+                    route_path=str(payload["route_path"]),
+                    idempotency_key=str(payload["idempotency_key"]),
+                )
+                blocked = store.reserve_mutation(
+                    scope="github-actions:provider-target-migration",
+                    route_path="/v1/test/provider-target",
+                    idempotency_key="provider-target-contender",
+                    request_fingerprint="provider-target-contender-fingerprint",
+                    lease_owner="worker-b",
+                    reconciliation_key=reconciliation_key,
+                )
+            finally:
+                store.close()
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.provider_target_key, reconciliation_key)
+        self.assertEqual(blocked.status, "target_busy")
+
+    def test_provider_target_fence_migration_fails_closed_on_duplicate_claims(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            alembic_command.upgrade(_alembic_config(database_url), "a2b4c6d8e0f2")
+            reconciliation_key = "dokploy:compose:duplicate-provider-target"
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                for index in (1, 2):
+                    payload = {
+                        "schema_version": 2,
+                        "record_id": f"mutation-reservation-duplicate-target-{index}",
+                        "scope": f"github-actions:duplicate-target-{index}",
+                        "route_path": "/v1/test/provider-target",
+                        "idempotency_key": f"provider-target-duplicate-{index}",
+                        "request_fingerprint": f"provider-target-fingerprint-{index}",
+                        "state": "reconcile_required",
+                        "lease_owner": f"worker-{index}",
+                        "lease_expires_at": "",
+                        "attempt": 1,
+                        "reconciliation_key": reconciliation_key,
+                        "provider_effect_phase": "",
+                        "provider_effect_started_at": "",
+                        "created_at": "2026-07-12T00:00:00Z",
+                        "updated_at": "2026-07-12T00:00:00Z",
+                        "response_status_code": None,
+                        "response_trace_id": "",
+                        "recorded_at": "",
+                        "response_payload": {},
+                    }
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_idempotency_records "
+                            "(record_id, scope, route_path, idempotency_key, "
+                            "request_fingerprint, state, lease_owner, lease_expires_at, "
+                            "attempt, reconciliation_key, created_at, updated_at, "
+                            "response_status_code, response_trace_id, recorded_at, payload) "
+                            "VALUES (:record_id, :scope, :route_path, :idempotency_key, "
+                            ":request_fingerprint, 'reconcile_required', :lease_owner, '', 1, "
+                            ":reconciliation_key, :created_at, :updated_at, NULL, '', '', "
+                            "CAST(:payload AS jsonb))"
+                        ),
+                        {
+                            "record_id": payload["record_id"],
+                            "scope": payload["scope"],
+                            "route_path": payload["route_path"],
+                            "idempotency_key": payload["idempotency_key"],
+                            "request_fingerprint": payload["request_fingerprint"],
+                            "lease_owner": payload["lease_owner"],
+                            "reconciliation_key": reconciliation_key,
+                            "created_at": payload["created_at"],
+                            "updated_at": payload["updated_at"],
+                            "payload": json.dumps(payload),
+                        },
+                    )
+            engine.dispose()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Cannot fence active provider mutations while duplicate target claims exist",
+            ):
+                _upgrade_empty_database_to_head(database_url)
 
     def test_startup_verification_fails_closed_when_critical_index_is_missing(
         self,
@@ -1544,6 +1700,308 @@ def _column_type(engine: Engine, *, table_name: str, column_name: str) -> str:
                 {"table_name": table_name, "column_name": column_name},
             ).scalar_one()
         )
+
+
+_PROVIDER_OPERATION_SCOPE = "github-actions:provider-operation-integration"
+_PROVIDER_OPERATION_ROUTE = "/v1/drivers/provider-operation-integration"
+_PROVIDER_OPERATION_KEY = "provider-operation:integration:1"
+_PROVIDER_OPERATION_FINGERPRINT = "provider-operation-integration-fingerprint"
+_PROVIDER_OPERATION_RECONCILIATION_KEY = "dokploy-compose:integration-preview"
+_PROVIDER_OPERATION_TARGET_KEY = "dokploy-target:integration-preview"
+
+
+class _IntegrationProviderAdapter:
+    def __init__(
+        self,
+        *,
+        started: threading.Event | None = None,
+        release: threading.Event | None = None,
+        observation: ProviderObservation | None = None,
+    ) -> None:
+        self._started = started
+        self._release = release
+        self._observation = observation or ProviderObservation(outcome="unknown")
+        self.apply_calls = 0
+        self.observe_calls = 0
+
+    def reconciliation_key(self) -> str:
+        return _PROVIDER_OPERATION_RECONCILIATION_KEY
+
+    def target_key(self) -> str:
+        return _PROVIDER_OPERATION_TARGET_KEY
+
+    def observe(
+        self,
+        provider_operation_key: str,
+        provider_effect_phase: str,
+        reconciliation_key: str,
+    ) -> ProviderObservation:
+        del provider_operation_key, provider_effect_phase, reconciliation_key
+        self.observe_calls += 1
+        return self._observation
+
+    def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        del provider_operation_key
+        self.apply_calls += 1
+        lease.checkpoint_effect("integration_effect")
+        if self._started is not None:
+            self._started.set()
+        if self._release is not None and not self._release.wait(timeout=5):
+            raise AssertionError("provider apply was not released")
+        return ProviderMutationOutcome(
+            response_status_code=202,
+            response_payload={"trace_id": "integration-effect", "status": "accepted"},
+        )
+
+
+def _run_integration_provider_operation(
+    store: PostgresRecordStore,
+    adapter: _IntegrationProviderAdapter,
+    *,
+    lease_owner: str,
+    response_trace_id: str,
+    lease_seconds: int = 300,
+    heartbeat_interval_seconds: float | None = None,
+    idempotency_key: str = _PROVIDER_OPERATION_KEY,
+    request_fingerprint: str = _PROVIDER_OPERATION_FINGERPRINT,
+) -> DurableProviderOperationResult:
+    return run_durable_provider_operation(
+        store=store,
+        scope=_PROVIDER_OPERATION_SCOPE,
+        route_path=_PROVIDER_OPERATION_ROUTE,
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=lease_owner,
+        response_trace_id=response_trace_id,
+        adapter=adapter,
+        lease_seconds=lease_seconds,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+    )
+
+
+class RealPostgresProviderOperationTests(unittest.TestCase):
+    def test_two_instances_apply_provider_effect_exactly_once(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            try:
+                started = threading.Event()
+                release = threading.Event()
+                holder = _IntegrationProviderAdapter(started=started, release=release)
+                holder_result: dict[str, DurableProviderOperationResult] = {}
+
+                def run_holder() -> None:
+                    holder_result["value"] = _run_integration_provider_operation(
+                        store,
+                        holder,
+                        lease_owner="instance-a",
+                        response_trace_id="integration-trace-a",
+                    )
+
+                holder_thread = threading.Thread(target=run_holder)
+                holder_thread.start()
+                try:
+                    self.assertTrue(started.wait(5))
+                    second = _IntegrationProviderAdapter()
+                    second_result = _run_integration_provider_operation(
+                        second_store,
+                        second,
+                        lease_owner="instance-b",
+                        response_trace_id="integration-trace-b",
+                    )
+                    self.assertEqual(second_result.status, "in_progress")
+                    self.assertEqual(second.apply_calls, 0)
+                finally:
+                    release.set()
+                    holder_thread.join(5)
+
+                self.assertEqual(holder_result["value"].status, "completed")
+                self.assertEqual(holder.apply_calls, 1)
+                stored = store.read_idempotency_record(
+                    scope=_PROVIDER_OPERATION_SCOPE,
+                    route_path=_PROVIDER_OPERATION_ROUTE,
+                    idempotency_key=_PROVIDER_OPERATION_KEY,
+                )
+                assert stored is not None
+                self.assertEqual(stored.state, "completed")
+            finally:
+                second_store.close()
+
+    def test_different_idempotency_key_cannot_bypass_active_target_fence(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            first = store.reserve_mutation(
+                scope=_PROVIDER_OPERATION_SCOPE,
+                route_path=_PROVIDER_OPERATION_ROUTE,
+                idempotency_key="provider-operation:integration:first",
+                request_fingerprint="provider-operation-integration-first",
+                lease_owner="instance-a",
+                lease_seconds=300,
+                reconciliation_key=_PROVIDER_OPERATION_RECONCILIATION_KEY,
+                provider_target_key=_PROVIDER_OPERATION_TARGET_KEY,
+            )
+            second = _run_integration_provider_operation(
+                store,
+                _IntegrationProviderAdapter(),
+                lease_owner="instance-b",
+                response_trace_id="integration-trace-b",
+                idempotency_key="provider-operation:integration:second",
+                request_fingerprint="provider-operation-integration-second",
+            )
+
+        self.assertEqual(first.status, "acquired")
+        self.assertEqual(second.status, "target_busy")
+
+    def test_heartbeats_hold_target_fence_past_original_lease(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            started = threading.Event()
+            release = threading.Event()
+            holder = _IntegrationProviderAdapter(started=started, release=release)
+            holder_result: dict[str, DurableProviderOperationResult] = {}
+
+            def run_holder() -> None:
+                holder_result["value"] = _run_integration_provider_operation(
+                    store,
+                    holder,
+                    lease_owner="instance-a",
+                    response_trace_id="integration-trace-a",
+                    lease_seconds=2,
+                    heartbeat_interval_seconds=0.2,
+                )
+
+            holder_thread = threading.Thread(target=run_holder)
+            holder_thread.start()
+            try:
+                self.assertTrue(started.wait(5))
+                time.sleep(2.2)
+                second_result = _run_integration_provider_operation(
+                    second_store,
+                    _IntegrationProviderAdapter(),
+                    lease_owner="instance-b",
+                    response_trace_id="integration-trace-b",
+                )
+                self.assertEqual(second_result.status, "in_progress")
+            finally:
+                release.set()
+                holder_thread.join(5)
+                second_store.close()
+
+            self.assertEqual(holder_result["value"].status, "completed")
+
+    def test_restart_adopts_observed_effect_without_reapplying(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            reservation = store.reserve_mutation(
+                scope=_PROVIDER_OPERATION_SCOPE,
+                route_path=_PROVIDER_OPERATION_ROUTE,
+                idempotency_key=_PROVIDER_OPERATION_KEY,
+                request_fingerprint=_PROVIDER_OPERATION_FINGERPRINT,
+                lease_owner="instance-a",
+                lease_seconds=1,
+                reconciliation_key=_PROVIDER_OPERATION_RECONCILIATION_KEY,
+                provider_target_key=_PROVIDER_OPERATION_TARGET_KEY,
+            )
+            self.assertEqual(reservation.status, "acquired")
+            time.sleep(1.2)
+
+            recovery = _IntegrationProviderAdapter(
+                observation=ProviderObservation(
+                    outcome="present",
+                    response_status_code=202,
+                    response_payload={"trace_id": "adopted", "status": "accepted"},
+                )
+            )
+            adopted = _run_integration_provider_operation(
+                store,
+                recovery,
+                lease_owner="instance-b",
+                response_trace_id="integration-trace-b",
+            )
+
+            self.assertEqual(adopted.status, "adopted")
+            self.assertEqual(recovery.apply_calls, 0)
+            stored = store.read_idempotency_record(
+                scope=_PROVIDER_OPERATION_SCOPE,
+                route_path=_PROVIDER_OPERATION_ROUTE,
+                idempotency_key=_PROVIDER_OPERATION_KEY,
+            )
+            assert stored is not None
+            self.assertEqual(stored.state, "completed")
+
+    def test_reconcile_required_fails_closed_when_effect_unknown(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            reservation = store.reserve_mutation(
+                scope=_PROVIDER_OPERATION_SCOPE,
+                route_path=_PROVIDER_OPERATION_ROUTE,
+                idempotency_key=_PROVIDER_OPERATION_KEY,
+                request_fingerprint=_PROVIDER_OPERATION_FINGERPRINT,
+                lease_owner="instance-a",
+                lease_seconds=300,
+                reconciliation_key=_PROVIDER_OPERATION_RECONCILIATION_KEY,
+                provider_target_key=_PROVIDER_OPERATION_TARGET_KEY,
+            )
+            store.mark_mutation_reconcile_required(
+                reservation=reservation.record,
+                reconciliation_key=_PROVIDER_OPERATION_RECONCILIATION_KEY,
+            )
+
+            recovery = _IntegrationProviderAdapter(
+                observation=ProviderObservation(outcome="unknown")
+            )
+            result = _run_integration_provider_operation(
+                store,
+                recovery,
+                lease_owner="instance-b",
+                response_trace_id="integration-trace-b",
+            )
+
+            self.assertEqual(result.status, "reconcile_required")
+            self.assertEqual(recovery.apply_calls, 0)
+            stored = store.read_idempotency_record(
+                scope=_PROVIDER_OPERATION_SCOPE,
+                route_path=_PROVIDER_OPERATION_ROUTE,
+                idempotency_key=_PROVIDER_OPERATION_KEY,
+            )
+            assert stored is not None
+            self.assertEqual(stored.state, "reconcile_required")
+
+    def test_reconcile_absent_releases_and_reapplies_once(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            reservation = store.reserve_mutation(
+                scope=_PROVIDER_OPERATION_SCOPE,
+                route_path=_PROVIDER_OPERATION_ROUTE,
+                idempotency_key=_PROVIDER_OPERATION_KEY,
+                request_fingerprint=_PROVIDER_OPERATION_FINGERPRINT,
+                lease_owner="instance-a",
+                lease_seconds=300,
+                reconciliation_key=_PROVIDER_OPERATION_RECONCILIATION_KEY,
+                provider_target_key=_PROVIDER_OPERATION_TARGET_KEY,
+            )
+            store.mark_mutation_reconcile_required(
+                reservation=reservation.record,
+                reconciliation_key=_PROVIDER_OPERATION_RECONCILIATION_KEY,
+            )
+            recovery = _IntegrationProviderAdapter(
+                observation=ProviderObservation(outcome="absent")
+            )
+
+            result = _run_integration_provider_operation(
+                store,
+                recovery,
+                lease_owner="instance-b",
+                response_trace_id="integration-trace-b",
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(recovery.observe_calls, 1)
+            self.assertEqual(recovery.apply_calls, 1)
+            stored = store.read_idempotency_record(
+                scope=_PROVIDER_OPERATION_SCOPE,
+                route_path=_PROVIDER_OPERATION_ROUTE,
+                idempotency_key=_PROVIDER_OPERATION_KEY,
+            )
+            assert stored is not None
+            self.assertEqual(stored.state, "completed")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 import re
@@ -18,6 +19,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewDokployApplyRequest,
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
+    observe_odoo_preview_dokploy_apply,
 )
 
 
@@ -130,6 +132,9 @@ def execute_odoo_preview_apply_result(
     profile: LaunchplaneProductProfileRecord,
     request: OdooPreviewApplyEnvelope,
     database_url: str | None,
+    provider_operation_title: str = "",
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
+    provider_lease_check: Callable[[], None] | None = None,
 ) -> dict[str, object]:
     if request.apply.dry_run_plan.repository.strip() != profile.repository.strip():
         raise ValueError("Odoo preview apply repository does not match product profile.")
@@ -154,8 +159,33 @@ def execute_odoo_preview_apply_result(
         control_plane_root=control_plane_root_path,
         request=service_apply_request,
         database_url=database_url,
+        provider_operation_title=provider_operation_title,
+        provider_effect_checkpoint=provider_effect_checkpoint,
+        provider_lease_check=provider_lease_check,
     )
     return driver_result.model_dump(mode="json")
+
+
+def observe_odoo_preview_apply_result(
+    *,
+    control_plane_root_path: Path,
+    profile: LaunchplaneProductProfileRecord,
+    request: OdooPreviewApplyEnvelope,
+    database_url: str | None,
+    provider_operation_title: str,
+    provider_effect_phase: str = "",
+) -> tuple[str, dict[str, object] | None, bool]:
+    observation = observe_odoo_preview_dokploy_apply(
+        control_plane_root=control_plane_root_path,
+        context_name=profile.preview.context,
+        request=request.apply,
+        database_url=database_url,
+        provider_operation_title=provider_operation_title,
+        provider_effect_phase=provider_effect_phase,
+    )
+    if observation.outcome != "present" or observation.result is None:
+        return observation.outcome, None, observation.retry_safe
+    return observation.outcome, observation.result.model_dump(mode="json"), False
 
 
 def driver_result_contains_status(

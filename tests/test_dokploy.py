@@ -138,6 +138,40 @@ class _FakeDokployTargetStore:
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_wait_for_target_deployment_tracks_exact_operation_title(self) -> None:
+        exact_deployment = {
+            "deploymentId": "deployment-exact",
+            "title": "Launchplane operation exact",
+            "status": "success",
+        }
+        with (
+            patch(
+                "control_plane.dokploy.deployment_for_target_by_title",
+                side_effect=(None, exact_deployment),
+            ) as exact_lookup,
+            patch(
+                "control_plane.dokploy.latest_deployment_for_target",
+                return_value={
+                    "deploymentId": "deployment-unrelated",
+                    "status": "success",
+                },
+            ) as latest_lookup,
+            patch("control_plane.dokploy.time.sleep"),
+        ):
+            result = control_plane_dokploy.wait_for_target_deployment(
+                host="https://dokploy.example",
+                token="token",
+                target_type="application",
+                target_id="application-one",
+                before_key="deployment-before",
+                timeout_seconds=30,
+                deployment_title="Launchplane operation exact",
+            )
+
+        self.assertEqual(result, "deployment=deployment-exact status=success")
+        self.assertEqual(exact_lookup.call_count, 2)
+        latest_lookup.assert_not_called()
+
     def test_odoo_target_replacement_plan_cli_requires_product(self) -> None:
         result = CliRunner().invoke(
             main,
@@ -2114,6 +2148,7 @@ domains = ["cm-testing.shinycomputers.com"]
             updated_env_payloads: list[str] = []
             schedule_payloads: list[dict[str, object]] = []
             request_paths: list[str] = []
+            effect_phases: list[str] = []
             override_payload_b64 = base64.b64encode(
                 json.dumps(
                     {"schema_version": 1, "context": "opw", "instance": "prod"},
@@ -2156,7 +2191,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 patch(
                     "control_plane.dokploy.wait_for_target_deployment",
                     side_effect=lambda **_kwargs: None,
-                ),
+                ) as wait_target_deployment,
                 patch(
                     "control_plane.dokploy.find_matching_dokploy_schedule",
                     return_value=None,
@@ -2193,6 +2228,8 @@ domains = ["cm-testing.shinycomputers.com"]
                         LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true",
                         "ONE_OFF_WORKFLOW_ONLY": "do-not-persist",
                     },
+                    before_provider_mutation=effect_phases.append,
+                    deployment_title="Launchplane post-deploy exact",
                 )
 
         self.assertEqual(len(updated_env_payloads), 1)
@@ -2217,6 +2254,19 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertIn("ONE_OFF_WORKFLOW_ONLY", str(schedule_payloads[0]["script"]))
         self.assertIn("/api/compose.deploy", request_paths)
         self.assertIn("/api/schedule.runManually", request_paths)
+        self.assertEqual(
+            effect_phases,
+            [
+                "post_deploy_target_update",
+                "post_deploy_deploy_trigger",
+                "post_deploy_schedule_upsert",
+                "post_deploy_schedule_trigger",
+            ],
+        )
+        self.assertEqual(
+            wait_target_deployment.call_args.kwargs["deployment_title"],
+            "Launchplane post-deploy exact",
+        )
 
     def test_run_compose_post_deploy_update_fails_when_runtime_override_env_does_not_persist(
         self,

@@ -15,6 +15,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployContext,
+    GenericWebPostDeployGuard,
 )
 from control_plane.workflows.odoo_generic_web_post_deploy import (
     execute_odoo_generic_web_post_deploy,
@@ -60,6 +61,7 @@ class OdooGenericWebPostDeployTests(unittest.TestCase):
                     Path("."),
                     cast(GenericWebDeployStore, store),
                     context,
+                    GenericWebPostDeployGuard(deployment_title="post-deploy-title"),
                 )
 
         self.assertTrue(evidence.attempted)
@@ -75,6 +77,10 @@ class OdooGenericWebPostDeployTests(unittest.TestCase):
         request = post_deploy.call_args.kwargs["request"]
         self.assertEqual(request.context, "cm")
         self.assertEqual(request.instance, "prod")
+        self.assertEqual(
+            post_deploy.call_args.kwargs["provider_operation_title"],
+            "post-deploy-title",
+        )
 
     def test_preserves_failure_detail(self) -> None:
         context = _context()
@@ -96,6 +102,7 @@ class OdooGenericWebPostDeployTests(unittest.TestCase):
                     Path("."),
                     cast(GenericWebDeployStore, store),
                     context,
+                    GenericWebPostDeployGuard(),
                 )
 
         self.assertTrue(evidence.attempted)

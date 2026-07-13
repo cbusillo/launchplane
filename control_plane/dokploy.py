@@ -770,7 +770,13 @@ def read_dokploy_config(
 
 
 def trigger_deployment(
-    *, host: str, token: str, target_type: str, target_id: str, no_cache: bool
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    no_cache: bool,
+    title: str = "",
 ) -> None:
     if target_type == "compose":
         endpoint_path = "/api/compose.redeploy" if no_cache else "/api/compose.deploy"
@@ -780,7 +786,10 @@ def trigger_deployment(
         payload = {"applicationId": target_id}
     else:
         raise click.ClickException(f"Unsupported Dokploy target type: {target_type}")
-    if no_cache:
+    normalized_title = title.strip()
+    if normalized_title:
+        payload["title"] = normalized_title
+    elif no_cache:
         payload["title"] = "Manual redeploy (no-cache requested)"
     dokploy_request(host=host, token=token, path=endpoint_path, method="POST", payload=payload)
 
@@ -788,6 +797,19 @@ def trigger_deployment(
 def latest_deployment_for_target(
     *, host: str, token: str, target_type: str, target_id: str
 ) -> JsonObject | None:
+    return _latest_deployment_from_list(
+        list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type=target_type,
+            target_id=target_id,
+        )
+    )
+
+
+def list_deployments_for_target(
+    *, host: str, token: str, target_type: str, target_id: str
+) -> list[JsonObject]:
     if target_type == "compose":
         compose_payload = dokploy_request(
             host=host,
@@ -797,11 +819,11 @@ def latest_deployment_for_target(
         )
         compose_payload_as_object = as_json_object(compose_payload)
         if compose_payload_as_object is None:
-            return None
+            return []
         deployments_payload = compose_payload_as_object.get("deployments")
         if not isinstance(deployments_payload, list):
-            return None
-        return _latest_deployment_from_list(_collect_object_items(deployments_payload))
+            return []
+        return _collect_object_items(deployments_payload)
 
     if target_type == "application":
         payload = dokploy_request(
@@ -810,9 +832,33 @@ def latest_deployment_for_target(
             path="/api/deployment.all",
             query={"applicationId": target_id},
         )
-        return _latest_deployment_from_list(extract_deployments(payload))
+        return extract_deployments(payload)
 
     raise click.ClickException(f"Unsupported Dokploy target type: {target_type}")
+
+
+def deployment_for_target_by_title(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    title: str,
+) -> JsonObject | None:
+    normalized_title = title.strip()
+    if not normalized_title:
+        raise click.ClickException("Dokploy deployment observation requires a title.")
+    matching_deployments = [
+        deployment
+        for deployment in list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type=target_type,
+            target_id=target_id,
+        )
+        if str(deployment.get("title") or "").strip() == normalized_title
+    ]
+    return _latest_deployment_from_list(matching_deployments)
 
 
 def fetch_dokploy_target_payload(
@@ -1495,19 +1541,33 @@ def wait_for_target_deployment(
     target_id: str,
     before_key: str,
     timeout_seconds: int,
+    deployment_title: str = "",
 ) -> str:
     failure_message_prefix = (
         "Dokploy compose deployment failed"
         if target_type == "compose"
         else "Dokploy deployment failed"
     )
-    return _wait_for_deployment_status(
-        fetch_latest_deployment=lambda: latest_deployment_for_target(
+    normalized_deployment_title = deployment_title.strip()
+
+    def fetch_deployment() -> JsonObject | None:
+        if normalized_deployment_title:
+            return deployment_for_target_by_title(
+                host=host,
+                token=token,
+                target_type=target_type,
+                target_id=target_id,
+                title=normalized_deployment_title,
+            )
+        return latest_deployment_for_target(
             host=host,
             token=token,
             target_type=target_type,
             target_id=target_id,
-        ),
+        )
+
+    return _wait_for_deployment_status(
+        fetch_latest_deployment=fetch_deployment,
         before_key=before_key,
         timeout_seconds=timeout_seconds,
         failure_message_prefix=failure_message_prefix,
@@ -1667,6 +1727,8 @@ def run_compose_post_deploy_update(
     required_workflow_environment_keys: tuple[str, ...] = (),
     protected_shopify_store_keys: tuple[str, ...] = (),
     run_destructive_restore: bool = False,
+    before_provider_mutation: Callable[[str], None] | None = None,
+    deployment_title: str = "",
 ) -> dict[str, str]:
     compose_id = target_definition.target_id.strip()
     compose_name = (
@@ -1715,6 +1777,8 @@ def run_compose_post_deploy_update(
         target_definition.deploy_timeout_seconds or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
     )
     if desired_env_map != current_env_map:
+        if before_provider_mutation is not None:
+            before_provider_mutation("post_deploy_target_update")
         update_dokploy_target_env(
             host=host,
             token=token,
@@ -1729,21 +1793,42 @@ def run_compose_post_deploy_update(
             target_type="compose",
             target_id=compose_id,
         )
-        trigger_deployment(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=compose_id,
-            no_cache=False,
-        )
-        wait_for_target_deployment(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=compose_id,
-            before_key=deployment_key(latest_compose_deployment),
-            timeout_seconds=schedule_timeout_seconds,
-        )
+        if before_provider_mutation is not None:
+            before_provider_mutation("post_deploy_deploy_trigger")
+        if deployment_title:
+            trigger_deployment(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                no_cache=False,
+                title=deployment_title,
+            )
+            wait_for_target_deployment(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                before_key=deployment_key(latest_compose_deployment),
+                timeout_seconds=schedule_timeout_seconds,
+                deployment_title=deployment_title,
+            )
+        else:
+            trigger_deployment(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                no_cache=False,
+            )
+            wait_for_target_deployment(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                before_key=deployment_key(latest_compose_deployment),
+                timeout_seconds=schedule_timeout_seconds,
+            )
         target_payload = fetch_dokploy_target_payload(
             host=host,
             token=token,
@@ -1824,6 +1909,8 @@ def run_compose_post_deploy_update(
         "enabled": False,
         "timezone": "UTC",
     }
+    if before_provider_mutation is not None:
+        before_provider_mutation("post_deploy_schedule_upsert")
     schedule = upsert_dokploy_schedule(
         host=host,
         token=token,
@@ -1843,6 +1930,8 @@ def run_compose_post_deploy_update(
         token=token,
         schedule_id=schedule_id,
     )
+    if before_provider_mutation is not None:
+        before_provider_mutation("post_deploy_schedule_trigger")
     dokploy_request(
         host=host,
         token=token,
@@ -2180,6 +2269,12 @@ def deployment_key_from_wait_result(wait_result: str) -> str:
     return ""
 
 
+def deployment_status(deployment: JsonObject | None) -> str:
+    if deployment is None:
+        return ""
+    return _deployment_status(deployment)
+
+
 def dokploy_request(
     *,
     host: str,
@@ -2378,8 +2473,6 @@ def _wait_for_deployment_status(
                 raise click.ClickException(
                     f"{failure_message_prefix}: deployment={latest_key} status={latest_status}"
                 )
-            if not latest_status:
-                return f"deployment={latest_key} status=unknown"
         time.sleep(3)
 
     raise click.ClickException("Timed out waiting for Dokploy deployment status.")
