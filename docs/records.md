@@ -34,7 +34,12 @@ HTTP service; schema or payload changes must therefore land as explicit Alembic
 revisions. Runtime code can still call `ensure_schema()` for compatibility, but
 it only creates tables for local SQLite/test databases. For shared-service
 database URLs, `ensure_schema()` verifies that Alembic has already created the
-required tables and columns and fails closed when migrations are missing.
+required tables and columns and fails closed when migrations are missing. Hosted
+Postgres verification also requires the database to be at the checked-in
+Alembic head and verifies the critical JSONB/integer types, unique indexes,
+worker-claim indexes, and partial active-operation predicates used by
+idempotency, claims, leases, CAS-style owner checks, and active operation
+reservations.
 
 For a fresh database, apply the current schema with:
 
@@ -46,9 +51,11 @@ For an existing Launchplane database that already has the tables created by the
 pre-migration `create_all` path, adopt the baseline by stamping the database at
 the current revision only after the automated schema adoption verifier passes.
 The verifier inspects existing Launchplane-owned tables and fails closed when a
-live table is missing an ORM-managed column or has an unexpected column. A
-failure means the operator must stop and reconcile the schema before stamping;
-do not hand-edit the Alembic version table or skip the check.
+live table is missing an ORM-managed column, has an unexpected column, or has a
+critical idempotency/active-operation index with missing uniqueness, columns, or
+partial predicate. A failure means the operator must stop and reconcile the
+schema before stamping; do not hand-edit the Alembic version table or skip the
+check.
 
 The hosted startup wrapper runs the verifier before stamping and then applies
 migrations:
@@ -77,6 +84,17 @@ payload snapshots. Fields that the GUI or drivers need to filter, order, join,
 authorize, constrain, display regularly, or act on should be promoted into ORM
 columns/tables and migrated explicitly while keeping the payload copy as
 historical evidence.
+
+The production schema proof runs against real PostgreSQL, not SQLite:
+
+```bash
+LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run launchplane ci postgres-integration
+```
+
+The test URL points at a disposable PostgreSQL service/database root. The harness
+creates isolated databases, applies Alembic from empty schema to `head`, verifies
+the exact schema head and critical invariants, and then drops the databases. It
+must not use Launchplane runtime credentials or shared production databases.
 
 ## ORM Query Boundary
 

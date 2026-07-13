@@ -34,6 +34,29 @@ the ignored `.ci-cache/` directory and remains a balancing hint rather than test
 authority. A failed run leaves the previous timing history unchanged instead of
 learning from a partial suite.
 
+Storage tests that instantiate `PostgresRecordStore` with `sqlite+pysqlite://`
+are portability and local rehearsal tests. They prove ORM mapping, payload round
+trips, and SQLite-compatible migration mechanics, but they do not prove
+PostgreSQL row locks, `SKIP LOCKED`, JSONB column types, Alembic head adoption,
+or partial unique index predicates.
+
+The real PostgreSQL storage proof is an explicit integration gate:
+
+```bash
+LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run launchplane ci postgres-integration
+```
+
+The URL is a temporary/root test service URL, not a Launchplane runtime
+credential. The harness creates and drops isolated databases, upgrades each from
+empty schema through Alembic `head`, verifies the exact checked-in schema head
+and critical indexes/types, and runs focused two-connection concurrency tests
+for idempotency conflicts, operation claims, stale lease owners, lease recovery,
+and active-operation partial uniqueness. Same-repo CI provides the URL via a
+PostgreSQL service container; fork PRs keep the SQLite/unittest path only. Keep
+the integration module focused: target runtime is under 2 minutes in CI, and any
+flake should be treated as a storage or harness bug rather than hidden with a
+retry loop.
+
 The lower-level CI shard commands remain available for diagnosis:
 
 ```bash
@@ -65,5 +88,7 @@ shard plan includes per-target timing-source diagnostics:
   default estimate until a shard timing artifact teaches it better.
 
 GitHub Actions remains the source of truth for required pull-request gates. The
-local command is the official pre-review full-suite proof; it does not replace
-CI's runner isolation, artifact retention, or required status checks.
+local command is the official pre-review full-suite proof; the PostgreSQL
+integration command is the official production storage-semantics proof when a
+local or CI PostgreSQL service is available. Neither local command replaces CI's
+runner isolation, artifact retention, or required status checks.

@@ -473,6 +473,46 @@ jobs:
       - name: Run unit tests
         run: uv run python -m unittest
 
+  postgres_integration:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: launchplane_test
+          POSTGRES_DB: launchplane_root
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U launchplane_test -d launchplane_root"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Run PostgreSQL integration tests
+        env:
+          LAUNCHPLANE_TEST_POSTGRES_URL: >-
+            postgresql+psycopg://launchplane_test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/launchplane_root
+        run: uv run launchplane ci postgres-integration
+
   ci_gate:
     name: ci-gate
     runs-on: ubuntu-latest
@@ -486,6 +526,7 @@ jobs:
       - frontend_validate_fork
       - test
       - test_fork
+      - postgres_integration
     if: always() && github.event_name == 'pull_request'
     permissions:
       contents: read
@@ -502,6 +543,7 @@ jobs:
           FRONTEND_VALIDATE_FORK_RESULT: ${{ needs.frontend_validate_fork.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TEST_FORK_RESULT: ${{ needs.test_fork.result }}
+          POSTGRES_INTEGRATION_RESULT: ${{ needs.postgres_integration.result }}
         run: |
           set -euo pipefail
           require_success() {
@@ -518,6 +560,7 @@ jobs:
             require_success container_scan "${CONTAINER_SCAN_RESULT}"
             require_success frontend_validate "${FRONTEND_VALIDATE_RESULT}"
             require_success test "${TEST_RESULT}"
+            require_success postgres_integration "${POSTGRES_INTEGRATION_RESULT}"
           else
             require_success static_checks_fork "${STATIC_CHECKS_FORK_RESULT}"
             require_success container_scan_fork "${CONTAINER_SCAN_FORK_RESULT}"
