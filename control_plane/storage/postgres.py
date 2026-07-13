@@ -2559,6 +2559,10 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Outbox idempotency evidence must be completed replay evidence.")
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_outbox_dedupe_keys(
+                session,
+                dedupe_keys=(request.delivery.dedupe_key,),
+            )
             existing_row = session.scalar(
                 select(LaunchplaneOutboxDeliveryRow)
                 .where(LaunchplaneOutboxDeliveryRow.dedupe_key == request.delivery.dedupe_key)
@@ -2576,6 +2580,20 @@ class PostgresRecordStore(HumanSessionStore):
                 session.merge(self._idempotency_row(request.idempotency_record))
             session.commit()
             return delivery
+
+    def _lock_outbox_dedupe_keys(
+        self,
+        session: Any,
+        *,
+        dedupe_keys: tuple[str, ...],
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        for dedupe_key in sorted(set(dedupe_keys)):
+            session.execute(
+                text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                {"lock_name": f"launchplane:outbox:{dedupe_key}"},
+            )
 
     def read_outbox_delivery_record(self, delivery_id: str) -> OutboxDeliveryRecord:
         return self._read_model(
@@ -2772,6 +2790,15 @@ class PostgresRecordStore(HumanSessionStore):
             if require_terminal:
                 next_updates["lease_owner"] = ""
                 next_updates["lease_expires_at"] = ""
+                if next_updates.get("state") in {"pending", "reconcile_required"}:
+                    retry_seconds = min(
+                        300,
+                        5 * (2 ** min(max(current_record.attempt - 1, 0), 6)),
+                    )
+                    next_updates["next_attempt_at"] = self._mutation_lease_expiry(
+                        observed_at=observed_at,
+                        lease_seconds=retry_seconds,
+                    )
             else:
                 next_updates["state"] = "running"
                 next_updates["lease_owner"] = normalized_lease_owner
@@ -6786,6 +6813,10 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_outbox_dedupe_keys(
+                session,
+                dedupe_keys=tuple(delivery.dedupe_key for delivery in outbox_deliveries),
+            )
             session.merge(
                 LaunchplanePublicIngressObservationRow(
                     record_id=observation.record_id,
@@ -6811,7 +6842,13 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 )
             for delivery in outbox_deliveries:
-                session.merge(self._outbox_delivery_row(delivery))
+                existing_delivery = session.scalar(
+                    select(LaunchplaneOutboxDeliveryRow)
+                    .where(LaunchplaneOutboxDeliveryRow.dedupe_key == delivery.dedupe_key)
+                    .limit(1)
+                )
+                if existing_delivery is None:
+                    session.add(self._outbox_delivery_row(delivery))
             session.commit()
 
     def list_public_ingress_incident_records(

@@ -108,6 +108,24 @@ def build_outbox_dedupe_key(*, kind: str, parts: tuple[str, ...]) -> str:
     return ":".join([kind.strip(), *(part.strip() for part in parts if part.strip())])
 
 
+def retry_outbox_delivery(
+    record: OutboxDeliveryRecord,
+    *,
+    error_code: str,
+) -> OutboxDeliveryRecord:
+    return record.model_copy(
+        update={
+            "state": "pending",
+            "error_code": error_code.strip() or "provider_error",
+            "action": "",
+            "external_id": "",
+            "external_url": "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+        }
+    )
+
+
 def _required_text(value: str, message: str) -> str:
     normalized = value.strip()
     if not normalized:

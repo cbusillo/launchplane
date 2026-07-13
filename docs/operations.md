@@ -178,19 +178,29 @@ workers may run concurrently; the claim query uses `FOR UPDATE SKIP LOCKED` so
 one locked row does not block unrelated pending deliveries. A worker records a
 provider operation marker before the external call. If it crashes after the
 marker is recorded, the next worker reconciles provider state before resending.
-Do not update outbox rows manually or clear provider markers to force a retry.
+Transient provider failures return the row to `pending` with database-clock
+exponential backoff and retain any provider marker so the next attempt
+reconciles before resending. Attempts are bounded by the row's `max_attempts`;
+invalid payloads and exhausted retries become terminal failures. Do not update
+outbox rows manually or clear provider markers to force a retry.
 
 Generic-web promotion workflow dispatches are queued by
 `POST /v1/drivers/generic-web/prod-promotion-workflow`; the HTTP response shows
 `dispatch_status=pending` and includes `records.outbox_delivery_id`. The worker
 resolves the managed GitHub token from Launchplane runtime records, sends the
 dispatch, then marks the outbox delivery delivered when the corresponding run is
-observed.
+observed. The delivery dedupe key includes a hashed transition identity: replay
+of one request reuses its row, while a later dispatch with the same workflow
+inputs creates a new row instead of being suppressed forever.
 
 Public-ingress monitor GitHub issue notifications are also queued when the
 record store supports the transactional outbox. Observation, incident, and
-pending notification rows commit atomically. Email and Discord notification
-paths remain direct-delivery until they are explicitly migrated.
+pending notification rows commit atomically. Mixed policies queue only the
+GitHub destinations while continuing to deliver and record email and Discord
+attempts directly. Resolved-incident reconciliation verifies the issue is
+actually closed after finding the marker, covering a crash between the marker
+comment and the close request. Email and Discord notification paths remain
+direct-delivery until they are explicitly migrated.
 
 ## Target Launchplane Ingress
 

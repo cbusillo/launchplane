@@ -659,6 +659,32 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_concurrent_outbox_enqueue_reuses_one_delivery(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            delivery = _outbox_delivery(suffix="concurrent-enqueue")
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def enqueue(active_store: PostgresRecordStore) -> OutboxDeliveryRecord:
+                barrier.wait(timeout=5)
+                return active_store.enqueue_outbox_delivery_with_idempotency(
+                    OutboxWithIdempotencyRequest(delivery=delivery)
+                )
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first_future = executor.submit(enqueue, store)
+                    second_future = executor.submit(enqueue, second_store)
+                    first = first_future.result(timeout=10)
+                    second = second_future.result(timeout=10)
+                rows = store.list_outbox_delivery_records()
+            finally:
+                second_store.close()
+
+        self.assertEqual(first.delivery_id, delivery.delivery_id)
+        self.assertEqual(second.delivery_id, delivery.delivery_id)
+        self.assertEqual([row.delivery_id for row in rows], [delivery.delivery_id])
+
     def test_lane_summary_waits_for_authority_bundle_commit(self) -> None:
         with _store_for_fresh_head_database() as store:
             bundle_step_reached = threading.Event()
@@ -885,6 +911,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(loaded.state, "claimed")
         assert replay_evidence is not None
         self.assertEqual(replay_evidence.state, "completed")
+
     def test_outbox_claim_skips_locked_pending_row_and_claims_next_delivery(self) -> None:
         with _store_for_fresh_head_database() as store:
             first = _outbox_delivery(suffix="first").model_copy(

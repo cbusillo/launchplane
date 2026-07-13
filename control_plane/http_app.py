@@ -16662,6 +16662,11 @@ def create_launchplane_fastapi_app(
                 control_plane_root=resolved_control_plane_root,
                 request=workflow_request,
                 profile=profile,
+                delivery_key=(
+                    f"{idempotency_scope(identity)}:{normalized_key}"
+                    if normalized_key
+                    else trace_id
+                ),
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(

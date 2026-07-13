@@ -209,6 +209,15 @@ original dispatch; public-ingress GitHub notifications include a hidden marker
 in issue/comment bodies and search for that marker before posting again. Unknown
 provider failures are stored only as bounded `error_code` values such as
 `github_provider_error` or `invalid_outbox_payload`.
+Retryable provider errors return to `pending` with bounded database-clock
+backoff; provider markers remain attached so post-send uncertainty reconciles
+before another effect. Dedupe keys identify one business transition rather than
+the workflow parameters forever, allowing a later legitimate dispatch with the
+same inputs to enqueue a distinct delivery.
+Workflow dispatches only adopt an observed run when reclaiming an existing
+provider marker; a first attempt records its marker and sends rather than
+claiming an unrelated concurrent run. Resolved public-ingress notifications
+also ensure the GitHub issue is closed after marker reconciliation.
 
 ## ORM Query Boundary
 

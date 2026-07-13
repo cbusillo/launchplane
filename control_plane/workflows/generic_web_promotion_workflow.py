@@ -11,7 +11,10 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
+from control_plane.contracts.outbox_delivery import (
+    OutboxDeliveryRecord,
+    retry_outbox_delivery,
+)
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
 
@@ -176,19 +179,21 @@ def dispatch_generic_web_promotion_workflow_delivery(
                 "provider_id": "github",
             }
         )
-        if not record.provider_operation_key:
+        reconciling_existing_marker = bool(record.provider_operation_key)
+        if not reconciling_existing_marker:
             mark_provider_started(provider_operation_key, "github")
-        existing_run = _latest_workflow_dispatch_run(
-            owner=owner,
-            repo=repo,
-            workflow_id=workflow_id,
-            ref=ref,
-            token=token,
-            previous_run_ids=previous_run_ids,
-            min_created_at=min_created_at,
-        )
-        if existing_run:
-            return _delivered_workflow_outbox_delivery(delivery_record, existing_run)
+        else:
+            existing_run = _latest_workflow_dispatch_run(
+                owner=owner,
+                repo=repo,
+                workflow_id=workflow_id,
+                ref=ref,
+                token=token,
+                previous_run_ids=previous_run_ids,
+                min_created_at=min_created_at,
+            )
+            if existing_run:
+                return _delivered_workflow_outbox_delivery(delivery_record, existing_run)
         github_api_request(
             path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
             token=token,
@@ -215,8 +220,18 @@ def dispatch_generic_web_promotion_workflow_delivery(
                 "action": "workflow_dispatch_sent",
             }
         )
-    except Exception as error:  # noqa: BLE001 - worker stores bounded provider-safe errors.
-        return _failed_outbox_delivery(delivery_record, _provider_safe_error_code(error))
+    except click.ClickException as error:
+        if error.__cause__ is None:
+            return _failed_outbox_delivery(delivery_record, _provider_safe_error_code(error))
+        return retry_outbox_delivery(
+            delivery_record,
+            error_code=_provider_safe_error_code(error),
+        )
+    except Exception as error:  # noqa: BLE001 - provider failures remain bounded retries.
+        return retry_outbox_delivery(
+            delivery_record,
+            error_code=_provider_safe_error_code(error),
+        )
 
 
 def _normalize_bump(value: str) -> BumpLevel:
@@ -418,7 +433,7 @@ def _failed_outbox_delivery(record: OutboxDeliveryRecord, error_code: str) -> Ou
 
 
 def _provider_safe_error_code(error: Exception) -> str:
-    if isinstance(error, click.ClickException):
+    if isinstance(error, click.ClickException) and error.__cause__ is None:
         return "github_dispatch_invalid_request"
     return "github_provider_error"
 

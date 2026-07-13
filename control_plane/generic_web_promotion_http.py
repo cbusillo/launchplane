@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from typing import Literal, cast
@@ -240,11 +241,13 @@ def dispatch_generic_web_promotion_workflow_result(
     control_plane_root: Path,
     request: GenericWebPromotionWorkflowEnvelope,
     profile: LaunchplaneProductProfileRecord,
+    delivery_key: str,
 ) -> tuple[dict[str, str], GenericWebPromotionWorkflowResult, OutboxDeliveryRecord]:
     delivery = build_generic_web_promotion_workflow_outbox_delivery(
         control_plane_root=control_plane_root,
         request=request,
         profile=profile,
+        delivery_key=delivery_key,
     )
     workflow = profile.promotion_workflow
     bump = _normalize_bump(
@@ -268,6 +271,7 @@ def build_generic_web_promotion_workflow_outbox_delivery(
     control_plane_root: Path,
     request: GenericWebPromotionWorkflowEnvelope,
     profile: LaunchplaneProductProfileRecord,
+    delivery_key: str,
 ) -> OutboxDeliveryRecord:
     owner, repo = _repository_parts(profile.repository)
     workflow = profile.promotion_workflow
@@ -310,6 +314,7 @@ def build_generic_web_promotion_workflow_outbox_delivery(
             ref,
             str(request.workflow.dry_run),
             bump,
+            hashlib.sha256(delivery_key.strip().encode("utf-8")).hexdigest()[:20],
         ),
     )
     return OutboxDeliveryRecord(

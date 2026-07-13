@@ -21,6 +21,7 @@ from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
     build_outbox_dedupe_key,
     build_outbox_delivery_id,
+    retry_outbox_delivery,
 )
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -39,6 +40,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationAttemptRecord,
     PublicIngressNotificationDeliveryStatus,
     PublicIngressNotificationDestination,
+    PublicIngressNotificationDestinationKind,
     PublicIngressNotificationPolicyRecord,
     PublicIngressObservationRecord,
     PublicIngressObservationStatus,
@@ -395,11 +397,14 @@ def run_public_ingress_monitor_once(
             1 for incident in incident_records if incident.status == "resolved"
         )
         for incident in incident_records:
-            if (
-                notify
-                and notification_drivers is not None
-                and not (callable(transition_writer) and outbox_deliveries)
-            ):
+            if notify and notification_drivers is not None:
+                direct_destination_kinds: (
+                    tuple[PublicIngressNotificationDestinationKind, ...] | None
+                ) = None
+                if callable(transition_writer) and any(
+                    delivery.aggregate_id == incident.incident_id for delivery in outbox_deliveries
+                ):
+                    direct_destination_kinds = ("email", "discord")
                 delivery_attempts.extend(
                     deliver_public_ingress_incident_notifications(
                         record_store=record_store,
@@ -407,6 +412,7 @@ def run_public_ingress_monitor_once(
                         incident=incident,
                         observation=record,
                         drivers=notification_drivers,
+                        destination_kinds=direct_destination_kinds,
                     )
                 )
     return PublicIngressMonitorResult(
@@ -431,10 +437,13 @@ def deliver_public_ingress_incident_notifications(
     incident: PublicIngressIncidentRecord,
     observation: PublicIngressObservationRecord,
     drivers: PublicIngressNotificationDrivers,
+    destination_kinds: tuple[PublicIngressNotificationDestinationKind, ...] | None = None,
 ) -> tuple[PublicIngressNotificationAttemptRecord, ...]:
     attempts: list[PublicIngressNotificationAttemptRecord] = []
     for policy in _matching_notification_policies(record_store=record_store, incident=incident):
         for destination in policy.destinations:
+            if destination_kinds is not None and destination.kind not in destination_kinds:
+                continue
             attempt_id = build_public_ingress_notification_attempt_id(
                 incident_id=incident.incident_id,
                 event=event,
@@ -1309,6 +1318,15 @@ def deliver_public_ingress_notification_outbox_delivery(
                 },
             )
             if reconciled_response:
+                if action == "close":
+                    reconciled_response = drivers.github_client(
+                        "ensure_closed",
+                        {
+                            "repository": destination.github_repository,
+                            "issue_number": destination.github_issue_number,
+                            "issue_url": existing_issue_url,
+                        },
+                    )
                 return _delivered_public_ingress_outbox_delivery(
                     record=delivery_record,
                     payload=payload,
@@ -1338,7 +1356,7 @@ def deliver_public_ingress_notification_outbox_delivery(
             marker=marker,
             response=response,
         )
-    except Exception as error:  # noqa: BLE001 - worker stores bounded provider-safe errors.
+    except (ValueError, KeyError) as error:
         return delivery_record.model_copy(
             update={
                 "state": "failed",
@@ -1346,6 +1364,11 @@ def deliver_public_ingress_notification_outbox_delivery(
                 "lease_owner": "",
                 "lease_expires_at": "",
             }
+        )
+    except Exception as error:  # noqa: BLE001 - provider failures remain bounded retries.
+        return retry_outbox_delivery(
+            delivery_record,
+            error_code=_public_ingress_provider_safe_error_code(error),
         )
 
 
@@ -1622,6 +1645,28 @@ def _gh_issue_client(
             payload=payload,
             token=resolved_token,
         )
+    if action == "ensure_closed":
+        repository, issue_number = _github_issue_reference(payload)
+        issue = _github_api_request(
+            method="GET",
+            path=f"/repos/{repository}/issues/{issue_number}",
+            token=resolved_token,
+        )
+        if not isinstance(issue, dict):
+            raise RuntimeError("GitHub issue lookup response must be a JSON object.")
+        if str(issue.get("state") or "").strip().lower() != "closed":
+            issue = _github_api_request(
+                method="PATCH",
+                path=f"/repos/{repository}/issues/{issue_number}",
+                token=resolved_token,
+                body={"state": "closed", "state_reason": "completed"},
+            )
+            if not isinstance(issue, dict):
+                raise RuntimeError("GitHub issue close response must be a JSON object.")
+        return {
+            "url": str(issue.get("html_url") or issue.get("url") or "").strip(),
+            "id": str(issue.get("node_id") or issue.get("id") or "").strip(),
+        }
     if action == "create":
         repository = _github_repository_path(str(payload["repository"]))
         body: dict[str, object] = {

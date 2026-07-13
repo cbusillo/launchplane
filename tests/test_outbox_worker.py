@@ -4,6 +4,8 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
+import click
+
 from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
     build_outbox_delivery_id,
@@ -48,6 +50,71 @@ def _workflow_delivery() -> OutboxDeliveryRecord:
 
 
 class OutboxWorkerTests(unittest.TestCase):
+    def test_transient_github_failure_schedules_bounded_retry(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            delivery = _workflow_delivery()
+            store.write_outbox_delivery_record(delivery)
+
+            def github_request(
+                *,
+                path: str,
+                token: str,
+                method: str = "GET",
+                body: dict[str, object] | None = None,
+            ) -> dict[str, Any] | None:
+                del path, token, method, body
+                try:
+                    raise OSError("temporary network failure")
+                except OSError as cause:
+                    raise click.ClickException("GitHub request failed") from cause
+
+            with (
+                patch.object(
+                    store,
+                    "_database_mutation_timestamp",
+                    side_effect=lambda _session: "2026-07-13T00:00:01Z",
+                ),
+                patch(
+                    "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                    side_effect=github_request,
+                ),
+            ):
+                worker_result = run_outbox_worker_once(
+                    record_store=store,
+                    control_plane_root=Path("."),
+                    lease_owner="worker-a",
+                )
+            loaded = store.read_outbox_delivery_record(delivery.delivery_id)
+            early_claim = store.claim_next_outbox_delivery_record(
+                lease_owner="worker-b",
+                now="2026-07-13T00:00:05Z",
+            )
+            retry_claim = store.claim_next_outbox_delivery_record(
+                lease_owner="worker-b",
+                now="2026-07-13T00:00:06Z",
+            )
+            store.close()
+
+        self.assertEqual(worker_result.status, "pending")
+        self.assertEqual(loaded.state, "pending")
+        self.assertEqual(loaded.attempt, 1)
+        self.assertEqual(loaded.error_code, "github_provider_error")
+        self.assertEqual(loaded.next_attempt_at, "2026-07-13T00:00:06Z")
+        self.assertEqual(early_claim.status, "empty")
+        self.assertEqual(retry_claim.status, "claimed")
+        assert retry_claim.record is not None
+        self.assertEqual(retry_claim.record.attempt, 2)
+
     def test_crash_before_send_leaves_pending_delivery_for_later_worker(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -108,7 +175,7 @@ class OutboxWorkerTests(unittest.TestCase):
 
         self.assertEqual(loaded.state, "pending")
         self.assertEqual(worker_result.status, "delivered")
-        self.assertEqual([method for method, _path in requests], ["GET", "POST", "GET"])
+        self.assertEqual([method for method, _path in requests], ["POST", "GET"])
 
     def test_crash_after_send_reconciles_existing_workflow_run_before_resend(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
