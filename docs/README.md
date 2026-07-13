@@ -25,6 +25,9 @@ Use these docs as the source of truth for `launchplane`.
   review rubric.
 - [operator-experience.md](operator-experience.md) — API-first product,
   environment, settings, promotion, cleanup, and UI rebuild contract.
+- [post-v2-audit.md](post-v2-audit.md) — post-v2 product, security,
+  persistence, contract, test, and modularity audit baseline and execution
+  graph.
 - [work-graph-read-model.md](work-graph-read-model.md) — Code Plans/GitHub work
   graph snapshot and recommendation queue contract.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge

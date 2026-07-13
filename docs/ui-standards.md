@@ -30,6 +30,11 @@ Do not blur these into a generic set of status cards. If a slice needs multiple
 objects, make the primary object visually dominant and place supporting objects
 as evidence around it.
 
+Product Ops is the default top-level surface. Work graph, issue reconciliation,
+Every Code, merge-train control, and platform maintenance belong to a separate
+Engineering Ops navigation area. Sharing a shell does not justify mixing the
+two jobs on one first screen.
+
 The top-level picker chooses a product workspace, not a raw Launchplane context.
 Use display names such as `SellYourOutboard`, `VeriReel`, `Odoo CM`, and
 `Odoo OPW`. Context strings such as `sellyouroutboard`,
@@ -92,6 +97,11 @@ Before committing a meaningful UI slice, check it against this rubric:
   empty cards are removed?
 - Is any missing evidence shown as a real blocked/unknown state instead of a
   reassuring placeholder?
+- Does every enabled action execute a supported operation or explicit workflow
+  dispatch rather than stopping at a review-only request preview?
+- Can the operator diagnose a red environment from placement, domain, ingress,
+  TLS, runtime identity, and evidence without opening provider-native tools in
+  normal cases?
 
 ## Review Workflow
 
