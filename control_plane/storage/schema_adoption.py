@@ -12,6 +12,7 @@ from control_plane.storage.postgres import Base, _build_engine
 from control_plane.storage.schema_invariants import (
     critical_column_type_errors,
     critical_index_errors,
+    critical_primary_key_errors,
     postgres_index_definitions,
 )
 
@@ -148,6 +149,9 @@ class SchemaInspectorProtocol(Protocol):
     def get_indexes(self, table_name: str) -> Sequence[Mapping[str, object]]:
         raise NotImplementedError
 
+    def get_pk_constraint(self, table_name: str) -> Mapping[str, object]:
+        raise NotImplementedError
+
 
 def verify_existing_schema_for_stamp(
     *,
@@ -164,7 +168,9 @@ def verify_existing_schema_for_stamp(
     if missing_tables:
         errors.append(f"missing tables: {', '.join(missing_tables)}")
 
-    unexpected_managed_tables = sorted((existing_tables - expected_tables) & LEGACY_KNOWN_LATER_TABLES)
+    unexpected_managed_tables = sorted(
+        (existing_tables - expected_tables) & LEGACY_KNOWN_LATER_TABLES
+    )
     if unexpected_managed_tables:
         errors.append(
             "has Launchplane tables beyond the adoption revision: "
@@ -183,9 +189,7 @@ def verify_existing_schema_for_stamp(
         if missing_columns:
             errors.append(f"{table_name} missing columns: {', '.join(missing_columns)}")
         if unexpected_columns:
-            errors.append(
-                f"{table_name} has unexpected columns: {', '.join(unexpected_columns)}"
-            )
+            errors.append(f"{table_name} has unexpected columns: {', '.join(unexpected_columns)}")
 
     errors.extend(
         critical_index_errors(
@@ -194,6 +198,7 @@ def verify_existing_schema_for_stamp(
             index_definitions=index_definitions,
         )
     )
+    errors.extend(critical_primary_key_errors(inspector, table_names=existing_tables))
     if verify_column_types:
         errors.extend(critical_column_type_errors(inspector, table_names=existing_tables))
 
@@ -219,7 +224,9 @@ def schema_stamp_revision_for_engine(engine: Engine) -> str:
 
     if "alembic_version" in existing_tables:
         with engine.connect() as connection:
-            version_rows = connection.execute(text("select version_num from alembic_version")).fetchall()
+            version_rows = connection.execute(
+                text("select version_num from alembic_version")
+            ).fetchall()
         version_numbers = {str(row[0]).strip() for row in version_rows if str(row[0]).strip()}
         if version_numbers == {LEGACY_BASELINE_REVISION} and has_current_marker_table:
             verify_existing_schema_for_stamp(

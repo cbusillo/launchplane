@@ -1,7 +1,7 @@
 """add Every Code work request leases
 
-Revision ID: be91f3a5c7d2
-Revises: d0e2f4a6b8c0
+Revision ID: f2a4c6e8b0d2
+Revises: e1f3a5c7b9d1
 Create Date: 2026-07-13 00:00:00.000000+00:00
 """
 
@@ -13,8 +13,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "be91f3a5c7d2"
-down_revision: str | None = "d0e2f4a6b8c0"
+revision: str = "f2a4c6e8b0d2"
+down_revision: str | None = "e1f3a5c7b9d1"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

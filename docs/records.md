@@ -124,16 +124,23 @@ repeating the effect. Lease renewal, completion, and reconciliation binding use
 owner checks and fail closed for stale owners.
 
 DB-only mutations should reserve and complete inside the same transaction as
-their business write. `POST /v1/product-profiles/preview-tls/apply` is the first
-migrated route: the reservation insert occurs before the profile write, and the
-profile plus completed response commit atomically. A no-op apply still commits
-the completed reservation so concurrent and later same-key requests replay the
-original response. If response-evidence persistence fails, the profile write
-and reservation both roll back. Its DB-only preflight may remove an expired
-unbound orphan reservation because the route cannot commit the profile write
-without completing that same transaction; active or reconciliation-bound claims
-remain fail-closed. Persisted reservation and completion timestamps come from
-the database clock.
+their business write. `POST /v1/product-profiles/preview-tls/apply` and
+`POST /v1/route-bindings/backfill/apply` use that boundary: the reservation
+insert occurs before the domain write, and the domain record plus completed
+response commit atomically. A no-op apply still commits the completed
+reservation so concurrent and later same-key requests replay the original
+response. If response-evidence persistence fails, the domain write and
+reservation both roll back. A DB-only preflight may remove an expired unbound
+orphan reservation when the route could not have committed the atomic domain
+write; active or reconciliation-bound claims remain fail-closed. Persisted
+reservation and completion timestamps come from the database clock.
+
+Route-binding backfill additionally releases its unbound reservation when a
+fresh plan proves the operation is blocked, stale, or already satisfied before
+any record can be written. PostgreSQL apply is the supported service mutation
+boundary. Filesystem storage retains typed route-binding read/write parity for
+local rehearsal, but the service does not emulate the PostgreSQL transaction by
+performing a split filesystem apply.
 
 Provider-backed routes must durably reserve first, bind their stable provider
 operation or reconciliation key before invoking the provider, and complete only
@@ -357,6 +364,27 @@ an ORM column/table or remains only in the evidence payload.
   `POST /v1/ingress/canary-routes/apply` consumes the stored record, records an
   ingress route audit, and preserves the existing idempotency replay/conflict
   contract.
+- Environment route binding: modeled fields are `product`, `context`,
+  `instance`, provider target summary, ingress provider/endpoint,
+  termination kind, primary domain, TLS owner, `status`, freshness, and
+  `updated_at`. The payload carries all typed desired domains, source record
+  references, and provider evidence needed to explain the binding. The primary
+  key is the neutral environment tuple, not a provider host id, certificate id,
+  IP address, or Dokploy target id. Native FastAPI
+  `GET /v1/route-bindings/records` and
+  `GET /v1/route-bindings/records/current` return redacted read models that omit
+  provider evidence. Native FastAPI
+  `POST /v1/route-bindings/backfill/apply` plans or writes one binding by
+  comparing existing Launchplane provider-target, tracked Dokploy target, edge
+  endpoint, and applied ingress audit records. The provider-target record must
+  equal the projection of the Dokploy target plus target-id record; the latest
+  matching apply audit must be terminal and include explicit TLS ownership.
+  Source record timestamps are retained as versions and must be within the
+  service-owned 24-hour freshness window. Backfill fails closed when any join is
+  missing, ambiguous, stale, conflicting, unresolved, or exceeds the bounded
+  evidence scan, and it never overwrites an existing route-binding record.
+  Product repositories must not own route bindings, TLS ownership, provider
+  host ids, certificate ids, or edge topology.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from

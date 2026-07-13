@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 IngressRouteAuditMode = Literal["dry-run", "apply"]
 IngressRouteAuditStatus = Literal["pending", "planned", "applied", "unchanged"]
+IngressRouteTlsOwner = Literal["launchplane", "provider", "external", "none", "unknown"]
 
 
 class IngressRouteAuditOperation(BaseModel):
@@ -42,6 +43,8 @@ class IngressRouteAuditRecord(BaseModel):
     dry_run: bool
     requested_domains: tuple[str, ...]
     edge_endpoint_key: str = ""
+    tls_owner: IngressRouteTlsOwner = "unknown"
+    provider_certificate_ref: str = ""
     expected_host_id: int | None = Field(default=None, ge=1)
     provider_host_id: int | None = Field(default=None, ge=1)
     operations: tuple[IngressRouteAuditOperation, ...]
@@ -62,7 +65,12 @@ class IngressRouteAuditRecord(BaseModel):
             self.recorded_at, "ingress route audit requires recorded_at"
         )
         self.edge_endpoint_key = self.edge_endpoint_key.strip()
+        self.provider_certificate_ref = self.provider_certificate_ref.strip()
         self.idempotency_key = self.idempotency_key.strip()
+        if self.tls_owner in {"none", "unknown"} and self.provider_certificate_ref:
+            raise ValueError(
+                "ingress route audit without managed TLS cannot include a provider certificate"
+            )
         normalized_domains = tuple(
             dict.fromkeys(
                 domain.strip().lower() for domain in self.requested_domains if domain.strip()

@@ -92,6 +92,26 @@ VeriReel product paths:
   - `POST /v1/ingress/canary-routes/apply`, requiring `ingress_route.apply` for
     the requested product/context, resolving the stored canary route and edge
     endpoint before provider apply, and requiring an `Idempotency-Key`
+- native FastAPI environment route-binding reads and backfill writes:
+  - `GET /v1/route-bindings/records`, requiring `route_binding.read` for the
+    requested product/context and supporting `instance`, `status`, and bounded
+    `limit` filters
+  - `GET /v1/route-bindings/records/current`, requiring `route_binding.read` for
+    the requested product/context/instance tuple
+  - `POST /v1/route-bindings/backfill/apply`, requiring `route_binding.apply`
+    for the requested product/context, requiring the provider-target projection
+    to match its tracked Dokploy target and target-id records, comparing bounded
+    edge-endpoint and ingress-audit evidence, and rejecting unknown TLS
+    ownership, unresolved newer applies, evidence older than 24 hours, or an
+    existing binding. `dry-run` does not require an `Idempotency-Key`; `apply`
+    does. Apply reserves before planning, releases an unbound reservation for a
+    blocked or already-satisfied plan, and commits the route-binding record plus
+    completed replay evidence in one PostgreSQL transaction. Concurrent
+    same-key requests replay or report the active claim, while different keys
+    racing the same product/context/instance cannot both create the binding.
+    Filesystem-backed service apply fails closed because it cannot provide that
+    atomic boundary; filesystem route-binding storage remains available for
+    explicit local rehearsal.
 - native FastAPI ingress route apply write:
   - `POST /v1/drivers/ingress/route-apply`, requiring `ingress_route.plan` for
     `dry-run` and `ingress_route.apply` for `apply`, resolving optional edge
@@ -720,7 +740,7 @@ base-branch movement before merging, relies on GitHub's SHA guard for each PR
 head, and records stale landing evidence before returning the normal stale-state
 response. When landing a collapsed stack root, the route validates the linked
 stack-collapse record before the root merge and then writes stack-child
-disposition evidence after the landing record is persisted and accepted calls
+disposition evidence after the landing record is persisted. Accepted calls
 support optional `Idempotency-Key` replay/conflict handling.
 
 `.github/workflows/merge-train-runner.yml` is the first external scheduler for
@@ -1802,6 +1822,10 @@ are present. The descriptor routes remain discoverable.
   human-session callers)
 - `GET /v1/ingress/canary-routes/records/{canary_key}` (native FastAPI for
   bearer-token and human-session callers)
+- `GET /v1/route-bindings/records` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/route-bindings/records/current` (native FastAPI for bearer-token and
+  human-session callers)
 - `GET /v1/ingress/route-audits/records` (native FastAPI for bearer-token and
   human-session callers)
 - `GET /v1/ingress/route-audits/records/{record_id}` (native FastAPI for
@@ -1864,6 +1888,18 @@ scope query parameters for list and single-record reads, preserve optional
 list filters, and return `404 not_found` when a record exists outside the
 requested scope. Endpoint apply and ingress route apply routes use native
 FastAPI write handlers with the apply contracts above.
+
+Environment route-binding reads check `route_binding.read` against the requested
+product/context before storage access and require product/context for list reads
+and product/context/instance for the singleton read. Responses are redacted read
+models: provider-specific host ids, certificate ids, target ids, edge addresses,
+provider payload evidence, and certificate references remain stored evidence
+and are omitted from the ordinary operator/API read contract. The backfill apply
+route checks `route_binding.apply` for the requested product/context, accepts no
+caller-supplied domains, provider identifiers, or freshness timestamps, and
+fails closed unless the provider-target projection matches its Dokploy target
+and target-id records and bounded, terminal, explicitly owned, fresh evidence
+resolves exactly one binding for the requested tuple.
 
 Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.
@@ -1976,8 +2012,8 @@ requests. The artifact-publish and artifact-publish inputs routes are owned by
 native FastAPI; product-specific artifact publish calls validate the requested
 context and instance against the DB-backed product profile lane before
 authorization. Native FastAPI owns the paths. Failed publish evidence is not
-cached as an idempotent success. Odoo post-deploy, config-parameter override, and
-website-bootstrap override are native FastAPI routes too. They preserve
+cached as an idempotent success. Odoo post-deploy, config-parameter override,
+and website-bootstrap override are native FastAPI routes too. They preserve
 product-profile driver validation, lane-scoped authorization, optional
 `Idempotency-Key` replay/conflict behavior, post-deploy transition records, and
 Odoo instance override record merge behavior. Odoo preview apply inputs and

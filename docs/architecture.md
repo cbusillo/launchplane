@@ -196,6 +196,11 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 - Launchplane now has the matching cleanup-evidence path too, so an external product
   can report confirmed preview teardown into the same durable preview identity
   without Launchplane claiming it executed that teardown itself.
+- Launchplane owns provider-neutral environment route-binding records keyed by
+  product/context/instance. These records describe desired domains, runtime
+  target summary, ingress termination, and TLS ownership while keeping
+  provider-specific host ids, certificate ids, target ids, edge addresses, and
+  provider payloads as evidence rather than neutral authority.
 - Ship execution prefers immutable artifact image references at runtime by
   syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy whenever a stored
   artifact manifest is available.
