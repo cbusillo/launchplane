@@ -76,7 +76,7 @@ from tests.http_app_test_support import (
     _terminal_agent_work_graph_rank_policy,
     _work_graph_read_policy,
 )
-from tests.test_protected_artifacts import _seed_store as seed_protected_artifact_store
+from tests.support.protected_artifacts import seed_protected_artifact_store
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.profiles import (
     _generic_site_profile_payload,
