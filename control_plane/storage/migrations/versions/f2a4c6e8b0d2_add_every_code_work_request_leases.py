@@ -20,6 +20,8 @@ depends_on: str | Sequence[str] | None = None
 
 _TABLE = "launchplane_every_code_work_requests"
 _LEASE_IDX = "launchplane_every_code_work_requests_lease_idx"
+_LEGACY_EXPIRED_LEASE = "1970-01-01T00:00:00Z"
+_LEGACY_MANUAL_REVIEW_ATTEMPT = 4
 
 
 def _column_exists(table_name: str, column_name: str) -> bool:
@@ -50,10 +52,29 @@ def upgrade() -> None:
             _TABLE,
             sa.Column("attempt", sa.Integer(), nullable=False, server_default="0"),
         )
+    connection = op.get_bind()
+    if connection.dialect.name == "postgresql":
+        payload_update = (
+            "payload = jsonb_set(jsonb_set(jsonb_set(payload, '{fencing_token}', "
+            f"'{_LEGACY_MANUAL_REVIEW_ATTEMPT}'::jsonb, true), '{{attempt}}', "
+            f"'{_LEGACY_MANUAL_REVIEW_ATTEMPT}'::jsonb, true), '{{lease_expires_at}}', "
+            f"'\"{_LEGACY_EXPIRED_LEASE}\"'::jsonb, true)"
+        )
+    else:
+        payload_update = (
+            "payload = json_set(payload, '$.fencing_token', "
+            f"{_LEGACY_MANUAL_REVIEW_ATTEMPT}, '$.attempt', "
+            f"{_LEGACY_MANUAL_REVIEW_ATTEMPT}, '$.lease_expires_at', "
+            f"'{_LEGACY_EXPIRED_LEASE}')"
+        )
     op.execute(
         sa.text(
-            f"UPDATE {_TABLE} SET fencing_token = 1, attempt = 1 "
-            "WHERE state IN ('claimed', 'running') AND fencing_token = 0"
+            f"UPDATE {_TABLE} SET "
+            f"fencing_token = {_LEGACY_MANUAL_REVIEW_ATTEMPT}, "
+            f"attempt = {_LEGACY_MANUAL_REVIEW_ATTEMPT}, "
+            f"lease_expires_at = '{_LEGACY_EXPIRED_LEASE}', "
+            f"{payload_update} "
+            "WHERE state IN ('claimed', 'running') AND lease_expires_at = ''"
         )
     )
     if not _index_exists(_TABLE, _LEASE_IDX):

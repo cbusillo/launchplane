@@ -554,6 +554,12 @@ def every_code_status(state_dir: Path) -> None:
 )
 @click.option("--request-id", required=True, help="Every Code work request id.")
 @click.option("--host", default="", help="Worker host name that claimed the request.")
+@click.option(
+    "--fencing-token",
+    type=click.IntRange(min=1),
+    required=True,
+    help="Fencing token captured when this session was launched.",
+)
 @click.option("--exit-code", type=int, required=True, help="Visible session exit code.")
 @click.option("--result-pr-url", default="", help="Optional PR URL created by the session.")
 @click.option("--result-summary", default="", help="Optional terminal result summary.")
@@ -564,6 +570,7 @@ def every_code_finish(
     state_dir: Path,
     request_id: str,
     host: str,
+    fencing_token: int,
     exit_code: int,
     result_pr_url: str,
     result_summary: str,
@@ -580,6 +587,7 @@ def every_code_finish(
             record_store=record_store,
             request_id=request_id,
             host=resolved_host,
+            fencing_token=fencing_token,
             exit_code=exit_code,
             result_pr_url=result_pr_url,
             result_summary=result_summary,

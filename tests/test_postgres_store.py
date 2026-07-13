@@ -1446,6 +1446,58 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(promoted["created_at"], "2026-07-12T00:00:00Z")
         self.assertEqual(promoted["updated_at"], "2026-07-12T00:00:00Z")
 
+    def test_every_code_lease_migration_blocks_legacy_active_requests_for_review(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            config = _alembic_config(database_url)
+            alembic_command.upgrade(config, "e1f3a5c7b9d1")
+            legacy_record = _every_code_work_request(state="running")
+            legacy_payload = legacy_record.model_dump(mode="json")
+            for field_name in ("lease_expires_at", "fencing_token", "attempt"):
+                legacy_payload.pop(field_name, None)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_every_code_work_requests "
+                        "(request_id, source, state, repository, issue_number, trigger_label, "
+                        "updated_at, claimed_by_host, payload) "
+                        "VALUES (:request_id, :source, :state, :repository, :issue_number, "
+                        ":trigger_label, :updated_at, :claimed_by_host, :payload)"
+                    ),
+                    {
+                        "request_id": legacy_record.request_id,
+                        "source": legacy_record.source,
+                        "state": legacy_record.state,
+                        "repository": legacy_record.repository,
+                        "issue_number": legacy_record.issue_number,
+                        "trigger_label": legacy_record.trigger_label,
+                        "updated_at": legacy_record.updated_at,
+                        "claimed_by_host": legacy_record.claimed_by_host,
+                        "payload": json.dumps(legacy_payload),
+                    },
+                )
+            engine.dispose()
+
+            alembic_command.upgrade(config, "head")
+            store = PostgresRecordStore(database_url=database_url)
+            migrated = store.read_every_code_work_request_record(legacy_record.request_id)
+            recovered = store.recover_stale_every_code_work_request_record(
+                expected_record=migrated,
+                recovered_at="2026-07-13T00:00:00Z",
+            )
+            store.close()
+
+        self.assertEqual(migrated.fencing_token, 4)
+        self.assertEqual(migrated.attempt, 4)
+        self.assertEqual(migrated.lease_expires_at, "1970-01-01T00:00:00Z")
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(recovered.state, "blocked")
+        self.assertIn("manual review required", recovered.error_message)
+
     def test_verify_schema_rejects_empty_database_without_creating_tables(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(

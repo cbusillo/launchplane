@@ -1184,6 +1184,13 @@ preflights.
   before any requeue. Recovery locks and compares the exact stale snapshot, so a
   concurrent heartbeat or status transition wins cleanly instead of being
   overwritten by a stale recovery decision.
+- Service-backed workers invoke the same recovery route during their polling
+  loop. Filesystem-backed workers serialize claim, heartbeat, status, and
+  recovery transitions with per-request process locks and publish JSON records
+  through atomic replacement.
+- Requests that were already active before lease fields existed migrate with an
+  expired lease and an exhausted safe-retry attempt. Their first recovery marks
+  them `blocked` for manual review instead of risking duplicate execution.
 - Worker-token claim and rerun requests use a stable synthetic idempotency scope.
   PostgreSQL claim commits the claimed record and completed replay evidence in
   one transaction; rerun uses compare-and-write with the completed response in
@@ -1195,10 +1202,12 @@ preflights.
   trusted PR feedback, reconciles preview gates and ready preview labels, removes
   stale source-issue queue labels for closed requests that can no longer reach
   preview readiness, routes failed checks back to the owning session, then claims
-  at most one queued request. Request handoff opens or reuses deterministic
-  visible tmux sessions for local checkouts, records `running` or immediate
-  `blocked` status, and wraps the visible command so terminal success or failure
-  calls `uv run launchplane every-code finish`.
+  at most one queued request. Request handoff terminates any stale deterministic
+  tmux session before launching a newly claimed attempt, records `running` or
+  immediate `blocked` status, and wraps the visible command so terminal success
+  or failure calls `uv run launchplane every-code finish` with the fencing token
+  captured at launch. A recovered or superseded session therefore cannot read a
+  newer token and finish as the new owner.
 - A Mac host can leave the poller running with
   `uv run launchplane every-code start`, inspect it with
   `uv run launchplane every-code status`, and stop it with

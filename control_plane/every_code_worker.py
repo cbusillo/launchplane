@@ -348,6 +348,22 @@ class EveryCodeWorkerApiStore:
         del expected_record, recovered_at
         return None
 
+    def recover_stale_every_code_work_requests(self) -> int:
+        payload = self._request(
+            "POST",
+            "/v1/every-code/work-requests/recover-stale",
+            body={},
+            idempotency_key="",
+        )
+        records = payload.get("records")
+        if not isinstance(records, dict):
+            raise EveryCodeWorkerApiError("Launchplane stale recovery response is invalid")
+        requeued = records.get("requeued")
+        flagged = records.get("flagged")
+        if not isinstance(requeued, int) or not isinstance(flagged, int):
+            raise EveryCodeWorkerApiError("Launchplane stale recovery counts are invalid")
+        return requeued + flagged
+
     def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> object:
         if record.state not in {"running", "done", "blocked"}:
             raise EveryCodeWorkerApiError(
@@ -851,6 +867,9 @@ def write_every_code_session_state(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "request_id": record.request_id,
+        "lifecycle_id": record.lifecycle_id,
+        "fencing_token": str(record.fencing_token),
+        "attempt": str(record.attempt),
         "session_name": session_name,
         "source_checkout_root": str(source_checkout_root),
         "launch_root": str(launch_root),
@@ -871,6 +890,9 @@ def read_every_code_session_state(path: Path) -> dict[str, str] | None:
     result: dict[str, str] = {}
     for key in (
         "request_id",
+        "lifecycle_id",
+        "fencing_token",
+        "attempt",
         "session_name",
         "host",
         "source_checkout_root",
@@ -1141,6 +1163,8 @@ def build_every_code_session_command(
     service_url: str = "",
     worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
 ) -> str:
+    if record.fencing_token < 1:
+        raise ValueError("Every Code session command requires a positive fencing token")
     finish_command = [
         "uv",
         "run",
@@ -1153,6 +1177,8 @@ def build_every_code_session_command(
         record.request_id,
         "--host",
         host.strip(),
+        "--fencing-token",
+        str(record.fencing_token),
         "--exit-code",
         "$status",
     ]
@@ -1185,6 +1211,7 @@ def build_every_code_session_command(
 
 def build_every_code_feedback_session_command(
     *,
+    record: EveryCodeWorkRequestRecord,
     feedback: EveryCodePrFeedbackRecord,
     state_dir: Path,
     host: str,
@@ -1194,20 +1221,7 @@ def build_every_code_feedback_session_command(
 ) -> str:
     command = "code " + shlex.quote(every_code_pr_feedback_prompt(feedback))
     return build_every_code_session_command(
-        record=EveryCodeWorkRequestRecord(
-            request_id=feedback.request_id,
-            source="manual",
-            state="running",
-            repository=feedback.repository,
-            issue_number=1,
-            issue_url=feedback.pr_url,
-            trigger_label="every-code",
-            queued_at=feedback.received_at,
-            updated_at=feedback.received_at,
-            claimed_at=feedback.received_at,
-            claimed_by_host=host.strip() or "Every Code worker",
-            started_at=feedback.received_at,
-        ),
+        record=record,
         command=command,
         state_dir=state_dir,
         host=host,
@@ -1457,6 +1471,20 @@ def run_every_code_worker_once(
             session_name=session_name,
             checkout_root=prepared_checkout.source_checkout_root,
         )
+    if existing_session and not _terminate_every_code_tmux_session(
+        tmux_binary=tmux_binary,
+        session_name=session_name,
+        runner=run,
+    ):
+        return _block_every_code_request(
+            record_store=record_store,
+            record=claimed_record,
+            host=normalized_host,
+            detail=f"Could not terminate stale tmux session {session_name!r}.",
+            session_name=session_name,
+            checkout_root=prepared_checkout.source_checkout_root,
+        )
+    existing_session = False
     if not existing_session:
         command = render_every_code_command(claimed_record, command_template=command_template)
         if state_dir is not None:
@@ -1765,6 +1793,8 @@ def recover_stale_every_code_work_requests(
     record_store: EveryCodeWorkerStore,
     limit: int = 20,
 ) -> int:
+    if isinstance(record_store, EveryCodeWorkerApiStore):
+        return record_store.recover_stale_every_code_work_requests()
     now = utc_now_timestamp()
     stale_records = record_store.list_stale_every_code_work_request_records(
         as_of=now,
@@ -2593,6 +2623,7 @@ def _apply_every_code_pr_feedback_record(
             request_id=feedback.request_id,
             session_name=session_name,
         )
+    session_record = record
     if record.state in TERMINAL_EVERY_CODE_STATES:
         resumed = resume_every_code_work_request(
             record,
@@ -2601,7 +2632,9 @@ def _apply_every_code_pr_feedback_record(
             result_summary=f"Resumed for PR feedback: {feedback.html_url or feedback.pr_url}",
         )
         record_store.write_every_code_work_request_record(resumed)
+        session_record = resumed
     command = build_every_code_feedback_session_command(
+        record=session_record,
         feedback=feedback,
         state_dir=state_dir,
         host=host,
@@ -2908,12 +2941,20 @@ def finish_every_code_work_request(
     record_store: EveryCodeWorkerStore,
     request_id: str,
     host: str,
+    fencing_token: int,
     exit_code: int,
     result_pr_url: str = "",
     result_summary: str = "",
     runner: Runner | None = None,
 ) -> EveryCodeWorkerFinishResult:
+    if fencing_token < 1:
+        raise ValueError("Every Code finish requires a positive fencing token")
     record = record_store.read_every_code_work_request_record(request_id.strip())
+    if record.fencing_token != fencing_token:
+        raise ValueError(
+            f"Every Code finish fencing token {fencing_token} "
+            f"does not match record fencing token {record.fencing_token}"
+        )
     if record.state in TERMINAL_EVERY_CODE_STATES:
         terminal_pr_url = result_pr_url.strip() or record.result_pr_url
         del runner
@@ -2953,7 +2994,7 @@ def finish_every_code_work_request(
             state="done" if succeeded else "blocked",
             host=host.strip(),
             updated_at=utc_now_timestamp(),
-            fencing_token=record.fencing_token,
+            fencing_token=fencing_token,
             result_pr_url=resolved_pr_url,
             result_summary=summary,
             error_message="" if succeeded else summary,

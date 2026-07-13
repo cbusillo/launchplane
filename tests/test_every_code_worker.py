@@ -81,6 +81,26 @@ def _queued_preview_record() -> EveryCodeWorkRequestRecord:
     )
 
 
+def _claimed_record() -> EveryCodeWorkRequestRecord:
+    return _queued_record().model_copy(
+        update={
+            "state": "claimed",
+            "claimed_at": "2026-05-05T22:01:00Z",
+            "claimed_by_host": "Chris-Studio",
+            "lease_expires_at": "2026-05-05T22:31:00Z",
+            "fencing_token": 1,
+            "attempt": 1,
+        }
+    )
+
+
+def _current_fencing_token(
+    store: FilesystemRecordStore,
+    request_id: str = "every-code-cbusillo-code-123-test",
+) -> int:
+    return store.read_every_code_work_request_record(request_id).fencing_token
+
+
 def _feedback_record(*, status: str = "pending") -> EveryCodePrFeedbackRecord:
     return EveryCodePrFeedbackRecord(
         feedback_id="every-code-pr-feedback-cbusillo-code-26-ic-1001",
@@ -108,6 +128,8 @@ def _done_record(*, repository: str, result_pr_url: str) -> EveryCodeWorkRequest
             "result_pr_url": result_pr_url,
             "claimed_at": "2026-05-05T22:01:00Z",
             "claimed_by_host": "Chris-Studio",
+            "fencing_token": 1,
+            "attempt": 1,
             "started_at": "2026-05-05T22:02:00Z",
             "finished_at": "2026-05-05T22:03:00Z",
         }
@@ -184,6 +206,8 @@ def _terminal_record(*, state: str = "done") -> EveryCodeWorkRequestRecord:
             "state": state,
             "claimed_at": "2026-05-06T00:00:00Z",
             "claimed_by_host": "Chris-Studio",
+            "fencing_token": 1,
+            "attempt": 1,
             "started_at": "2026-05-06T00:01:00Z",
             "finished_at": "2026-05-06T00:02:00Z" if state in {"done", "blocked"} else "",
             "updated_at": "2026-05-06T00:02:00Z",
@@ -620,6 +644,37 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if self.path == "/v1/every-code/work-requests/recover-stale":
+            stale_records = self.store.list_stale_every_code_work_request_records(
+                as_of="2026-05-06T00:30:00Z",
+                limit=20,
+            )
+            requeued: list[str] = []
+            flagged: list[str] = []
+            for stale_record in stale_records:
+                recovered = self.store.recover_stale_every_code_work_request_record(
+                    expected_record=stale_record,
+                    recovered_at="2026-05-06T00:30:00Z",
+                )
+                if recovered is None:
+                    continue
+                if recovered.state == "queued":
+                    requeued.append(recovered.request_id)
+                elif recovered.state == "blocked":
+                    flagged.append(recovered.request_id)
+            self._write_json(
+                202,
+                {
+                    "status": "accepted",
+                    "records": {
+                        "checked": len(stale_records),
+                        "requeued": len(requeued),
+                        "flagged": len(flagged),
+                    },
+                    "result": {"requeued": requeued, "flagged": flagged},
+                },
+            )
+            return
         if self.path == "/v1/every-code/work-requests/rerun":
             work_request_record = self.store.read_every_code_work_request_record(
                 str(payload["request_id"])
@@ -869,6 +924,38 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(read_record.state, "running")
         self.assertEqual(read_record.result_summary, "Visible tmux session: every-code-test")
 
+    def test_api_store_recovers_stale_requests_via_service(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            _EveryCodeApiHandler.store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            _EveryCodeApiHandler.store.write_every_code_work_request_record(_queued_record())
+            claimed = _EveryCodeApiHandler.store.claim_every_code_work_request_record(
+                request_id=_queued_record().request_id,
+                host="Chris-Studio",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            assert claimed is not None
+            server = ThreadingHTTPServer(("127.0.0.1", 0), _EveryCodeApiHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            try:
+                store = EveryCodeWorkerApiStore(
+                    service_url=f"http://127.0.0.1:{server.server_port}",
+                    worker_token="worker-token",
+                )
+
+                recovered = recover_stale_every_code_work_requests(record_store=store)
+                record = _EveryCodeApiHandler.store.read_every_code_work_request_record(
+                    claimed.request_id
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+        self.assertEqual(recovered, 1)
+        self.assertEqual(record.state, "queued")
+
     def test_api_store_lists_and_updates_pr_feedback_via_service(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
@@ -1078,7 +1165,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
     def test_session_command_reports_terminal_status(self) -> None:
         command = build_every_code_session_command(
-            record=_queued_record(),
+            record=_claimed_record(),
             command="code issue",
             state_dir=Path("state"),
             host="Chris-Studio",
@@ -1090,6 +1177,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("--service-url https://launchplane.example", command)
         self.assertIn("--worker-token-env LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", command)
         self.assertIn("--request-id every-code-cbusillo-code-123-test", command)
+        self.assertIn("--fencing-token 1", command)
         self.assertIn("--exit-code $status", command)
         self.assertIn("EVERY_CODE_SESSION_ORIGIN=every_code", command)
         self.assertIn("EVERY_CODE_REQUEST_ID=every-code-cbusillo-code-123-test", command)
@@ -1967,6 +2055,9 @@ class EveryCodeWorkerTests(unittest.TestCase):
             session_payload = json.loads(state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(session_payload["request_id"], "every-code-cbusillo-code-123-test")
+        self.assertEqual(session_payload["lifecycle_id"], record.lifecycle_id)
+        self.assertEqual(session_payload["fencing_token"], "1")
+        self.assertEqual(session_payload["attempt"], "1")
         self.assertEqual(session_payload["host"], "Chris-Studio")
         self.assertEqual(session_payload["source_checkout_root"], str(checkout_root.resolve()))
         self.assertEqual(
@@ -1991,7 +2082,49 @@ class EveryCodeWorkerTests(unittest.TestCase):
             str(every_code_worktree_root(_queued_record(), state_dir=temporary_root / "state")),
         )
         self.assertIn("every-code finish", launch_call[-1])
+        self.assertIn("--fencing-token 1", launch_call[-1])
         self.assertTrue(any(call[:3] == ("gh", "issue", "comment") for call in runner.calls))
+
+    def test_run_once_terminates_stale_session_before_relaunch(self) -> None:
+        class StaleSessionRunner(_Runner):
+            def __call__(
+                self, args: Sequence[str], env: Mapping[str, str] | None = None
+            ) -> subprocess.CompletedProcess[str]:
+                if args[0] == "tmux" and args[1] == "has-session":
+                    self.calls.append(tuple(args))
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                if args[0] == "tmux" and args[1] == "display-message":
+                    self.calls.append(tuple(args))
+                    return subprocess.CompletedProcess(args, 0, "4242\n", "")
+                return super().__call__(args, env)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            runner = StaleSessionRunner()
+
+            with patch("control_plane.every_code_worker.os.killpg") as killpg:
+                result = run_every_code_worker_once(
+                    record_store=store,
+                    host="Chris-Studio",
+                    workspace_root=temporary_root / "Developer",
+                    state_dir=temporary_root / "state",
+                    runner=runner,
+                )
+
+        self.assertEqual(result.status, "running")
+        killpg.assert_called_once_with(4242, signal.SIGTERM)
+        kill_index = next(
+            index for index, call in enumerate(runner.calls) if call[1] == "kill-session"
+        )
+        launch_index = next(
+            index for index, call in enumerate(runner.calls) if call[1] == "new-session"
+        )
+        self.assertLess(kill_index, launch_index)
 
     def test_apply_feedback_sends_prompt_to_active_session(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -3156,6 +3289,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 request_id="every-code-cbusillo-code-123-test",
                 host="Chris-Studio",
+                fencing_token=_current_fencing_token(store),
                 exit_code=0,
                 result_pr_url="https://github.com/cbusillo/code/pull/99",
             )
@@ -3165,6 +3299,49 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(record.state, "done")
         self.assertEqual(record.result_pr_url, "https://github.com/cbusillo/code/pull/99")
         self.assertEqual(record.error_message, "")
+
+    def test_finish_rejects_token_from_stale_session(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            first_attempt = store.read_every_code_work_request_record(_queued_record().request_id)
+            store.write_every_code_work_request_record(
+                requeue_every_code_work_request(
+                    first_attempt,
+                    queued_at="2026-05-06T00:10:00Z",
+                )
+            )
+            second_attempt = store.claim_every_code_work_request_record(
+                request_id=first_attempt.request_id,
+                host="Chris-Studio",
+                claimed_at="2026-05-06T00:11:00Z",
+            )
+            assert second_attempt is not None
+
+            with self.assertRaisesRegex(ValueError, "fencing token"):
+                finish_every_code_work_request(
+                    record_store=store,
+                    request_id=first_attempt.request_id,
+                    host="Chris-Studio",
+                    fencing_token=first_attempt.fencing_token,
+                    exit_code=0,
+                    result_pr_url="https://github.com/cbusillo/code/pull/99",
+                )
+            stored = store.read_every_code_work_request_record(first_attempt.request_id)
+
+        self.assertEqual(stored.state, "claimed")
+        self.assertEqual(stored.fencing_token, second_attempt.fencing_token)
 
     def test_finish_discovers_open_pr_for_successful_exit_without_result_url(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -3187,6 +3364,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 request_id="every-code-cbusillo-code-123-test",
                 host="Chris-Studio",
+                fencing_token=_current_fencing_token(store),
                 exit_code=0,
                 runner=runner,
             )
@@ -3216,6 +3394,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 request_id="every-code-cbusillo-code-123-test",
                 host="Chris-Studio",
+                fencing_token=_current_fencing_token(store),
                 exit_code=0,
                 runner=_Runner(pr_list_payload=[]),
             )
@@ -3247,6 +3426,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 request_id="every-code-every-tenant-opw-123-test",
                 host="Chris-Studio",
+                fencing_token=_current_fencing_token(store, "every-code-every-tenant-opw-123-test"),
                 exit_code=0,
                 result_pr_url="https://github.com/every/tenant-opw/pull/99",
                 runner=runner,
@@ -3279,6 +3459,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 request_id="every-code-cbusillo-code-123-test",
                 host="Chris-Studio",
+                fencing_token=_current_fencing_token(store),
                 exit_code=7,
             )
             record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
@@ -3318,6 +3499,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 request_id="every-code-cbusillo-code-123-test",
                 host="Chris-Studio",
+                fencing_token=record.fencing_token,
                 exit_code=0,
             )
 
@@ -3359,6 +3541,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 request_id="every-code-cbusillo-code-123-test",
                 host="Chris-Studio",
+                fencing_token=record.fencing_token,
                 exit_code=0,
                 runner=runner,
             )
@@ -3824,6 +4007,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 state_dir=temporary_root / "state",
                 runner=_Runner(),
             )
+            fencing_token = _current_fencing_token(store)
 
             result = CliRunner().invoke(
                 main,
@@ -3836,6 +4020,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
                     "every-code-cbusillo-code-123-test",
                     "--host",
                     "Chris-Studio",
+                    "--fencing-token",
+                    str(fencing_token),
                     "--exit-code",
                     "0",
                     "--result-pr-url",
