@@ -5131,6 +5131,10 @@ class PostgresRecordStore(HumanSessionStore):
                 ),
                 attempt=current_reservation.attempt + 1,
                 updated_at=observed_at,
+                response_status_code=None,
+                response_trace_id="",
+                recorded_at="",
+                response_payload={},
             )
             self._sync_idempotency_row(reservation_row, reclaimed_reservation)
             return self._compare_and_write_product_profile_locked(

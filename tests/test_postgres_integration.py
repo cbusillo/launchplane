@@ -668,6 +668,39 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(reclaimed.record.attempt, 2)
         self.assertEqual(stale_result.status, "reservation_mismatch")
 
+    def test_db_only_preflight_releases_expired_reservation_on_postgres(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            mutation = _db_only_mutation(
+                lease_owner="worker-b",
+                idempotency_key="product-preview-tls:postgres:preflight-expired",
+                response_trace_id="trace-worker-b",
+            )
+            acquired = store.reserve_mutation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner="worker-a",
+                lease_seconds=1,
+            )
+            time.sleep(1.1)
+
+            preflight = store.prepare_db_only_mutation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+            )
+            stored_reservation = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+
+        self.assertEqual(acquired.status, "acquired")
+        self.assertEqual(preflight.status, "released")
+        self.assertIsNone(stored_reservation)
+
     def test_atomic_noop_profile_mutation_replays_across_two_store_instances(self) -> None:
         with _store_for_fresh_head_database() as store:
             profile = _product_profile()
