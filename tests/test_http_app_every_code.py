@@ -651,7 +651,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     "request_id": "every-code-cbusillo-code-123-test",
                     "host": "Chris-Studio",
                     "state": "running",
-                    "fencing_token": 0,
+                    "fencing_token": 1,
                 },
                 authorization="Bearer worker-token",
             )

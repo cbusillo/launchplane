@@ -664,7 +664,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         update=EveryCodeWorkRequestStatusUpdate(
                             state="done",
                             host="worker-a",
-                            fencing_token=0,
+                            fencing_token=claimed.fencing_token + 1,
                             updated_at="2026-07-13T09:02:00Z",
                             result_summary="stale completion",
                         ),

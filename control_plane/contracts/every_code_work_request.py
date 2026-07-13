@@ -67,11 +67,6 @@ class EveryCodeWorkRequestRecord(BaseModel):
                 raise ValueError("claimed Every Code work request requires claimed_at")
             if not self.claimed_by_host.strip():
                 raise ValueError("claimed Every Code work request requires claimed_by_host")
-        if self.state in {"claimed", "running"}:
-            if self.fencing_token < 1:
-                raise ValueError("active Every Code work request requires fencing_token")
-            if self.attempt < 1:
-                raise ValueError("active Every Code work request requires attempt")
         if self.state in {"running", "done"} and not self.started_at.strip():
             raise ValueError("running Every Code work request requires started_at")
         if self.state in {"done", "blocked"} and not self.finished_at.strip():
@@ -89,7 +84,7 @@ class EveryCodeWorkRequestStatusUpdate(BaseModel):
     state: Literal["running", "done", "blocked"]
     host: str
     updated_at: str
-    fencing_token: int = Field(ge=0)
+    fencing_token: int = Field(ge=1)
     result_pr_url: str = ""
     result_summary: str = ""
     error_message: str = ""
