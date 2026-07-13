@@ -245,11 +245,6 @@ def should_store_generic_web_promotion_idempotency(
     statuses = _status_values(payload)
     if any(str(value).strip() == "blocked" for value in statuses):
         return False
-    if (
-        str(payload.get("deployment_status", "")).strip() == "pass"
-        and str(payload.get("post_deploy_status", "")).strip() == "fail"
-    ):
-        return True
     return not any(str(value).strip() == "fail" for value in statuses)
 
 

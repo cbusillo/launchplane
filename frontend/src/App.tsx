@@ -78,6 +78,7 @@ import type {
   MergeTrainControllerStatusPayload,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
+  ProductConfigRuntimeInput,
   ProductEnvironmentConfigStatus,
   ProductEnvironmentSummary,
   ProductProfileRecord,
@@ -1838,8 +1839,6 @@ function fixtureGenericWebPromotionDryRun(): Promise<GenericWebProdPromotionPayl
   return Promise.resolve({
     status: "accepted",
     trace_id: "fixture-trace-generic-web-promote",
-    replayed: false,
-    original_trace_id: "",
     records: {
       promotion_record_id: "",
       deployment_record_id: "",
@@ -1891,8 +1890,6 @@ function fixtureGenericWebPromotionWorkflow(
   return Promise.resolve({
     status: "accepted",
     trace_id: "fixture-trace-generic-web-workflow",
-    replayed: false,
-    original_trace_id: "",
     records: {},
     result: {
       product: payload.product,
@@ -1917,7 +1914,23 @@ function fixtureProductConfigApply(
 ): Promise<ProductConfigApplyPayload> {
   const context = payload.context ?? "";
   const instance = payload.instance ?? "";
-  const runtimeKeys = Object.keys(payload.runtime_env?.env ?? {});
+  const runtimeInput = payload.runtime_env;
+  const structuredRuntimeInput =
+    runtimeInput &&
+    "env" in runtimeInput &&
+    typeof runtimeInput.env === "object" &&
+    runtimeInput.env !== null
+      ? (runtimeInput as ProductConfigRuntimeInput)
+      : null;
+  const runtimeEnv = structuredRuntimeInput?.env ??
+    (runtimeInput
+      ? Object.fromEntries(
+          Object.entries(runtimeInput).filter(
+            ([key]) => !["scope", "context", "instance"].includes(key),
+          ),
+        )
+      : {});
+  const runtimeKeys = Object.keys(runtimeEnv);
   const response = {
     status: "ok",
     mode: payload.mode,
@@ -1929,7 +1942,7 @@ function fixtureProductConfigApply(
     runtime_environment: {
       action: "updated",
       scope:
-        payload.runtime_env?.scope ??
+        structuredRuntimeInput?.scope ??
         runtimeScopeForTarget(context, instance),
       context,
       instance,

@@ -373,6 +373,14 @@ promotion workflow dispatches. Generated request, success, validation, and
 error bindings are the API boundary consumed by the UI. Handwritten frontend
 types remain only for UI view models and explicit normalization.
 
+Launchplane converts FastAPI request-validation failures into the standard
+`400` Launchplane error envelope, so canonical and generated contracts omit the
+framework's unreachable `422` response. Product-config request generation keeps
+the structured `runtime_env` model while accepting the legacy flat environment
+map and unknown nested fields that earlier external callers could send; precise
+response contracts must not turn contract generation into an unannounced input
+compatibility break.
+
 The human auth/session family uses FastAPI routes in the production service:
 `GET /auth/github/login`, `GET /auth/github/callback`, `GET /v1/auth/session`,
 and `POST /auth/logout`. GitHub OAuth login preserves PKCE state, same-origin

@@ -10,7 +10,6 @@ import type {
   DriverDescriptorsResponse as GeneratedDriverDescriptorsResponse,
   EveryCodeSummaryResponse as GeneratedEveryCodeSummaryResponse,
   EveryCodeWorkRequestRecordsResponse as GeneratedEveryCodeWorkRequestRecordsResponse,
-  HttpValidationError as GeneratedHttpValidationError,
   LaunchplaneErrorResponse as GeneratedLaunchplaneErrorResponse,
   MergeTrainControllerStatusResponse as GeneratedMergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse as GeneratedMergeTrainPolicyTargetsResponse,
@@ -19,6 +18,7 @@ import type {
   ProductEnvironmentConfigStatusResponse as GeneratedProductEnvironmentConfigStatusResponse,
   ProductEnvironmentListResponse as GeneratedProductEnvironmentListResponse,
   ProductProfileListResponse as GeneratedProductProfileListResponse,
+  ProductConfigRuntimeInput as GeneratedProductConfigRuntimeInput,
   PreviewReadinessResponse as GeneratedPreviewReadinessResponse,
   RankWorkGraphSnapshotResponse as GeneratedRankWorkGraphSnapshotResponse,
   ReconcileWorkGraphIssueInboxData as GeneratedReconcileWorkGraphIssueInboxData,
@@ -315,13 +315,11 @@ export interface LogoutPayload {
   trace_id: string;
 }
 
-export type ApiErrorPayload = GeneratedLaunchplaneErrorResponse | GeneratedHttpValidationError;
+export type ApiErrorPayload = GeneratedLaunchplaneErrorResponse;
 
 export type ProductConfigApplyRequest = GeneratedApplyProductConfigData["body"];
 export type ProductConfigMode = ProductConfigApplyRequest["mode"];
-export type ProductConfigRuntimeInput = NonNullable<
-  ProductConfigApplyRequest["runtime_env"]
->;
+export type ProductConfigRuntimeInput = GeneratedProductConfigRuntimeInput;
 export type ProductConfigRuntimeScope = NonNullable<
   ProductConfigRuntimeInput["scope"]
 >;

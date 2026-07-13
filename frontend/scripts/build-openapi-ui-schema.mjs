@@ -71,6 +71,9 @@ function selectUiOperations(openapi, manifestKey, method, selectedPaths) {
         `Canonical OpenAPI operation id drift for ${routePath}: expected ${operationId}, got ${pathItem[method].operationId ?? "missing"}.`,
       );
     }
+    if (Object.hasOwn(selectedPaths, routePath)) {
+      throw new Error(`Canonical OpenAPI selects the UI route more than once: ${routePath}`);
+    }
     selectedPaths[routePath] = {
       ...(pathItem.parameters ? { parameters: pathItem.parameters } : {}),
       [method]: pathItem[method],
@@ -78,7 +81,7 @@ function selectUiOperations(openapi, manifestKey, method, selectedPaths) {
   }
 }
 
-function collectSuccessResponseSchemaReferences(selectedPaths) {
+function collectResponseSchemaReferences(selectedPaths) {
   const found = new Set();
   for (const pathItem of Object.values(selectedPaths)) {
     if (!isObject(pathItem)) {
@@ -88,10 +91,8 @@ function collectSuccessResponseSchemaReferences(selectedPaths) {
       if (!isObject(operation) || !isObject(operation.responses)) {
         continue;
       }
-      for (const [statusCode, response] of Object.entries(operation.responses)) {
-        if (statusCode.startsWith("2")) {
-          collectSchemaReferences(response, found);
-        }
+      for (const response of Object.values(operation.responses)) {
+        collectSchemaReferences(response, found);
       }
     }
   }
@@ -172,13 +173,13 @@ function buildUiSchema(openapi) {
   for (const schemaName of Array.from(selectedSchemaNames).sort()) {
     selectedSchemas[schemaName] = schemaForName(openapi, inlineSchemas, schemaName);
   }
-  const successResponseSchemaNames = collectSuccessResponseSchemaReferences(selectedPaths);
-  collectReferencedSchemas(openapi, inlineSchemas, successResponseSchemaNames);
-  const successResponseSchemas = {};
-  for (const schemaName of successResponseSchemaNames) {
-    successResponseSchemas[schemaName] = schemaForName(openapi, inlineSchemas, schemaName);
+  const responseSchemaNames = collectResponseSchemaReferences(selectedPaths);
+  collectReferencedSchemas(openapi, inlineSchemas, responseSchemaNames);
+  const responseSchemas = {};
+  for (const schemaName of responseSchemaNames) {
+    responseSchemas[schemaName] = schemaForName(openapi, inlineSchemas, schemaName);
   }
-  requireResponseProperties(successResponseSchemas);
+  requireResponseProperties(responseSchemas);
 
   return {
     openapi: openapi.openapi,

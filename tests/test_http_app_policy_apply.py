@@ -2445,6 +2445,29 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conflict_response.status_code, 409)
         self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
 
+    async def test_product_config_accepts_legacy_flat_runtime_env(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(database_url=database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+            payload = _product_config_payload()
+            payload["secrets"] = []
+            payload["runtime_env"] = {"CONTACT_EMAIL_MODE": "legacy-flat"}
+
+            response = await _post_product_config_apply(app, payload)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 202)
+        ProductConfigApplyResponse.model_validate(response.json())
+        runtime_environment = response.json()["result"]["runtime_environment"]
+        self.assertEqual(runtime_environment["keys"], ["CONTACT_EMAIL_MODE"])
+
     async def test_product_config_requires_database_storage(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -2508,6 +2531,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
         )
         for status_code in ("400", "401", "403", "409", "503"):
             self.assertIn(status_code, route["responses"])
+        self.assertNotIn("422", route["responses"])
 
 
 class FastApiProductContextCutoverTests(unittest.IsolatedAsyncioTestCase):

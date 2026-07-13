@@ -866,8 +866,14 @@ class LaunchplaneErrorResponse(BaseModel):
     status: str = "rejected"
     trace_id: str
     error: LaunchplaneErrorDetail
-    records: dict[str, str] | None = None
-    authz: dict[str, object] | None = None
+    records: dict[str, str] | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    authz: dict[str, object] | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class OdooStableBootstrapOperationActiveResponse(BaseModel):
@@ -3888,6 +3894,19 @@ class _LaunchplaneFastAPI(FastAPI):
         super().add_api_route(path, endpoint, **kwargs)
         if registers_error_response_model:
             self._launchplane_error_response_model_registered = True
+
+    def openapi(self) -> dict[str, Any]:
+        schema = super().openapi()
+        for path_item in schema.get("paths", {}).values():
+            if not isinstance(path_item, dict):
+                continue
+            for operation in path_item.values():
+                if not isinstance(operation, dict):
+                    continue
+                responses = operation.get("responses")
+                if isinstance(responses, dict):
+                    responses.pop("422", None)
+        return schema
 
     def _response_media_type(self, kwargs: dict[str, Any]) -> str:
         response_class = kwargs.get("response_class", self.router.default_response_class)

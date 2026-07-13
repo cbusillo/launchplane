@@ -20,7 +20,7 @@ ProductConfigMode = Literal["dry-run", "apply"]
 
 
 class ProductConfigRuntimeInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     scope: RuntimeEnvironmentScope | None = None
     context: str | None = None
@@ -29,7 +29,7 @@ class ProductConfigRuntimeInput(BaseModel):
 
 
 class ProductConfigSecretInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     scope: SecretScope | None = None
     context: str | None = None
@@ -179,8 +179,14 @@ class ProductConfigApplyEnvelope(BaseModel):
     instance: str = ""
     source_label: str = "product-config-api"
     reason: str = ""
-    runtime_env: ProductConfigRuntimeInput | None = None
-    runtime_environment: ProductConfigRuntimeInput | None = None
+    runtime_env: dict[str, ScalarValue] | ProductConfigRuntimeInput | None = Field(
+        default=None,
+        union_mode="left_to_right",
+    )
+    runtime_environment: dict[str, ScalarValue] | ProductConfigRuntimeInput | None = Field(
+        default=None,
+        union_mode="left_to_right",
+    )
     secrets: list[ProductConfigSecretInput] = Field(default_factory=list)
 
     @field_validator("mode", mode="before")
@@ -211,10 +217,18 @@ class ProductConfigApplyEnvelope(BaseModel):
             "secrets": [secret.model_dump(exclude_none=True) for secret in self.secrets],
         }
         if self.runtime_env is not None:
-            payload["runtime_env"] = self.runtime_env.model_dump(exclude_none=True)
+            payload["runtime_env"] = _runtime_input_payload(self.runtime_env)
         if self.runtime_environment is not None:
-            payload["runtime_environment"] = self.runtime_environment.model_dump(exclude_none=True)
+            payload["runtime_environment"] = _runtime_input_payload(self.runtime_environment)
         return payload
+
+
+def _runtime_input_payload(
+    value: dict[str, ScalarValue] | ProductConfigRuntimeInput,
+) -> dict[str, object]:
+    if isinstance(value, ProductConfigRuntimeInput):
+        return value.model_dump(exclude_none=True)
+    return dict(value)
 
 
 def product_config_live_target_next_actions(

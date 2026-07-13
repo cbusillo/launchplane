@@ -5974,7 +5974,8 @@
                 "type": "null"
               }
             ],
-            "title": "Authz"
+            "title": "Authz",
+            "x-launchplane-optional-response": true
           },
           "error": {
             "$ref": "#/components/schemas/LaunchplaneErrorDetail"
@@ -5991,7 +5992,8 @@
                 "type": "null"
               }
             ],
-            "title": "Records"
+            "title": "Records",
+            "x-launchplane-optional-response": true
           },
           "status": {
             "default": "rejected",
@@ -17106,16 +17108,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -17148,16 +17140,6 @@
         "responses": {
           "302": {
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -17198,16 +17180,6 @@
               }
             },
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Logout human auth session"
@@ -17278,16 +17250,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -17389,16 +17351,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -17499,16 +17451,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -17558,16 +17500,6 @@
               }
             },
             "description": "Unauthorized"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read human auth session"
@@ -17793,16 +17725,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -18039,16 +17961,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -18275,16 +18187,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -18490,16 +18392,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -18707,16 +18599,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -18923,16 +18805,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -19013,16 +18885,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read Launchplane driver view for a context"
@@ -19105,16 +18967,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read Launchplane driver view for one context instance"
@@ -19248,16 +19100,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -19370,16 +19212,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -19470,16 +19302,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -19582,16 +19404,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -19692,16 +19504,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -19833,16 +19635,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -19943,16 +19735,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -20022,16 +19804,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read Launchplane driver descriptors"
@@ -20209,16 +19981,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -20318,16 +20080,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -20501,16 +20253,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -20640,16 +20382,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -20778,16 +20510,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -20986,16 +20708,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -21191,16 +20903,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -21439,16 +21141,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -21646,16 +21338,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -21851,16 +21533,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -22055,16 +21727,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -22275,16 +21937,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -22384,16 +22036,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -22570,16 +22212,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Deploy the Launchplane service image"
@@ -22773,16 +22405,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -23206,16 +22828,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -23401,16 +23013,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -23589,16 +23191,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -23768,16 +23360,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -24458,16 +24040,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -24942,16 +24514,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -25126,16 +24688,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -25359,16 +24911,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -25536,16 +25078,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -25771,16 +25303,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -25998,16 +25520,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -26235,7 +25747,8 @@
                               "type": "null"
                             }
                           ],
-                          "title": "Authz"
+                          "title": "Authz",
+                          "x-launchplane-optional-response": true
                         },
                         "error": {
                           "$ref": "#/components/schemas/LaunchplaneErrorDetail"
@@ -26252,7 +25765,8 @@
                               "type": "null"
                             }
                           ],
-                          "title": "Records"
+                          "title": "Records",
+                          "x-launchplane-optional-response": true
                         },
                         "status": {
                           "default": "rejected",
@@ -26327,16 +25841,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -26428,16 +25932,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -26670,16 +26164,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -26837,16 +26321,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -26937,16 +26411,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -27221,16 +26685,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -27445,16 +26899,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -27636,16 +27080,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -27777,16 +27211,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -27984,16 +27408,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "502": {
             "content": {
               "application/json": {
@@ -28184,16 +27598,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -28363,16 +27767,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -28585,16 +27979,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -28818,16 +28202,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -29029,16 +28403,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -29198,16 +28562,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -29350,16 +28704,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -29573,16 +28917,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -29780,16 +29114,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -29890,16 +29214,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read one Launchplane driver descriptor"
@@ -29990,16 +29304,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -30111,16 +29415,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -30211,16 +29505,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -30319,16 +29603,6 @@
               }
             },
             "description": "Content Too Large"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -30460,16 +29734,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -30569,16 +29833,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -30730,16 +29984,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -30819,16 +30063,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -30931,16 +30165,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -31092,16 +30316,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -31181,16 +30395,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -31332,16 +30536,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -31472,16 +30666,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -31594,16 +30778,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -31703,16 +30877,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -31849,16 +31013,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -32016,16 +31170,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -32126,16 +31270,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -32247,16 +31381,6 @@
             },
             "description": "Content Too Large"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -32366,16 +31490,6 @@
               }
             },
             "description": "Content Too Large"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -32487,16 +31601,6 @@
             },
             "description": "Content Too Large"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -32606,16 +31710,6 @@
               }
             },
             "description": "Content Too Large"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -32727,16 +31821,6 @@
             },
             "description": "Content Too Large"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -32847,16 +31931,6 @@
             },
             "description": "Content Too Large"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -32966,16 +32040,6 @@
               }
             },
             "description": "Content Too Large"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -33094,16 +32158,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -33225,16 +32279,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -33335,16 +32379,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -33435,16 +32469,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -33606,16 +32630,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -33737,16 +32751,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -33858,16 +32862,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -34022,16 +33016,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -34432,16 +33416,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -34541,16 +33515,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -34662,16 +33626,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -34771,16 +33725,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -34892,16 +33836,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -35001,16 +33935,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -35142,16 +34066,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -35251,16 +34165,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -35402,16 +34306,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -35512,16 +34406,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -35624,16 +34508,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -35733,16 +34607,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -35873,16 +34737,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -36015,16 +34869,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -36080,7 +34924,7 @@
               "schema": {
                 "$defs": {
                   "ProductConfigRuntimeInput": {
-                    "additionalProperties": false,
+                    "additionalProperties": true,
                     "properties": {
                       "context": {
                         "anyOf": [
@@ -36145,7 +34989,7 @@
                     "type": "object"
                   },
                   "ProductConfigSecretInput": {
-                    "additionalProperties": false,
+                    "additionalProperties": true,
                     "properties": {
                       "binding_key": {
                         "title": "Binding Key",
@@ -36255,22 +35099,62 @@
                   "runtime_env": {
                     "anyOf": [
                       {
+                        "additionalProperties": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      },
+                      {
                         "$ref": "#/$defs/ProductConfigRuntimeInput"
                       },
                       {
                         "type": "null"
                       }
-                    ]
+                    ],
+                    "title": "Runtime Env"
                   },
                   "runtime_environment": {
                     "anyOf": [
                       {
+                        "additionalProperties": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      },
+                      {
                         "$ref": "#/$defs/ProductConfigRuntimeInput"
                       },
                       {
                         "type": "null"
                       }
-                    ]
+                    ],
+                    "title": "Runtime Environment"
                   },
                   "schema_version": {
                     "default": 1,
@@ -36352,16 +35236,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -37332,16 +36206,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -37421,16 +36285,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -37529,16 +36383,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -37689,16 +36533,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -37917,16 +36751,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -38076,16 +36900,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -38242,16 +37056,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -38342,16 +37146,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -38484,16 +37278,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -38583,16 +37367,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -38693,16 +37467,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -38805,16 +37569,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -38916,16 +37670,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -39026,16 +37770,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -39149,16 +37883,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -39271,16 +37995,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -39381,16 +38095,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -39539,16 +38243,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -39649,16 +38343,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -39728,16 +38412,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -39838,16 +38512,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -40000,16 +38664,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -40111,16 +38765,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -40200,16 +38844,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -40301,16 +38935,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -40380,16 +39004,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read Launchplane service runtime"
@@ -40460,16 +39074,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -40561,16 +39165,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -40640,16 +39234,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -40730,16 +39314,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Reconcile Launchplane GitHub issue inbox"
@@ -40830,16 +39404,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -40982,16 +39546,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "502": {
             "content": {
@@ -41154,16 +39708,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "502": {
             "content": {
               "application/json": {
@@ -41306,16 +39850,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "502": {
             "content": {
               "application/json": {
@@ -41426,16 +39960,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -41515,16 +40039,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -41687,16 +40201,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "502": {
             "content": {
               "application/json": {
@@ -41838,16 +40342,6 @@
               }
             },
             "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "502": {
             "content": {
@@ -42000,16 +40494,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "502": {
             "content": {
               "application/json": {
@@ -42109,16 +40593,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Rank Launchplane work graph snapshot"
@@ -42179,16 +40653,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {

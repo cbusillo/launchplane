@@ -40,16 +40,6 @@
               }
             },
             "description": "Unauthorized"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read human auth session"
@@ -121,16 +111,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read Launchplane driver view for a context"
@@ -213,16 +193,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read Launchplane driver view for one context instance"
@@ -283,16 +253,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Read Launchplane driver descriptors"
@@ -424,16 +384,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -563,16 +513,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -714,16 +654,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -803,16 +733,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -903,16 +823,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -1015,16 +925,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1126,16 +1026,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1236,16 +1126,6 @@
               }
             },
             "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -1359,16 +1239,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1481,16 +1351,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1561,16 +1421,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1640,16 +1490,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -1751,16 +1591,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1841,16 +1671,6 @@
             },
             "description": "Forbidden"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -1920,16 +1740,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           },
           "503": {
             "content": {
@@ -2073,16 +1883,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -2225,16 +2025,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -2320,22 +2110,62 @@
                   "runtime_env": {
                     "anyOf": [
                       {
+                        "additionalProperties": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      },
+                      {
                         "$ref": "#/components/schemas/ProductConfigRuntimeInput"
                       },
                       {
                         "type": "null"
                       }
-                    ]
+                    ],
+                    "title": "Runtime Env"
                   },
                   "runtime_environment": {
                     "anyOf": [
                       {
+                        "additionalProperties": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      },
+                      {
                         "$ref": "#/components/schemas/ProductConfigRuntimeInput"
                       },
                       {
                         "type": "null"
                       }
-                    ]
+                    ],
+                    "title": "Runtime Environment"
                   },
                   "schema_version": {
                     "default": 1,
@@ -2418,16 +2248,6 @@
             },
             "description": "Conflict"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -2507,16 +2327,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Reconcile Launchplane GitHub issue inbox"
@@ -2597,16 +2407,6 @@
               }
             },
             "description": "Forbidden"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Rank Launchplane work graph snapshot"
@@ -3076,9 +2876,10 @@
           }
         },
         "required": [
-          "trace_id",
+          "configured",
           "error",
-          "configured"
+          "status",
+          "trace_id"
         ],
         "title": "AuthSessionRequiredResponse",
         "type": "object"
@@ -5917,19 +5718,6 @@
         "title": "GitHubIssueInboxRepositoryGroup",
         "type": "object"
       },
-      "HTTPValidationError": {
-        "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
-          }
-        },
-        "title": "HTTPValidationError",
-        "type": "object"
-      },
       "HealthcheckEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -6046,7 +5834,8 @@
                 "type": "null"
               }
             ],
-            "title": "Authz"
+            "title": "Authz",
+            "x-launchplane-optional-response": true
           },
           "error": {
             "$ref": "#/components/schemas/LaunchplaneErrorDetail"
@@ -6063,7 +5852,8 @@
                 "type": "null"
               }
             ],
-            "title": "Records"
+            "title": "Records",
+            "x-launchplane-optional-response": true
           },
           "status": {
             "default": "rejected",
@@ -6076,8 +5866,9 @@
           }
         },
         "required": [
-          "trace_id",
-          "error"
+          "error",
+          "status",
+          "trace_id"
         ],
         "title": "LaunchplaneErrorResponse",
         "type": "object"
@@ -8769,7 +8560,7 @@
         "type": "object"
       },
       "ProductConfigRuntimeInput": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "context": {
             "anyOf": [
@@ -8896,7 +8687,7 @@
         "type": "object"
       },
       "ProductConfigSecretInput": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "binding_key": {
             "title": "Binding Key",
@@ -11696,46 +11487,6 @@
           "status",
           "version"
         ]
-      },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loc",
-          "msg",
-          "type"
-        ],
-        "title": "ValidationError",
-        "type": "object"
       },
       "WorkGraphIssueInboxReconcileResponse": {
         "additionalProperties": false,

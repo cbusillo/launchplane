@@ -1305,6 +1305,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                     "LaunchplaneErrorResponse",
                     json.dumps(route["responses"][status_code]),
                 )
+            self.assertNotIn("422", route["responses"])
 
     async def test_list_products_returns_db_backed_overviews(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
