@@ -110,6 +110,9 @@ from control_plane.service_auth import (
 )
 from control_plane.service_human_auth import (
     GitHubOAuthConfig,
+    HumanSessionManager,
+    LaunchplaneHumanSession,
+    build_browser_mutation_request_headers,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -2826,6 +2829,19 @@ def _github_human_identity(*, role: Literal["read_only", "admin"] = "admin") -> 
         teams=frozenset({"example-org/launchplane-operators"}),
         role=role,
     )
+
+
+def _browser_mutation_headers(
+    session_manager: HumanSessionManager,
+    session: LaunchplaneHumanSession,
+) -> dict[str, str]:
+    return {
+        "Cookie": session_manager.session_cookie_header(session),
+        **build_browser_mutation_request_headers(
+            origin=session_manager.public_origin,
+            csrf_token=session_manager.csrf_token(session),
+        ),
+    }
 
 
 def _local_operator_bearer_config(*, token_label: str = "local-owner-read") -> BearerIdentityConfig:

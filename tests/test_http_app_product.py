@@ -33,6 +33,7 @@ from control_plane.work_graph_issue_inbox import (
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
+    _browser_mutation_headers,
     _get_agent_context,
     _get_config_status,
     _get_product,
@@ -802,7 +803,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             app,
             payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
             authorization="",
-            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            headers=_browser_mutation_headers(session_manager, human_session),
         )
 
         self.assertEqual(response.status_code, 202)

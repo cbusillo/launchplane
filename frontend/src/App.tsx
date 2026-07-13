@@ -27,7 +27,6 @@ import {
   readAuthSession,
   readDriverView,
   readProductEnvironmentConfigStatus,
-  reconcileGitHubIssueInbox,
 } from "./api";
 import { ApiErrorPanel, AuthPanel } from "./AuthPanels";
 import { formatTime, labelForStatus } from "./format";
@@ -600,9 +599,6 @@ export function App() {
               onWorkGraphFilterChange={setWorkGraphFilter}
               onWorkGraphModeChange={setWorkGraphMode}
               onRefreshIssueInbox={() => void refreshIssueInbox()}
-              reconcileIssueInbox={async (mode, signal) =>
-                reconcileGitHubIssueInbox(mode, signal)
-              }
             />
             <ProductOverviewShell
               product={selectedProductOverview}

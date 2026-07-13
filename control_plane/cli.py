@@ -112,6 +112,10 @@ from control_plane.storage.factory import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.service_auth import load_authz_policy
+from control_plane.service_human_auth import (
+    browser_origin_from_url,
+    build_browser_mutation_request_headers,
+)
 from control_plane.workflows.launchplane import (
     build_preview_inventory_payload,
     build_preview_status_payload,
@@ -1828,7 +1832,22 @@ def _post_launchplane_service_json(
     if bearer_token.strip():
         headers["Authorization"] = f"Bearer {bearer_token.strip()}"
     else:
-        headers["Cookie"] = session_cookie.strip()
+        normalized_session_cookie = session_cookie.strip()
+        try:
+            service_origin = browser_origin_from_url(normalized_service_url)
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
+        headers["Cookie"] = normalized_session_cookie
+        csrf_token = _read_launchplane_browser_csrf_token(
+            service_url=normalized_service_url,
+            session_cookie=normalized_session_cookie,
+        )
+        headers.update(
+            build_browser_mutation_request_headers(
+                origin=service_origin,
+                csrf_token=csrf_token,
+            )
+        )
     if idempotency_key.strip():
         headers["Idempotency-Key"] = idempotency_key.strip()
     request = Request(
@@ -1857,6 +1876,44 @@ def _post_launchplane_service_json(
     if not isinstance(response_payload, dict):
         raise click.ClickException("Launchplane service response was not a JSON object.")
     return cast(dict[str, object], response_payload)
+
+
+def _read_launchplane_browser_csrf_token(*, service_url: str, session_cookie: str) -> str:
+    request = Request(
+        f"{service_url}/v1/auth/session",
+        headers={
+            "Accept": "application/json",
+            "Cookie": session_cookie,
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        response_text = error.read().decode("utf-8", errors="replace")
+        try:
+            error_payload = json.loads(response_text)
+        except JSONDecodeError:
+            error_payload = {"error": {"message": response_text.strip()}}
+        error_detail = error_payload.get("error") if isinstance(error_payload, dict) else None
+        error_message = error_detail.get("message", "") if isinstance(error_detail, dict) else ""
+        message = str(error_message or f"Launchplane service returned HTTP {error.code}.")
+        raise click.ClickException(message) from error
+    except (URLError, TimeoutError) as error:
+        raise click.ClickException(f"Launchplane service request failed: {error}") from error
+    except JSONDecodeError as error:
+        raise click.ClickException(
+            "Launchplane auth session response was not valid JSON."
+        ) from error
+    if not isinstance(response_payload, dict):
+        raise click.ClickException("Launchplane auth session response was not a JSON object.")
+    csrf_token = str(response_payload.get("csrf_token") or "").strip()
+    if not csrf_token:
+        raise click.ClickException(
+            "Launchplane auth session response did not include a CSRF token."
+        )
+    return csrf_token
 
 
 def _load_github_webhook_json_bytes(

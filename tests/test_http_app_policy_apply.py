@@ -35,6 +35,7 @@ from tests.http_app_test_support import (
     _AgentWriteIntentEvaluateReplayOnlyStore,
     _asgi_get,
     _asgi_request,
+    _browser_mutation_headers,
     _ConcurrentProductConfigDryRunMarkerStore,
     _every_code_notification_policy_record,
     _get_context_cutover_audit,
@@ -1867,7 +1868,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                     app,
                     _meta_product_config_payload(mode="apply"),
                     authorization="",
-                    headers={"Cookie": session_manager.session_cookie_header(human_session)},
+                    headers=_browser_mutation_headers(session_manager, human_session),
                     idempotency_key="product-config-human-apply",
                 )
                 runtime_records = app_store.list_runtime_environment_records()
@@ -1950,7 +1951,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                 app,
                 _meta_product_config_payload(mode="apply"),
                 authorization="",
-                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+                headers=_browser_mutation_headers(session_manager, human_session),
                 idempotency_key="product-config-read-only-human-apply",
             )
             app_store.close()
