@@ -119,6 +119,36 @@ existing explicit provider-target row before mutating the Dokploy pair, write th
 Dokploy target/id records, then write the matching provider-target row. A stale
 explicit provider-target row blocks the mutation instead of being overwritten.
 
+## Mutation Reservation Recovery
+
+Reservation-backed service mutations use the PostgreSQL
+`launchplane_idempotency_records` table as a typed execution claim. Operators
+and reconcilers should interpret states as follows:
+
+- `running` with an unexpired lease means another owner is executing; do not
+  bypass it or retry with a new key.
+- `completed` is terminal replay evidence. Retry the same route, caller scope,
+  key, and request fingerprint to receive the original accepted response.
+- `reconcile_required` means a provider operation/reconciliation key was bound
+  before the outcome became unknown. Do not repeat the provider mutation. Use
+  the owning domain's service reconciliation workflow to inspect provider state
+  and write terminal evidence.
+
+Expired DB-only reservations without a reconciliation key may be reclaimed by
+the storage API with an incremented attempt. Provider-backed work must bind its
+stable provider operation key before effects; after that point lease expiry is a
+reconciliation event, not a retry signal. Stale owners cannot renew or complete
+another owner's lease or an earlier attempt owned by the same worker identity.
+Lease timestamps and expiry decisions use the database clock rather than caller
+time. Do not repair reservation rows with direct SQL or an arbitrary checkout;
+shared/live recovery belongs in a typed Launchplane service endpoint or domain
+reconciler.
+
+Product preview TLS apply is the first migrated DB-only route. Its reservation,
+profile compare-and-write, and response completion share one transaction, so a
+completion-persistence failure rolls back the profile change and a no-op apply
+still produces replay evidence.
+
 ## Target Launchplane Ingress
 
 The target communication model is:

@@ -94,6 +94,8 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
+    build_launchplane_mutation_reservation,
+    complete_launchplane_mutation_reservation,
 )
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
@@ -749,6 +751,7 @@ _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
 _AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
+_DB_ONLY_MUTATION_LEASE = timedelta(minutes=5)
 
 AuthzPolicyRouteEnvelope = (
     control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope
@@ -11887,18 +11890,33 @@ def create_launchplane_fastapi_app(
                 records={"product_profile": preview_tls_request.product},
                 result=result_plan.model_dump(mode="json"),
             )
-            atomic_idempotency_record = build_apply_idempotency_record(
-                identity=identity,
+            reservation_started_at = utc_now_timestamp()
+            mutation_reservation = build_launchplane_mutation_reservation(
+                scope=idempotency_scope(identity),
                 route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
                 idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                lease_expires_at=(
+                    parse_utc_timestamp(reservation_started_at) + _DB_ONLY_MUTATION_LEASE
+                )
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                reserved_at=reservation_started_at,
+            )
+            mutation_completion = complete_launchplane_mutation_reservation(
+                mutation_reservation,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                completed_at=reservation_started_at,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
             )
             write_result = database_store.compare_and_write_product_profile_record(
                 expected_record=profile,
                 replacement_record=replacement_profile,
-                idempotency_record=atomic_idempotency_record,
+                mutation_reservation=mutation_reservation,
+                mutation_completion=mutation_completion,
             )
             if write_result.status == "replayed":
                 if write_result.idempotency_record is None:
@@ -11934,6 +11952,25 @@ def create_launchplane_fastapi_app(
                     code="stale",
                     message=(
                         "Product profile changed while applying the reviewed preview TLS plan."
+                    ),
+                )
+            if write_result.status == "reservation_in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product preview TLS mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if write_result.status == "reconciliation_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product preview TLS mutation requires reconciliation before retry."
                     ),
                 )
             return response
@@ -12367,6 +12404,25 @@ def create_launchplane_fastapi_app(
                             "Launchplane request payload on this route."
                         ),
                     )
+                if stored_record.state == "running":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_in_progress",
+                        message=(
+                            "A matching Launchplane mutation is already running. "
+                            "Retry with the same Idempotency-Key."
+                        ),
+                    )
+                if stored_record.state == "reconcile_required":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_reconciliation_required",
+                        message=(
+                            "The prior Launchplane mutation requires reconciliation before retry."
+                        ),
+                    )
                 return (
                     normalized_idempotency_key,
                     payload_fingerprint,
@@ -12438,6 +12494,25 @@ def create_launchplane_fastapi_app(
                         message=(
                             "Idempotency-Key was already used for a different "
                             "Launchplane request payload on this route."
+                        ),
+                    )
+                if stored_record.state == "running":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_in_progress",
+                        message=(
+                            "A matching Launchplane mutation is already running. "
+                            "Retry with the same Idempotency-Key."
+                        ),
+                    )
+                if stored_record.state == "reconcile_required":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_reconciliation_required",
+                        message=(
+                            "The prior Launchplane mutation requires reconciliation before retry."
                         ),
                     )
                 return (

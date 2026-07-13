@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import json
 import os
 import threading
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from alembic import command as alembic_command
@@ -14,19 +17,30 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    build_launchplane_idempotency_record_id,
+    build_launchplane_mutation_reservation,
+    complete_launchplane_mutation_reservation,
+)
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapRequest
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
     OdooStableBootstrapOperationPhase,
     OdooStableBootstrapOperationStatus,
 )
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+    ProductPreviewProfile,
+)
+from control_plane.storage.postgres import MutationReservationResult, PostgresRecordStore
 from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
 LOCK_WAIT_TIMEOUT = "1000ms"
+
+
 def _postgres_root_database_url() -> str:
     database_url = os.environ.get(POSTGRES_TEST_URL_ENV, "").strip()
     if not database_url:
@@ -48,15 +62,11 @@ def _isolated_postgres_database() -> Iterator[str]:
     root_database_url = _postgres_root_database_url()
     root_url = make_url(root_database_url)
     database_name = f"launchplane_test_{uuid4().hex}"
-    database_url = root_url.set(database=database_name).render_as_string(
-        hide_password=False
-    )
+    database_url = root_url.set(database=database_name).render_as_string(hide_password=False)
     root_engine = create_engine(root_database_url, isolation_level="AUTOCOMMIT")
     try:
         with root_engine.connect() as connection:
-            connection.execute(
-                text(f'CREATE DATABASE "{database_name}"')
-            )
+            connection.execute(text(f'CREATE DATABASE "{database_name}"'))
         try:
             yield database_url
         finally:
@@ -148,6 +158,69 @@ def _idempotency_record(
     )
 
 
+def _mutation_reservation(
+    *,
+    lease_owner: str,
+    request_fingerprint: str = "mutation-fingerprint-a",
+    idempotency_key: str = "product-preview-tls:postgres:1",
+    lease_expires_at: str = "2026-07-13T00:05:00Z",
+    reserved_at: str = "2026-07-13T00:00:00Z",
+) -> LaunchplaneIdempotencyRecord:
+    return build_launchplane_mutation_reservation(
+        scope="github-actions|cbusillo/launchplane|workflow:test",
+        route_path="/v1/product-profiles/preview-tls/apply",
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=lease_owner,
+        lease_expires_at=lease_expires_at,
+        reserved_at=reserved_at,
+    )
+
+
+def _mutation_completion(
+    reservation: LaunchplaneIdempotencyRecord,
+    *,
+    response_trace_id: str,
+) -> LaunchplaneIdempotencyRecord:
+    return complete_launchplane_mutation_reservation(
+        reservation,
+        response_status_code=202,
+        response_trace_id=response_trace_id,
+        completed_at="2026-07-13T00:01:00Z",
+        response_payload={"status": "accepted", "trace_id": response_trace_id},
+    )
+
+
+def _reserve_mutation(
+    store: PostgresRecordStore,
+    reservation: LaunchplaneIdempotencyRecord,
+    *,
+    lease_seconds: int = 300,
+) -> MutationReservationResult:
+    return store.reserve_mutation(
+        scope=reservation.scope,
+        route_path=reservation.route_path,
+        idempotency_key=reservation.idempotency_key,
+        request_fingerprint=reservation.request_fingerprint,
+        lease_owner=reservation.lease_owner,
+        lease_seconds=lease_seconds,
+        reconciliation_key=reservation.reconciliation_key,
+    )
+
+
+def _product_profile() -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="postgres-reservation-test",
+        display_name="PostgreSQL Reservation Test",
+        repository="example/postgres-reservation-test",
+        driver_id="odoo",
+        image=ProductImageProfile(),
+        preview=ProductPreviewProfile(),
+        updated_at="2026-07-13T00:00:00Z",
+        source="test:postgres-integration",
+    )
+
+
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_alembic_from_empty_database_reaches_exact_head_and_required_invariants(
         self,
@@ -169,10 +242,19 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     index["name"]: index
                     for index in inspector.get_indexes("launchplane_idempotency_records")
                 }
+                idempotency_columns = {
+                    column["name"]: column
+                    for column in inspector.get_columns("launchplane_idempotency_records")
+                }
                 payload_type = _column_type(
                     engine,
                     table_name="launchplane_idempotency_records",
                     column_name="payload",
+                )
+                attempt_type = _column_type(
+                    engine,
+                    table_name="launchplane_idempotency_records",
+                    column_name="attempt",
                 )
                 alembic_version = _current_alembic_version(engine)
             finally:
@@ -180,10 +262,86 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
         self.assertEqual(alembic_version, EXPECTED_ALEMBIC_HEAD_REVISION)
         self.assertEqual(payload_type, "jsonb")
+        self.assertEqual(attempt_type, "integer")
+        self.assertTrue(idempotency_columns["response_status_code"]["nullable"])
         self.assertTrue(
             idempotency_indexes["launchplane_idempotency_scope_route_key_idx"]["unique"]
         )
+        self.assertFalse(idempotency_indexes["launchplane_idempotency_state_lease_idx"]["unique"])
         self.assertTrue(indexes["launchplane_odoo_bootstrap_active_lane_uidx"]["unique"])
+
+    def test_mutation_reservation_migration_backfills_existing_postgres_rows(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            alembic_command.upgrade(_alembic_config(database_url), "c9d1e3f5a7b9")
+            legacy_payload = {
+                "schema_version": 1,
+                "record_id": "idempotency-postgres-legacy",
+                "scope": "github-actions:postgres-legacy",
+                "route_path": "/v1/evidence/previews/generations",
+                "idempotency_key": "postgres-legacy-key",
+                "request_fingerprint": "postgres-legacy-fingerprint",
+                "response_status_code": 202,
+                "response_trace_id": "postgres-legacy-trace",
+                "recorded_at": "2026-07-12T00:00:00Z",
+                "response_payload": {"status": "accepted"},
+            }
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_idempotency_records "
+                        "(record_id, scope, route_path, idempotency_key, request_fingerprint, "
+                        "response_status_code, response_trace_id, recorded_at, payload) "
+                        "VALUES (:record_id, :scope, :route_path, :idempotency_key, "
+                        ":request_fingerprint, :response_status_code, :response_trace_id, "
+                        ":recorded_at, CAST(:payload AS jsonb))"
+                    ),
+                    {
+                        "record_id": "idempotency-postgres-legacy",
+                        "scope": "github-actions:postgres-legacy",
+                        "route_path": "/v1/evidence/previews/generations",
+                        "idempotency_key": "postgres-legacy-key",
+                        "request_fingerprint": "postgres-legacy-fingerprint",
+                        "response_status_code": 202,
+                        "response_trace_id": "postgres-legacy-trace",
+                        "recorded_at": "2026-07-12T00:00:00Z",
+                        "payload": json.dumps(legacy_payload),
+                    },
+                )
+            engine.dispose()
+
+            _upgrade_empty_database_to_head(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.verify_schema()
+                loaded = store.read_idempotency_record(
+                    scope="github-actions:postgres-legacy",
+                    route_path="/v1/evidence/previews/generations",
+                    idempotency_key="postgres-legacy-key",
+                )
+                with store._engine.connect() as connection:
+                    promoted = (
+                        connection.execute(
+                            text(
+                                "SELECT state, attempt, created_at, updated_at "
+                                "FROM launchplane_idempotency_records "
+                                "WHERE record_id = 'idempotency-postgres-legacy'"
+                            )
+                        )
+                        .mappings()
+                        .one()
+                    )
+            finally:
+                store.close()
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.schema_version, 1)
+        self.assertEqual(loaded.state, "completed")
+        self.assertEqual(promoted["state"], "completed")
+        self.assertEqual(promoted["attempt"], 1)
+        self.assertEqual(promoted["created_at"], "2026-07-12T00:00:00Z")
+        self.assertEqual(promoted["updated_at"], "2026-07-12T00:00:00Z")
 
     def test_startup_verification_fails_closed_when_critical_index_is_missing(
         self,
@@ -192,15 +350,32 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             _upgrade_empty_database_to_head(database_url)
             engine = create_engine(database_url)
             with engine.begin() as connection:
-                connection.execute(
-                    text("drop index launchplane_idempotency_scope_route_key_idx")
-                )
+                connection.execute(text("drop index launchplane_idempotency_scope_route_key_idx"))
             engine.dispose()
             store = PostgresRecordStore(database_url=database_url)
             try:
                 with self.assertRaisesRegex(
                     RuntimeError,
                     "launchplane_idempotency_records missing required index",
+                ):
+                    store.verify_schema()
+            finally:
+                store.close()
+
+    def test_startup_verification_fails_closed_when_reservation_lease_index_is_missing(
+        self,
+    ) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(text("drop index launchplane_idempotency_state_lease_idx"))
+            engine.dispose()
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "launchplane_idempotency_state_lease_idx",
                 ):
                     store.verify_schema()
             finally:
@@ -252,11 +427,13 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     lease_expires_at="2026-05-17T00:11:00Z",
                     claimed_at="2026-05-17T00:02:00Z",
                 )
-                stale_owner_heartbeat = second_store.heartbeat_odoo_stable_bootstrap_operation_record(
-                    operation_id=first_claim.operation_id if first_claim else "missing",
-                    lease_owner="worker-b",
-                    heartbeat_at="2026-05-17T00:03:00Z",
-                    lease_expires_at="2026-05-17T00:13:00Z",
+                stale_owner_heartbeat = (
+                    second_store.heartbeat_odoo_stable_bootstrap_operation_record(
+                        operation_id=first_claim.operation_id if first_claim else "missing",
+                        lease_owner="worker-b",
+                        heartbeat_at="2026-05-17T00:03:00Z",
+                        lease_expires_at="2026-05-17T00:13:00Z",
+                    )
                 )
                 recovered_ids = store.recover_expired_odoo_stable_bootstrap_operation_records(
                     now="2026-05-17T00:12:00Z",
@@ -360,6 +537,180 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.request_fingerprint, "fingerprint-first")
 
+    def test_two_store_instances_reserve_same_key_once_and_conflict_deterministically(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def reserve(
+                active_store: PostgresRecordStore,
+                reservation: LaunchplaneIdempotencyRecord,
+            ) -> str:
+                barrier.wait()
+                return _reserve_mutation(active_store, reservation).status
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: reserve(*arguments),
+                            (
+                                (store, _mutation_reservation(lease_owner="worker-a")),
+                                (second_store, _mutation_reservation(lease_owner="worker-b")),
+                            ),
+                        )
+                    )
+                conflict = _reserve_mutation(
+                    second_store,
+                    _mutation_reservation(
+                        lease_owner="worker-c",
+                        request_fingerprint="mutation-fingerprint-b",
+                    ),
+                )
+                stored = store.read_idempotency_record(
+                    scope="github-actions|cbusillo/launchplane|workflow:test",
+                    route_path="/v1/product-profiles/preview-tls/apply",
+                    idempotency_key="product-preview-tls:postgres:1",
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["acquired", "in_progress"])
+        self.assertEqual(conflict.status, "conflict")
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.state, "running")
+        self.assertEqual(stored.attempt, 1)
+
+    def test_expired_reconciliation_key_transitions_to_reconcile_required(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            reservation = _mutation_reservation(lease_owner="worker-a")
+            clock = {"now": "2026-07-13T00:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                acquired = _reserve_mutation(store, reservation)
+                clock["now"] = "2026-07-13T00:01:00Z"
+                bound = store.bind_mutation_reconciliation_key(
+                    reservation=acquired.record,
+                    reconciliation_key="provider-operation-123",
+                )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            try:
+                with patch.object(
+                    second_store,
+                    "_database_mutation_timestamp",
+                    return_value="2026-07-13T00:06:00Z",
+                ):
+                    reconciled = _reserve_mutation(
+                        second_store,
+                        _mutation_reservation(lease_owner="worker-b"),
+                    )
+            finally:
+                second_store.close()
+
+        self.assertEqual(acquired.status, "acquired")
+        self.assertEqual(bound.status, "updated")
+        self.assertEqual(reconciled.status, "reconcile_required")
+        self.assertEqual(reconciled.record.state, "reconcile_required")
+        self.assertEqual(reconciled.record.reconciliation_key, "provider-operation-123")
+
+    def test_atomic_noop_profile_mutation_replays_across_two_store_instances(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            profile = _product_profile()
+            store.write_product_profile_record(profile)
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def apply_noop(active_store: PostgresRecordStore, owner: str) -> str:
+                reservation = _mutation_reservation(
+                    lease_owner=owner,
+                    idempotency_key="product-preview-tls:postgres:noop",
+                )
+                completion = _mutation_completion(
+                    reservation,
+                    response_trace_id=f"trace-{owner}",
+                )
+                barrier.wait()
+                return active_store.compare_and_write_product_profile_record(
+                    expected_record=profile,
+                    replacement_record=profile,
+                    mutation_reservation=reservation,
+                    mutation_completion=completion,
+                ).status
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: apply_noop(*arguments),
+                            ((store, "worker-a"), (second_store, "worker-b")),
+                        )
+                    )
+                stored_profile = store.read_product_profile_record(profile.product)
+                stored_reservation = store.read_idempotency_record(
+                    scope="github-actions|cbusillo/launchplane|workflow:test",
+                    route_path="/v1/product-profiles/preview-tls/apply",
+                    idempotency_key="product-preview-tls:postgres:noop",
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["replayed", "written"])
+        self.assertEqual(stored_profile, profile)
+        self.assertIsNotNone(stored_reservation)
+        assert stored_reservation is not None
+        self.assertEqual(stored_reservation.state, "completed")
+        self.assertEqual(stored_reservation.attempt, 1)
+
+    def test_profile_write_rolls_back_when_completion_persistence_fails(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            profile = _product_profile()
+            replacement = profile.model_copy(
+                update={
+                    "display_name": "Changed Before Injected Failure",
+                    "updated_at": "2026-07-13T00:01:00Z",
+                }
+            )
+            reservation = _mutation_reservation(
+                lease_owner="worker-a",
+                idempotency_key="product-preview-tls:postgres:fault",
+            )
+            completion = _mutation_completion(
+                reservation,
+                response_trace_id="trace-injected-failure",
+            )
+            store.write_product_profile_record(profile)
+
+            with patch.object(
+                store,
+                "_sync_idempotency_row",
+                side_effect=RuntimeError("injected completion persistence failure"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected completion persistence failure",
+                ):
+                    store.compare_and_write_product_profile_record(
+                        expected_record=profile,
+                        replacement_record=replacement,
+                        mutation_reservation=reservation,
+                        mutation_completion=completion,
+                    )
+            stored_profile = store.read_product_profile_record(profile.product)
+            stored_reservation = store.read_idempotency_record(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+            )
+
+        self.assertEqual(stored_profile, profile)
+        self.assertIsNone(stored_reservation)
+
     def test_partial_unique_active_operation_index_rejects_second_active_lane(
         self,
     ) -> None:
@@ -399,7 +750,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertFalse(created)
         self.assertEqual(existing_record.operation_id, first_record.operation_id)
-        self.assertEqual([record.operation_id for record in terminal_records], [terminal_record.operation_id])
+        self.assertEqual(
+            [record.operation_id for record in terminal_records], [terminal_record.operation_id]
+        )
 
 
 def _attempt_stale_owner_completion(
