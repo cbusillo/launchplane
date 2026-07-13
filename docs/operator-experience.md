@@ -13,6 +13,168 @@ The rebuilt UI should be a product operations surface, not a raw record browser.
 The first screen should show products, their stable environments, current
 operational state, and the next safe action.
 
+## Primary User And Job
+
+The primary user is an operator who may also be a developer, but who is acting
+in an operations context. Their job is:
+
+> Understand what is running for one product, whether it is healthy, why it is
+> unhealthy, and what action is safe to take next without understanding or
+> bypassing Launchplane's provider plumbing.
+
+The same person may switch into engineering maintenance work, but Product Ops
+and Engineering Ops are separate jobs and must have separate navigation:
+
+- **Product Ops** owns product environments, previews, settings, secrets,
+  promotions, maintenance, activity, and diagnosis.
+- **Engineering Ops** owns the work graph, GitHub issue reconciliation, Every
+  Code queues, merge-train controls, and platform maintenance.
+
+Product Ops is the default surface. Engineering Ops may reuse the same session,
+theme, and API transport, but it must not dominate the product workspace or the
+first screen.
+
+## Representative Operator Journeys
+
+The clean-slate product model is grounded in recent Launchplane work rather than
+generic dashboard assumptions.
+
+### Recover A Product Safely
+
+In the rebuilt UI, an operator who discovers that a product profile or scoped
+workflow grant is missing must see which product record, provider target, runtime
+configuration, secret bindings, and grants are missing. The operator reviews a
+dry-run, applies only the missing authority through the service, runs an
+isolated preview canary, destroys it, and sees clean lifecycle evidence.
+
+### Diagnose A Public TLS Failure
+
+In the rebuilt UI, an operator who sees that a preview or stable environment is
+unreachable must receive an environment view that explains the bound domain,
+runtime placement, ingress termination, TLS owner, certificate observation,
+provider/runtime identity, and the evidence behind the failure. Normal
+diagnosis must not require direct Dokploy, edge-proxy, DNS-provider, or database
+inspection.
+
+### Prove Preview Apply And Destroy
+
+The rebuilt UI must let an operator compare desired and actual previews,
+refresh one through a reviewed plan, verify health and runtime identity,
+destroy it, and confirm that no provider or Launchplane inventory remains
+orphaned. Apply, destroy, and report-only reconciliation are one understandable
+journey.
+
+### Promote A Verified Release
+
+The rebuilt UI must show what artifact is in testing and production, why
+promotion is enabled or blocked, and how to run a browser-safe dry-run,
+dispatch the product-owned workflow, and follow promotion evidence without
+creating a release or mutating production during dry-run.
+
+### Change Runtime Settings Or Secrets
+
+The rebuilt UI must show expected runtime keys separately from managed-secret
+bindings and let an operator review missing/stale/disabled state, submit a
+dry-run, and apply the change without plaintext secret values remaining in the
+browser, response, logs, or activity record.
+
+## Golden Paths And Anti-Goals
+
+The primary golden paths are:
+
+1. Select a product and understand testing, production, previews, warnings, and
+   the next safe action.
+2. Open an environment and diagnose placement, domain, ingress, TLS, runtime
+   identity, configuration, and health evidence.
+3. Review and execute a supported dry-run, apply, workflow dispatch, refresh,
+   destroy, or maintenance action.
+4. Follow activity and evidence until the action reaches a clear terminal or
+   reconciliation state.
+
+The rebuilt product must not become:
+
+- a generic card dashboard
+- a raw context, route, provider-ID, or record browser
+- a fleet-wide engineering queue presented as Product Ops
+- a collection of buttons that only prepare requests or perform no operation
+- a source of inferred, fixture-backed, or reassuring placeholder state
+- a second authority for runtime configuration or provider topology
+
+## Information Architecture
+
+```text
+Launchplane
+  Product Ops
+    Products
+      Product workspace
+        Overview
+        Testing
+        Production
+        Previews
+        Runtime settings
+        Managed secrets
+        Promotions
+        Activity
+        Maintenance
+        Diagnostics
+  Engineering Ops
+    Work graph
+    Issue reconciliation
+    Every Code
+    Merge train
+    Platform maintenance
+```
+
+The product workspace is the primary object. Stable lanes and previews are
+visually distinct children of that product. Runtime settings and managed
+secrets are separate surfaces. Activity is an operator timeline. Diagnostics
+contains raw contexts, provider IDs, route paths, record IDs, and provider-only
+evidence that ordinary operation does not require.
+
+## Action Taxonomy
+
+Every visible action must declare one of these behaviors:
+
+- `inspect`: read-only navigation or evidence retrieval
+- `dry-run`: computes and records a plan without a live mutation
+- `apply`: performs a supported service mutation after required review
+- `workflow-dispatch`: starts a product-owned or operator-owned workflow
+- `destructive`: removes or disables live mutable state and requires explicit
+  confirmation plus replacement/recovery evidence
+- `unsupported`: visible only when explaining why the capability is unavailable
+
+No control may look enabled when it only prepares a request, copies a command,
+or has no execution handler. Disabled actions show exact prerequisite,
+authorization, evidence, or trust-state reasons.
+
+## First-Run And Empty States
+
+Empty states are part of the product contract:
+
+- no products: explain how a product becomes Launchplane-owned and link to the
+  supported onboarding action or documentation
+- product without stable evidence: show the profile and missing records, not an
+  empty dashboard
+- no previews: distinguish previews disabled, no desired previews, and missing
+  inventory evidence
+- missing settings/secrets: list required key or binding names and the safe
+  action that can resolve them
+- unsupported capability: name the driver limitation without presenting an
+  actionable control
+- stale or failed reads: preserve the last recorded value only with an explicit
+  trust state and timestamp
+
+Loading, empty, blocked, missing, unsupported, and error are different states
+and must not share a reassuring generic placeholder.
+
+## Responsive Product Contract
+
+Desktop layouts optimize for fast comparison across testing, production, and
+previews. Narrow layouts preserve the same hierarchy in one column: product
+identity, warnings, next action, lane state, and supporting evidence. Critical
+status, trust, timestamp, and action labels must not depend on hover or color
+alone.
+
 ## Product Model
 
 The primary operator model is:
@@ -37,6 +199,10 @@ For SellYourOutboard, the canonical product key is `sellyouroutboard`. Stable
 environments live under that product as `testing` and `prod`. Legacy names such
 as `sellyouroutboard-testing` are transition details and must not be the primary
 picker model.
+
+These names describe the current operator model. Launchplane records remain the
+authority for live product keys, lanes, contexts, repositories, domains,
+targets, and bindings.
 
 ## API Contract
 
@@ -165,3 +331,7 @@ Reusable pieces from the current UI may survive only if they fit the new model:
 session/auth client, API request wrapper, status formatting, evidence formatting,
 and theme basics. The current context-picker/product-config flow should be
 hidden or removed once the new settings flow covers its use cases.
+
+The handwritten frontend contract mirror is not reusable authority. Generated
+backend contracts should replace request/response types; handwritten frontend
+types remain only for UI state and view models.
