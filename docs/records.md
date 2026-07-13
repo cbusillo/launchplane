@@ -129,7 +129,11 @@ migrated route: the reservation insert occurs before the profile write, and the
 profile plus completed response commit atomically. A no-op apply still commits
 the completed reservation so concurrent and later same-key requests replay the
 original response. If response-evidence persistence fails, the profile write
-and reservation both roll back.
+and reservation both roll back. Its DB-only preflight may remove an expired
+unbound orphan reservation because the route cannot commit the profile write
+without completing that same transaction; active or reconciliation-bound claims
+remain fail-closed. Persisted reservation and completion timestamps come from
+the database clock.
 
 Provider-backed routes must durably reserve first, bind their stable provider
 operation or reconciliation key before invoking the provider, and complete only

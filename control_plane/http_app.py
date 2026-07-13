@@ -94,8 +94,6 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
-    build_launchplane_mutation_reservation,
-    complete_launchplane_mutation_reservation,
 )
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
@@ -583,7 +581,7 @@ from control_plane.launchplane_mutations import (
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     PromotionEvidenceValidationError,
@@ -11885,20 +11883,63 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
         payload_fingerprint = ""
-        if preview_tls_request.mode == "apply":
-            (
-                normalized_idempotency_key,
-                payload_fingerprint,
-                replay_response,
-            ) = await replay_apply_idempotency(
-                request=request,
-                record_store=database_store,
-                identity=identity,
+
+        def prepare_product_preview_tls_mutation() -> AcceptedEvidenceResponse | None:
+            preflight = database_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
                 route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
                 idempotency_key=normalized_idempotency_key,
-                trace_id=trace_id,
-                check_replay=True,
+                request_fingerprint=payload_fingerprint,
             )
+            if preflight.status in {"missing", "released"}:
+                return None
+            if preflight.record is None:
+                raise RuntimeError("Product preview TLS mutation preflight requires evidence.")
+            if preflight.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=preflight.record,
+                    route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                )
+            if preflight.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if preflight.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product preview TLS mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if preflight.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product preview TLS mutation requires reconciliation before retry."
+                    ),
+                )
+            raise RuntimeError(
+                f"Unsupported product preview TLS mutation preflight status: {preflight.status}"
+            )
+
+        if preview_tls_request.mode == "apply":
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                payload=cast(dict[str, object], raw_payload),
+            )
+            replay_response = prepare_product_preview_tls_mutation()
             if replay_response is not None:
                 return replay_response
         try:
@@ -11933,27 +11974,9 @@ def create_launchplane_fastapi_app(
             preview_tls_request.mode == "apply"
             and preview_tls_request.reviewed_plan_sha256 != plan.plan_sha256
         ):
-            stored_idempotency_record = database_store.read_idempotency_record(
-                scope=idempotency_scope(identity),
-                route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            )
-            if stored_idempotency_record is not None:
-                if stored_idempotency_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=stored_idempotency_record,
-                    route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
-                )
+            replay_response = prepare_product_preview_tls_mutation()
+            if replay_response is not None:
+                return replay_response
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -11991,33 +12014,21 @@ def create_launchplane_fastapi_app(
                 records={"product_profile": preview_tls_request.product},
                 result=result_plan.model_dump(mode="json"),
             )
-            reservation_started_at = utc_now_timestamp()
-            mutation_reservation = build_launchplane_mutation_reservation(
+            mutation = DbOnlyMutationRequest(
                 scope=idempotency_scope(identity),
                 route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
                 idempotency_key=normalized_idempotency_key,
                 request_fingerprint=payload_fingerprint,
                 lease_owner=trace_id,
-                lease_expires_at=(
-                    parse_utc_timestamp(reservation_started_at) + _DB_ONLY_MUTATION_LEASE
-                )
-                .replace(microsecond=0)
-                .isoformat()
-                .replace("+00:00", "Z"),
-                reserved_at=reservation_started_at,
-            )
-            mutation_completion = complete_launchplane_mutation_reservation(
-                mutation_reservation,
                 response_status_code=202,
                 response_trace_id=trace_id,
-                completed_at=reservation_started_at,
                 response_payload=response.model_dump(mode="json", exclude_none=True),
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
             )
             write_result = database_store.compare_and_write_product_profile_record(
                 expected_record=profile,
                 replacement_record=replacement_profile,
-                mutation_reservation=mutation_reservation,
-                mutation_completion=mutation_completion,
+                mutation=mutation,
             )
             if write_result.status == "replayed":
                 if write_result.idempotency_record is None:

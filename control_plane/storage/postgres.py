@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast
 
@@ -47,6 +48,7 @@ from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanR
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_mutation_reservation,
+    complete_launchplane_mutation_reservation,
     format_launchplane_mutation_timestamp,
     parse_launchplane_mutation_timestamp,
 )
@@ -166,6 +168,14 @@ MutationReservationCompletionStatus = Literal[
     "lease_expired",
     "reconcile_required",
 ]
+DbOnlyMutationPreflightStatus = Literal[
+    "missing",
+    "released",
+    "replayed",
+    "conflict",
+    "in_progress",
+    "reconcile_required",
+]
 
 
 class ProductProfileCompareWriteResult(NamedTuple):
@@ -186,6 +196,24 @@ class MutationReservationUpdateResult(NamedTuple):
 class MutationReservationCompletionResult(NamedTuple):
     status: MutationReservationCompletionStatus
     record: LaunchplaneIdempotencyRecord | None = None
+
+
+class DbOnlyMutationPreflightResult(NamedTuple):
+    status: DbOnlyMutationPreflightStatus
+    record: LaunchplaneIdempotencyRecord | None = None
+
+
+@dataclass(frozen=True)
+class DbOnlyMutationRequest:
+    scope: str
+    route_path: str
+    idempotency_key: str
+    request_fingerprint: str
+    lease_owner: str
+    response_status_code: int
+    response_trace_id: str
+    response_payload: dict[str, Any]
+    lease_seconds: int = 300
 
 
 def _utc_now_timestamp() -> str:
@@ -1934,6 +1962,89 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 return None
             return self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+
+    def prepare_db_only_mutation(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> DbOnlyMutationPreflightResult:
+        normalized_scope = scope.strip()
+        normalized_route_path = route_path.strip()
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_request_fingerprint = request_fingerprint.strip()
+        if not all(
+            (
+                normalized_scope,
+                normalized_route_path,
+                normalized_idempotency_key,
+                normalized_request_fingerprint,
+            )
+        ):
+            raise ValueError("DB-only mutation preflight requires complete idempotency identity.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=normalized_scope,
+                    route_path=normalized_route_path,
+                    idempotency_key=normalized_idempotency_key,
+                    for_update=True,
+                )
+            )
+            if row is None:
+                return DbOnlyMutationPreflightResult(status="missing")
+            current_record = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=row.payload,
+            )
+            if current_record.request_fingerprint != normalized_request_fingerprint:
+                return DbOnlyMutationPreflightResult(
+                    status="conflict",
+                    record=current_record,
+                )
+            if current_record.state == "completed":
+                return DbOnlyMutationPreflightResult(
+                    status="replayed",
+                    record=current_record,
+                )
+            if current_record.state == "reconcile_required":
+                return DbOnlyMutationPreflightResult(
+                    status="reconcile_required",
+                    record=current_record,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_record.lease_expires_at,
+                field_name="lease_expires_at",
+            ) > parse_launchplane_mutation_timestamp(
+                observed_at,
+                field_name="observed_at",
+            ):
+                return DbOnlyMutationPreflightResult(
+                    status="in_progress",
+                    record=current_record,
+                )
+            if current_record.reconciliation_key:
+                reconcile_record = self._updated_idempotency_record(
+                    current_record,
+                    state="reconcile_required",
+                    updated_at=observed_at,
+                )
+                self._sync_idempotency_row(row, reconcile_record)
+                session.commit()
+                return DbOnlyMutationPreflightResult(
+                    status="reconcile_required",
+                    record=reconcile_record,
+                )
+            session.delete(row)
+            session.commit()
+            return DbOnlyMutationPreflightResult(
+                status="released",
+                record=current_record,
+            )
 
     def reserve_mutation(
         self,
@@ -4895,24 +5006,15 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         expected_record: LaunchplaneProductProfileRecord,
         replacement_record: LaunchplaneProductProfileRecord,
-        mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
-        mutation_completion: LaunchplaneIdempotencyRecord | None = None,
+        mutation: DbOnlyMutationRequest | None = None,
     ) -> ProductProfileCompareWriteResult:
         if expected_record.product != replacement_record.product:
             raise ValueError("Product profile compare-and-write requires matching products.")
-        if (mutation_reservation is None) != (mutation_completion is None):
-            raise ValueError(
-                "Product profile mutation requires both reservation and completion records."
-            )
-        if mutation_reservation is not None and mutation_completion is not None:
-            if mutation_reservation.state != "running":
-                raise ValueError("Product profile mutation reservation must be running.")
-            if mutation_completion.state != "completed":
-                raise ValueError("Product profile mutation completion must be completed.")
-            if self._mutation_transition_identity(
-                mutation_completion
-            ) != self._mutation_transition_identity(mutation_reservation):
-                raise ValueError("Product profile mutation completion must match its reservation.")
+        if mutation is not None:
+            if not 100 <= mutation.response_status_code <= 599:
+                raise ValueError("DB-only mutation response status must be between 100 and 599.")
+            if not mutation.response_trace_id.strip():
+                raise ValueError("DB-only mutation response trace id is required.")
         statement = (
             select(LaunchplaneProductProfileRow)
             .where(LaunchplaneProductProfileRow.product == expected_record.product)
@@ -4920,67 +5022,172 @@ class PostgresRecordStore(HumanSessionStore):
         )
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
+        if mutation is None:
+            with self._session_factory() as session:
+                self._begin_serialized_write(session)
+                return self._compare_and_write_product_profile_locked(
+                    session=session,
+                    statement=statement,
+                    expected_record=expected_record,
+                    replacement_record=replacement_record,
+                )
+
         reservation_insert_error: IntegrityError | None = None
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            reservation_row: LaunchplaneIdempotencyRow | None = None
-            if mutation_reservation is not None:
-                reservation_row = self._idempotency_row(mutation_reservation)
-                session.add(reservation_row)
-                try:
-                    session.flush()
-                except IntegrityError as error:
-                    session.rollback()
-                    reservation_insert_error = error
+            observed_at = self._database_mutation_timestamp(session)
+            stored_reservation = build_launchplane_mutation_reservation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                reserved_at=observed_at,
+            )
+            reservation_row = self._idempotency_row(stored_reservation)
+            session.add(reservation_row)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                session.rollback()
+                reservation_insert_error = error
             if reservation_insert_error is None:
-                row = session.scalar(statement)
-                if row is None:
-                    return ProductProfileCompareWriteResult(status="missing")
-                current_record = self._read_product_profile_payload(row.payload)
-                if self._payload_dict(current_record) != self._payload_dict(expected_record):
-                    return ProductProfileCompareWriteResult(status="changed")
-                row.display_name = replacement_record.display_name
-                row.repository = replacement_record.repository
-                row.driver_id = replacement_record.driver_id
-                row.updated_at = replacement_record.updated_at
-                row.payload = self._payload_dict(replacement_record)
-                if reservation_row is not None and mutation_completion is not None:
-                    self._sync_idempotency_row(reservation_row, mutation_completion)
-                session.commit()
-                return ProductProfileCompareWriteResult(status="written")
+                return self._compare_and_write_product_profile_locked(
+                    session=session,
+                    statement=statement,
+                    expected_record=expected_record,
+                    replacement_record=replacement_record,
+                    reservation_row=reservation_row,
+                    mutation_reservation=stored_reservation,
+                    mutation=mutation,
+                )
 
-        if mutation_reservation is None:
-            assert reservation_insert_error is not None
-            raise reservation_insert_error
-        existing_idempotency_record = self.read_idempotency_record(
-            scope=mutation_reservation.scope,
-            route_path=mutation_reservation.route_path,
-            idempotency_key=mutation_reservation.idempotency_key,
-        )
-        if existing_idempotency_record is None:
-            assert reservation_insert_error is not None
-            raise reservation_insert_error
-        if (
-            existing_idempotency_record.request_fingerprint
-            != mutation_reservation.request_fingerprint
-        ):
-            return ProductProfileCompareWriteResult(
-                status="idempotency_conflict",
-                idempotency_record=existing_idempotency_record,
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_row = session.scalar(
+                self._idempotency_statement(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    for_update=True,
+                )
             )
-        if existing_idempotency_record.state == "completed":
-            return ProductProfileCompareWriteResult(
-                status="replayed",
-                idempotency_record=existing_idempotency_record,
+            if reservation_row is None:
+                assert reservation_insert_error is not None
+                raise reservation_insert_error
+            current_reservation = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=reservation_row.payload,
             )
-        if existing_idempotency_record.state == "reconcile_required":
-            return ProductProfileCompareWriteResult(
-                status="reconciliation_required",
-                idempotency_record=existing_idempotency_record,
+            if current_reservation.request_fingerprint != mutation.request_fingerprint:
+                return ProductProfileCompareWriteResult(
+                    status="idempotency_conflict",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "completed":
+                return ProductProfileCompareWriteResult(
+                    status="replayed",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "reconcile_required":
+                return ProductProfileCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=current_reservation,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_reservation.lease_expires_at,
+                field_name="lease_expires_at",
+            ) > parse_launchplane_mutation_timestamp(
+                observed_at,
+                field_name="observed_at",
+            ):
+                return ProductProfileCompareWriteResult(
+                    status="reservation_in_progress",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.reconciliation_key:
+                reconcile_record = self._updated_idempotency_record(
+                    current_reservation,
+                    state="reconcile_required",
+                    updated_at=observed_at,
+                )
+                self._sync_idempotency_row(reservation_row, reconcile_record)
+                session.commit()
+                return ProductProfileCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=reconcile_record,
+                )
+            reclaimed_reservation = self._updated_idempotency_record(
+                current_reservation,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                attempt=current_reservation.attempt + 1,
+                updated_at=observed_at,
             )
+            self._sync_idempotency_row(reservation_row, reclaimed_reservation)
+            return self._compare_and_write_product_profile_locked(
+                session=session,
+                statement=statement,
+                expected_record=expected_record,
+                replacement_record=replacement_record,
+                reservation_row=reservation_row,
+                mutation_reservation=reclaimed_reservation,
+                mutation=mutation,
+            )
+
+    def _compare_and_write_product_profile_locked(
+        self,
+        *,
+        session: Any,
+        statement: Any,
+        expected_record: LaunchplaneProductProfileRecord,
+        replacement_record: LaunchplaneProductProfileRecord,
+        reservation_row: LaunchplaneIdempotencyRow | None = None,
+        mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
+        mutation: DbOnlyMutationRequest | None = None,
+    ) -> ProductProfileCompareWriteResult:
+        row = session.scalar(statement)
+        if row is None:
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return ProductProfileCompareWriteResult(status="missing")
+        current_record = self._read_product_profile_payload(row.payload)
+        if self._payload_dict(current_record) != self._payload_dict(expected_record):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return ProductProfileCompareWriteResult(status="changed")
+        row.display_name = replacement_record.display_name
+        row.repository = replacement_record.repository
+        row.driver_id = replacement_record.driver_id
+        row.updated_at = replacement_record.updated_at
+        row.payload = self._payload_dict(replacement_record)
+        stored_completion: LaunchplaneIdempotencyRecord | None = None
+        if reservation_row is not None:
+            if mutation_reservation is None or mutation is None:
+                raise RuntimeError("Product profile mutation completion evidence is incomplete.")
+            completed_at = self._database_mutation_timestamp(session)
+            stored_completion = complete_launchplane_mutation_reservation(
+                mutation_reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=completed_at,
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(reservation_row, stored_completion)
+        session.commit()
         return ProductProfileCompareWriteResult(
-            status="reservation_in_progress",
-            idempotency_record=existing_idempotency_record,
+            status="written",
+            idempotency_record=stored_completion,
         )
 
     def _read_product_profile_payload(

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import json
 import os
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -34,7 +35,11 @@ from control_plane.contracts.product_profile_record import (
     ProductImageProfile,
     ProductPreviewProfile,
 )
-from control_plane.storage.postgres import MutationReservationResult, PostgresRecordStore
+from control_plane.storage.postgres import (
+    DbOnlyMutationRequest,
+    MutationReservationResult,
+    PostgresRecordStore,
+)
 from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
@@ -187,6 +192,24 @@ def _mutation_completion(
         response_status_code=202,
         response_trace_id=response_trace_id,
         completed_at="2026-07-13T00:01:00Z",
+        response_payload={"status": "accepted", "trace_id": response_trace_id},
+    )
+
+
+def _db_only_mutation(
+    *,
+    lease_owner: str,
+    idempotency_key: str,
+    response_trace_id: str,
+) -> DbOnlyMutationRequest:
+    return DbOnlyMutationRequest(
+        scope="github-actions|cbusillo/launchplane|workflow:test",
+        route_path="/v1/product-profiles/preview-tls/apply",
+        idempotency_key=idempotency_key,
+        request_fingerprint="mutation-fingerprint-a",
+        lease_owner=lease_owner,
+        response_status_code=202,
+        response_trace_id=response_trace_id,
         response_payload={"status": "accepted", "trace_id": response_trace_id},
     )
 
@@ -619,6 +642,32 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(reconciled.record.state, "reconcile_required")
         self.assertEqual(reconciled.record.reconciliation_key, "provider-operation-123")
 
+    def test_expired_reclaim_fences_stale_attempt_across_store_instances(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            reservation = _mutation_reservation(lease_owner="worker-reused")
+            try:
+                acquired = _reserve_mutation(store, reservation, lease_seconds=1)
+                time.sleep(1.1)
+                reclaimed = _reserve_mutation(
+                    second_store,
+                    _mutation_reservation(lease_owner="worker-reused"),
+                )
+                stale_completion = _mutation_completion(
+                    acquired.record,
+                    response_trace_id="trace-stale-attempt",
+                )
+                stale_result = store.complete_mutation_reservation(
+                    completion=stale_completion,
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(acquired.status, "acquired")
+        self.assertEqual(reclaimed.status, "acquired")
+        self.assertEqual(reclaimed.record.attempt, 2)
+        self.assertEqual(stale_result.status, "reservation_mismatch")
+
     def test_atomic_noop_profile_mutation_replays_across_two_store_instances(self) -> None:
         with _store_for_fresh_head_database() as store:
             profile = _product_profile()
@@ -627,20 +676,16 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             barrier = threading.Barrier(2)
 
             def apply_noop(active_store: PostgresRecordStore, owner: str) -> str:
-                reservation = _mutation_reservation(
+                mutation = _db_only_mutation(
                     lease_owner=owner,
                     idempotency_key="product-preview-tls:postgres:noop",
-                )
-                completion = _mutation_completion(
-                    reservation,
                     response_trace_id=f"trace-{owner}",
                 )
                 barrier.wait()
                 return active_store.compare_and_write_product_profile_record(
                     expected_record=profile,
                     replacement_record=profile,
-                    mutation_reservation=reservation,
-                    mutation_completion=completion,
+                    mutation=mutation,
                 ).status
 
             try:
@@ -667,6 +712,47 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(stored_reservation.state, "completed")
         self.assertEqual(stored_reservation.attempt, 1)
 
+    def test_atomic_profile_mutation_reclaims_expired_reservation_with_db_clock(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            profile = _product_profile()
+            mutation = _db_only_mutation(
+                lease_owner="worker-b",
+                idempotency_key="product-preview-tls:postgres:expired",
+                response_trace_id="trace-worker-b",
+            )
+            store.write_product_profile_record(profile)
+            acquired = store.reserve_mutation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner="worker-a",
+                lease_seconds=1,
+            )
+            time.sleep(1.1)
+
+            result = store.compare_and_write_product_profile_record(
+                expected_record=profile,
+                replacement_record=profile,
+                mutation=mutation,
+            )
+            stored_reservation = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+
+        self.assertEqual(acquired.status, "acquired")
+        self.assertEqual(result.status, "written")
+        self.assertIsNotNone(stored_reservation)
+        assert stored_reservation is not None
+        self.assertEqual(stored_reservation.state, "completed")
+        self.assertEqual(stored_reservation.attempt, 2)
+        self.assertEqual(stored_reservation.lease_owner, mutation.lease_owner)
+        self.assertEqual(stored_reservation.response_trace_id, mutation.response_trace_id)
+
     def test_profile_write_rolls_back_when_completion_persistence_fails(self) -> None:
         with _store_for_fresh_head_database() as store:
             profile = _product_profile()
@@ -676,12 +762,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     "updated_at": "2026-07-13T00:01:00Z",
                 }
             )
-            reservation = _mutation_reservation(
+            mutation = _db_only_mutation(
                 lease_owner="worker-a",
                 idempotency_key="product-preview-tls:postgres:fault",
-            )
-            completion = _mutation_completion(
-                reservation,
                 response_trace_id="trace-injected-failure",
             )
             store.write_product_profile_record(profile)
@@ -698,14 +781,13 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     store.compare_and_write_product_profile_record(
                         expected_record=profile,
                         replacement_record=replacement,
-                        mutation_reservation=reservation,
-                        mutation_completion=completion,
+                        mutation=mutation,
                     )
             stored_profile = store.read_product_profile_record(profile.product)
             stored_reservation = store.read_idempotency_record(
-                scope=reservation.scope,
-                route_path=reservation.route_path,
-                idempotency_key=reservation.idempotency_key,
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
             )
 
         self.assertEqual(stored_profile, profile)

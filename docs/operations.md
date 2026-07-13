@@ -147,7 +147,10 @@ reconciler.
 Product preview TLS apply is the first migrated DB-only route. Its reservation,
 profile compare-and-write, and response completion share one transaction, so a
 completion-persistence failure rolls back the profile change and a no-op apply
-still produces replay evidence.
+still produces replay evidence. Before planning, the route uses the database
+clock to reject active claims, replay completed claims, transition bound expired
+claims to reconciliation, and release only expired unbound orphan claims that
+cannot have committed the atomic profile write.
 
 ## Target Launchplane Ingress
 

@@ -1304,11 +1304,14 @@ SHA-256 and an `Idempotency-Key`; changed reviewed inputs or a profile-row chang
 during apply make the operation stale. A successful apply uses an atomic
 compare-and-write, rebuilds from the current stored record, and changes only the
 preview certificate value plus `updated_at` and server-owned `source`;
-the transaction inserts a typed `running` mutation reservation before the
-profile write and commits the profile plus `completed` replay evidence together,
-even when the requested value is already current. Concurrent same-key requests
-cannot both write; matching requests replay the committed response and changed
-fingerprints fail with `409 idempotency_key_reused`. The operator workflow
+DB-clock preflight rejects active claims, preserves reconciliation-bound claims,
+and releases only expired unbound orphans that cannot have committed this
+DB-only atomic write. The transaction inserts a typed `running` mutation
+reservation before the profile write and commits the profile plus `completed`
+replay evidence together, even when the requested value is already current.
+Concurrent same-key requests cannot both write; matching requests replay the
+committed response and changed fingerprints fail with
+`409 idempotency_key_reused`. The operator workflow
 receives the real target product as dispatch input, and its product-specific
 authz grant comes from operator-supplied configuration rather than checked-in
 runtime authority.

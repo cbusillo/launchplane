@@ -2315,6 +2315,72 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["code"], "mutation_in_progress")
 
+    async def test_apply_product_preview_tls_releases_expired_db_only_reservation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_preview_tls_profile())
+            identity = _product_preview_tls_identity()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            apply_payload = {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+            route_path = "/v1/product-profiles/preview-tls/apply"
+            idempotency_key = "product-preview-tls-expired"
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                store.reserve_mutation(
+                    scope=idempotency_scope(identity),
+                    route_path=route_path,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=idempotency_request_fingerprint(
+                        route_path=route_path,
+                        payload=apply_payload,
+                    ),
+                    lease_owner="orphaned-worker",
+                    lease_seconds=60,
+                )
+                clock["now"] = "2026-07-12T01:02:00Z"
+                response = await _post_product_preview_tls(
+                    app,
+                    apply_payload,
+                    idempotency_key=idempotency_key,
+                )
+            stored_record = store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 202)
+        self.assertIsNotNone(stored_record)
+        assert stored_record is not None
+        self.assertEqual(stored_record.state, "completed")
+        self.assertEqual(stored_record.attempt, 1)
+        self.assertEqual(stored_record.created_at, "2026-07-12T01:02:00Z")
+        self.assertEqual(stored_record.recorded_at, "2026-07-12T01:02:00Z")
+
     async def test_apply_product_preview_tls_reports_reconcile_required_reservation(
         self,
     ) -> None:
@@ -2570,6 +2636,77 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(apply_response.status_code, 409)
         self.assertEqual(apply_response.json()["error"]["code"], "stale")
         self.assertEqual(stored_profile.preview.domain_certificate_type, "none")
+
+    async def test_apply_product_preview_tls_stale_plan_releases_expired_reservation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            original_profile = _product_preview_tls_profile()
+            store.write_product_profile_record(original_profile)
+            identity = _product_preview_tls_identity()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=_product_preview_tls_policy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run_response = await _post_product_preview_tls(
+                app,
+                _product_preview_tls_payload(),
+            )
+            route_path = "/v1/product-profiles/preview-tls/apply"
+            idempotency_key = "product-preview-tls-expired-stale"
+            apply_payload = {
+                **_product_preview_tls_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                store.reserve_mutation(
+                    scope=idempotency_scope(identity),
+                    route_path=route_path,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=idempotency_request_fingerprint(
+                        route_path=route_path,
+                        payload=apply_payload,
+                    ),
+                    lease_owner="orphaned-worker",
+                    lease_seconds=60,
+                )
+                store.write_product_profile_record(
+                    original_profile.model_copy(
+                        update={
+                            "updated_at": "2026-07-12T02:00:00Z",
+                            "source": "concurrent-profile-update",
+                        }
+                    )
+                )
+                clock["now"] = "2026-07-12T01:02:00Z"
+                response = await _post_product_preview_tls(
+                    app,
+                    apply_payload,
+                    idempotency_key=idempotency_key,
+                )
+            stored_record = store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "stale")
+        self.assertIsNone(stored_record)
 
     async def test_apply_product_preview_tls_requires_idempotency_key(self) -> None:
         app = create_launchplane_fastapi_app(

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Literal
+from typing import Literal
 from unittest.mock import Mock, patch
 
 from alembic import command as alembic_command
@@ -164,8 +164,10 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.postgres import (
     Base,
+    DbOnlyMutationRequest,
     LaunchplaneIdempotencyRow,
     LaunchplaneProductProfileRow,
+    MutationReservationResult,
     PostgresRecordStore,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
@@ -207,28 +209,17 @@ def _product_profile_record(
     )
 
 
-def _product_profile_mutation_reservation(
+def _product_profile_db_only_mutation(
     *, request_fingerprint: str = "fingerprint-a"
-) -> LaunchplaneIdempotencyRecord:
-    return build_launchplane_mutation_reservation(
+) -> DbOnlyMutationRequest:
+    return DbOnlyMutationRequest(
         scope="github-actions:example",
         route_path="/v1/product-profiles/preview-tls/apply",
         idempotency_key="product-preview-tls:test:apply:1",
         request_fingerprint=request_fingerprint,
         lease_owner="trace-product-preview-tls",
-        lease_expires_at="2026-07-12T01:05:00Z",
-        reserved_at="2026-07-12T01:00:00Z",
-    )
-
-
-def _product_profile_mutation_completion(
-    reservation: LaunchplaneIdempotencyRecord,
-) -> LaunchplaneIdempotencyRecord:
-    return complete_launchplane_mutation_reservation(
-        reservation,
         response_status_code=202,
         response_trace_id="trace-product-preview-tls",
-        completed_at="2026-07-12T01:00:30Z",
         response_payload={"status": "accepted", "trace_id": "trace-product-preview-tls"},
     )
 
@@ -257,7 +248,7 @@ def _reserve_mutation(
     reservation: LaunchplaneIdempotencyRecord,
     *,
     lease_seconds: int = 300,
-) -> Any:
+) -> MutationReservationResult:
     return store.reserve_mutation(
         scope=reservation.scope,
         route_path=reservation.route_path,
@@ -1965,6 +1956,47 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(replayed.record.state, "completed")
         self.assertEqual(replayed.record.response_trace_id, "trace-mutation-completed")
 
+    def test_db_only_mutation_preflight_releases_expired_unbound_reservation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            mutation = _product_profile_db_only_mutation()
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                acquired = store.reserve_mutation(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    request_fingerprint=mutation.request_fingerprint,
+                    lease_owner="orphaned-worker",
+                    lease_seconds=60,
+                )
+                clock["now"] = "2026-07-12T01:02:00Z"
+                preflight = store.prepare_db_only_mutation(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    request_fingerprint=mutation.request_fingerprint,
+                )
+            stored_record = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(acquired.status, "acquired")
+        self.assertEqual(preflight.status, "released")
+        self.assertIsNone(stored_record)
+
     def test_mutation_reconciliation_key_fences_expired_lease(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -3332,43 +3364,95 @@ env_var = "GH_TOKEN"
                     "source": "service:test-compare-write",
                 }
             )
-            mutation_reservation = _product_profile_mutation_reservation()
-            mutation_completion = _product_profile_mutation_completion(mutation_reservation)
+            mutation = _product_profile_db_only_mutation()
             store.write_product_profile_record(expected_record)
 
             first_result = store.compare_and_write_product_profile_record(
                 expected_record=expected_record,
                 replacement_record=replacement_record,
-                mutation_reservation=mutation_reservation,
-                mutation_completion=mutation_completion,
+                mutation=mutation,
             )
             replay_result = store.compare_and_write_product_profile_record(
                 expected_record=expected_record,
                 replacement_record=replacement_record,
-                mutation_reservation=mutation_reservation,
-                mutation_completion=mutation_completion,
+                mutation=mutation,
             )
-            conflicting_reservation = _product_profile_mutation_reservation(
+            conflicting_mutation = _product_profile_db_only_mutation(
                 request_fingerprint="fingerprint-b"
             )
             conflict_result = store.compare_and_write_product_profile_record(
                 expected_record=expected_record,
                 replacement_record=replacement_record,
-                mutation_reservation=conflicting_reservation,
-                mutation_completion=_product_profile_mutation_completion(conflicting_reservation),
+                mutation=conflicting_mutation,
             )
             stored_idempotency = store.read_idempotency_record(
-                scope=mutation_reservation.scope,
-                route_path=mutation_reservation.route_path,
-                idempotency_key=mutation_reservation.idempotency_key,
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
             )
             store.close()
 
         self.assertEqual(first_result.status, "written")
         self.assertEqual(replay_result.status, "replayed")
-        self.assertEqual(replay_result.idempotency_record, mutation_completion)
+        self.assertIsNotNone(replay_result.idempotency_record)
         self.assertEqual(conflict_result.status, "idempotency_conflict")
-        self.assertEqual(stored_idempotency, mutation_completion)
+        self.assertIsNotNone(stored_idempotency)
+        assert stored_idempotency is not None
+        self.assertEqual(stored_idempotency.state, "completed")
+        self.assertEqual(stored_idempotency.response_trace_id, mutation.response_trace_id)
+        self.assertEqual(stored_idempotency.response_payload, mutation.response_payload)
+        self.assertEqual(stored_idempotency.attempt, 1)
+
+    def test_product_profile_compare_and_write_reclaims_expired_reservation_with_db_clock(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            profile = _product_profile_record()
+            mutation = _product_profile_db_only_mutation()
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            store.write_product_profile_record(profile)
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                acquired = store.reserve_mutation(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    request_fingerprint=mutation.request_fingerprint,
+                    lease_owner="orphaned-worker",
+                    lease_seconds=60,
+                )
+                clock["now"] = "2026-07-12T01:02:00Z"
+                result = store.compare_and_write_product_profile_record(
+                    expected_record=profile,
+                    replacement_record=profile,
+                    mutation=mutation,
+                )
+            stored_record = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(acquired.status, "acquired")
+        self.assertEqual(result.status, "written")
+        self.assertIsNotNone(stored_record)
+        assert stored_record is not None
+        self.assertEqual(stored_record.state, "completed")
+        self.assertEqual(stored_record.attempt, 2)
+        self.assertEqual(stored_record.lease_owner, mutation.lease_owner)
+        self.assertEqual(stored_record.created_at, "2026-07-12T01:00:00Z")
+        self.assertEqual(stored_record.updated_at, "2026-07-12T01:02:00Z")
+        self.assertEqual(stored_record.recorded_at, "2026-07-12T01:02:00Z")
 
     def test_product_profile_reads_migrate_legacy_alert_issue_url(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
