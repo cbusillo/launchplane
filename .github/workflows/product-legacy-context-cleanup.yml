@@ -84,7 +84,7 @@ jobs:
 
       - name: Request Launchplane legacy context cleanup
         id: cleanup_request
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           route-path: /v1/product-profiles/legacy-context-cleanup/apply
@@ -108,7 +108,7 @@ jobs:
 
       - name: Upload cleanup artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: launchplane-product-legacy-context-cleanup-${{ inputs.product }}
           path: launchplane-product-legacy-context-cleanup.json
