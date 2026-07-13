@@ -93,6 +93,16 @@ integration command is the official production storage-semantics proof when a
 local or CI PostgreSQL service is available. Neither local command replaces CI's
 runner isolation, artifact retention, or required status checks.
 
+Workflow contract tests should parse workflow YAML through
+`tests/support/workflows.py` and assert named invariants instead of mirroring
+large YAML snippets, substring counts, or indentation-sensitive job fragments.
+Use semantic checks for event shape, fork-hosted versus same-repository
+self-hosted runner isolation, OIDC and permission requirements,
+`launchplane-request` inputs, artifact retention, immutable timing snapshots,
+and aggregate gate dependencies. Keep direct text assertions only for embedded
+script behavior that is not represented as YAML structure, and make invariant
+failures name both the workflow file and the violated invariant.
+
 ## HTTP and ASGI contracts
 
 - Use `tests.support.http.lifespan_client` or `tests.support.http.request` for
