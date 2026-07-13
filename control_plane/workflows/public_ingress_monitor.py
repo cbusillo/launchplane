@@ -1134,7 +1134,7 @@ def public_ingress_managed_secret_resolver(
             return ""
         try:
             version = record_store.read_secret_version(record.current_version_id)
-            return control_plane_secrets._decrypt_secret_value(version.ciphertext)
+            return control_plane_secrets._decrypt_secret_value(version.ciphertext, version.key_id)
         except Exception:  # noqa: BLE001 - delivery records capture unreadable secrets per destination.
             return ""
 

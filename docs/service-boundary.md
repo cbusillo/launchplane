@@ -1386,11 +1386,22 @@ target. It reuses the same planner/writer as `launchplane product-config apply`,
 returns only actions, keys, counts, actor/source metadata, and secret IDs, uses
 generic validation messages for rejected requests, and fails closed when the
 record store is not DB-backed, when a secret bundle is submitted without
-`LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane runtime, or when
+valid `LAUNCHPLANE_SECRET_KEYS_JSON` (or the migration-only legacy
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`) in the trusted Launchplane runtime, or when
 there is no active runtime key-safety policy that allows the requested managed
 secret binding for the target runtime class. Request bodies for this route must
 not be copied into logs, issues, docs, or workflow artifacts because they can
 contain plaintext secret values.
+
+`POST /v1/secrets/reencrypt` owns shared and production managed-secret root
+rotation. The route requires JSON with a bounded body, exact
+`secret.reencrypt.dry-run` or `secret.reencrypt.apply` authority, a reason, and
+DB-backed storage. Apply additionally requires the matching dry-run digest and
+an `Idempotency-Key`. Version, current-pointer, and audit writes commit in one
+transaction; the audit operation token provides retry recovery if idempotency
+evidence cannot be persisted after that transaction. Terminal-agent read
+credentials cannot call the route, and responses expose key IDs and counts but
+never plaintext or ciphertext.
 
 #### Product-config secret source contract
 

@@ -252,19 +252,19 @@ jobs:
           PY
 
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ steps.prep.outputs.checkout_ref }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Install Python
         run: uv python install 3.13
 
       - name: Set up Docker Buildx
         if: steps.prep.outputs.should_build == 'true'
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
         if: steps.prep.outputs.should_build == 'true'
@@ -289,7 +289,7 @@ jobs:
       - name: Build and push Launchplane image
         if: steps.prep.outputs.should_build == 'true'
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile
@@ -321,7 +321,7 @@ jobs:
       - name: Read previous Launchplane runtime
         id: previous_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -537,7 +537,7 @@ jobs:
       - name: Request Launchplane self deploy
         id: self_deploy_request
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -586,7 +586,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - name: Wait for deployed Launchplane runtime image
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -660,7 +660,7 @@ jobs:
           exit 1
 
       - name: Verify deployed Launchplane runtime image after health
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -711,7 +711,7 @@ jobs:
           && steps.rollback_request.outputs.previous_image_reference != ''
         id: rollback_request_action
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -789,7 +789,7 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
         id: rollback_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -928,7 +928,7 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
           && steps.rollback_runtime.outcome == 'success'
           && steps.rollback_health.outcome == 'success'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -961,7 +961,7 @@ jobs:
 
       - name: Ensure GitHub Actions authz grants
         if: steps.authz_grants.outputs.has_github_actions_grants == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -973,7 +973,7 @@ jobs:
 
       - name: Ensure terminal-agent authz grants
         if: steps.authz_grants.outputs.has_terminal_agents_grants == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -985,7 +985,7 @@ jobs:
 
       - name: Ensure local-operator authz grants
         if: steps.authz_grants.outputs.has_local_operators_grants == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -997,7 +997,7 @@ jobs:
 
       - name: Ensure local-admin authz grants
         if: steps.authz_grants.outputs.has_local_admins_grants == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1009,7 +1009,7 @@ jobs:
 
       - name: Ensure GitHub human authz grants
         if: steps.authz_grants.outputs.has_github_humans_grants == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1021,7 +1021,7 @@ jobs:
 
       - name: Ensure runtime key-safety policy
         if: steps.authz_grants.outputs.has_runtime_key_safety_policy == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1034,7 +1034,7 @@ jobs:
       - name: Read deployed Launchplane runtime
         id: deployed_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1191,7 +1191,7 @@ jobs:
 
       - name: Upload v2 deployed smoke evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: launchplane-v2-deployed-smoke
           path: |
@@ -1298,7 +1298,7 @@ jobs:
           }
 
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Render operator-configured authz grants
         id: authz_grants
@@ -1385,9 +1385,9 @@ jobs:
       LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS: ${{ vars.LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS }}
       LAUNCHPLANE_IMAGE_REPOSITORY: ${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Validate manual break-glass request
         shell: bash
@@ -1470,7 +1470,7 @@ jobs:
 
       - name: Upload break-glass rollback evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: launchplane-break-glass-rollback
           path: ${{ runner.temp }}/launchplane-break-glass-rollback.json
