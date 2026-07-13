@@ -20,7 +20,8 @@ from tests.http_app_test_support import (
     _RejectingVerifier,
     _work_graph_read_policy,
 )
-from tests.test_service import _identity, _StubVerifier, _work_graph_snapshot_payload
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.work_graph import _work_graph_snapshot_payload
 
 
 class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):

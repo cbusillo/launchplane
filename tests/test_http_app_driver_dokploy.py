@@ -41,12 +41,8 @@ from tests.http_app_test_support import (
     _RejectingVerifier,
     _seed_dokploy_target_inspect_records,
 )
-from tests.test_service import (
-    _identity,
-    _seed_tracked_target_records,
-    _sqlite_database_url,
-    _StubVerifier,
-)
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.stores import _seed_tracked_target_records, _sqlite_database_url
 
 
 class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):

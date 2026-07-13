@@ -13,7 +13,8 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_request
-from tests.test_service import _identity, _sqlite_database_url, _StubVerifier
+from tests.support.auth import _StubVerifier, _identity
+from tests.support.stores import _sqlite_database_url
 
 
 def _fernet_key(offset: int) -> str:
