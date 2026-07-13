@@ -77,14 +77,13 @@ from tests.http_app_test_support import (
     _work_graph_read_policy,
 )
 from tests.test_protected_artifacts import _seed_store as seed_protected_artifact_store
-from tests.test_service import (
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.profiles import (
     _generic_site_profile_payload,
-    _identity,
     _product_profile_payload,
-    _sqlite_database_url,
-    _StubVerifier,
-    _work_graph_snapshot_payload,
 )
+from tests.support.stores import _sqlite_database_url
+from tests.support.work_graph import _work_graph_snapshot_payload
 
 
 def _product_expected_config_payload() -> dict[str, object]:

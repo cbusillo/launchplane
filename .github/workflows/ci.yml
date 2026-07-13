@@ -357,7 +357,7 @@ jobs:
 
       - name: Show unit test shard plan
         run: >-
-          uv run launchplane ci unittest-shard plan
+          uv run --extra dev launchplane ci unittest-shard plan
           --shard-count "${UNITTEST_SHARD_COUNT}"
           --timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"
           --max-tests-per-target "${UNITTEST_MAX_TESTS_PER_TARGET}"
@@ -365,7 +365,7 @@ jobs:
 
       - name: Run unit test shard
         run: >-
-          uv run launchplane ci unittest-shard run
+          uv run --extra dev launchplane ci unittest-shard run
           --shard-count "${UNITTEST_SHARD_COUNT}"
           --shard-index ${{ matrix.shard_index }}
           --timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"
@@ -436,7 +436,7 @@ jobs:
 
       - name: Aggregate unittest timings
         run: >-
-          uv run launchplane ci unittest-shard aggregate
+          uv run --extra dev launchplane ci unittest-shard aggregate
           --shard-count "${UNITTEST_SHARD_COUNT}"
           --results-dir "${RUNNER_TEMP}/unittest-timings"
           --timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"
@@ -471,7 +471,7 @@ jobs:
         run: uv python install 3.13
 
       - name: Run unit tests
-        run: uv run python -m unittest
+        run: uv run --extra dev python -m unittest
 
   postgres_integration:
     if: >-
@@ -511,7 +511,7 @@ jobs:
         env:
           LAUNCHPLANE_TEST_POSTGRES_URL: >-
             postgresql+psycopg://launchplane_test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/launchplane_root
-        run: uv run launchplane ci postgres-integration
+        run: uv run --extra dev launchplane ci postgres-integration
 
   ci_gate:
     name: ci-gate

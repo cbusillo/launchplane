@@ -56,11 +56,8 @@ from tests.http_app_test_support import (
     _seed_every_code_read_records,
     _seed_every_code_rerun_intent,
 )
-from tests.test_service import (
-    _identity,
-    _sqlite_database_url,
-    _StubVerifier,
-)
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.stores import _sqlite_database_url
 
 
 class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):

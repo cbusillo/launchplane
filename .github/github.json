@@ -31,11 +31,11 @@
   },
   "qualityGate": {
     "test": {
-      "default": "uv run launchplane ci unittest-shard local",
-      "targeted": "uv run python -m unittest {modules}",
-      "postgresIntegration": "LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run launchplane ci postgres-integration",
-      "shardPlan": "uv run launchplane ci unittest-shard plan --shard-count {shard_count} --timings-file {timings_file} --max-tests-per-target {max_tests_per_target} --max-seconds-per-target {max_seconds_per_target}",
-      "shardRun": "uv run launchplane ci unittest-shard run --shard-count {shard_count} --shard-index {shard_index} --timings-file {timings_file} --max-tests-per-target {max_tests_per_target} --max-seconds-per-target {max_seconds_per_target} --timings-output {timings_output}",
+      "default": "uv run --extra dev launchplane ci unittest-shard local",
+      "targeted": "uv run --extra dev python -m unittest {modules}",
+      "postgresIntegration": "LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run --extra dev launchplane ci postgres-integration",
+      "shardPlan": "uv run --extra dev launchplane ci unittest-shard plan --shard-count {shard_count} --timings-file {timings_file} --max-tests-per-target {max_tests_per_target} --max-seconds-per-target {max_seconds_per_target}",
+      "shardRun": "uv run --extra dev launchplane ci unittest-shard run --shard-count {shard_count} --shard-index {shard_index} --timings-file {timings_file} --max-tests-per-target {max_tests_per_target} --max-seconds-per-target {max_seconds_per_target} --timings-output {timings_output}",
       "shardGranularity": "whole modules by default; large or timing-known-slow modules may split into unittest target IDs"
     },
     "lint": {

@@ -63,16 +63,17 @@ from tests.http_app_test_support import (
     _terminal_agent_write_intent_policy,
     _write_context_cutover_audit_records,
 )
-from tests.test_service import (
-    _identity,
-    _local_operator_policy,
+from tests.support.http import lifespan_client
+from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
+from tests.support.product_config import (
     _meta_product_config_payload,
     _product_config_payload,
     _product_config_secrets,
-    _product_profile_payload_with_prod,
+)
+from tests.support.profiles import _product_profile_payload_with_prod
+from tests.support.stores import (
     _seed_tracked_target_records,
     _sqlite_database_url,
-    _StubVerifier,
     _write_runtime_key_safety_policy,
 )
 
@@ -192,26 +193,27 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
                     "policy": _public_ingress_notification_policy_record().model_dump(mode="json"),
                 }
 
-                first_response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/public-ingress/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "public-ingress-notification-policy-replay",
-                    },
-                    payload=payload,
-                )
-                second_response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/public-ingress/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "public-ingress-notification-policy-replay",
-                    },
-                    payload=payload,
-                )
+                async with lifespan_client(app) as client:
+                    first_response = await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/public-ingress/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "public-ingress-notification-policy-replay",
+                        },
+                        payload=payload,
+                    )
+                    second_response = await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/public-ingress/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "public-ingress-notification-policy-replay",
+                        },
+                        payload=payload,
+                    )
             finally:
                 store.close()
 
@@ -256,26 +258,27 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
                     ).model_dump(mode="json"),
                 }
 
-                await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/public-ingress/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "public-ingress-notification-policy-conflict",
-                    },
-                    payload=first_payload,
-                )
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/public-ingress/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "public-ingress-notification-policy-conflict",
-                    },
-                    payload=conflicting_payload,
-                )
+                async with lifespan_client(app) as client:
+                    await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/public-ingress/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "public-ingress-notification-policy-conflict",
+                        },
+                        payload=first_payload,
+                    )
+                    response = await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/public-ingress/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "public-ingress-notification-policy-conflict",
+                        },
+                        payload=conflicting_payload,
+                    )
             finally:
                 store.close()
 
@@ -394,26 +397,27 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
                     "policy": _every_code_notification_policy_record().model_dump(mode="json"),
                 }
 
-                first_response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/every-code/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "every-code-notification-policy-replay",
-                    },
-                    payload=payload,
-                )
-                second_response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/every-code/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "every-code-notification-policy-replay",
-                    },
-                    payload=payload,
-                )
+                async with lifespan_client(app) as client:
+                    first_response = await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/every-code/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "every-code-notification-policy-replay",
+                        },
+                        payload=payload,
+                    )
+                    second_response = await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/every-code/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "every-code-notification-policy-replay",
+                        },
+                        payload=payload,
+                    )
             finally:
                 store.close()
 
@@ -458,26 +462,27 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
                     ).model_dump(mode="json"),
                 }
 
-                await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/every-code/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "every-code-notification-policy-conflict",
-                    },
-                    payload=first_payload,
-                )
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/every-code/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "every-code-notification-policy-conflict",
-                    },
-                    payload=conflicting_payload,
-                )
+                async with lifespan_client(app) as client:
+                    await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/every-code/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "every-code-notification-policy-conflict",
+                        },
+                        payload=first_payload,
+                    )
+                    response = await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/every-code/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "every-code-notification-policy-conflict",
+                        },
+                        payload=conflicting_payload,
+                    )
             finally:
                 store.close()
 
@@ -638,26 +643,27 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 }
 
-                first_response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/previews/pr-feedback/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "preview-pr-feedback-notification-policy-replay",
-                    },
-                    payload=payload,
-                )
-                second_response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/previews/pr-feedback/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "preview-pr-feedback-notification-policy-replay",
-                    },
-                    payload=payload,
-                )
+                async with lifespan_client(app) as client:
+                    first_response = await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/previews/pr-feedback/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "preview-pr-feedback-notification-policy-replay",
+                        },
+                        payload=payload,
+                    )
+                    second_response = await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/previews/pr-feedback/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "preview-pr-feedback-notification-policy-replay",
+                        },
+                        payload=payload,
+                    )
             finally:
                 store.close()
 
@@ -704,26 +710,27 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
                     ).model_dump(mode="json"),
                 }
 
-                await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/previews/pr-feedback/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "preview-pr-feedback-notification-policy-conflict",
-                    },
-                    payload=first_payload,
-                )
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/previews/pr-feedback/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "preview-pr-feedback-notification-policy-conflict",
-                    },
-                    payload=conflicting_payload,
-                )
+                async with lifespan_client(app) as client:
+                    await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/previews/pr-feedback/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "preview-pr-feedback-notification-policy-conflict",
+                        },
+                        payload=first_payload,
+                    )
+                    response = await _asgi_request(
+                        client,
+                        "POST",
+                        "/v1/previews/pr-feedback/notification-policies/apply",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "preview-pr-feedback-notification-policy-conflict",
+                        },
+                        payload=conflicting_payload,
+                    )
             finally:
                 store.close()
 
