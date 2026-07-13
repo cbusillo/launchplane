@@ -14,9 +14,21 @@ from control_plane.config_authority_audit import evaluate_config_authority_gate
 from control_plane.config_authority_audit import render_config_authority_markdown
 from control_plane.config_authority_audit import _allow_reason
 from control_plane.config_authority_audit import _workflow_path_key_values
+from tests.support.workflows import WorkflowInvariantViolation
+from tests.support.workflows import check_forbidden_scalar_values
+from tests.support.workflows import check_launchplane_oidc_permissions
+from tests.support.workflows import check_launchplane_request_contract
+from tests.support.workflows import load_workflow
 
 
 CLI_MAIN = cast(Command, main)
+
+
+def _assert_no_workflow_violations(
+    test_case: unittest.TestCase,
+    violations: tuple[WorkflowInvariantViolation, ...],
+) -> None:
+    test_case.assertEqual([], [str(violation) for violation in violations])
 
 
 def _git(root: Path, *args: str) -> str:
@@ -56,191 +68,224 @@ def _gaps(payload: dict[str, object]) -> list[dict[str, object]]:
 
 class ConfigAuthorityAuditTest(unittest.TestCase):
     def test_merge_train_policy_import_uses_shared_request(self) -> None:
+        workflow = load_workflow(".github/workflows/merge-train-policy-import.yml")
         workflow_text = Path(".github/workflows/merge-train-policy-import.yml").read_text(
             encoding="utf-8"
         )
 
+        _assert_no_workflow_violations(self, check_launchplane_oidc_permissions(workflow))
+        _assert_no_workflow_violations(
+            self,
+            check_launchplane_request_contract(
+                workflow,
+                invariant="merge-train-policy-import-requests",
+                expected_steps={
+                    "Request policy import dry-run": {
+                        "method": "POST",
+                        "route-path": "/v1/merge-train/policies/import",
+                        "payload-file": "${{ steps.policy.outputs.dry_run_payload }}",
+                        "fail-result-paths": "",
+                        "response-output-file": "merge-train-policy-dry-run.json",
+                        "log-response-body": "false",
+                    },
+                    "Apply policy import": {
+                        "method": "POST",
+                        "route-path": "/v1/merge-train/policies/import",
+                        "payload-file": "${{ steps.apply_policy.outputs.payload }}",
+                        "idempotency-key": "${{ steps.apply_policy.outputs.idempotency_key }}",
+                        "fail-result-paths": "",
+                        "response-output-file": "merge-train-policy-apply.json",
+                        "log-response-body": "false",
+                    },
+                },
+            ),
+        )
+        _assert_no_workflow_violations(
+            self,
+            check_forbidden_scalar_values(
+                workflow,
+                invariant="merge-train-policy-import-no-direct-secret-or-curl",
+                forbidden_values=(
+                    "ACTIONS_ID_TOKEN_REQUEST_URL",
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+                    "LAUNCHPLANE_SERVICE_TOKEN",
+                    "import-policy \\",
+                    "SERVICE_ORIGIN",
+                    "curl -fsSL",
+                ),
+            ),
+        )
+
         self.assertIn("Resolve service endpoint", workflow_text)
         self.assertIn("Build policy payload", workflow_text)
-        self.assertIn("Request policy import dry-run", workflow_text)
         self.assertIn("Build policy apply payload", workflow_text)
-        self.assertIn("Apply policy import", workflow_text)
-        self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
-            workflow_text,
-        )
-        self.assertIn("route-path: /v1/merge-train/policies/import", workflow_text)
-        self.assertIn("payload-file: ${{ steps.policy.outputs.dry_run_payload }}", workflow_text)
-        self.assertIn("payload-file: ${{ steps.apply_policy.outputs.payload }}", workflow_text)
-        self.assertIn(
-            "idempotency-key: ${{ steps.apply_policy.outputs.idempotency_key }}",
-            workflow_text,
-        )
-        self.assertIn("response-output-file: merge-train-policy-dry-run.json", workflow_text)
-        self.assertIn("response-output-file: merge-train-policy-apply.json", workflow_text)
-        self.assertIn('fail-result-paths: ""', workflow_text)
-        self.assertIn('log-response-body: "false"', workflow_text)
         self.assertIn("build-import-request", workflow_text)
         self.assertIn("merge-train-policy-dry-run-request.json", workflow_text)
         self.assertIn("merge-train-policy-apply-request.json", workflow_text)
         self.assertIn("stack_child_disposition_label:", workflow_text)
         self.assertIn("POLICY_STACK_CHILD_DISPOSITION_LABEL", workflow_text)
         self.assertIn('print(f"{key} = {json.dumps(values[key])}")', workflow_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
-        self.assertNotIn("LAUNCHPLANE_SERVICE_TOKEN", workflow_text)
-        self.assertNotIn("import-policy \\", workflow_text)
-        self.assertNotIn("SERVICE_ORIGIN", workflow_text)
-        self.assertNotIn("curl -fsSL", workflow_text)
 
     def test_merge_train_runner_uses_shared_request_for_reads_worker_and_feedback_posts(
         self,
     ) -> None:
+        workflow = load_workflow(".github/workflows/merge-train-runner.yml")
         workflow_text = Path(".github/workflows/merge-train-runner.yml").read_text(encoding="utf-8")
 
-        self.assertIn("/v1/work-graph/merge-train/policy-targets", workflow_text)
+        _assert_no_workflow_violations(self, check_launchplane_oidc_permissions(workflow))
+        _assert_no_workflow_violations(
+            self,
+            check_launchplane_request_contract(
+                workflow,
+                invariant="merge-train-runner-requests",
+                expected_steps={
+                    "Read scheduled merge-train targets": {
+                        "method": "GET",
+                        "route-path": "/v1/work-graph/merge-train/policy-targets",
+                        "fail-result-paths": "",
+                        "response-output-file": "${{ steps.scheduled_target_request.outputs.response_file }}",
+                        "log-response-body": "false",
+                    },
+                    "Read merge-train admission": {
+                        "method": "GET",
+                        "route-path": "${{ steps.admission_request.outputs.route_path }}",
+                        "fail-result-paths": "",
+                        "response-output-file": "${{ steps.admission_request.outputs.response_file }}",
+                        "log-response-body": "false",
+                    },
+                    "Send merge-train run-once request": {
+                        "method": "POST",
+                        "route-path": "/v1/work-graph/merge-train/run-once",
+                        "payload-file": "${{ steps.level1_request.outputs.payload_file }}",
+                        "idempotency-key": "${{ steps.level1_request.outputs.idempotency_key }}",
+                        "fail-result-paths": "",
+                        "response-output-file": "${{ steps.level1_request.outputs.response_file }}",
+                        "log-response-body": "false",
+                    },
+                    "Send merge-train controller request": {
+                        "method": "POST",
+                        "route-path": "/v1/work-graph/merge-train/controller/run-once",
+                        "payload-file": "${{ steps.controller_request.outputs.payload_file }}",
+                        "idempotency-key": "${{ steps.controller_request.outputs.idempotency_key }}",
+                        "fail-result-paths": "",
+                        "response-output-file": "${{ steps.controller_request.outputs.response_file }}",
+                        "log-response-body": "false",
+                    },
+                    "Send merge-train controller PR feedback": {
+                        "method": "POST",
+                        "route-path": "/v1/work-graph/merge-train/pr-feedback",
+                        "payload-list-file": (
+                            "${{ steps.controller_summary.outputs.feedback_payloads }}"
+                        ),
+                        "idempotency-key-prefix": (
+                            "${{ steps.controller_summary.outputs.feedback_idempotency_key_prefix }}"
+                        ),
+                        "fail-result-paths": "",
+                        "response-output-file": (
+                            "${{ steps.controller_summary.outputs.feedback_response }}"
+                        ),
+                        "log-response-body": "false",
+                    },
+                    "Send batch-candidate phase request": {
+                        "method": "POST",
+                        "route-path": "/v1/work-graph/merge-train/batch-candidate/run-once",
+                        "payload-file": (
+                            "${{ steps.batch_candidate_request.outputs.payload_file }}"
+                        ),
+                        "idempotency-key": (
+                            "${{ steps.batch_candidate_request.outputs.idempotency_key }}"
+                        ),
+                        "fail-result-paths": "",
+                        "response-output-file": (
+                            "${{ steps.batch_candidate_request.outputs.response_file }}"
+                        ),
+                        "log-response-body": "false",
+                    },
+                    "Send stack-collapse phase request": {
+                        "method": "POST",
+                        "route-path": "/v1/work-graph/merge-train/stack-collapse/run-once",
+                        "payload-file": (
+                            "${{ steps.stack_collapse_request.outputs.payload_file }}"
+                        ),
+                        "idempotency-key": (
+                            "${{ steps.stack_collapse_request.outputs.idempotency_key }}"
+                        ),
+                        "fail-result-paths": "",
+                        "response-output-file": (
+                            "${{ steps.stack_collapse_request.outputs.response_file }}"
+                        ),
+                        "log-response-body": "false",
+                    },
+                    "Send batch-landing phase request": {
+                        "method": "POST",
+                        "route-path": "/v1/work-graph/merge-train/batch-landing/run-once",
+                        "payload-file": ("${{ steps.batch_landing_request.outputs.payload_file }}"),
+                        "idempotency-key": (
+                            "${{ steps.batch_landing_request.outputs.idempotency_key }}"
+                        ),
+                        "fail-result-paths": "",
+                        "response-output-file": (
+                            "${{ steps.batch_landing_request.outputs.response_file }}"
+                        ),
+                        "log-response-body": "false",
+                    },
+                    "Send manual phase PR feedback": {
+                        "method": "POST",
+                        "route-path": "/v1/work-graph/merge-train/pr-feedback",
+                        "payload-list-file": (
+                            "${{ steps.manual_phase_feedback.outputs.feedback_payloads }}"
+                        ),
+                        "idempotency-key-prefix": (
+                            "${{ steps.manual_phase_feedback.outputs.feedback_idempotency_key_prefix }}"
+                        ),
+                        "fail-result-paths": "",
+                        "response-output-file": (
+                            "${{ steps.manual_phase_feedback.outputs.feedback_response }}"
+                        ),
+                        "log-response-body": "false",
+                    },
+                },
+            ),
+        )
+        _assert_no_workflow_violations(
+            self,
+            check_forbidden_scalar_values(
+                workflow,
+                invariant="merge-train-runner-no-direct-secret-or-url",
+                forbidden_values=(
+                    '"${service_origin}/v1/work-graph/merge-train/policy-targets"',
+                    '"${service_origin}/v1/work-graph/merge-train/admission?${query_string}"',
+                    '"${SERVICE_ORIGIN}/v1/work-graph/merge-train/run-once"',
+                    "batch_candidate_url=",
+                    "stack_collapse_url=",
+                    "batch_landing_url=",
+                    '"$controller_url"',
+                    "feedback_url=",
+                    '"$feedback_url"',
+                    "feedback_status=",
+                    "ACTIONS_ID_TOKEN_REQUEST_URL",
+                    "LAUNCHPLANE_MERGE_TRAIN_REPOSITORY",
+                    "LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH",
+                    "LAUNCHPLANE_MERGE_TRAIN_MUTATE",
+                    "LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE",
+                ),
+            ),
+        )
+
         self.assertIn("Read scheduled merge-train targets", workflow_text)
         self.assertIn("Read merge-train admission", workflow_text)
         self.assertIn("Prepare merge-train run-once request", workflow_text)
-        self.assertIn("Send merge-train run-once request", workflow_text)
         self.assertIn("Summarize merge-train run-once response", workflow_text)
         self.assertIn("Prepare merge-train controller request", workflow_text)
-        self.assertIn("Send merge-train controller request", workflow_text)
         self.assertIn("Summarize merge-train controller response", workflow_text)
-        self.assertIn("Send merge-train controller PR feedback", workflow_text)
         for phase_name in (
             "batch-candidate",
             "stack-collapse",
             "batch-landing",
         ):
             self.assertIn(f"Prepare {phase_name} phase request", workflow_text)
-            self.assertIn(f"Send {phase_name} phase request", workflow_text)
             self.assertIn(f"Summarize {phase_name} phase response", workflow_text)
         self.assertIn("Post manual phase PR feedback", workflow_text)
-        self.assertIn("Send manual phase PR feedback", workflow_text)
-        self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@", workflow_text
-        )
-        self.assertIn(
-            "audience: ${{ steps.scheduled_target_request.outputs.service_audience }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "audience: ${{ steps.admission_request.outputs.service_audience }}", workflow_text
-        )
-        self.assertIn("audience: ${{ steps.admission.outputs.service_audience }}", workflow_text)
-        self.assertIn("method: GET", workflow_text)
-        self.assertIn("method: POST", workflow_text)
-        self.assertIn("route-path: /v1/work-graph/merge-train/policy-targets", workflow_text)
-        self.assertIn(
-            "route-path: ${{ steps.admission_request.outputs.route_path }}", workflow_text
-        )
-        self.assertIn("route-path: /v1/work-graph/merge-train/run-once", workflow_text)
-        self.assertIn("route-path: /v1/work-graph/merge-train/controller/run-once", workflow_text)
-        self.assertIn("route-path: /v1/work-graph/merge-train/pr-feedback", workflow_text)
-        self.assertIn(
-            "route-path: /v1/work-graph/merge-train/batch-candidate/run-once",
-            workflow_text,
-        )
-        self.assertIn(
-            "route-path: /v1/work-graph/merge-train/stack-collapse/run-once",
-            workflow_text,
-        )
-        self.assertIn(
-            "route-path: /v1/work-graph/merge-train/batch-landing/run-once",
-            workflow_text,
-        )
-        self.assertIn(
-            "payload-file: ${{ steps.level1_request.outputs.payload_file }}", workflow_text
-        )
-        self.assertIn(
-            "payload-file: ${{ steps.controller_request.outputs.payload_file }}", workflow_text
-        )
-        self.assertIn(
-            "payload-file: ${{ steps.batch_candidate_request.outputs.payload_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "payload-file: ${{ steps.stack_collapse_request.outputs.payload_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "payload-file: ${{ steps.batch_landing_request.outputs.payload_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "payload-list-file: ${{ steps.controller_summary.outputs.feedback_payloads }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "payload-list-file: ${{ steps.manual_phase_feedback.outputs.feedback_payloads }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "idempotency-key: ${{ steps.level1_request.outputs.idempotency_key }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "idempotency-key: ${{ steps.controller_request.outputs.idempotency_key }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "idempotency-key: ${{ steps.batch_candidate_request.outputs.idempotency_key }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "idempotency-key: ${{ steps.stack_collapse_request.outputs.idempotency_key }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "idempotency-key: ${{ steps.batch_landing_request.outputs.idempotency_key }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "${{ steps.controller_summary.outputs.feedback_idempotency_key_prefix }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "${{ steps.manual_phase_feedback.outputs.feedback_idempotency_key_prefix }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "response-output-file: ${{ steps.scheduled_target_request.outputs.response_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "response-output-file: ${{ steps.admission_request.outputs.response_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "response-output-file: ${{ steps.level1_request.outputs.response_file }}", workflow_text
-        )
-        self.assertIn(
-            "response-output-file: ${{ steps.controller_request.outputs.response_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "response-output-file: ${{ steps.batch_candidate_request.outputs.response_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "response-output-file: ${{ steps.stack_collapse_request.outputs.response_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "response-output-file: ${{ steps.batch_landing_request.outputs.response_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "response-output-file: ${{ steps.controller_summary.outputs.feedback_response }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "response-output-file: ${{ steps.manual_phase_feedback.outputs.feedback_response }}",
-            workflow_text,
-        )
-        self.assertIn('fail-result-paths: ""', workflow_text)
-        self.assertIn('log-response-body: "false"', workflow_text)
         self.assertIn("launchplane-merge-train-policy-targets.json", workflow_text)
         self.assertIn("launchplane-merge-train-admission.json", workflow_text)
         self.assertIn("launchplane-merge-train-run-once-request.json", workflow_text)
@@ -271,68 +316,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             workflow_text,
         )
         self.assertNotIn("${GITHUB_RUN_ATTEMPT}:${payload_digest}", workflow_text)
-        self.assertRegex(
-            workflow_text,
-            r"(?s)Send merge-train run-once request.*idempotency-key: "
-            r"\$\{\{ steps\.level1_request\.outputs\.idempotency_key \}\}.*"
-            r"log-response-body: \"false\"",
-        )
-        self.assertRegex(
-            workflow_text,
-            r"(?s)Send merge-train controller request.*idempotency-key: "
-            r"\$\{\{ steps\.controller_request\.outputs\.idempotency_key \}\}.*"
-            r"log-response-body: \"false\"",
-        )
-        self.assertRegex(
-            workflow_text,
-            r"(?s)Send batch-candidate phase request.*idempotency-key: "
-            r"\$\{\{ steps\.batch_candidate_request\.outputs\.idempotency_key \}\}.*"
-            r"log-response-body: \"false\"",
-        )
-        self.assertRegex(
-            workflow_text,
-            r"(?s)Send stack-collapse phase request.*idempotency-key: "
-            r"\$\{\{ steps\.stack_collapse_request\.outputs\.idempotency_key \}\}.*"
-            r"log-response-body: \"false\"",
-        )
-        self.assertRegex(
-            workflow_text,
-            r"(?s)Send batch-landing phase request.*idempotency-key: "
-            r"\$\{\{ steps\.batch_landing_request\.outputs\.idempotency_key \}\}.*"
-            r"log-response-body: \"false\"",
-        )
-        self.assertRegex(
-            workflow_text,
-            r"(?s)Send merge-train controller PR feedback.*payload-list-file: "
-            r"\$\{\{ steps\.controller_summary\.outputs\.feedback_payloads \}\}.*"
-            r"log-response-body: \"false\"",
-        )
-        self.assertRegex(
-            workflow_text,
-            r"(?s)Send manual phase PR feedback.*payload-list-file: "
-            r"\$\{\{ steps\.manual_phase_feedback\.outputs\.feedback_payloads \}\}.*"
-            r"log-response-body: \"false\"",
-        )
-        self.assertNotIn(
-            '"${service_origin}/v1/work-graph/merge-train/policy-targets"', workflow_text
-        )
-        self.assertNotIn(
-            '"${service_origin}/v1/work-graph/merge-train/admission?${query_string}"',
-            workflow_text,
-        )
-        self.assertNotIn('"${SERVICE_ORIGIN}/v1/work-graph/merge-train/run-once"', workflow_text)
-        self.assertNotIn("batch_candidate_url=", workflow_text)
-        self.assertNotIn("stack_collapse_url=", workflow_text)
-        self.assertNotIn("batch_landing_url=", workflow_text)
-        self.assertNotIn('"$controller_url"', workflow_text)
-        self.assertNotIn("feedback_url=", workflow_text)
-        self.assertNotIn('"$feedback_url"', workflow_text)
-        self.assertNotIn("feedback_status=", workflow_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
-        self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_REPOSITORY", workflow_text)
-        self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH", workflow_text)
-        self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_MUTATE", workflow_text)
-        self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE", workflow_text)
 
     def test_python_repo_policy_default_is_reported_and_redacted(self) -> None:
         with TemporaryDirectory() as temp_dir:

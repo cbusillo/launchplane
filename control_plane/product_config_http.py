@@ -1,31 +1,207 @@
 from __future__ import annotations
 
+from typing import Literal, cast
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.runtime_environment_record import (
+    RuntimeEnvironmentScope,
+    ScalarValue,
+)
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyFinding,
+    RuntimeKeySafetyTarget,
+)
+from control_plane.contracts.secret_record import SecretScope
+
+
+ProductConfigMode = Literal["dry-run", "apply"]
+
+
+class ProductConfigRuntimeInput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    scope: RuntimeEnvironmentScope | None = None
+    context: str | None = None
+    instance: str | None = None
+    env: dict[str, ScalarValue] = Field(default_factory=dict)
+
+
+class ProductConfigSecretInput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    scope: SecretScope | None = None
+    context: str | None = None
+    instance: str | None = None
+    integration: str | None = None
+    name: str | None = None
+    binding_key: str | None = None
+    value: str
+    description: str = ""
+
+    @model_validator(mode="after")
+    def _require_secret_identity(self) -> "ProductConfigSecretInput":
+        if not (self.name or "").strip() and not (self.binding_key or "").strip():
+            raise ValueError("Product config secrets require name or binding_key.")
+        return self
+
+
+class ProductConfigRuntimeEnvironmentRecordSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: RuntimeEnvironmentScope
+    context: str
+    instance: str
+    updated_at: str
+    source_label: str
+    env_keys: list[str]
+    env_value_count: int = Field(ge=0)
+
+
+class ProductConfigRuntimeEnvironmentResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["skipped", "created", "updated", "unchanged"]
+    scope: RuntimeEnvironmentScope
+    context: str
+    instance: str
+    keys: list[str]
+    changed_keys: list[str]
+    unchanged_keys: list[str]
+    env_value_count_after: int = Field(ge=0)
+    record: ProductConfigRuntimeEnvironmentRecordSummary | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+
+class ProductConfigRuntimeKeySafetyResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    required: bool
+    status: Literal["skipped", "pass"]
+    policy_record_id: str = ""
+    policy_sha256: str = ""
+    target: RuntimeKeySafetyTarget | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    checked_binding_keys: list[str] = Field(default_factory=list)
+    findings: list[RuntimeKeySafetyFinding] = Field(default_factory=list)
+
+
+class ProductConfigSecretResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["created", "rotated", "unchanged"]
+    scope: SecretScope
+    integration: str
+    name: str
+    binding_key: str
+    context: str
+    instance: str
+    secret_id: str = ""
+
+
+class ProductConfigApplySummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runtime_changed_key_count: int = Field(ge=0)
+    secret_change_count: int = Field(ge=0)
+
+
+class ProductConfigLiveTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context: str
+    instance: str
+    target_type: str
+    target_name: str
+
+
+class ProductConfigLiveTargetRuntimeOperation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["POST"]
+    endpoint: str
+    mode: ProductConfigMode
+
+
+class ProductConfigLiveTargetRuntimeNextAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["live_target_runtime_apply"]
+    required: bool
+    status: Literal["live_sync_required"]
+    target: ProductConfigLiveTarget
+    changed_keys: list[str]
+    dry_run: ProductConfigLiveTargetRuntimeOperation
+    apply: ProductConfigLiveTargetRuntimeOperation
+    instruction: str
+
+
+class ProductConfigApplyResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok", "records_applied_live_sync_required"]
+    mode: ProductConfigMode
+    product: str
+    context: str
+    instance: str
+    actor: str
+    source_label: str
+    runtime_environment: ProductConfigRuntimeEnvironmentResult
+    runtime_key_safety: ProductConfigRuntimeKeySafetyResult
+    secrets: list[ProductConfigSecretResult]
+    summary: ProductConfigApplySummary
+    next_actions: list[ProductConfigLiveTargetRuntimeNextAction] = Field(default_factory=list)
+
+
+class ProductConfigApplyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted"] = "accepted"
+    trace_id: str
+    records: dict[str, str] = Field(default_factory=dict)
+    result: ProductConfigApplyResult
+    replayed: bool | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    original_trace_id: str | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ProductConfigApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    mode: str
+    mode: ProductConfigMode
     product: str
     context: str = ""
     instance: str = ""
     source_label: str = "product-config-api"
     reason: str = ""
-    runtime_env: dict[str, object] | None = None
-    runtime_environment: dict[str, object] | None = None
-    secrets: list[dict[str, object]] = Field(default_factory=list)
+    runtime_env: dict[str, ScalarValue] | ProductConfigRuntimeInput | None = Field(
+        default=None,
+        union_mode="left_to_right",
+    )
+    runtime_environment: dict[str, ScalarValue] | ProductConfigRuntimeInput | None = Field(
+        default=None,
+        union_mode="left_to_right",
+    )
+    secrets: list[ProductConfigSecretInput] = Field(default_factory=list)
 
-    @field_validator("mode")
+    @field_validator("mode", mode="before")
     @classmethod
-    def _validate_mode(cls, value: str) -> str:
-        normalized_value = value.strip().lower()
+    def _validate_mode(cls, value: object) -> ProductConfigMode:
+        normalized_value = str(value).strip().lower()
         if normalized_value not in {"dry-run", "apply"}:
             raise ValueError("Product config mode must be 'dry-run' or 'apply'.")
-        return normalized_value
+        return cast(ProductConfigMode, normalized_value)
 
     @model_validator(mode="after")
     def _validate_product(self) -> "ProductConfigApplyEnvelope":
@@ -44,13 +220,21 @@ class ProductConfigApplyEnvelope(BaseModel):
             "product": self.product,
             "context": self.context,
             "instance": self.instance,
-            "secrets": self.secrets,
+            "secrets": [secret.model_dump(exclude_none=True) for secret in self.secrets],
         }
         if self.runtime_env is not None:
-            payload["runtime_env"] = self.runtime_env
+            payload["runtime_env"] = _runtime_input_payload(self.runtime_env)
         if self.runtime_environment is not None:
-            payload["runtime_environment"] = self.runtime_environment
+            payload["runtime_environment"] = _runtime_input_payload(self.runtime_environment)
         return payload
+
+
+def _runtime_input_payload(
+    value: dict[str, ScalarValue] | ProductConfigRuntimeInput,
+) -> dict[str, object]:
+    if isinstance(value, ProductConfigRuntimeInput):
+        return value.model_dump(exclude_none=True)
+    return dict(value)
 
 
 def product_config_live_target_next_actions(

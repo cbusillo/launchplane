@@ -375,7 +375,7 @@ New or changed service route families must preserve the completed HTTP boundary:
 typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
-Frontend read-contract generation uses the same boundary. Run
+Frontend contract generation uses the same boundary. Run
 `uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`
 to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
 without live credentials, managed-secret values, or runtime-authority examples.
@@ -383,11 +383,24 @@ The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
 and checked `frontend/src/generated/openapi.ts/` types from that canonical
 export. `pnpm --dir frontend check:openapi-drift` regenerates those artifacts in
 temporary paths and fails when the checked schema or generated types drift from
-the backend contract. The canonical `x-launchplane-ui-read-operations` manifest
-owns each selected GET path and stable operation id; slicing fails closed when a
-route, operation id, success response, or referenced schema drifts. Generated
-response envelopes are the API boundary consumed by the UI. Handwritten
-frontend types remain only for write requests and explicit UI normalization.
+the backend contract. The canonical `x-launchplane-ui-read-operations` and
+`x-launchplane-ui-write-operations` manifests own each selected GET or accepted
+browser-safe POST path and stable operation id; slicing fails closed when a
+route, method, operation id, success response, or referenced schema drifts. The
+write slice currently covers work-graph ranking, product-config dry-run/apply,
+generic-web promotion dry-runs, and generic-web promotion workflow dispatches.
+Issue reconciliation remains a bearer-only service operation rather than a
+browser client binding. Generated request, success, validation, and error
+bindings are the API boundary consumed by the UI. Handwritten frontend types
+remain only for UI view models and explicit normalization.
+
+Launchplane converts FastAPI request-validation failures into the standard
+`400` Launchplane error envelope, so canonical and generated contracts omit the
+framework's unreachable `422` response. Product-config request generation keeps
+the structured `runtime_env` model while accepting the legacy flat environment
+map and unknown nested fields that earlier external callers could send; precise
+response contracts must not turn contract generation into an unannounced input
+compatibility break.
 
 The human auth/session family uses FastAPI routes in the production service:
 `GET /auth/github/login`, `GET /auth/github/callback`, `GET /v1/auth/session`,

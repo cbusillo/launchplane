@@ -11,6 +11,7 @@ import type {
   EveryCodeWorkRequestRecord,
   GitHubIssueInbox,
   GitHubIssueInboxReconcileMode,
+  GitHubIssueInboxReconcilePayload,
   GitHubIssueInboxReconcileSummary,
   ProductSiteOverview,
   MergeTrainControllerStatus,
@@ -61,7 +62,7 @@ export function ProductInventoryCockpit({
   reconcileIssueInbox?: (
     mode: GitHubIssueInboxReconcileMode,
     signal?: AbortSignal,
-  ) => Promise<{ result: { reconcile: GitHubIssueInboxReconcileSummary } }>;
+  ) => Promise<GitHubIssueInboxReconcilePayload>;
   readMergeTrainStatus?: (
     repository: string,
     baseBranch: string,

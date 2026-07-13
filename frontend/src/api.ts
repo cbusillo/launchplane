@@ -25,6 +25,12 @@ import type {
   WorkGraphSnapshot,
   WorkGraphSnapshotPayload,
 } from "./types";
+import type {
+  ApplyGenericWebProdPromotionData,
+  ApplyProductConfigData,
+  DispatchGenericWebProdPromotionWorkflowData,
+  RankWorkGraphSnapshotData,
+} from "./generated/openapi.ts";
 
 export class LaunchplaneApiError extends Error {
   statusCode: number;
@@ -114,6 +120,16 @@ async function performJsonRequest<T>(
   return payload as T;
 }
 
+function requestGeneratedPost<
+  T,
+  TRequest extends { body: unknown; url: string } = { body: unknown; url: string },
+>(
+  request: TRequest,
+  signal?: AbortSignal,
+): Promise<T> {
+  return requestJson<T>(request.url, "POST", request.body, signal);
+}
+
 export function readAuthSession(): Promise<AuthSessionPayload> {
   return requestJson<AuthSessionPayload>("/v1/auth/session");
 }
@@ -201,10 +217,14 @@ export function rankWorkGraphSnapshot(
   snapshot: WorkGraphSnapshot,
   limit = 12,
 ): Promise<WorkGraphRankPayload> {
-  return requestJson<WorkGraphRankPayload>("/v1/work-graph/rank", "POST", {
-    snapshot,
-    limit,
-  });
+  const request: RankWorkGraphSnapshotData = {
+    url: "/v1/work-graph/rank",
+    body: {
+      snapshot,
+      limit,
+    },
+  };
+  return requestGeneratedPost<WorkGraphRankPayload>(request);
 }
 
 export function readGitHubIssueInbox(
@@ -250,30 +270,31 @@ export function applyProductConfig(
   payload: ProductConfigApplyRequest,
   signal?: AbortSignal,
 ): Promise<ProductConfigApplyPayload> {
-  return requestJson<ProductConfigApplyResponsePayload>(
-    "/v1/product-config/apply",
-    "POST",
-    payload,
-    signal,
-  ).then((response) => response.result);
+  const request: ApplyProductConfigData = {
+    url: "/v1/product-config/apply",
+    body: payload,
+  };
+  return requestGeneratedPost<ProductConfigApplyResponsePayload>(request, signal).then(
+    (response) => response.result,
+  );
 }
 
 export function dryRunGenericWebProdPromotion(
   payload: GenericWebProdPromotionRequest,
 ): Promise<GenericWebProdPromotionPayload> {
-  return requestJson<GenericWebProdPromotionPayload>(
-    "/v1/drivers/generic-web/prod-promotion",
-    "POST",
-    payload,
-  );
+  const request: ApplyGenericWebProdPromotionData = {
+    url: "/v1/drivers/generic-web/prod-promotion",
+    body: payload,
+  };
+  return requestGeneratedPost<GenericWebProdPromotionPayload>(request);
 }
 
 export function dispatchGenericWebPromotionWorkflow(
   payload: GenericWebPromotionWorkflowRequest,
 ): Promise<GenericWebPromotionWorkflowPayload> {
-  return requestJson<GenericWebPromotionWorkflowPayload>(
-    "/v1/drivers/generic-web/prod-promotion-workflow",
-    "POST",
-    payload,
-  );
+  const request: DispatchGenericWebProdPromotionWorkflowData = {
+    url: "/v1/drivers/generic-web/prod-promotion-workflow",
+    body: payload,
+  };
+  return requestGeneratedPost<GenericWebPromotionWorkflowPayload>(request);
 }
