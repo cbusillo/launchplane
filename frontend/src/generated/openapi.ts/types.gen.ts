@@ -353,14 +353,17 @@ export type EveryCodeSummaryResponse = {
 };
 
 export type EveryCodeWorkRequestRecord = {
+    attempt: number;
     claimed_at: string;
     claimed_by_host: string;
     error_message: string;
+    fencing_token: number;
     finished_at: string;
     github_delivery_id: string;
     issue_number: number;
     issue_title: string;
     issue_url: string;
+    lease_expires_at: string;
     lifecycle_id: string;
     queued_at: string;
     repository: string;
@@ -409,6 +412,124 @@ export type EveryCodeWorkRequestSummary = {
     updated_at: string;
 };
 
+export type GenericWebProdPromotionEnvelope = {
+    product: string;
+    promotion: GenericWebProdPromotionRequest;
+    schema_version?: number;
+};
+
+export type GenericWebProdPromotionRecords = {
+    backup_record_id: string;
+    backup_status: string;
+    deployment_record_id: string;
+    deployment_status: string;
+    destination_health_status: string;
+    dry_run: string;
+    inventory_record_id: string;
+    promotion_record_id: string;
+    promotion_status: string;
+    release_status: string;
+    release_tag: string;
+    release_url: string;
+    source_health_status: string;
+};
+
+export type GenericWebProdPromotionRequest = {
+    artifact_id?: string;
+    backup_record_id?: string;
+    backup_required?: boolean;
+    dry_run?: boolean;
+    from_instance?: string;
+    health_timeout_seconds?: number;
+    no_cache?: boolean;
+    product: string;
+    release_tag?: string;
+    schema_version?: number;
+    source_git_ref?: string;
+    timeout_seconds?: number | null;
+    to_instance?: string;
+    verify_health?: boolean;
+    wait?: boolean;
+};
+
+export type GenericWebProdPromotionResponse = {
+    original_trace_id?: string | null;
+    records: GenericWebProdPromotionRecords;
+    replayed?: boolean | null;
+    result: GenericWebProdPromotionResponseResult;
+    status: 'accepted';
+    trace_id: string;
+};
+
+export type GenericWebProdPromotionResponseResult = {
+    artifact_id: string;
+    backup_record_id: string;
+    backup_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    context: string;
+    deployment_record_id: string;
+    deployment_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    destination_health_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    dry_run: boolean;
+    error_message: string;
+    from_instance: string;
+    inventory_record_id: string;
+    product: string;
+    promotion_record_id: string;
+    promotion_status: 'pending' | 'pass' | 'fail';
+    provider_id: string;
+    provider_target_type: string;
+    release_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    release_tag: string;
+    release_url: string;
+    source_git_ref: string;
+    source_health_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    target_category: 'application' | 'compose' | 'container' | 'service' | 'static' | 'unknown';
+    target_id: string;
+    target_name: string;
+    to_instance: string;
+};
+
+export type GenericWebPromotionWorkflowEnvelope = {
+    product: string;
+    schema_version?: number;
+    workflow: GenericWebPromotionWorkflowRequest;
+};
+
+export type GenericWebPromotionWorkflowRequest = {
+    bump?: 'patch' | 'minor' | 'major' | null;
+    context: string;
+    dry_run?: boolean;
+    observe_timeout_seconds?: number;
+    product: string;
+    schema_version?: number;
+};
+
+export type GenericWebPromotionWorkflowResponse = {
+    original_trace_id?: string | null;
+    records: {
+        [key: string]: string;
+    };
+    replayed?: boolean | null;
+    result: GenericWebPromotionWorkflowResponseResult;
+    status: 'accepted';
+    trace_id: string;
+};
+
+export type GenericWebPromotionWorkflowResponseResult = {
+    bump: 'patch' | 'minor' | 'major';
+    context: string;
+    dispatch_status: 'pending' | 'dispatched';
+    dry_run: boolean;
+    product: string;
+    ref: string;
+    repository: string;
+    run_conclusion: string;
+    run_id: number;
+    run_status: string;
+    run_url: string;
+    workflow_id: string;
+};
+
 export type GitHubHumanIdentityResponse = {
     email: string;
     github_id: number;
@@ -453,10 +574,6 @@ export type GitHubIssueInboxRepositoryGroup = {
     repository: string;
 };
 
-export type HttpValidationError = {
-    detail: Array<ValidationError>;
-};
-
 export type HealthcheckEvidence = {
     observed_runtime_identity: RuntimeIdentity | null;
     runtime_identity_detail: string;
@@ -474,11 +591,11 @@ export type LaunchplaneErrorDetail = {
 };
 
 export type LaunchplaneErrorResponse = {
-    authz: {
+    authz?: {
         [key: string]: unknown;
     } | null;
     error: LaunchplaneErrorDetail;
-    records: {
+    records?: {
         [key: string]: string;
     } | null;
     status: string;
@@ -894,6 +1011,126 @@ export type ProductActivityResponse = {
     activity: ProductActivityReadModel;
     status: 'ok';
     trace_id: string;
+};
+
+export type ProductConfigApplyResponse = {
+    original_trace_id?: string | null;
+    records: {
+        [key: string]: string;
+    };
+    replayed?: boolean | null;
+    result: ProductConfigApplyResult;
+    status: 'accepted';
+    trace_id: string;
+};
+
+export type ProductConfigApplyResult = {
+    actor: string;
+    context: string;
+    instance: string;
+    mode: 'dry-run' | 'apply';
+    next_actions: Array<ProductConfigLiveTargetRuntimeNextAction>;
+    product: string;
+    runtime_environment: ProductConfigRuntimeEnvironmentResult;
+    runtime_key_safety: ProductConfigRuntimeKeySafetyResult;
+    secrets: Array<ProductConfigSecretResult>;
+    source_label: string;
+    status: 'ok' | 'records_applied_live_sync_required';
+    summary: ProductConfigApplySummary;
+};
+
+export type ProductConfigApplySummary = {
+    runtime_changed_key_count: number;
+    secret_change_count: number;
+};
+
+export type ProductConfigLiveTarget = {
+    context: string;
+    instance: string;
+    target_name: string;
+    target_type: string;
+};
+
+export type ProductConfigLiveTargetRuntimeNextAction = {
+    apply: ProductConfigLiveTargetRuntimeOperation;
+    changed_keys: Array<string>;
+    dry_run: ProductConfigLiveTargetRuntimeOperation;
+    instruction: string;
+    kind: 'live_target_runtime_apply';
+    required: boolean;
+    status: 'live_sync_required';
+    target: ProductConfigLiveTarget;
+};
+
+export type ProductConfigLiveTargetRuntimeOperation = {
+    endpoint: string;
+    method: 'POST';
+    mode: 'dry-run' | 'apply';
+};
+
+export type ProductConfigRuntimeEnvironmentRecordSummary = {
+    context: string;
+    env_keys: Array<string>;
+    env_value_count: number;
+    instance: string;
+    scope: 'global' | 'context' | 'instance';
+    source_label: string;
+    updated_at: string;
+};
+
+export type ProductConfigRuntimeEnvironmentResult = {
+    action: 'skipped' | 'created' | 'updated' | 'unchanged';
+    changed_keys: Array<string>;
+    context: string;
+    env_value_count_after: number;
+    instance: string;
+    keys: Array<string>;
+    record?: ProductConfigRuntimeEnvironmentRecordSummary | null;
+    scope: 'global' | 'context' | 'instance';
+    unchanged_keys: Array<string>;
+};
+
+export type ProductConfigRuntimeInput = {
+    context?: string | null;
+    env?: {
+        [key: string]: string | number | number | boolean;
+    };
+    instance?: string | null;
+    scope?: 'global' | 'context' | 'instance' | null;
+    [key: string]: unknown;
+};
+
+export type ProductConfigRuntimeKeySafetyResult = {
+    checked_binding_keys: Array<string>;
+    findings: Array<RuntimeKeySafetyFinding>;
+    policy_record_id: string;
+    policy_sha256: string;
+    required: boolean;
+    status: 'skipped' | 'pass';
+    target?: RuntimeKeySafetyTarget | null;
+};
+
+export type ProductConfigSecretInput = {
+    binding_key?: string | null;
+    context?: string | null;
+    description?: string;
+    instance?: string | null;
+    integration?: string | null;
+    name?: string | null;
+    scope?: 'global' | 'context' | 'context_instance' | null;
+    value: string;
+    [key: string]: unknown;
+};
+
+export type ProductConfigSecretResult = {
+    action: 'created' | 'rotated' | 'unchanged';
+    binding_key: string;
+    context: string;
+    instance: string;
+    integration: string;
+    name: string;
+    scope: 'global' | 'context' | 'context_instance';
+    secret_id: string;
 };
 
 export type ProductEnvironmentConfigStatus = {
@@ -1336,6 +1573,21 @@ export type RuntimeIdentity = {
     source_git_ref: string;
 };
 
+export type RuntimeKeySafetyFinding = {
+    binding_id: string;
+    binding_key: string;
+    code: 'ambiguous_binding' | 'binding_disabled' | 'binding_missing' | 'context_not_allowed' | 'instance_not_allowed' | 'secret_class_not_allowed' | 'unclassified_binding' | 'unknown_environment_class';
+    detail: string;
+    secret_class: string;
+    secret_id: string;
+};
+
+export type RuntimeKeySafetyTarget = {
+    context: string;
+    environment_class: 'prod' | 'testing' | 'preview' | 'dev' | 'unknown';
+    instance: string;
+};
+
 export type SecretBinding = {
     binding_id: string;
     binding_key: string;
@@ -1358,16 +1610,6 @@ export type StructuredHealthEvidence = {
     source_git_ref: string;
     status: 'unchecked' | 'pass' | 'fail' | 'malformed';
     version: string;
-};
-
-export type ValidationError = {
-    ctx: {
-        [key: string]: unknown;
-    };
-    input: unknown;
-    loc: Array<string | number>;
-    msg: string;
-    type: string;
 };
 
 export type WorkGraphIssueInboxResponse = {
@@ -1395,6 +1637,69 @@ export type WorkGraphIssueSnapshot = {
     title: string;
     updated_at: string;
     url: string;
+};
+
+export type WorkGraphQueue = {
+    generated_at: string;
+    hidden_count: number;
+    items: Array<WorkGraphQueueItem>;
+    schema_version: number;
+};
+
+export type WorkGraphQueueEvidence = {
+    code: string;
+    detail: string;
+    source_url: string;
+    state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type WorkGraphQueueItem = {
+    blocked_by_count: number;
+    evidence: Array<WorkGraphQueueEvidence>;
+    finish_line: string;
+    focus: 'Now' | 'Next' | 'Waiting' | 'Later' | 'Done' | 'Unknown';
+    handoff_url: string;
+    manager: string;
+    next_action: string;
+    number: number;
+    product: string;
+    product_display_name: string;
+    reasons: Array<WorkGraphRecommendationReason>;
+    recommendation: 'quick_win' | 'deep_work' | 'switch_projects' | 'blocked_cleanup' | 'attention_needed' | 'watch';
+    repo_classification: 'managed_runtime' | 'active_awareness' | 'support_dependency' | 'out_of_scope';
+    repository: string;
+    safe_to_start: boolean;
+    score: number;
+    source_of_truth_url: string;
+    state: 'ready' | 'waiting' | 'blocked' | 'done' | 'hidden';
+    title: string;
+    updated_at: string;
+    url: string;
+    why_now: string;
+};
+
+export type WorkGraphRankEnvelope = {
+    limit?: number;
+    schema_version?: number;
+    snapshot: WorkGraphSnapshot;
+};
+
+export type WorkGraphRankResponse = {
+    records: {
+        [key: string]: string;
+    };
+    result: WorkGraphRankResult;
+    status: 'accepted';
+    trace_id: string;
+};
+
+export type WorkGraphRankResult = {
+    queue: WorkGraphQueue;
+};
+
+export type WorkGraphRecommendationReason = {
+    code: string;
+    detail: string;
 };
 
 export type WorkGraphRepoSnapshot = {
@@ -1432,7 +1737,6 @@ export type ReadHumanAuthSessionData = {
 
 export type ReadHumanAuthSessionErrors = {
     401: AuthSessionRequiredResponse;
-    422: HttpValidationError;
 };
 
 export type ReadHumanAuthSessionError = ReadHumanAuthSessionErrors[keyof ReadHumanAuthSessionErrors];
@@ -1459,7 +1763,6 @@ export type ReadDriverContextViewData = {
 export type ReadDriverContextViewErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
-    422: HttpValidationError;
 };
 
 export type ReadDriverContextViewError = ReadDriverContextViewErrors[keyof ReadDriverContextViewErrors];
@@ -1487,7 +1790,6 @@ export type ReadDriverInstanceViewData = {
 export type ReadDriverInstanceViewErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
-    422: HttpValidationError;
 };
 
 export type ReadDriverInstanceViewError = ReadDriverInstanceViewErrors[keyof ReadDriverInstanceViewErrors];
@@ -1512,7 +1814,6 @@ export type ReadDriverDescriptorsData = {
 export type ReadDriverDescriptorsErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
-    422: HttpValidationError;
 };
 
 export type ReadDriverDescriptorsError = ReadDriverDescriptorsErrors[keyof ReadDriverDescriptorsErrors];
@@ -1545,7 +1846,6 @@ export type ReadEveryCodeSummaryErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1578,7 +1878,6 @@ export type ListEveryCodeWorkRequestsErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1612,7 +1911,6 @@ export type ReadPreviewReadinessErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1640,7 +1938,6 @@ export type ListProductProfilesData = {
 export type ListProductProfilesErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1668,7 +1965,6 @@ export type ListProductsErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1698,7 +1994,6 @@ export type ReadProductErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1728,7 +2023,6 @@ export type ReadProductActivityErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1758,7 +2052,6 @@ export type ListProductEnvironmentsErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1789,7 +2082,6 @@ export type ReadProductEnvironmentErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1820,7 +2112,6 @@ export type ReadProductEnvironmentConfigStatusErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1846,7 +2137,6 @@ export type ReadRepoProductMappingData = {
 export type ReadRepoProductMappingErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1872,7 +2162,6 @@ export type ReadWorkGraphIssueInboxData = {
 export type ReadWorkGraphIssueInboxErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1902,7 +2191,6 @@ export type ReadMergeTrainControllerStatusErrors = {
     400: LaunchplaneErrorResponse;
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1929,7 +2217,6 @@ export type ReadMergeTrainPolicyTargetsErrors = {
     400: LaunchplaneErrorResponse;
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1955,7 +2242,6 @@ export type ReadWorkGraphSnapshotData = {
 export type ReadWorkGraphSnapshotErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
-    422: HttpValidationError;
     503: LaunchplaneErrorResponse;
 };
 
@@ -1966,3 +2252,129 @@ export type ReadWorkGraphSnapshotResponses = {
 };
 
 export type ReadWorkGraphSnapshotResponse = ReadWorkGraphSnapshotResponses[keyof ReadWorkGraphSnapshotResponses];
+
+export type ApplyGenericWebProdPromotionData = {
+    body: GenericWebProdPromotionEnvelope;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/drivers/generic-web/prod-promotion';
+};
+
+export type ApplyGenericWebProdPromotionErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyGenericWebProdPromotionError = ApplyGenericWebProdPromotionErrors[keyof ApplyGenericWebProdPromotionErrors];
+
+export type ApplyGenericWebProdPromotionResponses = {
+    202: GenericWebProdPromotionResponse;
+};
+
+export type ApplyGenericWebProdPromotionResponse = ApplyGenericWebProdPromotionResponses[keyof ApplyGenericWebProdPromotionResponses];
+
+export type DispatchGenericWebProdPromotionWorkflowData = {
+    body: GenericWebPromotionWorkflowEnvelope;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/drivers/generic-web/prod-promotion-workflow';
+};
+
+export type DispatchGenericWebProdPromotionWorkflowErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type DispatchGenericWebProdPromotionWorkflowError = DispatchGenericWebProdPromotionWorkflowErrors[keyof DispatchGenericWebProdPromotionWorkflowErrors];
+
+export type DispatchGenericWebProdPromotionWorkflowResponses = {
+    202: GenericWebPromotionWorkflowResponse;
+};
+
+export type DispatchGenericWebProdPromotionWorkflowResponse = DispatchGenericWebProdPromotionWorkflowResponses[keyof DispatchGenericWebProdPromotionWorkflowResponses];
+
+export type ApplyProductConfigData = {
+    body: {
+        context?: string;
+        instance?: string;
+        mode: 'dry-run' | 'apply';
+        product: string;
+        reason?: string;
+        runtime_env?: {
+            [key: string]: string | number | number | boolean;
+        } | ProductConfigRuntimeInput | null;
+        runtime_environment?: {
+            [key: string]: string | number | number | boolean;
+        } | ProductConfigRuntimeInput | null;
+        schema_version?: number;
+        secrets?: Array<ProductConfigSecretInput>;
+        source_label?: string;
+    };
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/product-config/apply';
+};
+
+export type ApplyProductConfigErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyProductConfigError = ApplyProductConfigErrors[keyof ApplyProductConfigErrors];
+
+export type ApplyProductConfigResponses = {
+    202: ProductConfigApplyResponse;
+};
+
+export type ApplyProductConfigResponse = ApplyProductConfigResponses[keyof ApplyProductConfigResponses];
+
+export type RankWorkGraphSnapshotData = {
+    body: WorkGraphRankEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/work-graph/rank';
+};
+
+export type RankWorkGraphSnapshotErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+};
+
+export type RankWorkGraphSnapshotError = RankWorkGraphSnapshotErrors[keyof RankWorkGraphSnapshotErrors];
+
+export type RankWorkGraphSnapshotResponses = {
+    202: WorkGraphRankResponse;
+};
+
+export type RankWorkGraphSnapshotResponse = RankWorkGraphSnapshotResponses[keyof RankWorkGraphSnapshotResponses];

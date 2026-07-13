@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,6 +17,7 @@ from control_plane.contracts.repo_product_mapping_read_model import (
     build_repo_product_mapping_from_records,
 )
 from control_plane.contracts.work_graph_read_model import (
+    WorkGraphQueue,
     WorkGraphPlanningIssueFacts,
     WorkGraphSnapshot,
     build_work_graph_queue,
@@ -53,6 +54,36 @@ class WorkGraphRankEnvelope(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     snapshot: WorkGraphSnapshot
     limit: int = Field(default=25, ge=1, le=100)
+
+
+class WorkGraphRankResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    queue: WorkGraphQueue
+
+
+class WorkGraphRankResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted"] = "accepted"
+    trace_id: str
+    records: dict[str, str] = Field(default_factory=dict)
+    result: WorkGraphRankResult
+
+
+class WorkGraphIssueInboxReconcileResponseResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reconcile: GitHubIssueInboxReconcileResult
+
+
+class WorkGraphIssueInboxReconcileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted"] = "accepted"
+    trace_id: str
+    records: dict[str, str] = Field(default_factory=dict)
+    result: WorkGraphIssueInboxReconcileResponseResult
 
 
 def build_work_graph_snapshot_service_payload(

@@ -50,12 +50,13 @@ The URL is a temporary/root test service URL, not a Launchplane runtime
 credential. The harness creates and drops isolated databases, upgrades each from
 empty schema through Alembic `head`, verifies the exact checked-in schema head
 and critical indexes/types, and runs focused two-connection concurrency tests
-for idempotency conflicts, operation claims, stale lease owners, lease recovery,
-and active-operation partial uniqueness. Same-repo CI provides the URL via a
-PostgreSQL service container; fork PRs keep the SQLite/unittest path only. Keep
-the integration module focused: target runtime is under 2 minutes in CI, and any
-flake should be treated as a storage or harness bug rather than hidden with a
-retry loop.
+for mutation reservation/replay/conflict, reconciliation-key fencing, atomic
+business-write completion and rollback, operation claims, stale lease owners,
+lease recovery, and active-operation partial uniqueness. Same-repo CI provides
+the URL via a PostgreSQL service container; fork PRs keep the SQLite/unittest
+path only. Keep the integration module focused: target runtime is under 2
+minutes in CI, and any flake should be treated as a storage or harness bug
+rather than hidden with a retry loop.
 
 The lower-level CI shard commands remain available for diagnosis:
 
@@ -92,6 +93,16 @@ local command is the official pre-review full-suite proof; the PostgreSQL
 integration command is the official production storage-semantics proof when a
 local or CI PostgreSQL service is available. Neither local command replaces CI's
 runner isolation, artifact retention, or required status checks.
+
+Workflow contract tests should parse workflow YAML through
+`tests/support/workflows.py` and assert named invariants instead of mirroring
+large YAML snippets, substring counts, or indentation-sensitive job fragments.
+Use semantic checks for event shape, fork-hosted versus same-repository
+self-hosted runner isolation, OIDC and permission requirements,
+`launchplane-request` inputs, artifact retention, immutable timing snapshots,
+and aggregate gate dependencies. Keep direct text assertions only for embedded
+script behavior that is not represented as YAML structure, and make invariant
+failures name both the workflow file and the violated invariant.
 
 ## HTTP and ASGI contracts
 

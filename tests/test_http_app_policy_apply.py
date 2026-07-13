@@ -17,6 +17,7 @@ from control_plane.http_app import (
     create_launchplane_fastapi_app,
     store_product_config_dry_run_record,
 )
+from control_plane.product_config_http import ProductConfigApplyResponse
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -2443,12 +2444,120 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first_response.status_code, 202)
         self.assertEqual(replay_response.status_code, 202)
+        ProductConfigApplyResponse.model_validate(first_response.json())
+        ProductConfigApplyResponse.model_validate(replay_response.json())
         self.assertTrue(replay_response.json()["replayed"])
         self.assertEqual(
             replay_response.json()["original_trace_id"], first_response.json()["trace_id"]
         )
         self.assertEqual(conflict_response.status_code, 409)
         self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_product_config_dry_run_idempotency_replay_and_conflict(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(database_url=database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+            payload = {**_product_config_payload(), "mode": "dry-run"}
+            changed_payload = {
+                **payload,
+                "runtime_env": {"scope": "instance", "env": {"CONTACT_EMAIL_MODE": "api"}},
+            }
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                first_response = await _post_product_config_apply(
+                    app,
+                    payload,
+                    idempotency_key="product-config-dry-run-idempotent",
+                )
+                replay_response = await _post_product_config_apply(
+                    app,
+                    payload,
+                    idempotency_key="product-config-dry-run-idempotent",
+                )
+                conflict_response = await _post_product_config_apply(
+                    app,
+                    changed_payload,
+                    idempotency_key="product-config-dry-run-idempotent",
+                )
+            app_store.close()
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(
+            replay_response.json()["original_trace_id"], first_response.json()["trace_id"]
+        )
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_product_config_accepts_legacy_flat_runtime_env(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(database_url=database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+            payload = _product_config_payload()
+            payload["secrets"] = []
+            payload["runtime_env"] = {"CONTACT_EMAIL_MODE": "legacy-flat"}
+
+            response = await _post_product_config_apply(app, payload)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 202)
+        ProductConfigApplyResponse.model_validate(response.json())
+        runtime_environment = response.json()["result"]["runtime_environment"]
+        self.assertEqual(runtime_environment["keys"], ["CONTACT_EMAIL_MODE"])
+
+    async def test_product_config_accepts_legacy_secret_identity_shorthand(self) -> None:
+        for omitted_field in ("name", "binding_key"):
+            with self.subTest(omitted_field=omitted_field):
+                with TemporaryDirectory() as temporary_directory_name:
+                    root = Path(temporary_directory_name)
+                    database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+                    _write_runtime_key_safety_policy(database_url=database_url)
+                    app_store = PostgresRecordStore(database_url=database_url)
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(_identity()),
+                        authz_policy=_product_config_policy(action="product_config.plan"),
+                        record_store_factory=lambda: app_store,
+                    )
+                    payload = _product_config_payload()
+                    secret = _product_config_secrets(payload)[0]
+                    secret.pop(omitted_field)
+
+                    with patch.dict(
+                        os.environ,
+                        {
+                            control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: (
+                                "test-master-key"
+                            )
+                        },
+                        clear=True,
+                    ):
+                        response = await _post_product_config_apply(app, payload)
+                    app_store.close()
+
+                self.assertEqual(response.status_code, 202)
+                ProductConfigApplyResponse.model_validate(response.json())
+                secret_result = response.json()["result"]["secrets"][0]
+                self.assertEqual(secret_result["name"], "SMTP_PASSWORD")
+                self.assertEqual(secret_result["binding_key"], "SMTP_PASSWORD")
 
     async def test_product_config_requires_database_storage(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2505,7 +2614,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route["operationId"], "apply_product_config")
         self.assertEqual(
             route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
+            "#/components/schemas/ProductConfigApplyResponse",
         )
         self.assertEqual(
             route["requestBody"]["content"]["application/json"]["schema"]["title"],
@@ -2513,6 +2622,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
         )
         for status_code in ("400", "401", "403", "409", "503"):
             self.assertIn(status_code, route["responses"])
+        self.assertNotIn("422", route["responses"])
 
 
 class FastApiProductContextCutoverTests(unittest.IsolatedAsyncioTestCase):

@@ -1,11 +1,15 @@
+import fcntl
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 import time
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from json import JSONDecodeError
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from pydantic import BaseModel
 
@@ -22,8 +26,13 @@ from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationPolicyRecord,
 )
 from control_plane.contracts.every_code_work_request import (
+    EveryCodeWorkRequestHeartbeat,
     EveryCodeWorkRequestRecord,
+    EveryCodeWorkRequestStatusUpdate,
+    apply_every_code_work_request_status,
     claim_every_code_work_request,
+    heartbeat_every_code_work_request,
+    recover_stale_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
@@ -60,6 +69,10 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    build_route_binding_key,
+)
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
@@ -77,14 +90,53 @@ from control_plane.contracts.public_ingress_monitoring import PublicIngressIncid
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.runtime_environment_record import (
+    RuntimeEnvironmentDeleteEvent,
+    RuntimeEnvironmentRecord,
+)
+from control_plane.contracts.secret_record import (
+    SecretAuditEvent,
+    SecretBinding,
+    SecretRecord,
+    SecretRotationWrite,
+    SecretVersion,
+)
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProviderTargetWrite,
+    RuntimeEnvironmentDelete,
+)
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
+RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
+CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
+ProviderTargetCreateStatus = Literal["created", "exists"]
+
+
+class _AuthorityBundleStageEntry(BaseModel):
+    action: Literal["write", "delete"]
+    record_type: str
+    record_id: str
+    final_path: str
+    step_name: str
+    staged_path: str = ""
+    expected_payload: dict[str, object] | None = None
+
+
+class _AuthorityBundleStageManifest(BaseModel):
+    schema_version: int = 1
+    stage_id: str
+    state: Literal["ready", "publishing"]
+    entries: tuple[_AuthorityBundleStageEntry, ...]
 
 
 def _utc_now_timestamp() -> str:
@@ -99,20 +151,58 @@ class FilesystemRecordStore:
 
     def __init__(self, state_dir: Path) -> None:
         self.state_dir = state_dir
+        self._recovering_product_authority_bundle = False
 
     def _record_path(self, record_type: str, record_id: str) -> Path:
         return self.state_dir / record_type / f"{record_id}.json"
 
     def _write_model(self, record_type: str, record_id: str, model: BaseModel) -> Path:
+        with self._product_authority_bundle_lock():
+            return self._write_model_locked(record_type, record_id, model)
+
+    def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
-        record_path.write_text(
-            json.dumps(model.model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True),
-            encoding="utf-8",
+        descriptor, temporary_path = tempfile.mkstemp(
+            dir=record_path.parent,
+            prefix=f".{record_path.name}.",
+            suffix=".tmp",
         )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as record_file:
+                record_file.write(
+                    json.dumps(
+                        model.model_dump(mode="json", exclude_none=True),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                record_file.flush()
+                os.fsync(record_file.fileno())
+            os.replace(temporary_path, record_path)
+        finally:
+            Path(temporary_path).unlink(missing_ok=True)
         return record_path
 
+    @contextmanager
+    def _exclusive_record_lock(self, record_type: str, record_id: str) -> Iterator[None]:
+        lock_digest = hashlib.sha256(record_id.encode("utf-8")).hexdigest()
+        lock_path = self.state_dir / ".locks" / record_type / f"{lock_digest}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def _create_model_if_absent(self, record_type: str, record_id: str, model: BaseModel) -> bool:
+        with self._product_authority_bundle_lock():
+            return self._create_model_if_absent_locked(record_type, record_id, model)
+
+    def _create_model_if_absent_locked(
+        self, record_type: str, record_id: str, model: BaseModel
+    ) -> bool:
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -131,6 +221,12 @@ class FilesystemRecordStore:
     def _read_model(
         self, model_type: type[RecordModel], record_type: str, record_id: str
     ) -> RecordModel:
+        with self._product_authority_bundle_lock():
+            return self._read_model_locked(model_type, record_type, record_id)
+
+    def _read_model_locked(
+        self, model_type: type[RecordModel], record_type: str, record_id: str
+    ) -> RecordModel:
         record_path = self._record_path(record_type, record_id)
         payload = json.loads(record_path.read_text(encoding="utf-8"))
         return model_type.model_validate(payload)
@@ -139,6 +235,12 @@ class FilesystemRecordStore:
         return self.state_dir / record_type
 
     def _list_models(
+        self, model_type: type[RecordModel], record_type: str
+    ) -> tuple[RecordModel, ...]:
+        with self._product_authority_bundle_lock():
+            return self._list_models_locked(model_type, record_type)
+
+    def _list_models_locked(
         self, model_type: type[RecordModel], record_type: str
     ) -> tuple[RecordModel, ...]:
         record_dir = self._record_dir(record_type)
@@ -150,6 +252,424 @@ class FilesystemRecordStore:
             payload = json.loads(record_path.read_text(encoding="utf-8"))
             records.append(model_type.model_validate(payload))
         return tuple(records)
+
+    def _product_authority_bundle_stage_root(self) -> Path:
+        return self.state_dir / ".product_authority_bundle_stages"
+
+    def _after_product_authority_bundle_step(self, step_name: str) -> None:
+        _ = step_name
+
+    @contextmanager
+    def _product_authority_bundle_lock(self) -> Iterator[None]:
+        with self._exclusive_record_lock("product_authority_bundles", "global"):
+            self._recover_product_authority_bundle_stages_locked()
+            yield
+
+    def _recover_product_authority_bundle_stages_locked(self) -> None:
+        if self._recovering_product_authority_bundle:
+            return
+        stage_root = self._product_authority_bundle_stage_root()
+        if not stage_root.exists():
+            return
+        self._recovering_product_authority_bundle = True
+        try:
+            for stage_dir in sorted(path for path in stage_root.iterdir() if path.is_dir()):
+                manifest_path = stage_dir / "manifest.json"
+                if not manifest_path.exists():
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+                    continue
+                manifest = _AuthorityBundleStageManifest.model_validate_json(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+                if manifest.state == "ready":
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+                    continue
+                self._publish_product_authority_bundle_stage(
+                    manifest=manifest,
+                    stage_dir=stage_dir,
+                    recovering=True,
+                )
+            with suppress(OSError):
+                stage_root.rmdir()
+        finally:
+            self._recovering_product_authority_bundle = False
+
+    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
+        if not bundle.requires_write():
+            return
+        with self._product_authority_bundle_lock():
+            stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
+            stage_dir = self._product_authority_bundle_stage_root() / stage_id
+            records_dir = stage_dir / "records"
+            records_dir.mkdir(parents=True, exist_ok=False)
+            entries: list[_AuthorityBundleStageEntry] = []
+            try:
+                self._stage_product_authority_bundle_entries(
+                    bundle=bundle,
+                    stage_dir=stage_dir,
+                    entries=entries,
+                )
+                manifest = _AuthorityBundleStageManifest(
+                    stage_id=stage_id,
+                    state="ready",
+                    entries=tuple(entries),
+                )
+                self._write_product_authority_bundle_stage_manifest(
+                    stage_dir=stage_dir,
+                    manifest=manifest,
+                )
+                self._after_product_authority_bundle_step("stage_product_authority_bundle")
+                publishing_manifest = manifest.model_copy(update={"state": "publishing"})
+                self._write_product_authority_bundle_stage_manifest(
+                    stage_dir=stage_dir,
+                    manifest=publishing_manifest,
+                )
+                self._after_product_authority_bundle_step("publish_product_authority_bundle")
+                self._publish_product_authority_bundle_stage(
+                    manifest=publishing_manifest,
+                    stage_dir=stage_dir,
+                    recovering=False,
+                )
+            except Exception:
+                if not (stage_dir / "manifest.json").exists():
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+                raise
+
+    def _stage_product_authority_bundle_entries(
+        self,
+        *,
+        bundle: ProductAuthorityBundle,
+        stage_dir: Path,
+        entries: list[_AuthorityBundleStageEntry],
+    ) -> None:
+        for delete_item in bundle.delete_runtime_environments:
+            self._stage_product_authority_bundle_delete(
+                entries=entries,
+                record_type="launchplane_runtime_environments",
+                record_id=_runtime_environment_record_id(delete_item.expected_record),
+                expected_model=delete_item.expected_record,
+                step_name="delete_runtime_environment",
+            )
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="launchplane_runtime_environment_delete_events",
+                record_id=delete_item.event.event_id,
+                model=delete_item.event,
+                step_name="write_runtime_environment_delete_event",
+            )
+        for provider_target_delete in bundle.delete_provider_targets:
+            self._stage_product_authority_bundle_delete(
+                entries=entries,
+                record_type="launchplane_provider_targets",
+                record_id=_context_instance_record_id(
+                    provider_target_delete.context,
+                    provider_target_delete.instance,
+                ),
+                expected_model=provider_target_delete,
+                step_name="delete_provider_target",
+            )
+        for target_id_delete in bundle.delete_dokploy_target_ids:
+            self._stage_product_authority_bundle_delete(
+                entries=entries,
+                record_type="dokploy_target_ids",
+                record_id=_context_instance_record_id(
+                    target_id_delete.context,
+                    target_id_delete.instance,
+                ),
+                expected_model=target_id_delete,
+                step_name="delete_dokploy_target_id",
+            )
+        for target_delete in bundle.delete_dokploy_targets:
+            self._stage_product_authority_bundle_delete(
+                entries=entries,
+                record_type="dokploy_targets",
+                record_id=_context_instance_record_id(
+                    target_delete.context, target_delete.instance
+                ),
+                expected_model=target_delete,
+                step_name="delete_dokploy_target",
+            )
+
+        for profile_record in bundle.product_profiles:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="launchplane_product_profiles",
+                record_id=profile_record.product,
+                model=profile_record,
+                step_name="write_product_profile",
+            )
+        for target_record in bundle.dokploy_targets:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="dokploy_targets",
+                record_id=_context_instance_record_id(
+                    target_record.context, target_record.instance
+                ),
+                model=target_record,
+                step_name="write_dokploy_target",
+            )
+        for target_id_record in bundle.dokploy_target_ids:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="dokploy_target_ids",
+                record_id=_context_instance_record_id(
+                    target_id_record.context,
+                    target_id_record.instance,
+                ),
+                model=target_id_record,
+                step_name="write_dokploy_target_id",
+            )
+        for provider_target_write in bundle.provider_target_writes:
+            self._validate_provider_target_write(provider_target_write)
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="launchplane_provider_targets",
+                record_id=_context_instance_record_id(
+                    provider_target_write.record.context,
+                    provider_target_write.record.instance,
+                ),
+                model=provider_target_write.record,
+                step_name="write_provider_target",
+            )
+        for runtime_record in bundle.runtime_environments:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="launchplane_runtime_environments",
+                record_id=_runtime_environment_record_id(runtime_record),
+                model=runtime_record,
+                step_name="write_runtime_environment",
+            )
+        for version in bundle.secret_versions:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="launchplane_secret_versions",
+                record_id=version.version_id,
+                model=version,
+                step_name="write_secret_version",
+            )
+        for secret_record in bundle.secret_records:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="launchplane_secrets",
+                record_id=secret_record.secret_id,
+                model=secret_record,
+                step_name="write_secret_record",
+            )
+        for binding in bundle.secret_bindings:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="launchplane_secret_bindings",
+                record_id=binding.binding_id,
+                model=binding,
+                step_name="write_secret_binding",
+            )
+        for event in bundle.secret_audit_events:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="launchplane_secret_audit_events",
+                record_id=event.event_id,
+                model=event,
+                step_name="write_secret_audit_event",
+            )
+        for inventory_record in bundle.environment_inventory:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="inventory",
+                record_id=f"{inventory_record.context}-{inventory_record.instance}",
+                model=inventory_record,
+                step_name="write_environment_inventory",
+            )
+        for release_record in bundle.release_tuples:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="release_tuples",
+                record_id=f"{release_record.context}-{release_record.channel}",
+                model=release_record,
+                step_name="write_release_tuple",
+            )
+        if bundle.idempotency_record is not None:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="idempotency",
+                record_id=bundle.idempotency_record.record_id,
+                model=bundle.idempotency_record,
+                step_name="write_idempotency",
+            )
+
+    def _stage_product_authority_bundle_write(
+        self,
+        *,
+        stage_dir: Path,
+        entries: list[_AuthorityBundleStageEntry],
+        record_type: str,
+        record_id: str,
+        model: BaseModel,
+        step_name: str,
+    ) -> None:
+        payload = model.model_dump(mode="json", exclude_none=True)
+        staged_path = stage_dir / "records" / f"{len(entries):04d}.json"
+        self._write_json_file(staged_path, payload)
+        entry = _AuthorityBundleStageEntry(
+            action="write",
+            record_type=record_type,
+            record_id=record_id,
+            final_path=self._record_path(record_type, record_id)
+            .relative_to(self.state_dir)
+            .as_posix(),
+            staged_path=staged_path.relative_to(stage_dir).as_posix(),
+            expected_payload=payload,
+            step_name=step_name,
+        )
+        entries.append(entry)
+        self._after_product_authority_bundle_step(f"stage_{step_name}")
+
+    def _validate_provider_target_write(self, write: ProviderTargetWrite) -> None:
+        record_path = self._record_path(
+            "launchplane_provider_targets",
+            _context_instance_record_id(write.record.context, write.record.instance),
+        )
+        current_payload = self._read_json_file(record_path)
+        if write.expected_absent:
+            if current_payload is not None:
+                raise ValueError(
+                    "Provider target record was created after authority bundle planning."
+                )
+            return
+        expected_record = write.expected_record
+        if expected_record is None:
+            raise ValueError("Provider target write expectation is missing.")
+        expected_payload = expected_record.model_dump(mode="json", exclude_none=True)
+        if current_payload != expected_payload:
+            raise ValueError("Provider target record changed after authority bundle planning.")
+
+    def _stage_product_authority_bundle_delete(
+        self,
+        *,
+        entries: list[_AuthorityBundleStageEntry],
+        record_type: str,
+        record_id: str,
+        expected_model: BaseModel,
+        step_name: str,
+    ) -> None:
+        expected_payload = expected_model.model_dump(mode="json", exclude_none=True)
+        final_path = self._record_path(record_type, record_id)
+        current_payload = self._read_json_file(final_path)
+        if current_payload is None:
+            raise FileNotFoundError(f"{record_type} record {record_id} was already deleted.")
+        if current_payload != expected_payload:
+            raise ValueError(f"{record_type} record {record_id} changed during bundle write.")
+        entries.append(
+            _AuthorityBundleStageEntry(
+                action="delete",
+                record_type=record_type,
+                record_id=record_id,
+                final_path=final_path.relative_to(self.state_dir).as_posix(),
+                expected_payload=expected_payload,
+                step_name=step_name,
+            )
+        )
+        self._after_product_authority_bundle_step(f"stage_{step_name}")
+
+    def _write_product_authority_bundle_stage_manifest(
+        self, *, stage_dir: Path, manifest: _AuthorityBundleStageManifest
+    ) -> None:
+        self._write_json_file(
+            stage_dir / "manifest.json",
+            manifest.model_dump(mode="json", exclude_none=True),
+        )
+
+    def _publish_product_authority_bundle_stage(
+        self,
+        *,
+        manifest: _AuthorityBundleStageManifest,
+        stage_dir: Path,
+        recovering: bool,
+    ) -> None:
+        for entry in manifest.entries:
+            final_path = self.state_dir / entry.final_path
+            if entry.action == "write":
+                self._publish_product_authority_bundle_write_entry(
+                    entry=entry,
+                    stage_dir=stage_dir,
+                    final_path=final_path,
+                )
+            else:
+                self._publish_product_authority_bundle_delete_entry(
+                    entry=entry,
+                    final_path=final_path,
+                    recovering=recovering,
+                )
+            self._after_product_authority_bundle_step(entry.step_name)
+        shutil.rmtree(stage_dir, ignore_errors=True)
+
+    def _publish_product_authority_bundle_write_entry(
+        self,
+        *,
+        entry: _AuthorityBundleStageEntry,
+        stage_dir: Path,
+        final_path: Path,
+    ) -> None:
+        staged_path = stage_dir / entry.staged_path
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        if staged_path.exists():
+            os.replace(staged_path, final_path)
+            return
+        current_payload = self._read_json_file(final_path)
+        if current_payload != entry.expected_payload:
+            raise RuntimeError(
+                f"Cannot recover authority bundle write for {entry.record_type}/{entry.record_id}."
+            )
+
+    def _publish_product_authority_bundle_delete_entry(
+        self,
+        *,
+        entry: _AuthorityBundleStageEntry,
+        final_path: Path,
+        recovering: bool,
+    ) -> None:
+        current_payload = self._read_json_file(final_path)
+        if current_payload is None:
+            return
+        if current_payload != entry.expected_payload:
+            action = "recover" if recovering else "publish"
+            raise RuntimeError(
+                f"Cannot {action} authority bundle delete for "
+                f"{entry.record_type}/{entry.record_id}; live record changed."
+            )
+        with suppress(FileNotFoundError):
+            final_path.unlink()
+
+    @staticmethod
+    def _write_json_file(path: Path, payload: dict[str, object]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        with temporary_path.open("w", encoding="utf-8") as record_file:
+            record_file.write(json.dumps(payload, indent=2, sort_keys=True))
+            record_file.flush()
+            os.fsync(record_file.fileno())
+        os.replace(temporary_path, path)
+
+    @staticmethod
+    def _read_json_file(path: Path) -> dict[str, object] | None:
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Record file {path} does not contain a JSON object.")
+        return payload
 
     @staticmethod
     def _record_sort_timestamp(finished_at: str, started_at: str) -> tuple[str, str]:
@@ -501,7 +1021,9 @@ class FilesystemRecordStore:
         return tuple(records)
 
     def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> Path:
-        return self._write_model("launchplane_every_code_work_requests", record.request_id, record)
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, record.request_id):
+            return self._write_model(record_type, record.request_id, record)
 
     def create_every_code_work_request_record_if_absent(
         self, record: EveryCodeWorkRequestRecord
@@ -554,13 +1076,137 @@ class FilesystemRecordStore:
         request_id: str,
         host: str,
         claimed_at: str,
+        lease_seconds: int = 1800,
+        idempotency_record_factory: (
+            Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
+        ) = None,
     ) -> EveryCodeWorkRequestRecord | None:
-        record = self.read_every_code_work_request_record(request_id)
-        claimed_record = claim_every_code_work_request(record, host=host, claimed_at=claimed_at)
-        if claimed_record is None:
-            return None
-        self.write_every_code_work_request_record(claimed_record)
-        return claimed_record
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, request_id):
+            record = self.read_every_code_work_request_record(request_id)
+            claimed_record = claim_every_code_work_request(
+                record, host=host, claimed_at=claimed_at, lease_seconds=lease_seconds
+            )
+            if claimed_record is None:
+                return None
+            self._write_model(record_type, request_id, claimed_record)
+            if idempotency_record_factory is not None:
+                self.write_idempotency_record(idempotency_record_factory(claimed_record))
+            return claimed_record
+
+    def heartbeat_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        fencing_token: int,
+        heartbeat_at: str,
+        lease_expires_at: str,
+        lease_seconds: int = 1800,
+    ) -> bool:
+        del lease_seconds
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, request_id):
+            try:
+                record = self.read_every_code_work_request_record(request_id)
+            except FileNotFoundError:
+                return False
+            updated = heartbeat_every_code_work_request(
+                record,
+                EveryCodeWorkRequestHeartbeat(
+                    host=host,
+                    fencing_token=fencing_token,
+                    heartbeat_at=heartbeat_at,
+                    lease_expires_at=lease_expires_at,
+                ),
+            )
+            if updated is None:
+                return False
+            self._write_model(record_type, request_id, updated)
+            return True
+
+    def update_every_code_work_request_status_record(
+        self,
+        *,
+        request_id: str,
+        update: EveryCodeWorkRequestStatusUpdate,
+    ) -> EveryCodeWorkRequestRecord:
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, request_id):
+            record = self.read_every_code_work_request_record(request_id)
+            if record.fencing_token > 0 and update.fencing_token != record.fencing_token:
+                raise ValueError(
+                    f"Every Code status update fencing token {update.fencing_token} "
+                    f"does not match record fencing token {record.fencing_token}"
+                )
+            updated = apply_every_code_work_request_status(record, update)
+            self._write_model(record_type, request_id, updated)
+            return updated
+
+    def compare_and_write_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        record: EveryCodeWorkRequestRecord,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> Literal["updated", "changed", "missing"]:
+        if expected_record.request_id != record.request_id:
+            raise ValueError("Every Code compare-and-write requires matching request IDs")
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, expected_record.request_id):
+            try:
+                current = self.read_every_code_work_request_record(expected_record.request_id)
+            except FileNotFoundError:
+                return "missing"
+            if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
+                return "changed"
+            self._write_model(record_type, record.request_id, record)
+            if idempotency_record is not None:
+                self.write_idempotency_record(idempotency_record)
+            return "updated"
+
+    def list_stale_every_code_work_request_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
+        stale_states = {"claimed", "running"}
+        records = [
+            record
+            for record in self._list_models(
+                EveryCodeWorkRequestRecord,
+                "launchplane_every_code_work_requests",
+            )
+            if record.state in stale_states
+            and record.lease_expires_at
+            and record.lease_expires_at < as_of
+        ]
+        records.sort(key=lambda r: (r.lease_expires_at, r.request_id))
+        return tuple(records[:limit])
+
+    def recover_stale_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        recovered_at: str,
+    ) -> EveryCodeWorkRequestRecord | None:
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, expected_record.request_id):
+            try:
+                current = self.read_every_code_work_request_record(expected_record.request_id)
+            except FileNotFoundError:
+                return None
+            if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
+                return None
+            if not current.lease_expires_at or current.lease_expires_at >= recovered_at:
+                return None
+            recovered = recover_stale_every_code_work_request(
+                current,
+                recovered_at=recovered_at,
+            )
+            self._write_model(record_type, recovered.request_id, recovered)
+            return recovered
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> Path:
         return self._write_model("launchplane_every_code_pr_feedback", record.feedback_id, record)
@@ -685,6 +1331,358 @@ class FilesystemRecordStore:
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> Path:
         return self._write_model("launchplane_product_profiles", record.product, record)
 
+    def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> Path:
+        return self._write_model(
+            "dokploy_target_ids",
+            _context_instance_record_id(record.context, record.instance),
+            record,
+        )
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord:
+        return self._read_model(
+            DokployTargetIdRecord,
+            "dokploy_target_ids",
+            _context_instance_record_id(context_name, instance_name),
+        )
+
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]:
+        records = list(self._list_models(DokployTargetIdRecord, "dokploy_target_ids"))
+        records.sort(key=lambda record: (record.context, record.instance))
+        return tuple(records)
+
+    def delete_dokploy_target_id_record(
+        self,
+        *,
+        expected_record: DokployTargetIdRecord,
+    ) -> CurrentAuthorityDeleteStatus:
+        return self._delete_expected_authority_record(
+            record_type="dokploy_target_ids",
+            record_id=_context_instance_record_id(
+                expected_record.context,
+                expected_record.instance,
+            ),
+            expected_record=expected_record,
+        )
+
+    def write_dokploy_target_record(self, record: DokployTargetRecord) -> Path:
+        return self._write_model(
+            "dokploy_targets",
+            _context_instance_record_id(record.context, record.instance),
+            record,
+        )
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord:
+        return self._read_model(
+            DokployTargetRecord,
+            "dokploy_targets",
+            _context_instance_record_id(context_name, instance_name),
+        )
+
+    def list_dokploy_target_records(self) -> tuple[DokployTargetRecord, ...]:
+        records = list(self._list_models(DokployTargetRecord, "dokploy_targets"))
+        records.sort(key=lambda record: (record.context, record.instance))
+        return tuple(records)
+
+    def delete_dokploy_target_record(
+        self,
+        *,
+        expected_record: DokployTargetRecord,
+    ) -> CurrentAuthorityDeleteStatus:
+        return self._delete_expected_authority_record(
+            record_type="dokploy_targets",
+            record_id=_context_instance_record_id(
+                expected_record.context,
+                expected_record.instance,
+            ),
+            expected_record=expected_record,
+        )
+
+    def write_provider_target_record(self, record: ProviderTargetRecord) -> Path:
+        return self._write_model(
+            "launchplane_provider_targets",
+            _context_instance_record_id(record.context, record.instance),
+            record,
+        )
+
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord:
+        return self._read_model(
+            ProviderTargetRecord,
+            "launchplane_provider_targets",
+            _context_instance_record_id(context_name, instance_name),
+        )
+
+    def list_provider_target_records(
+        self, *, provider_id: str = ""
+    ) -> tuple[ProviderTargetRecord, ...]:
+        normalized_provider_id = provider_id.strip().lower()
+        records = [
+            record
+            for record in self._list_models(
+                ProviderTargetRecord,
+                "launchplane_provider_targets",
+            )
+            if not normalized_provider_id or record.provider_id == normalized_provider_id
+        ]
+        records.sort(key=lambda record: (record.context, record.instance))
+        return tuple(records)
+
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]:
+        return self.list_provider_target_records()
+
+    def create_provider_target_record_if_absent(
+        self, record: ProviderTargetRecord
+    ) -> ProviderTargetCreateStatus:
+        created = self._create_model_if_absent(
+            "launchplane_provider_targets",
+            _context_instance_record_id(record.context, record.instance),
+            record,
+        )
+        return "created" if created else "exists"
+
+    def delete_provider_target_record(
+        self,
+        *,
+        expected_record: ProviderTargetRecord,
+    ) -> CurrentAuthorityDeleteStatus:
+        return self._delete_expected_authority_record(
+            record_type="launchplane_provider_targets",
+            record_id=_context_instance_record_id(
+                expected_record.context,
+                expected_record.instance,
+            ),
+            expected_record=expected_record,
+        )
+
+    def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> Path:
+        return self._write_model(
+            "launchplane_runtime_environments",
+            _runtime_environment_record_id(record),
+            record,
+        )
+
+    def delete_runtime_environment_record_with_event(
+        self,
+        *,
+        event: RuntimeEnvironmentDeleteEvent,
+        expected_record: RuntimeEnvironmentRecord,
+    ) -> RuntimeEnvironmentDeleteStatus:
+        bundle = ProductAuthorityBundle(
+            delete_runtime_environments=(
+                RuntimeEnvironmentDelete(expected_record=expected_record, event=event),
+            )
+        )
+        try:
+            self.write_product_authority_bundle(bundle)
+        except FileNotFoundError:
+            return "missing"
+        except ValueError:
+            return "changed"
+        return "deleted"
+
+    def write_runtime_environment_delete_event(self, event: RuntimeEnvironmentDeleteEvent) -> Path:
+        return self._write_model(
+            "launchplane_runtime_environment_delete_events",
+            event.event_id,
+            event,
+        )
+
+    def list_runtime_environment_delete_events(
+        self,
+        *,
+        scope: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+    ) -> tuple[RuntimeEnvironmentDeleteEvent, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                RuntimeEnvironmentDeleteEvent,
+                "launchplane_runtime_environment_delete_events",
+            )
+            if (not scope or record.scope == scope)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        ]
+        records.sort(key=lambda record: (record.recorded_at, record.event_id), reverse=True)
+        return tuple(records)
+
+    def list_runtime_environment_records(
+        self,
+        *,
+        scope: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                RuntimeEnvironmentRecord,
+                "launchplane_runtime_environments",
+            )
+            if (not scope or record.scope == scope)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        ]
+        records.sort(key=lambda record: (record.scope, record.context, record.instance))
+        return tuple(records)
+
+    def write_secret_record(self, record: SecretRecord) -> Path:
+        return self._write_model("launchplane_secrets", record.secret_id, record)
+
+    def read_secret_record(self, secret_id: str) -> SecretRecord:
+        return self._read_model(SecretRecord, "launchplane_secrets", secret_id)
+
+    def find_secret_record(
+        self,
+        *,
+        scope: str,
+        integration: str,
+        name: str,
+        context: str = "",
+        instance: str = "",
+    ) -> SecretRecord | None:
+        records = [
+            record
+            for record in self._list_models(SecretRecord, "launchplane_secrets")
+            if record.scope == scope
+            and record.integration == integration
+            and record.name == name
+            and record.context == context
+            and record.instance == instance
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.secret_id), reverse=True)
+        return records[0] if records else None
+
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(SecretRecord, "launchplane_secrets")
+            if (not integration or record.integration == integration)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.secret_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_secret_version(self, version: SecretVersion) -> Path:
+        return self._write_model("launchplane_secret_versions", version.version_id, version)
+
+    def read_secret_version(self, version_id: str) -> SecretVersion:
+        return self._read_model(SecretVersion, "launchplane_secret_versions", version_id)
+
+    def list_secret_versions(self, *, secret_id: str) -> tuple[SecretVersion, ...]:
+        records = [
+            version
+            for version in self._list_models(SecretVersion, "launchplane_secret_versions")
+            if version.secret_id == secret_id
+        ]
+        records.sort(key=lambda version: (version.created_at, version.version_id), reverse=True)
+        return tuple(records)
+
+    def write_secret_binding(self, binding: SecretBinding) -> Path:
+        return self._write_model("launchplane_secret_bindings", binding.binding_id, binding)
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        records = [
+            binding
+            for binding in self._list_models(SecretBinding, "launchplane_secret_bindings")
+            if (not integration or binding.integration == integration)
+            and (not context_name or binding.context == context_name)
+            and (not instance_name or binding.instance == instance_name)
+        ]
+        records.sort(key=lambda binding: (binding.updated_at, binding.binding_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_secret_audit_event(self, event: SecretAuditEvent) -> Path:
+        return self._write_model("launchplane_secret_audit_events", event.event_id, event)
+
+    def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]:
+        records = [
+            event
+            for event in self._list_models(
+                SecretAuditEvent,
+                "launchplane_secret_audit_events",
+            )
+            if event.secret_id == secret_id
+        ]
+        records.sort(key=lambda event: (event.recorded_at, event.event_id), reverse=True)
+        return tuple(records)
+
+    def write_secret_rotations(
+        self,
+        rotations: tuple[SecretRotationWrite, ...],
+        *,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> None:
+        ordered_rotations = tuple(sorted(rotations, key=lambda item: item.record.secret_id))
+        for rotation in ordered_rotations:
+            current_record = self.read_secret_record(rotation.record.secret_id)
+            if current_record.current_version_id != rotation.expected_current_version_id:
+                raise ValueError("Managed secret changed after rotation preflight.")
+        self.write_product_authority_bundle(
+            ProductAuthorityBundle(
+                secret_versions=tuple(rotation.version for rotation in ordered_rotations),
+                secret_records=tuple(rotation.record for rotation in ordered_rotations),
+                secret_audit_events=tuple(rotation.audit_event for rotation in ordered_rotations),
+                idempotency_record=idempotency_record,
+            )
+        )
+
+    def _delete_expected_authority_record(
+        self,
+        *,
+        record_type: str,
+        record_id: str,
+        expected_record: BaseModel,
+    ) -> CurrentAuthorityDeleteStatus:
+        with self._product_authority_bundle_lock():
+            return self._delete_expected_authority_record_locked(
+                record_type=record_type,
+                record_id=record_id,
+                expected_record=expected_record,
+            )
+
+    def _delete_expected_authority_record_locked(
+        self,
+        *,
+        record_type: str,
+        record_id: str,
+        expected_record: BaseModel,
+    ) -> CurrentAuthorityDeleteStatus:
+        record_path = self._record_path(record_type, record_id)
+        current_payload = self._read_json_file(record_path)
+        if current_payload is None:
+            return "missing"
+        expected_payload = expected_record.model_dump(mode="json", exclude_none=True)
+        if current_payload != expected_payload:
+            return "changed"
+        record_path.unlink()
+        return "deleted"
+
     def write_public_ingress_observation_record(
         self, record: PublicIngressObservationRecord
     ) -> Path:
@@ -701,6 +1699,57 @@ class FilesystemRecordStore:
             _ingress_canary_route_record_id(record.canary_key),
             record,
         )
+
+    def write_route_binding_record(self, record: EnvironmentRouteBindingRecord) -> Path:
+        return self._write_model(
+            "launchplane_route_bindings",
+            _route_binding_record_id(record.binding_key),
+            record,
+        )
+
+    def read_route_binding_record(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentRouteBindingRecord:
+        return self._read_model(
+            EnvironmentRouteBindingRecord,
+            "launchplane_route_bindings",
+            _route_binding_record_id(
+                build_route_binding_key(
+                    product=product,
+                    context=context_name,
+                    instance=instance_name,
+                )
+            ),
+        )
+
+    def list_route_binding_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EnvironmentRouteBindingRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                EnvironmentRouteBindingRecord,
+                "launchplane_route_bindings",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.product, record.context, record.instance))
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord:
         return self._read_model(
@@ -964,24 +2013,26 @@ class FilesystemRecordStore:
         return tuple(records)
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
-        return self._read_product_profile_record_path(
-            self._record_path("launchplane_product_profiles", product)
-        )
+        with self._product_authority_bundle_lock():
+            return self._read_product_profile_record_path(
+                self._record_path("launchplane_product_profiles", product)
+            )
 
     def list_product_profile_records(
         self,
         *,
         driver_id: str = "",
     ) -> tuple[LaunchplaneProductProfileRecord, ...]:
-        record_dir = self._record_dir("launchplane_product_profiles")
-        records: list[LaunchplaneProductProfileRecord] = []
-        if record_dir.exists():
-            for record_path in sorted(record_dir.glob("*.json")):
-                record = self._read_product_profile_record_path(record_path)
-                if not driver_id or record.driver_id == driver_id:
-                    records.append(record)
-        records.sort(key=lambda record: record.product)
-        return tuple(records)
+        with self._product_authority_bundle_lock():
+            record_dir = self._record_dir("launchplane_product_profiles")
+            records: list[LaunchplaneProductProfileRecord] = []
+            if record_dir.exists():
+                for record_path in sorted(record_dir.glob("*.json")):
+                    record = self._read_product_profile_record_path(record_path)
+                    if not driver_id or record.driver_id == driver_id:
+                        records.append(record)
+            records.sort(key=lambda record: record.product)
+            return tuple(records)
 
     def _read_product_profile_record_path(
         self, record_path: Path
@@ -1802,19 +2853,30 @@ class FilesystemRecordStore:
         promotion_record: PromotionRecord,
         inventory: EnvironmentInventory,
     ) -> Path:
-        promotion_path = self._record_path("promotions", promotion_record.record_id)
-        inventory_path = self._record_path("inventory", f"{inventory.context}-{inventory.instance}")
-        previous_promotion = promotion_path.read_bytes() if promotion_path.exists() else None
-        previous_inventory = inventory_path.read_bytes() if inventory_path.exists() else None
-        try:
-            self.write_environment_inventory(inventory)
-            return self.write_promotion_record(promotion_record)
-        except Exception:
-            with suppress(Exception):
-                self._restore_record_path(promotion_path, previous_promotion)
-            with suppress(Exception):
-                self._restore_record_path(inventory_path, previous_inventory)
-            raise
+        with self._product_authority_bundle_lock():
+            promotion_path = self._record_path("promotions", promotion_record.record_id)
+            inventory_path = self._record_path(
+                "inventory", f"{inventory.context}-{inventory.instance}"
+            )
+            previous_promotion = promotion_path.read_bytes() if promotion_path.exists() else None
+            previous_inventory = inventory_path.read_bytes() if inventory_path.exists() else None
+            try:
+                self._write_model_locked(
+                    "inventory",
+                    f"{inventory.context}-{inventory.instance}",
+                    inventory,
+                )
+                return self._write_model_locked(
+                    "promotions",
+                    promotion_record.record_id,
+                    promotion_record,
+                )
+            except Exception:
+                with suppress(Exception):
+                    self._restore_record_path(promotion_path, previous_promotion)
+                with suppress(Exception):
+                    self._restore_record_path(inventory_path, previous_inventory)
+                raise
 
     @staticmethod
     def _restore_record_path(record_path: Path, payload: bytes | None) -> None:
@@ -2264,12 +3326,35 @@ def _runner_lane_registration_audit_record_id(audit_record_key: str) -> str:
     return audit_record_key.strip().replace("/", "-") + f"-{digest}"
 
 
+def _context_instance_record_id(context: str, instance: str) -> str:
+    return _record_id_from_parts(context, instance)
+
+
+def _runtime_environment_record_id(record: RuntimeEnvironmentRecord) -> str:
+    if record.scope == "global":
+        return "global"
+    if record.scope == "context":
+        return _record_id_from_parts(record.scope, record.context)
+    return _record_id_from_parts(record.scope, record.context, record.instance)
+
+
+def _record_id_from_parts(*parts: str) -> str:
+    normalized_parts = tuple(part.strip() for part in parts)
+    raw_id = "-".join(normalized_parts)
+    digest = hashlib.sha256("\x1f".join(normalized_parts).encode("utf-8")).hexdigest()[:12]
+    return raw_id.replace("/", "-").replace("\\", "-") + f"-{digest}"
+
+
 def _edge_endpoint_record_id(endpoint_key: str) -> str:
     return endpoint_key.replace("/", "%2F").replace("\\", "%5C")
 
 
 def _private_health_endpoint_record_id(endpoint_key: str) -> str:
     return endpoint_key.replace("/", "%2F").replace("\\", "%5C")
+
+
+def _route_binding_record_id(binding_key: str) -> str:
+    return hashlib.sha256(binding_key.encode("utf-8")).hexdigest()
 
 
 def _ingress_canary_route_record_id(canary_key: str) -> str:

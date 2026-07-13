@@ -130,6 +130,7 @@ def canonical_openapi_document() -> dict[str, Any]:
         "version": "0.1.0",
     }
     scrubbed_payload["x-launchplane-ui-read-operations"] = UI_OPENAPI_READ_OPERATIONS
+    scrubbed_payload["x-launchplane-ui-write-operations"] = UI_OPENAPI_WRITE_OPERATIONS
     return scrubbed_payload
 
 
@@ -165,4 +166,14 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/github/issues": "read_work_graph_issue_inbox",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
+}
+
+
+UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/work-graph/rank": "rank_work_graph_snapshot",
+    "/v1/product-config/apply": "apply_product_config",
+    "/v1/drivers/generic-web/prod-promotion": "apply_generic_web_prod_promotion",
+    "/v1/drivers/generic-web/prod-promotion-workflow": (
+        "dispatch_generic_web_prod_promotion_workflow"
+    ),
 }

@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
-from sqlalchemy import create_engine, inspect, text, update
+from sqlalchemy import create_engine, inspect, insert, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.schema import Index
 
@@ -50,9 +50,21 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
 )
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    build_launchplane_idempotency_record_id,
+    build_launchplane_mutation_reservation,
+    complete_launchplane_mutation_reservation,
+)
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+    RouteBindingIngress,
+    RouteBindingProviderTarget,
+    RouteBindingSource,
+    RouteBindingTls,
+)
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -89,6 +101,12 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
+)
+from control_plane.contracts.outbox_delivery import (
+    OutboxDeliveryKind,
+    OutboxDeliveryRecord,
+    OutboxDeliveryState,
+    build_outbox_delivery_id,
 )
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
@@ -158,7 +176,15 @@ from control_plane.service_auth import (
 from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.factory import build_shared_record_store
-from control_plane.storage.postgres import Base, LaunchplaneProductProfileRow, PostgresRecordStore
+from control_plane.storage.postgres import (
+    Base,
+    DbOnlyMutationRequest,
+    LaunchplaneIdempotencyRow,
+    LaunchplaneProductProfileRow,
+    MutationReservationResult,
+    OutboxWithIdempotencyRequest,
+    PostgresRecordStore,
+)
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 
@@ -198,19 +224,89 @@ def _product_profile_record(
     )
 
 
-def _product_profile_idempotency_record(
+def _product_profile_db_only_mutation(
     *, request_fingerprint: str = "fingerprint-a"
-) -> LaunchplaneIdempotencyRecord:
-    return LaunchplaneIdempotencyRecord(
-        record_id="idempotency-product-preview-tls",
+) -> DbOnlyMutationRequest:
+    return DbOnlyMutationRequest(
         scope="github-actions:example",
         route_path="/v1/product-profiles/preview-tls/apply",
         idempotency_key="product-preview-tls:test:apply:1",
         request_fingerprint=request_fingerprint,
+        lease_owner="trace-product-preview-tls",
         response_status_code=202,
         response_trace_id="trace-product-preview-tls",
-        recorded_at="2026-07-12T01:00:00Z",
         response_payload={"status": "accepted", "trace_id": "trace-product-preview-tls"},
+    )
+
+
+def _mutation_reservation(
+    *,
+    request_fingerprint: str = "mutation-fingerprint-a",
+    lease_owner: str = "worker-a",
+    idempotency_key: str = "mutation:test:1",
+    lease_expires_at: str = "2026-07-12T01:05:00Z",
+    reserved_at: str = "2026-07-12T01:00:00Z",
+) -> LaunchplaneIdempotencyRecord:
+    return build_launchplane_mutation_reservation(
+        scope="github-actions:mutation-test",
+        route_path="/v1/test/mutation",
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=lease_owner,
+        lease_expires_at=lease_expires_at,
+        reserved_at=reserved_at,
+    )
+
+
+def _outbox_delivery(
+    *,
+    kind: OutboxDeliveryKind = "github_workflow_dispatch",
+    dedupe_key: str = "github-workflow-dispatch:example/repo:deploy.yml:main:abc123",
+    state: OutboxDeliveryState = "pending",
+    created_at: str = "2026-07-13T00:00:00Z",
+    next_attempt_at: str = "2026-07-13T00:00:00Z",
+    provider_operation_key: str = "",
+    attempt: int = 0,
+    lease_owner: str = "",
+    lease_expires_at: str = "",
+) -> OutboxDeliveryRecord:
+    return OutboxDeliveryRecord(
+        delivery_id=build_outbox_delivery_id(kind=kind, dedupe_key=dedupe_key),
+        kind=kind,
+        state=state,
+        aggregate_type="generic_web_promotion_workflow",
+        aggregate_id="example-product:example-context",
+        dedupe_key=dedupe_key,
+        created_at=created_at,
+        updated_at=created_at,
+        next_attempt_at=next_attempt_at,
+        lease_owner=lease_owner,
+        lease_expires_at=lease_expires_at,
+        attempt=attempt,
+        provider_operation_key=provider_operation_key,
+        payload={
+            "repository": "example/repo",
+            "workflow_id": "deploy.yml",
+            "ref": "main",
+            "inputs": {"dry_run": "false"},
+        },
+    )
+
+
+def _reserve_mutation(
+    store: PostgresRecordStore,
+    reservation: LaunchplaneIdempotencyRecord,
+    *,
+    lease_seconds: int = 300,
+) -> MutationReservationResult:
+    return store.reserve_mutation(
+        scope=reservation.scope,
+        route_path=reservation.route_path,
+        idempotency_key=reservation.idempotency_key,
+        request_fingerprint=reservation.request_fingerprint,
+        lease_owner=reservation.lease_owner,
+        lease_seconds=lease_seconds,
+        reconciliation_key=reservation.reconciliation_key,
     )
 
 
@@ -503,6 +599,42 @@ def _private_health_endpoint_record(
         status=status,
         updated_at="2026-06-15T00:00:00Z",
         source_label="test:private-health-endpoint",
+    )
+
+
+def _route_binding_record(
+    *, product: str = "example-product", context: str = "reon", instance: str = "prod"
+) -> EnvironmentRouteBindingRecord:
+    return EnvironmentRouteBindingRecord(
+        product=product,
+        context=context,
+        instance=instance,
+        provider_target=RouteBindingProviderTarget(
+            provider_id="dokploy",
+            target_category="compose",
+            provider_target_type="compose",
+            target_name="example-target",
+            provider_evidence={"target_record": f"{context}:{instance}"},
+        ),
+        ingress=RouteBindingIngress(
+            provider="npmplus",
+            endpoint_key="example-edge",
+            termination_kind="edge",
+            provider_evidence={"audit_record": "audit-example"},
+        ),
+        domains=(RouteBindingDomain(domain_name="app.example.test", role="primary"),),
+        tls=RouteBindingTls(
+            owner="launchplane",
+            provider_evidence={"audit_record": "audit-example"},
+        ),
+        source=RouteBindingSource(
+            source_kind="operator",
+            source_label="test",
+            source_record_ids=("operator:test",),
+            refreshed_at="2026-07-12T00:00:00Z",
+            freshness_status="recorded",
+        ),
+        updated_at="2026-07-12T00:00:00Z",
     )
 
 
@@ -1140,6 +1272,8 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.write_private_health_endpoint_record(private_health_endpoint)
             ingress_canary_route = _ingress_canary_route_record()
             store.write_ingress_canary_route_record(ingress_canary_route)
+            route_binding = _route_binding_record()
+            store.write_route_binding_record(route_binding)
             inspect_engine = create_engine(database_url)
             inspector = inspect(inspect_engine)
             table_names = set(inspector.get_table_names())
@@ -1160,6 +1294,12 @@ class PostgresRecordStoreTests(unittest.TestCase):
             provider_target_indexes = {
                 index["name"] for index in inspector.get_indexes("launchplane_provider_targets")
             }
+            route_binding_columns = {
+                column["name"] for column in inspector.get_columns("launchplane_route_bindings")
+            }
+            route_binding_indexes = {
+                index["name"] for index in inspector.get_indexes("launchplane_route_bindings")
+            }
             loaded = store.read_artifact_manifest(manifest.artifact_id)
             loaded_provider_target = store.read_provider_target_record(
                 context_name="reon",
@@ -1171,6 +1311,11 @@ class PostgresRecordStoreTests(unittest.TestCase):
             )
             loaded_ingress_canary_route = store.read_ingress_canary_route_record(
                 ingress_canary_route.canary_key
+            )
+            loaded_route_binding = store.read_route_binding_record(
+                product=route_binding.product,
+                context_name=route_binding.context,
+                instance_name=route_binding.instance,
             )
             audit_records = store.list_ingress_route_audit_records(
                 product="launchplane", context_name="reon-prod"
@@ -1187,9 +1332,11 @@ class PostgresRecordStoreTests(unittest.TestCase):
             "http://10.0.0.5:8000/health",
         )
         self.assertEqual(loaded_ingress_canary_route.domain_name, "ingress-canary.example.test")
+        self.assertEqual(loaded_route_binding.binding_key, route_binding.binding_key)
         self.assertIn("launchplane_edge_endpoints", table_names)
         self.assertIn("launchplane_private_health_endpoints", table_names)
         self.assertIn("launchplane_ingress_canary_routes", table_names)
+        self.assertIn("launchplane_route_bindings", table_names)
         self.assertGreaterEqual(
             edge_endpoint_columns,
             {
@@ -1249,9 +1396,149 @@ class PostgresRecordStoreTests(unittest.TestCase):
         )
         self.assertIn("launchplane_provider_targets_provider_idx", provider_target_indexes)
         self.assertIn("launchplane_provider_targets_updated_idx", provider_target_indexes)
+        self.assertGreaterEqual(
+            route_binding_columns,
+            {
+                "product",
+                "context",
+                "instance",
+                "provider_id",
+                "target_category",
+                "ingress_provider",
+                "ingress_endpoint_key",
+                "termination_kind",
+                "tls_owner",
+                "primary_domain",
+                "status",
+                "freshness_status",
+                "updated_at",
+                "payload",
+            },
+        )
+        self.assertIn("launchplane_route_bindings_lookup_idx", route_binding_indexes)
+        self.assertIn("launchplane_route_bindings_updated_idx", route_binding_indexes)
         self.assertEqual(
             [record.record_id for record in audit_records], [ingress_route_audit.record_id]
         )
+
+    def test_mutation_reservation_migration_backfills_completed_idempotency_rows(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            config = _alembic_config(database_url)
+            alembic_command.upgrade(config, "c9d1e3f5a7b9")
+            legacy_payload = {
+                "schema_version": 1,
+                "record_id": "idempotency-legacy-trace",
+                "scope": "github-actions:legacy",
+                "route_path": "/v1/evidence/previews/generations",
+                "idempotency_key": "legacy-idempotency-key",
+                "request_fingerprint": "legacy-fingerprint",
+                "response_status_code": 202,
+                "response_trace_id": "legacy-trace",
+                "recorded_at": "2026-07-12T00:00:00Z",
+                "response_payload": {"status": "accepted"},
+            }
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    insert(LaunchplaneIdempotencyRow).values(
+                        record_id="idempotency-legacy-trace",
+                        scope="github-actions:legacy",
+                        route_path="/v1/evidence/previews/generations",
+                        idempotency_key="legacy-idempotency-key",
+                        request_fingerprint="legacy-fingerprint",
+                        response_status_code=202,
+                        response_trace_id="legacy-trace",
+                        recorded_at="2026-07-12T00:00:00Z",
+                        payload=legacy_payload,
+                    )
+                )
+            engine.dispose()
+
+            alembic_command.upgrade(config, "head")
+            store = PostgresRecordStore(database_url=database_url)
+            loaded = store.read_idempotency_record(
+                scope="github-actions:legacy",
+                route_path="/v1/evidence/previews/generations",
+                idempotency_key="legacy-idempotency-key",
+            )
+            with store._engine.connect() as connection:
+                promoted = (
+                    connection.execute(
+                        text(
+                            "SELECT state, attempt, created_at, updated_at "
+                            "FROM launchplane_idempotency_records "
+                            "WHERE record_id = 'idempotency-legacy-trace'"
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+            store.close()
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.schema_version, 1)
+        self.assertEqual(loaded.state, "completed")
+        self.assertEqual(loaded.created_at, "2026-07-12T00:00:00Z")
+        self.assertEqual(promoted["state"], "completed")
+        self.assertEqual(promoted["attempt"], 1)
+        self.assertEqual(promoted["created_at"], "2026-07-12T00:00:00Z")
+        self.assertEqual(promoted["updated_at"], "2026-07-12T00:00:00Z")
+
+    def test_every_code_lease_migration_blocks_legacy_active_requests_for_review(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            config = _alembic_config(database_url)
+            alembic_command.upgrade(config, "e1f3a5c7b9d1")
+            legacy_record = _every_code_work_request(state="running")
+            legacy_payload = legacy_record.model_dump(mode="json")
+            for field_name in ("lease_expires_at", "fencing_token", "attempt"):
+                legacy_payload.pop(field_name, None)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_every_code_work_requests "
+                        "(request_id, source, state, repository, issue_number, trigger_label, "
+                        "updated_at, claimed_by_host, payload) "
+                        "VALUES (:request_id, :source, :state, :repository, :issue_number, "
+                        ":trigger_label, :updated_at, :claimed_by_host, :payload)"
+                    ),
+                    {
+                        "request_id": legacy_record.request_id,
+                        "source": legacy_record.source,
+                        "state": legacy_record.state,
+                        "repository": legacy_record.repository,
+                        "issue_number": legacy_record.issue_number,
+                        "trigger_label": legacy_record.trigger_label,
+                        "updated_at": legacy_record.updated_at,
+                        "claimed_by_host": legacy_record.claimed_by_host,
+                        "payload": json.dumps(legacy_payload),
+                    },
+                )
+            engine.dispose()
+
+            alembic_command.upgrade(config, "head")
+            store = PostgresRecordStore(database_url=database_url)
+            migrated = store.read_every_code_work_request_record(legacy_record.request_id)
+            recovered = store.recover_stale_every_code_work_request_record(
+                expected_record=migrated,
+                recovered_at="2026-07-13T00:00:00Z",
+            )
+            store.close()
+
+        self.assertEqual(migrated.fencing_token, 4)
+        self.assertEqual(migrated.attempt, 4)
+        self.assertEqual(migrated.lease_expires_at, "1970-01-01T00:00:00Z")
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(recovered.state, "blocked")
+        self.assertIn("manual review required", recovered.error_message)
 
     def test_verify_schema_rejects_empty_database_without_creating_tables(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1770,6 +2057,400 @@ class PostgresRecordStoreTests(unittest.TestCase):
             self.assertEqual(loaded.request_fingerprint, "fingerprint-123")
             self.assertEqual(loaded.response_payload["records"]["preview_id"], "preview-35")
 
+    def test_outbox_delivery_round_trip_claim_and_complete(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            delivery = _outbox_delivery()
+
+            store.write_outbox_delivery_record(delivery)
+            claimed = store.claim_next_outbox_delivery_record(
+                lease_owner="worker-a",
+                lease_seconds=300,
+                now="2026-07-13T00:00:10Z",
+            )
+            assert claimed.record is not None
+            delivered_record = claimed.record.model_copy(
+                update={
+                    "state": "delivered",
+                    "action": "dispatched_workflow",
+                    "external_id": "12345",
+                    "external_url": "https://github.example/actions/runs/12345",
+                }
+            )
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                return_value="2026-07-13T00:00:20Z",
+            ):
+                stale_completion = store.complete_outbox_delivery_record(
+                    record=delivered_record,
+                    lease_owner="worker-b",
+                )
+                completion = store.complete_outbox_delivery_record(
+                    record=delivered_record,
+                    lease_owner="worker-a",
+                )
+            loaded = store.read_outbox_delivery_record(delivery.delivery_id)
+            store.close()
+
+        self.assertEqual(claimed.status, "claimed")
+        self.assertEqual(claimed.record.state, "running")
+        self.assertEqual(claimed.record.lease_owner, "worker-a")
+        self.assertEqual(claimed.record.attempt, 1)
+        self.assertEqual(stale_completion.status, "owner_mismatch")
+        self.assertEqual(completion.status, "updated")
+        self.assertEqual(loaded.state, "delivered")
+        self.assertEqual(loaded.lease_owner, "")
+        self.assertEqual(loaded.external_id, "12345")
+
+    def test_outbox_enqueue_with_idempotency_commits_both_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            delivery = _outbox_delivery()
+            idempotency = LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_idempotency_record_id(
+                    response_trace_id="launchplane_req_outbox",
+                ),
+                scope="github-actions:outbox-test",
+                route_path="/v1/drivers/generic-web/prod-promotion-workflow",
+                idempotency_key="outbox-idempotency-key",
+                request_fingerprint="fingerprint-outbox",
+                response_status_code=202,
+                response_trace_id="launchplane_req_outbox",
+                recorded_at="2026-07-13T00:00:00Z",
+                response_payload={
+                    "status": "accepted",
+                    "records": {"outbox_delivery_id": delivery.delivery_id},
+                },
+            )
+
+            first = store.enqueue_outbox_delivery_with_idempotency(
+                OutboxWithIdempotencyRequest(
+                    delivery=delivery,
+                    idempotency_record=idempotency,
+                )
+            )
+            duplicate = store.enqueue_outbox_delivery_with_idempotency(
+                OutboxWithIdempotencyRequest(
+                    delivery=delivery.model_copy(update={"delivery_id": "ignored-duplicate"}),
+                    idempotency_record=None,
+                )
+            )
+            loaded_idempotency = store.read_idempotency_record(
+                scope=idempotency.scope,
+                route_path=idempotency.route_path,
+                idempotency_key=idempotency.idempotency_key,
+            )
+            outbox_rows = store.list_outbox_delivery_records(states=("pending",))
+            store.close()
+
+        self.assertEqual(first.delivery_id, delivery.delivery_id)
+        self.assertEqual(duplicate.delivery_id, delivery.delivery_id)
+        self.assertIsNotNone(loaded_idempotency)
+        assert loaded_idempotency is not None
+        self.assertEqual(
+            loaded_idempotency.response_payload["records"]["outbox_delivery_id"],
+            delivery.delivery_id,
+        )
+        self.assertEqual([row.delivery_id for row in outbox_rows], [delivery.delivery_id])
+
+    def test_outbox_claim_marks_expired_provider_marker_for_reconciliation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            delivery = _outbox_delivery(
+                state="running",
+                provider_operation_key="github-workflow-dispatch:example/repo:deploy.yml:main:abc123",
+                attempt=1,
+                lease_owner="worker-a",
+                lease_expires_at="2026-07-13T00:01:00Z",
+            )
+            store.write_outbox_delivery_record(delivery)
+
+            claimed = store.claim_next_outbox_delivery_record(
+                lease_owner="worker-b",
+                now="2026-07-13T00:02:00Z",
+            )
+            loaded = store.read_outbox_delivery_record(delivery.delivery_id)
+            store.close()
+
+        self.assertEqual(claimed.status, "claimed")
+        assert claimed.record is not None
+        self.assertEqual(claimed.record.state, "running")
+        self.assertEqual(claimed.record.lease_owner, "worker-b")
+        self.assertEqual(claimed.record.attempt, 2)
+        self.assertEqual(
+            claimed.record.provider_operation_key,
+            "github-workflow-dispatch:example/repo:deploy.yml:main:abc123",
+        )
+        self.assertEqual(loaded.state, "running")
+        self.assertEqual(loaded.lease_owner, "worker-b")
+
+    def test_mutation_reservation_replays_conflicts_and_reclaims_expired_lease(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            first_reservation = _mutation_reservation()
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                acquired = _reserve_mutation(store, first_reservation)
+                stale_completion = complete_launchplane_mutation_reservation(
+                    acquired.record,
+                    response_status_code=202,
+                    response_trace_id="trace-stale-owner",
+                    completed_at="2026-07-12T01:01:00Z",
+                    response_payload={"status": "accepted"},
+                ).model_copy(update={"lease_owner": "worker-b"})
+                stale_owner_completion = store.complete_mutation_reservation(
+                    completion=stale_completion,
+                )
+                clock["now"] = "2026-07-12T01:01:00Z"
+                in_progress = _reserve_mutation(
+                    store,
+                    _mutation_reservation(lease_owner="worker-b"),
+                )
+                conflict = _reserve_mutation(
+                    store,
+                    _mutation_reservation(
+                        request_fingerprint="mutation-fingerprint-b",
+                        lease_owner="worker-b",
+                    ),
+                )
+                clock["now"] = "2026-07-12T01:06:00Z"
+                reclaimed = _reserve_mutation(
+                    store,
+                    _mutation_reservation(lease_owner="worker-b"),
+                )
+                completion = complete_launchplane_mutation_reservation(
+                    reclaimed.record,
+                    response_status_code=202,
+                    response_trace_id="trace-mutation-completed",
+                    completed_at="2026-07-12T01:07:00Z",
+                    response_payload={"status": "accepted"},
+                )
+                clock["now"] = "2026-07-12T01:07:00Z"
+                completed = store.complete_mutation_reservation(completion=completion)
+                clock["now"] = "2026-07-12T01:08:00Z"
+                replayed = _reserve_mutation(
+                    store,
+                    _mutation_reservation(lease_owner="worker-c"),
+                )
+            store.close()
+
+        self.assertEqual(acquired.status, "acquired")
+        self.assertEqual(stale_owner_completion.status, "owner_mismatch")
+        self.assertEqual(in_progress.status, "in_progress")
+        self.assertEqual(conflict.status, "conflict")
+        self.assertEqual(reclaimed.status, "acquired")
+        self.assertEqual(reclaimed.record.attempt, 2)
+        self.assertEqual(reclaimed.record.lease_owner, "worker-b")
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(replayed.status, "replayed")
+        self.assertEqual(replayed.record.state, "completed")
+        self.assertEqual(replayed.record.response_trace_id, "trace-mutation-completed")
+
+    def test_db_only_mutation_preflight_releases_expired_unbound_reservation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            mutation = _product_profile_db_only_mutation()
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                acquired = store.reserve_mutation(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    request_fingerprint=mutation.request_fingerprint,
+                    lease_owner="orphaned-worker",
+                    lease_seconds=60,
+                )
+                clock["now"] = "2026-07-12T01:02:00Z"
+                preflight = store.prepare_db_only_mutation(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    request_fingerprint=mutation.request_fingerprint,
+                )
+            stored_record = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(acquired.status, "acquired")
+        self.assertEqual(preflight.status, "released")
+        self.assertIsNone(stored_record)
+
+    def test_mutation_reconciliation_key_fences_expired_lease(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                acquired = _reserve_mutation(store, _mutation_reservation())
+                clock["now"] = "2026-07-12T01:01:00Z"
+                renewed = store.renew_mutation_reservation(
+                    reservation=acquired.record,
+                    lease_seconds=600,
+                )
+                assert renewed.record is not None
+                clock["now"] = "2026-07-12T01:02:00Z"
+                bound = store.bind_mutation_reconciliation_key(
+                    reservation=renewed.record,
+                    reconciliation_key="provider-operation-123",
+                )
+                clock["now"] = "2026-07-12T01:12:00Z"
+                reconcile_required = _reserve_mutation(
+                    store,
+                    _mutation_reservation(lease_owner="worker-b"),
+                )
+            store.close()
+
+        self.assertEqual(renewed.status, "updated")
+        self.assertEqual(bound.status, "updated")
+        self.assertEqual(reconcile_required.status, "reconcile_required")
+        self.assertEqual(reconcile_required.record.state, "reconcile_required")
+        self.assertEqual(
+            reconcile_required.record.reconciliation_key,
+            "provider-operation-123",
+        )
+        self.assertEqual(reconcile_required.record.attempt, 1)
+
+    def test_mutation_owner_can_mark_unknown_provider_outcome_for_reconciliation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                acquired = _reserve_mutation(
+                    store,
+                    _mutation_reservation(idempotency_key="mutation:test:unknown"),
+                )
+                clock["now"] = "2026-07-12T01:01:00Z"
+                bound = store.bind_mutation_reconciliation_key(
+                    reservation=acquired.record,
+                    reconciliation_key="provider-operation-unknown",
+                )
+                assert bound.record is not None
+                clock["now"] = "2026-07-12T01:02:00Z"
+                marked = store.mark_mutation_reconcile_required(
+                    reservation=bound.record,
+                    reconciliation_key="provider-operation-unknown",
+                )
+            store.close()
+
+        self.assertEqual(marked.status, "updated")
+        self.assertIsNotNone(marked.record)
+        assert marked.record is not None
+        self.assertEqual(marked.record.state, "reconcile_required")
+        self.assertEqual(marked.record.reconciliation_key, "provider-operation-unknown")
+
+    def test_mutation_transitions_reject_stale_attempt_with_reused_owner(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                acquired = _reserve_mutation(
+                    store,
+                    _mutation_reservation(lease_owner="worker-reused"),
+                    lease_seconds=60,
+                )
+                clock["now"] = "2026-07-12T01:02:00Z"
+                reclaimed = _reserve_mutation(
+                    store,
+                    _mutation_reservation(lease_owner="worker-reused"),
+                )
+                stale_completion = complete_launchplane_mutation_reservation(
+                    acquired.record,
+                    response_status_code=202,
+                    response_trace_id="trace-stale-attempt",
+                    completed_at="2026-07-12T01:02:00Z",
+                    response_payload={"status": "accepted"},
+                )
+                renewed = store.renew_mutation_reservation(reservation=acquired.record)
+                bound = store.bind_mutation_reconciliation_key(
+                    reservation=acquired.record,
+                    reconciliation_key="provider-operation-stale",
+                )
+                marked = store.mark_mutation_reconcile_required(
+                    reservation=acquired.record,
+                    reconciliation_key="provider-operation-stale",
+                )
+                completed = store.complete_mutation_reservation(
+                    completion=stale_completion,
+                )
+            store.close()
+
+        self.assertEqual(reclaimed.status, "acquired")
+        self.assertEqual(reclaimed.record.attempt, 2)
+        self.assertEqual(renewed.status, "reservation_mismatch")
+        self.assertEqual(bound.status, "reservation_mismatch")
+        self.assertEqual(marked.status, "reservation_mismatch")
+        self.assertEqual(completed.status, "reservation_mismatch")
+
+    def test_mutation_reservation_rejects_empty_idempotency_key(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires idempotency_key"):
+            build_launchplane_mutation_reservation(
+                scope="github-actions:mutation-test",
+                route_path="/v1/test/mutation",
+                idempotency_key=" ",
+                request_fingerprint="mutation-fingerprint-a",
+                lease_owner="worker-a",
+                lease_expires_at="2026-07-12T01:05:00Z",
+                reserved_at="2026-07-12T01:00:00Z",
+            )
+
     def test_every_code_work_requests_round_trip_list_and_claim_once(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -1820,6 +2501,347 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(claimed.claimed_by_host, "Chris-Studio")
         self.assertIsNone(second_claim)
         self.assertEqual(loaded.state, "claimed")
+
+    def test_every_code_work_request_claim_sets_lease_and_fencing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=600,
+            )
+
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertEqual(claimed.fencing_token, 1)
+        self.assertEqual(claimed.attempt, 1)
+        self.assertEqual(claimed.lease_expires_at, "2026-05-05T22:11:00Z")
+
+    def test_every_code_work_request_two_worker_only_one_claims(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            first_claim = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            second_claim = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-2",
+                claimed_at="2026-05-05T22:01:01Z",
+            )
+            loaded = store.read_every_code_work_request_record(record.request_id)
+
+        self.assertIsNotNone(first_claim)
+        self.assertIsNone(second_claim)
+        assert first_claim is not None
+        self.assertEqual(loaded.claimed_by_host, "worker-1")
+        self.assertEqual(loaded.fencing_token, 1)
+
+    def test_every_code_work_request_stale_owner_rejected_by_fencing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            assert claimed is not None
+            stale_fencing_token = 99
+
+            from control_plane.contracts.every_code_work_request import (
+                EveryCodeWorkRequestStatusUpdate,
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                store.update_every_code_work_request_status_record(
+                    request_id=claimed.request_id,
+                    update=EveryCodeWorkRequestStatusUpdate(
+                        state="done",
+                        host="worker-1",
+                        updated_at="2026-05-05T22:05:00Z",
+                        fencing_token=stale_fencing_token,
+                        result_summary="done",
+                    ),
+                )
+            with self.assertRaises(ValueError):
+                store.update_every_code_work_request_status_record(
+                    request_id=claimed.request_id,
+                    update=EveryCodeWorkRequestStatusUpdate(
+                        state="done",
+                        host="worker-1",
+                        fencing_token=claimed.fencing_token + 1,
+                        updated_at="2026-05-05T22:05:00Z",
+                        result_summary="done",
+                    ),
+                )
+        self.assertIn("fencing token", str(ctx.exception))
+
+    def test_every_code_work_request_heartbeat_extends_lease(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=600,
+            )
+            assert claimed is not None
+
+            accepted = store.heartbeat_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                fencing_token=claimed.fencing_token,
+                heartbeat_at="2026-05-05T22:05:00Z",
+                lease_expires_at="2026-05-05T22:15:00Z",
+            )
+            refreshed = store.read_every_code_work_request_record(record.request_id)
+
+        self.assertTrue(accepted)
+        self.assertEqual(refreshed.lease_expires_at, "2026-05-05T22:15:00Z")
+
+    def test_every_code_work_request_heartbeat_rejects_wrong_fencing_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            assert claimed is not None
+
+            rejected = store.heartbeat_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                fencing_token=99,
+                heartbeat_at="2026-05-05T22:05:00Z",
+                lease_expires_at="2026-05-05T22:35:00Z",
+            )
+
+        self.assertFalse(rejected)
+
+    def test_every_code_work_request_heartbeat_rejects_wrong_host(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            assert claimed is not None
+
+            rejected = store.heartbeat_every_code_work_request_record(
+                request_id=record.request_id,
+                host="attacker-2",
+                fencing_token=claimed.fencing_token,
+                heartbeat_at="2026-05-05T22:05:00Z",
+                lease_expires_at="2026-05-05T22:35:00Z",
+            )
+
+        self.assertFalse(rejected)
+
+    def test_every_code_work_request_stale_lease_listed_for_recovery(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=600,
+            )
+            assert claimed is not None
+
+            fresh_stale = store.list_stale_every_code_work_request_records(
+                as_of="2026-05-05T22:05:00Z",
+            )
+            expired_stale = store.list_stale_every_code_work_request_records(
+                as_of="2026-05-05T23:00:00Z",
+            )
+
+        self.assertEqual(len(fresh_stale), 0)
+        self.assertEqual(len(expired_stale), 1)
+        self.assertEqual(expired_stale[0].request_id, record.request_id)
+
+    def test_every_code_work_request_stale_recovery_safe_requeues(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=600,
+            )
+            assert claimed is not None
+
+            requeued = store.recover_stale_every_code_work_request_record(
+                expected_record=claimed,
+                recovered_at="2026-05-05T23:00:00Z",
+            )
+            loaded = store.read_every_code_work_request_record(record.request_id)
+
+        self.assertIsNotNone(requeued)
+        self.assertEqual(loaded.state, "queued")
+        self.assertEqual(loaded.fencing_token, 0)
+
+    def test_every_code_work_request_stale_recovery_rejects_heartbeated_snapshot(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=60,
+            )
+            assert claimed is not None
+            stale_snapshot = store.list_stale_every_code_work_request_records(
+                as_of="2026-05-05T22:03:00Z"
+            )[0]
+            heartbeat_accepted = store.heartbeat_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                fencing_token=claimed.fencing_token,
+                heartbeat_at="2026-05-05T22:02:30Z",
+                lease_expires_at="2026-05-05T22:12:30Z",
+            )
+
+            recovered = store.recover_stale_every_code_work_request_record(
+                expected_record=stale_snapshot,
+                recovered_at="2026-05-05T22:03:00Z",
+            )
+            loaded = store.read_every_code_work_request_record(record.request_id)
+
+        self.assertTrue(heartbeat_accepted)
+        self.assertIsNone(recovered)
+        self.assertEqual(loaded.state, "claimed")
+        self.assertEqual(loaded.lease_expires_at, "2026-05-05T22:12:30Z")
+
+    def test_every_code_work_request_process_death_recovery_increments_attempt(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            first = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                lease_seconds=600,
+            )
+            assert first is not None
+            self.assertEqual(first.attempt, 1)
+            requeued = store.recover_stale_every_code_work_request_record(
+                expected_record=first,
+                recovered_at="2026-05-05T23:00:00Z",
+            )
+            assert requeued is not None
+
+            second = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-2",
+                claimed_at="2026-05-05T23:01:00Z",
+                lease_seconds=600,
+            )
+
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertEqual(second.attempt, 2)
+        self.assertEqual(second.fencing_token, 2)
+        self.assertEqual(second.claimed_by_host, "worker-2")
+
+    def test_every_code_work_request_lost_response_replay_uses_idempotent_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+
+            def idempotency_record_factory(
+                claimed_record: EveryCodeWorkRequestRecord,
+            ) -> LaunchplaneIdempotencyRecord:
+                return LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(
+                        response_trace_id="trace-every-code-claim"
+                    ),
+                    scope="terminal-agent:every-code-worker",
+                    route_path="/v1/every-code/work-requests/claim",
+                    idempotency_key="every-code-claim-test",
+                    request_fingerprint="claim-fingerprint",
+                    response_status_code=202,
+                    response_trace_id="trace-every-code-claim",
+                    recorded_at="2026-05-05T22:01:00Z",
+                    response_payload={
+                        "status": "accepted",
+                        "result": {"request": claimed_record.model_dump(mode="json")},
+                    },
+                )
+
+            claimed = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:01:00Z",
+                idempotency_record_factory=idempotency_record_factory,
+            )
+            assert claimed is not None
+            stored_idempotency = store.read_idempotency_record(
+                scope="terminal-agent:every-code-worker",
+                route_path="/v1/every-code/work-requests/claim",
+                idempotency_key="every-code-claim-test",
+            )
+
+            second_claim_attempt = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-1",
+                claimed_at="2026-05-05T22:02:00Z",
+            )
+
+        self.assertIsNone(second_claim_attempt)
+        self.assertEqual(claimed.fencing_token, 1)
+        self.assertIsNotNone(stored_idempotency)
+        assert stored_idempotency is not None
+        self.assertEqual(stored_idempotency.state, "completed")
 
     def test_every_code_pr_feedback_round_trip_and_filter(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2991,38 +4013,95 @@ env_var = "GH_TOKEN"
                     "source": "service:test-compare-write",
                 }
             )
-            idempotency_record = _product_profile_idempotency_record()
+            mutation = _product_profile_db_only_mutation()
             store.write_product_profile_record(expected_record)
 
             first_result = store.compare_and_write_product_profile_record(
                 expected_record=expected_record,
                 replacement_record=replacement_record,
-                idempotency_record=idempotency_record,
+                mutation=mutation,
             )
             replay_result = store.compare_and_write_product_profile_record(
                 expected_record=expected_record,
                 replacement_record=replacement_record,
-                idempotency_record=idempotency_record,
+                mutation=mutation,
+            )
+            conflicting_mutation = _product_profile_db_only_mutation(
+                request_fingerprint="fingerprint-b"
             )
             conflict_result = store.compare_and_write_product_profile_record(
                 expected_record=expected_record,
                 replacement_record=replacement_record,
-                idempotency_record=_product_profile_idempotency_record(
-                    request_fingerprint="fingerprint-b"
-                ),
+                mutation=conflicting_mutation,
             )
             stored_idempotency = store.read_idempotency_record(
-                scope=idempotency_record.scope,
-                route_path=idempotency_record.route_path,
-                idempotency_key=idempotency_record.idempotency_key,
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
             )
             store.close()
 
         self.assertEqual(first_result.status, "written")
         self.assertEqual(replay_result.status, "replayed")
-        self.assertEqual(replay_result.idempotency_record, idempotency_record)
+        self.assertIsNotNone(replay_result.idempotency_record)
         self.assertEqual(conflict_result.status, "idempotency_conflict")
-        self.assertEqual(stored_idempotency, idempotency_record)
+        self.assertIsNotNone(stored_idempotency)
+        assert stored_idempotency is not None
+        self.assertEqual(stored_idempotency.state, "completed")
+        self.assertEqual(stored_idempotency.response_trace_id, mutation.response_trace_id)
+        self.assertEqual(stored_idempotency.response_payload, mutation.response_payload)
+        self.assertEqual(stored_idempotency.attempt, 1)
+
+    def test_product_profile_compare_and_write_reclaims_expired_reservation_with_db_clock(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            profile = _product_profile_record()
+            mutation = _product_profile_db_only_mutation()
+            clock = {"now": "2026-07-12T01:00:00Z"}
+            store.write_product_profile_record(profile)
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                acquired = store.reserve_mutation(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    request_fingerprint=mutation.request_fingerprint,
+                    lease_owner="orphaned-worker",
+                    lease_seconds=60,
+                )
+                clock["now"] = "2026-07-12T01:02:00Z"
+                result = store.compare_and_write_product_profile_record(
+                    expected_record=profile,
+                    replacement_record=profile,
+                    mutation=mutation,
+                )
+            stored_record = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(acquired.status, "acquired")
+        self.assertEqual(result.status, "written")
+        self.assertIsNotNone(stored_record)
+        assert stored_record is not None
+        self.assertEqual(stored_record.state, "completed")
+        self.assertEqual(stored_record.attempt, 2)
+        self.assertEqual(stored_record.lease_owner, mutation.lease_owner)
+        self.assertEqual(stored_record.created_at, "2026-07-12T01:00:00Z")
+        self.assertEqual(stored_record.updated_at, "2026-07-12T01:02:00Z")
+        self.assertEqual(stored_record.recorded_at, "2026-07-12T01:02:00Z")
 
     def test_product_profile_reads_migrate_legacy_alert_issue_url(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

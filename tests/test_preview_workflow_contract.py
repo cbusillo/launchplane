@@ -20,29 +20,12 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyRequest,
     GenericWebPreviewRefreshRequest,
 )
+from tests.support.workflows import load_workflow
+from tests.support.workflows import workflow_call_inputs
 
 
 CLI_MAIN = cast(Command, main)
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _workflow_call_inputs(workflow: str) -> set[str]:
-    inputs: set[str] = set()
-    in_inputs = False
-    input_indent = 0
-    for line in workflow.splitlines():
-        stripped = line.strip()
-        if stripped == "inputs:":
-            in_inputs = True
-            input_indent = len(line) - len(line.lstrip())
-            continue
-        if in_inputs:
-            indent = len(line) - len(line.lstrip())
-            if stripped and indent <= input_indent:
-                break
-            if indent == input_indent + 2 and stripped.endswith(":"):
-                inputs.add(stripped[:-1])
-    return inputs
 
 
 def _event(**overrides: object) -> PreviewWorkflowEvent:
@@ -169,7 +152,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
     def test_reusable_preview_feedback_workflow_owns_request_details(self) -> None:
         workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-pr-feedback.yml"
         workflow = workflow_path.read_text(encoding="utf-8")
-        workflow_inputs = _workflow_call_inputs(workflow)
+        workflow_inputs = workflow_call_inputs(load_workflow(workflow_path))
 
         self.assertIn("route-path: /v1/previews/pr-feedback", workflow)
         self.assertIn("status=${{ steps.request.outputs.status }}", workflow)
@@ -205,7 +188,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
     def test_reusable_preview_feedback_status_workflow_owns_status_selection(self) -> None:
         workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-feedback-status.yml"
         workflow = workflow_path.read_text(encoding="utf-8")
-        workflow_inputs = _workflow_call_inputs(workflow)
+        workflow_inputs = workflow_call_inputs(load_workflow(workflow_path))
 
         self.assertIn("mode", workflow_inputs)
         self.assertIn("publish_result", workflow_inputs)
@@ -241,7 +224,8 @@ class PreviewWorkflowContractTests(unittest.TestCase):
     def test_reusable_preview_request_notice_owns_notice_decision(self) -> None:
         workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-request-notice.yml"
         workflow = workflow_path.read_text(encoding="utf-8")
-        workflow_inputs = _workflow_call_inputs(workflow)
+        parsed_workflow = load_workflow(workflow_path)
+        workflow_inputs = workflow_call_inputs(parsed_workflow)
 
         self.assertIn("pull_request_target", workflow)
         self.assertIn("context.eventName !== 'pull_request_target'", workflow)
@@ -268,10 +252,9 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("route-path", workflow_inputs)
 
     def test_reusable_generic_web_preview_lifecycle_derives_preview_slug(self) -> None:
-        workflow = (
-            REPO_ROOT / ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
-        ).read_text(encoding="utf-8")
-        workflow_inputs = _workflow_call_inputs(workflow)
+        workflow_path = REPO_ROOT / ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
+        workflow = (workflow_path).read_text(encoding="utf-8")
+        workflow_inputs = workflow_call_inputs(load_workflow(workflow_path))
 
         self.assertIn("route-path: /v1/drivers/generic-web/preview-refresh", workflow)
         self.assertIn("route-path: /v1/drivers/generic-web/preview-destroy", workflow)
@@ -301,10 +284,11 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("result.feedback_status", workflow)
 
     def test_reusable_generic_web_preview_verification_derives_context(self) -> None:
-        workflow = (
+        workflow_path = (
             REPO_ROOT / ".github/workflows/reusable-generic-web-preview-verification.yml"
-        ).read_text(encoding="utf-8")
-        workflow_inputs = _workflow_call_inputs(workflow)
+        )
+        workflow = (workflow_path).read_text(encoding="utf-8")
+        workflow_inputs = workflow_call_inputs(load_workflow(workflow_path))
 
         self.assertIn("route-path: /v1/drivers/generic-web/preview-verification", workflow)
         self.assertIn(

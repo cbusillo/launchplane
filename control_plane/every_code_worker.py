@@ -10,6 +10,7 @@ import re
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from typing import Callable, Literal, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
@@ -32,7 +33,7 @@ from control_plane.contracts.every_code_preview_gate_record import (
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
-    apply_every_code_work_request_status,
+    _add_seconds_to_timestamp as _add_lease_seconds,
     resume_every_code_work_request,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -69,6 +70,39 @@ class EveryCodeWorkerStore(Protocol):
         request_id: str,
         host: str,
         claimed_at: str,
+        lease_seconds: int = 1800,
+    ) -> EveryCodeWorkRequestRecord | None: ...
+
+    def heartbeat_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        fencing_token: int,
+        heartbeat_at: str,
+        lease_expires_at: str,
+        lease_seconds: int = 1800,
+    ) -> bool: ...
+
+    def update_every_code_work_request_status_record(
+        self,
+        *,
+        request_id: str,
+        update: EveryCodeWorkRequestStatusUpdate,
+    ) -> EveryCodeWorkRequestRecord: ...
+
+    def list_stale_every_code_work_request_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
+
+    def recover_stale_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        recovered_at: str,
     ) -> EveryCodeWorkRequestRecord | None: ...
 
     def write_every_code_work_request_record(
@@ -113,6 +147,8 @@ class EveryCodeWorkerStore(Protocol):
 Runner = Callable[[Sequence[str], Mapping[str, str] | None], subprocess.CompletedProcess[str]]
 EVERY_CODE_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN"
 EVERY_CODE_GITHUB_ACTOR_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR"
+EVERY_CODE_LEASE_SECONDS = 1800
+EVERY_CODE_HEARTBEAT_INTERVAL_SECONDS = 300
 
 
 class DaemonProcess(Protocol):
@@ -120,6 +156,53 @@ class DaemonProcess(Protocol):
 
 
 ProcessLauncher = Callable[[Sequence[str], Path, Path], DaemonProcess]
+
+
+def start_every_code_heartbeat_thread(
+    *,
+    record_store: EveryCodeWorkerStore,
+    request_id: str,
+    host: str,
+    fencing_token: int,
+    lease_seconds: int = EVERY_CODE_LEASE_SECONDS,
+    interval_seconds: float = EVERY_CODE_HEARTBEAT_INTERVAL_SECONDS,
+    stop_event: threading.Event | None = None,
+    on_lease_lost: Callable[[], None] | None = None,
+) -> threading.Thread:
+    resolved_stop = stop_event if stop_event is not None else threading.Event()
+
+    def _run() -> None:
+        lease_deadline = time.monotonic() + lease_seconds
+        while not resolved_stop.wait(timeout=interval_seconds):
+            now = utc_now_timestamp()
+            new_lease = _add_lease_seconds(now, lease_seconds)
+            try:
+                accepted = record_store.heartbeat_every_code_work_request_record(
+                    request_id=request_id,
+                    host=host,
+                    fencing_token=fencing_token,
+                    heartbeat_at=now,
+                    lease_expires_at=new_lease,
+                    lease_seconds=lease_seconds,
+                )
+            except Exception:
+                if time.monotonic() < lease_deadline:
+                    continue
+                accepted = False
+            if accepted:
+                lease_deadline = time.monotonic() + lease_seconds
+                continue
+            resolved_stop.set()
+            if on_lease_lost is not None:
+                try:
+                    on_lease_lost()
+                except Exception:
+                    pass
+            return
+
+    thread = threading.Thread(target=_run, name=f"every-code-heartbeat-{request_id}", daemon=True)
+    thread.start()
+    return thread
 
 
 class EveryCodeWorkerApiError(RuntimeError):
@@ -189,14 +272,20 @@ class EveryCodeWorkerApiStore:
         request_id: str,
         host: str,
         claimed_at: str,
+        lease_seconds: int = 1800,
     ) -> EveryCodeWorkRequestRecord | None:
-        del claimed_at
         try:
             payload = self._request(
                 "POST",
                 "/v1/every-code/work-requests/claim",
-                body={"request_id": request_id.strip(), "host": host.strip()},
-                idempotency_key=f"every-code-claim-{request_id.strip()}-{host.strip()}",
+                body={
+                    "request_id": request_id.strip(),
+                    "host": host.strip(),
+                    "lease_seconds": lease_seconds,
+                },
+                idempotency_key=(
+                    f"every-code-claim-{request_id.strip()}-{host.strip()}-{claimed_at.strip()}"
+                ),
             )
         except EveryCodeWorkerApiError as error:
             if "HTTP 409" in str(error):
@@ -212,22 +301,104 @@ class EveryCodeWorkerApiStore:
             raise EveryCodeWorkerApiError("Launchplane claim response is invalid")
         return EveryCodeWorkRequestRecord.model_validate(request_payload)
 
+    def heartbeat_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        fencing_token: int,
+        heartbeat_at: str,
+        lease_expires_at: str,
+        lease_seconds: int = 1800,
+    ) -> bool:
+        del heartbeat_at, lease_expires_at
+        try:
+            self._request(
+                "POST",
+                "/v1/every-code/work-requests/heartbeat",
+                body={
+                    "request_id": request_id.strip(),
+                    "host": host.strip(),
+                    "fencing_token": fencing_token,
+                    "lease_seconds": lease_seconds,
+                },
+                idempotency_key="",
+            )
+        except EveryCodeWorkerApiError as error:
+            if "HTTP 409" in str(error):
+                return False
+            raise
+        return True
+
+    def list_stale_every_code_work_request_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
+        del as_of
+        return ()
+
+    def recover_stale_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        recovered_at: str,
+    ) -> EveryCodeWorkRequestRecord | None:
+        del expected_record, recovered_at
+        return None
+
+    def recover_stale_every_code_work_requests(self) -> int:
+        payload = self._request(
+            "POST",
+            "/v1/every-code/work-requests/recover-stale",
+            body={},
+            idempotency_key="",
+        )
+        records = payload.get("records")
+        if not isinstance(records, dict):
+            raise EveryCodeWorkerApiError("Launchplane stale recovery response is invalid")
+        requeued = records.get("requeued")
+        flagged = records.get("flagged")
+        if not isinstance(requeued, int) or not isinstance(flagged, int):
+            raise EveryCodeWorkerApiError("Launchplane stale recovery counts are invalid")
+        return requeued + flagged
+
     def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> object:
+        if record.state not in {"running", "done", "blocked"}:
+            raise EveryCodeWorkerApiError(
+                f"Launchplane status API cannot persist {record.state} work requests"
+            )
+        return self.update_every_code_work_request_status_record(
+            request_id=record.request_id,
+            update=EveryCodeWorkRequestStatusUpdate(
+                state=record.state,
+                host=record.claimed_by_host,
+                updated_at=record.updated_at,
+                fencing_token=record.fencing_token,
+                result_pr_url=record.result_pr_url,
+                result_summary=record.result_summary,
+                error_message=record.error_message,
+            ),
+        )
+
+    def update_every_code_work_request_status_record(
+        self,
+        *,
+        request_id: str,
+        update: EveryCodeWorkRequestStatusUpdate,
+    ) -> EveryCodeWorkRequestRecord:
         payload = self._request(
             "POST",
             "/v1/every-code/work-requests/status",
-            body={
-                "request_id": record.request_id,
-                "host": record.claimed_by_host,
-                "state": record.state,
-                "result_pr_url": record.result_pr_url,
-                "result_summary": record.result_summary,
-                "error_message": record.error_message,
-                "updated_at": record.updated_at,
-            },
-            idempotency_key=f"every-code-status-{record.request_id}-{record.state}-{record.updated_at}",
+            body={"request_id": request_id, **update.model_dump(mode="json")},
+            idempotency_key=f"every-code-status-{request_id}-{update.state}-{update.updated_at}",
         )
-        return payload
+        result = payload.get("result")
+        request_payload = result.get("request") if isinstance(result, dict) else None
+        if request_payload is None:
+            raise EveryCodeWorkerApiError("Launchplane status response is invalid")
+        return EveryCodeWorkRequestRecord.model_validate(request_payload)
 
     def rerun_every_code_work_request_record(
         self, *, request_id: str, trigger_actor: str = ""
@@ -667,9 +838,49 @@ class EveryCodeCleanupReconciliationResult:
         }
 
 
-def every_code_tmux_session_name(request_id: str) -> str:
+def _every_code_tmux_fenced_prefix(request_id: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
-    return f"every-code-{normalized or 'request'}"[:80]
+    prefix = f"every-code-{normalized or 'request'}"
+    return prefix[:60].rstrip("-._:")
+
+
+def every_code_tmux_session_name(request_id: str, *, fencing_token: int = 0) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
+    prefix = f"every-code-{normalized or 'request'}"
+    if fencing_token < 1:
+        return prefix[:80]
+    fenced_prefix = _every_code_tmux_fenced_prefix(request_id)
+    suffix = f"-f{fencing_token}"
+    if len(fenced_prefix) + len(suffix) > 80:
+        suffix = f"-f{hashlib.sha256(str(fencing_token).encode('utf-8')).hexdigest()[:16]}"
+    return f"{fenced_prefix}{suffix}"
+
+
+def _every_code_tmux_session_names(
+    *,
+    tmux_binary: str,
+    request_id: str,
+    runner: Runner,
+) -> tuple[str, ...] | None:
+    try:
+        result = runner((tmux_binary, "list-sessions", "-F", "#{session_name}"), None)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        detail = f"{result.stdout}\n{result.stderr}".lower()
+        if any(
+            marker in detail for marker in ("no server running", "failed to connect", "no sessions")
+        ):
+            return ()
+        return None
+    legacy_name = every_code_tmux_session_name(request_id)
+    fenced_prefix = _every_code_tmux_fenced_prefix(request_id) + "-f"
+    names = []
+    for line in result.stdout.splitlines():
+        session_name = line.strip()
+        if session_name == legacy_name or session_name.startswith(fenced_prefix):
+            names.append(session_name)
+    return tuple(dict.fromkeys(names))
 
 
 def every_code_session_state_path(*, state_dir: Path, request_id: str) -> Path:
@@ -696,6 +907,9 @@ def write_every_code_session_state(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "request_id": record.request_id,
+        "lifecycle_id": record.lifecycle_id,
+        "fencing_token": str(record.fencing_token),
+        "attempt": str(record.attempt),
         "session_name": session_name,
         "source_checkout_root": str(source_checkout_root),
         "launch_root": str(launch_root),
@@ -716,6 +930,9 @@ def read_every_code_session_state(path: Path) -> dict[str, str] | None:
     result: dict[str, str] = {}
     for key in (
         "request_id",
+        "lifecycle_id",
+        "fencing_token",
+        "attempt",
         "session_name",
         "host",
         "source_checkout_root",
@@ -986,6 +1203,8 @@ def build_every_code_session_command(
     service_url: str = "",
     worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
 ) -> str:
+    if record.fencing_token < 1:
+        raise ValueError("Every Code session command requires a positive fencing token")
     finish_command = [
         "uv",
         "run",
@@ -998,6 +1217,8 @@ def build_every_code_session_command(
         record.request_id,
         "--host",
         host.strip(),
+        "--fencing-token",
+        str(record.fencing_token),
         "--exit-code",
         "$status",
     ]
@@ -1030,6 +1251,7 @@ def build_every_code_session_command(
 
 def build_every_code_feedback_session_command(
     *,
+    record: EveryCodeWorkRequestRecord,
     feedback: EveryCodePrFeedbackRecord,
     state_dir: Path,
     host: str,
@@ -1039,20 +1261,7 @@ def build_every_code_feedback_session_command(
 ) -> str:
     command = "code " + shlex.quote(every_code_pr_feedback_prompt(feedback))
     return build_every_code_session_command(
-        record=EveryCodeWorkRequestRecord(
-            request_id=feedback.request_id,
-            source="manual",
-            state="running",
-            repository=feedback.repository,
-            issue_number=1,
-            issue_url=feedback.pr_url,
-            trigger_label="every-code",
-            queued_at=feedback.received_at,
-            updated_at=feedback.received_at,
-            claimed_at=feedback.received_at,
-            claimed_by_host=host.strip() or "Every Code worker",
-            started_at=feedback.received_at,
-        ),
+        record=record,
         command=command,
         state_dir=state_dir,
         host=host,
@@ -1189,7 +1398,10 @@ def run_every_code_worker_once(
             issue_number=queued_record.issue_number,
         )
 
-    session_name = every_code_tmux_session_name(claimed_record.request_id)
+    session_name = every_code_tmux_session_name(
+        claimed_record.request_id,
+        fencing_token=claimed_record.fencing_token,
+    )
     run = runner or _run_subprocess
     claim_comment_failure: ChildProcessFailure | None = None
     try:
@@ -1288,78 +1500,91 @@ def run_every_code_worker_once(
             checkout_root=prepared_checkout.source_checkout_root,
         )
 
-    existing_session = _tmux_session_exists(
+    stale_session_names = _every_code_tmux_session_names(
         tmux_binary=tmux_binary,
-        session_name=session_name,
+        request_id=claimed_record.request_id,
         runner=run,
     )
-    if existing_session is None:
+    if stale_session_names is None:
         return _block_every_code_request(
             record_store=record_store,
             record=claimed_record,
             host=normalized_host,
-            detail=f"Could not inspect tmux session {session_name!r}.",
+            detail="Could not inspect existing Every Code tmux sessions.",
             session_name=session_name,
             checkout_root=prepared_checkout.source_checkout_root,
         )
-    if not existing_session:
-        command = render_every_code_command(claimed_record, command_template=command_template)
-        if state_dir is not None:
-            command = build_every_code_session_command(
-                record=claimed_record,
-                command=command,
-                state_dir=state_dir,
-                database_url=database_url,
-                service_url=service_url,
-                worker_token_env=worker_token_env,
-                host=normalized_host,
-            )
-        try:
-            launch_result = run(
-                (
-                    tmux_binary,
-                    "new-session",
-                    "-d",
-                    "-s",
-                    session_name,
-                    "-c",
-                    str(resolved_checkout_root),
-                    command,
-                ),
-                None,
-            )
-        except OSError as exc:
-            failure = normalize_child_process_failure(
-                operation="Launch Every Code tmux session",
-                tool="child_process",
-                exception=exc,
-            )
+    for stale_session_name in stale_session_names:
+        if not _terminate_every_code_tmux_session(
+            tmux_binary=tmux_binary,
+            session_name=stale_session_name,
+            runner=run,
+        ):
             return _block_every_code_request(
                 record_store=record_store,
                 record=claimed_record,
                 host=normalized_host,
-                detail=failure.detail,
-                failure=failure,
+                detail=f"Could not terminate stale tmux session {stale_session_name!r}.",
                 session_name=session_name,
                 checkout_root=prepared_checkout.source_checkout_root,
             )
-        if launch_result.returncode != 0:
-            failure = normalize_child_process_failure(
-                operation="Launch Every Code tmux session",
-                tool="child_process",
-                returncode=launch_result.returncode,
-                stdout=launch_result.stdout,
-                stderr=launch_result.stderr,
-            )
-            return _block_every_code_request(
-                record_store=record_store,
-                record=claimed_record,
-                host=normalized_host,
-                detail=failure.detail,
-                failure=failure,
-                session_name=session_name,
-                checkout_root=prepared_checkout.source_checkout_root,
-            )
+    command = render_every_code_command(claimed_record, command_template=command_template)
+    if state_dir is not None:
+        command = build_every_code_session_command(
+            record=claimed_record,
+            command=command,
+            state_dir=state_dir,
+            database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
+            host=normalized_host,
+        )
+    try:
+        launch_result = run(
+            (
+                tmux_binary,
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-c",
+                str(resolved_checkout_root),
+                command,
+            ),
+            None,
+        )
+    except OSError as exc:
+        failure = normalize_child_process_failure(
+            operation="Launch Every Code tmux session",
+            tool="child_process",
+            exception=exc,
+        )
+        return _block_every_code_request(
+            record_store=record_store,
+            record=claimed_record,
+            host=normalized_host,
+            detail=failure.detail,
+            failure=failure,
+            session_name=session_name,
+            checkout_root=prepared_checkout.source_checkout_root,
+        )
+    if launch_result.returncode != 0:
+        failure = normalize_child_process_failure(
+            operation="Launch Every Code tmux session",
+            tool="child_process",
+            returncode=launch_result.returncode,
+            stdout=launch_result.stdout,
+            stderr=launch_result.stderr,
+        )
+        return _block_every_code_request(
+            record_store=record_store,
+            record=claimed_record,
+            host=normalized_host,
+            detail=failure.detail,
+            failure=failure,
+            session_name=session_name,
+            checkout_root=prepared_checkout.source_checkout_root,
+        )
     if state_dir is not None:
         write_every_code_session_state(
             state_dir=state_dir,
@@ -1370,12 +1595,13 @@ def run_every_code_worker_once(
             worktree_branch=prepared_checkout.worktree_branch,
             host=normalized_host,
         )
-    running_record = apply_every_code_work_request_status(
-        record_store.read_every_code_work_request_record(claimed_record.request_id),
-        EveryCodeWorkRequestStatusUpdate(
+    running_record = record_store.update_every_code_work_request_status_record(
+        request_id=claimed_record.request_id,
+        update=EveryCodeWorkRequestStatusUpdate(
             state="running",
             host=normalized_host,
             updated_at=utc_now_timestamp(),
+            fencing_token=claimed_record.fencing_token,
             result_summary="; ".join(
                 part
                 for part in (
@@ -1386,7 +1612,22 @@ def run_every_code_worker_once(
             ),
         ),
     )
-    record_store.write_every_code_work_request_record(running_record)
+    if running_record.fencing_token > 0:
+
+        def terminate_lost_lease_session() -> None:
+            _terminate_every_code_tmux_session(
+                tmux_binary=tmux_binary,
+                session_name=session_name,
+                runner=run,
+            )
+
+        start_every_code_heartbeat_thread(
+            record_store=record_store,
+            request_id=running_record.request_id,
+            host=normalized_host,
+            fencing_token=running_record.fencing_token,
+            on_lease_lost=terminate_lost_lease_session,
+        )
     return EveryCodeWorkerHandoffResult(
         status="running",
         detail="Every Code work request handed off to a visible tmux session.",
@@ -1536,6 +1777,10 @@ def run_every_code_worker_loop(
                         runner=runner,
                     ),
                 ),
+                _try_every_code_worker_maintenance(
+                    "Every Code stale lease recovery",
+                    lambda: recover_stale_every_code_work_requests(record_store=record_store),
+                ),
             )
             if error
         )
@@ -1583,6 +1828,31 @@ def run_every_code_worker_loop(
         stopped_reason="stopped",
         last_result=last_result,
     )
+
+
+def recover_stale_every_code_work_requests(
+    *,
+    record_store: EveryCodeWorkerStore,
+    limit: int = 20,
+) -> int:
+    if isinstance(record_store, EveryCodeWorkerApiStore):
+        return record_store.recover_stale_every_code_work_requests()
+    now = utc_now_timestamp()
+    stale_records = record_store.list_stale_every_code_work_request_records(
+        as_of=now,
+        limit=limit,
+    )
+    recovered = 0
+    for stale in stale_records:
+        if (
+            record_store.recover_stale_every_code_work_request_record(
+                expected_record=stale,
+                recovered_at=now,
+            )
+            is not None
+        ):
+            recovered += 1
+    return recovered
 
 
 def close_terminal_every_code_sessions(
@@ -2395,6 +2665,7 @@ def _apply_every_code_pr_feedback_record(
             request_id=feedback.request_id,
             session_name=session_name,
         )
+    session_record = record
     if record.state in TERMINAL_EVERY_CODE_STATES:
         resumed = resume_every_code_work_request(
             record,
@@ -2403,7 +2674,9 @@ def _apply_every_code_pr_feedback_record(
             result_summary=f"Resumed for PR feedback: {feedback.html_url or feedback.pr_url}",
         )
         record_store.write_every_code_work_request_record(resumed)
+        session_record = resumed
     command = build_every_code_feedback_session_command(
+        record=session_record,
         feedback=feedback,
         state_dir=state_dir,
         host=host,
@@ -2492,16 +2765,16 @@ def _persist_every_code_pr_feedback_failure(
     record = record_store.read_every_code_work_request_record(request_id)
     if record.state in TERMINAL_EVERY_CODE_STATES:
         return
-    blocked_record = apply_every_code_work_request_status(
-        record,
-        EveryCodeWorkRequestStatusUpdate(
+    record_store.update_every_code_work_request_status_record(
+        request_id=record.request_id,
+        update=EveryCodeWorkRequestStatusUpdate(
             state="blocked",
             host=host,
             updated_at=utc_now_timestamp(),
+            fencing_token=record.fencing_token,
             error_message=failure.operator_message(),
         ),
     )
-    record_store.write_every_code_work_request_record(blocked_record)
 
 
 def _acknowledge_every_code_pr_feedback(
@@ -2710,12 +2983,20 @@ def finish_every_code_work_request(
     record_store: EveryCodeWorkerStore,
     request_id: str,
     host: str,
+    fencing_token: int,
     exit_code: int,
     result_pr_url: str = "",
     result_summary: str = "",
     runner: Runner | None = None,
 ) -> EveryCodeWorkerFinishResult:
+    if fencing_token < 1:
+        raise ValueError("Every Code finish requires a positive fencing token")
     record = record_store.read_every_code_work_request_record(request_id.strip())
+    if record.fencing_token != fencing_token:
+        raise ValueError(
+            f"Every Code finish fencing token {fencing_token} "
+            f"does not match record fencing token {record.fencing_token}"
+        )
     if record.state in TERMINAL_EVERY_CODE_STATES:
         terminal_pr_url = result_pr_url.strip() or record.result_pr_url
         del runner
@@ -2749,18 +3030,18 @@ def finish_every_code_work_request(
     if succeeded and not resolved_pr_url:
         succeeded = False
         summary = "Every Code session exited successfully but did not open a pull request."
-    updated_record = apply_every_code_work_request_status(
-        record,
-        EveryCodeWorkRequestStatusUpdate(
+    updated_record = record_store.update_every_code_work_request_status_record(
+        request_id=record.request_id,
+        update=EveryCodeWorkRequestStatusUpdate(
             state="done" if succeeded else "blocked",
             host=host.strip(),
             updated_at=utc_now_timestamp(),
+            fencing_token=fencing_token,
             result_pr_url=resolved_pr_url,
             result_summary=summary,
             error_message="" if succeeded else summary,
         ),
     )
-    record_store.write_every_code_work_request_record(updated_record)
     return EveryCodeWorkerFinishResult(
         status="done" if succeeded else "blocked",
         detail=summary,
@@ -4262,16 +4543,17 @@ def _block_every_code_request(
     error_code = failure.code if failure is not None else ""
     error_correlation_id = failure.correlation_id if failure is not None else ""
     persisted_error = failure.operator_message() if failure is not None else safe_detail
-    blocked_record = apply_every_code_work_request_status(
-        record_store.read_every_code_work_request_record(record.request_id),
-        EveryCodeWorkRequestStatusUpdate(
+    current_record = record_store.read_every_code_work_request_record(record.request_id)
+    blocked_record = record_store.update_every_code_work_request_status_record(
+        request_id=current_record.request_id,
+        update=EveryCodeWorkRequestStatusUpdate(
             state="blocked",
             host=host,
             updated_at=utc_now_timestamp(),
+            fencing_token=current_record.fencing_token,
             error_message=persisted_error,
         ),
     )
-    record_store.write_every_code_work_request_record(blocked_record)
     return EveryCodeWorkerHandoffResult(
         status="blocked",
         detail=safe_detail,

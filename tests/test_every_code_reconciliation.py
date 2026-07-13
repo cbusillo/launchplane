@@ -140,9 +140,7 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(captured_request["bearer_token"], "service-token")
         self.assertEqual(captured_request["session_cookie"], "")
-        self.assertEqual(
-            captured_request["path"], "/v1/authz-policies/github-actions/removals"
-        )
+        self.assertEqual(captured_request["path"], "/v1/authz-policies/github-actions/removals")
         payload = captured_request["payload"]
         assert isinstance(payload, dict)
         self.assertEqual(payload["mode"], "dry_run")
@@ -401,6 +399,7 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="blocked",
                     host="worker-host",
+                    fencing_token=claimed.fencing_token,
                     updated_at="2026-05-06T00:01:00Z",
                     error_message="Needs another pass.",
                 ),
@@ -457,6 +456,7 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
                 EveryCodeWorkRequestStatusUpdate(
                     state="done",
                     host="worker-host",
+                    fencing_token=claimed.fencing_token,
                     updated_at="2026-05-06T00:01:00Z",
                     result_pr_url="https://github.com/cbusillo/launchplane/pull/351",
                 ),

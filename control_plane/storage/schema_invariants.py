@@ -8,7 +8,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-EXPECTED_ALEMBIC_HEAD_REVISION = "c9d1e3f5a7b9"
+EXPECTED_ALEMBIC_HEAD_REVISION = "a2b4c6d8e0f2"
 
 
 class SchemaInspectorProtocol(Protocol):
@@ -16,6 +16,9 @@ class SchemaInspectorProtocol(Protocol):
         raise NotImplementedError
 
     def get_columns(self, table_name: str) -> Sequence[Mapping[str, object]]:
+        raise NotImplementedError
+
+    def get_pk_constraint(self, table_name: str) -> Mapping[str, object]:
         raise NotImplementedError
 
 
@@ -35,6 +38,12 @@ class CriticalIndex:
     predicate_tokens: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class CriticalPrimaryKey:
+    table_name: str
+    column_names: tuple[str, ...]
+
+
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     CriticalColumnType(
         "launchplane_idempotency_records",
@@ -47,6 +56,26 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("integer", "int4"),
     ),
     CriticalColumnType(
+        "launchplane_idempotency_records",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_work_requests",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_work_requests",
+        "fencing_token",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_work_requests",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
         "launchplane_odoo_stable_bootstrap_operations",
         "payload",
         ("jsonb",),
@@ -74,6 +103,26 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     CriticalColumnType(
         "launchplane_verireel_prod_backup_gate_operations",
         "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_route_bindings",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_outbox_deliveries",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_outbox_deliveries",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_outbox_deliveries",
+        "max_attempts",
         ("integer", "int4"),
     ),
 )
@@ -86,6 +135,16 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_idempotency_scope_route_key_idx",
         ("scope", "route_path", "idempotency_key"),
         unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_idempotency_records",
+        "launchplane_idempotency_state_lease_idx",
+        ("state", "lease_expires_at", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_every_code_work_requests",
+        "launchplane_every_code_work_requests_lease_idx",
+        ("state", "lease_expires_at"),
     ),
     CriticalIndex(
         "launchplane_odoo_stable_bootstrap_operations",
@@ -133,6 +192,34 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_verireel_backup_gate_worker_claim_idx",
         ("status", "lease_expires_at", "updated_at"),
     ),
+    CriticalIndex(
+        "launchplane_route_bindings",
+        "launchplane_route_bindings_lookup_idx",
+        ("product", "context", "status", "instance"),
+    ),
+    CriticalIndex(
+        "launchplane_route_bindings",
+        "launchplane_route_bindings_updated_idx",
+        ("updated_at",),
+    ),
+    CriticalIndex(
+        "launchplane_outbox_deliveries",
+        "launchplane_outbox_deliveries_dedupe_uidx",
+        ("dedupe_key",),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_outbox_deliveries",
+        "launchplane_outbox_deliveries_claim_idx",
+        ("state", "next_attempt_at", "lease_expires_at", "created_at"),
+    ),
+)
+
+CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
+    CriticalPrimaryKey(
+        "launchplane_route_bindings",
+        ("product", "context", "instance"),
+    ),
 )
 
 
@@ -151,6 +238,10 @@ def verify_postgres_schema_invariants(engine: Engine) -> None:
             inspector=inspector,
             table_names=set(inspector.get_table_names()),
             index_definitions=postgres_index_definitions(engine),
+        ),
+        *critical_primary_key_errors(
+            inspector,
+            table_names=set(inspector.get_table_names()),
         ),
     ]
     if errors:
@@ -191,6 +282,31 @@ def critical_column_type_errors(
     return errors
 
 
+def critical_primary_key_errors(
+    inspector: SchemaInspectorProtocol,
+    *,
+    table_names: set[str] | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    for expected_key in CRITICAL_PRIMARY_KEYS:
+        if table_names is not None and expected_key.table_name not in table_names:
+            continue
+        constraint = inspector.get_pk_constraint(expected_key.table_name)
+        observed_columns = tuple(
+            str(column_name)
+            for column_name in _object_sequence(constraint.get("constrained_columns"))
+            if str(column_name)
+        )
+        if observed_columns != expected_key.column_names:
+            observed_summary = ", ".join(observed_columns) or "<none>"
+            expected_summary = ", ".join(expected_key.column_names)
+            errors.append(
+                f"{expected_key.table_name} has primary key ({observed_summary}); "
+                f"expected ({expected_summary})"
+            )
+    return errors
+
+
 def critical_index_errors(
     *,
     inspector: SchemaInspectorProtocol,
@@ -210,8 +326,7 @@ def critical_index_errors(
         observed_index = indexes_by_name.get(expected_index.index_name)
         if observed_index is None:
             errors.append(
-                f"{expected_index.table_name} missing required index "
-                f"{expected_index.index_name}"
+                f"{expected_index.table_name} missing required index {expected_index.index_name}"
             )
             continue
         observed_unique = bool(observed_index.get("unique", False))
@@ -236,9 +351,7 @@ def critical_index_errors(
                 ),
             )
             missing_tokens = [
-                token
-                for token in expected_index.predicate_tokens
-                if token not in predicate_text
+                token for token in expected_index.predicate_tokens if token not in predicate_text
             ]
             if missing_tokens:
                 errors.append(
@@ -279,8 +392,7 @@ def postgres_index_definitions(engine: Engine) -> dict[tuple[str, str], str]:
             )
         ).mappings()
         return {
-            (str(row["tablename"]), str(row["indexname"])): str(row["indexdef"])
-            for row in rows
+            (str(row["tablename"]), str(row["indexname"])): str(row["indexdef"]) for row in rows
         }
 
 

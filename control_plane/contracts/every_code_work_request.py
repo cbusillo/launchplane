@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -9,6 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 EveryCodeWorkRequestSource = Literal["github_issue_label", "manual", "reconciliation"]
 EveryCodeWorkRequestState = Literal["queued", "claimed", "running", "done", "blocked"]
+EveryCodeWorkRequestRecoveryPolicy = Literal["safe_requeue", "manual_review"]
+
+EVERY_CODE_WORK_REQUEST_DEFAULT_LEASE_SECONDS = 1800
+EVERY_CODE_WORK_REQUEST_MAX_SAFE_ATTEMPTS = 3
 
 
 class EveryCodeWorkRequestRecord(BaseModel):
@@ -30,6 +35,9 @@ class EveryCodeWorkRequestRecord(BaseModel):
     updated_at: str
     claimed_at: str = ""
     claimed_by_host: str = ""
+    lease_expires_at: str = ""
+    fencing_token: int = Field(default=0, ge=0)
+    attempt: int = Field(default=0, ge=0)
     started_at: str = ""
     finished_at: str = ""
     result_pr_url: str = ""
@@ -76,6 +84,7 @@ class EveryCodeWorkRequestStatusUpdate(BaseModel):
     state: Literal["running", "done", "blocked"]
     host: str
     updated_at: str
+    fencing_token: int = Field(ge=1)
     result_pr_url: str = ""
     result_summary: str = ""
     error_message: str = ""
@@ -90,6 +99,25 @@ class EveryCodeWorkRequestStatusUpdate(BaseModel):
             raise ValueError("done Every Code status update must not include error_message")
         if self.state == "blocked" and not self.error_message.strip():
             raise ValueError("blocked Every Code status update requires error_message")
+        return self
+
+
+class EveryCodeWorkRequestHeartbeat(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    host: str
+    fencing_token: int = Field(ge=1)
+    heartbeat_at: str
+    lease_expires_at: str
+
+    @model_validator(mode="after")
+    def _validate_heartbeat(self) -> "EveryCodeWorkRequestHeartbeat":
+        if not self.host.strip():
+            raise ValueError("Every Code heartbeat requires host")
+        if not self.heartbeat_at.strip():
+            raise ValueError("Every Code heartbeat requires heartbeat_at")
+        if not self.lease_expires_at.strip():
+            raise ValueError("Every Code heartbeat requires lease_expires_at")
         return self
 
 
@@ -130,7 +158,12 @@ def build_every_code_work_request_lifecycle_id(
 
 
 def claim_every_code_work_request(
-    record: EveryCodeWorkRequestRecord, *, host: str, claimed_at: str
+    record: EveryCodeWorkRequestRecord,
+    *,
+    host: str,
+    claimed_at: str,
+    lease_expires_at: str = "",
+    lease_seconds: int = EVERY_CODE_WORK_REQUEST_DEFAULT_LEASE_SECONDS,
 ) -> EveryCodeWorkRequestRecord | None:
     normalized_host = host.strip()
     if not normalized_host:
@@ -139,14 +172,47 @@ def claim_every_code_work_request(
         raise ValueError("Every Code work request claim requires claimed_at")
     if record.state != "queued":
         return None
+    new_attempt = record.attempt + 1
+    resolved_lease_expires_at = lease_expires_at.strip() or _add_seconds_to_timestamp(
+        claimed_at, lease_seconds
+    )
     return record.model_copy(
         update={
             "state": "claimed",
             "claimed_at": claimed_at,
             "claimed_by_host": normalized_host,
+            "lease_expires_at": resolved_lease_expires_at,
+            "fencing_token": new_attempt,
+            "attempt": new_attempt,
             "updated_at": claimed_at,
         }
     )
+
+
+def heartbeat_every_code_work_request(
+    record: EveryCodeWorkRequestRecord,
+    heartbeat: EveryCodeWorkRequestHeartbeat,
+) -> EveryCodeWorkRequestRecord | None:
+    if record.state not in {"claimed", "running"}:
+        return None
+    if record.claimed_by_host.strip() != heartbeat.host.strip():
+        return None
+    if record.fencing_token != heartbeat.fencing_token:
+        return None
+    return record.model_copy(
+        update={
+            "lease_expires_at": heartbeat.lease_expires_at,
+            "updated_at": heartbeat.heartbeat_at,
+        }
+    )
+
+
+def classify_stale_every_code_work_request_recovery(
+    record: EveryCodeWorkRequestRecord,
+) -> EveryCodeWorkRequestRecoveryPolicy:
+    if record.attempt <= EVERY_CODE_WORK_REQUEST_MAX_SAFE_ATTEMPTS:
+        return "safe_requeue"
+    return "manual_review"
 
 
 def apply_every_code_work_request_status(
@@ -158,6 +224,11 @@ def apply_every_code_work_request_status(
         raise ValueError("finished Every Code work request cannot be updated")
     if record.claimed_by_host.strip() != update.host.strip():
         raise ValueError("Every Code status update host does not match claim host")
+    if record.fencing_token != update.fencing_token:
+        raise ValueError(
+            f"Every Code status update fencing token {update.fencing_token} "
+            f"does not match record fencing token {record.fencing_token}"
+        )
 
     updates: dict[str, object] = {
         "state": update.state,
@@ -210,8 +281,8 @@ def requeue_every_code_work_request(
 ) -> EveryCodeWorkRequestRecord:
     if not queued_at.strip():
         raise ValueError("Every Code requeue requires queued_at")
-    if record.state not in {"done", "blocked"}:
-        raise ValueError("Every Code requeue requires a terminal work request")
+    if record.state not in {"done", "blocked", "claimed", "running"}:
+        raise ValueError("Every Code requeue requires a terminal or active work request")
 
     return record.model_copy(
         update={
@@ -226,11 +297,37 @@ def requeue_every_code_work_request(
             "updated_at": queued_at,
             "claimed_at": "",
             "claimed_by_host": "",
+            "lease_expires_at": "",
+            "fencing_token": 0,
             "started_at": "",
             "finished_at": "",
             "result_pr_url": "",
             "result_summary": "",
             "error_message": "",
+        }
+    )
+
+
+def recover_stale_every_code_work_request(
+    record: EveryCodeWorkRequestRecord,
+    *,
+    recovered_at: str,
+) -> EveryCodeWorkRequestRecord:
+    if record.state not in {"claimed", "running"}:
+        raise ValueError("Every Code stale recovery requires an active work request")
+    if not recovered_at.strip():
+        raise ValueError("Every Code stale recovery requires recovered_at")
+    if classify_stale_every_code_work_request_recovery(record) == "safe_requeue":
+        return requeue_every_code_work_request(record, queued_at=recovered_at)
+    return record.model_copy(
+        update={
+            "state": "blocked",
+            "finished_at": recovered_at,
+            "updated_at": recovered_at,
+            "error_message": (
+                f"Stale lease expired after {record.attempt} attempt(s); "
+                "manual review required before requeue."
+            ),
         }
     )
 
@@ -304,3 +401,12 @@ def close_every_code_work_request_for_issue(
     if not record.started_at.strip():
         updates["started_at"] = closed_at
     return record.model_copy(update=updates)
+
+
+def _add_seconds_to_timestamp(timestamp: str, seconds: int) -> str:
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return timestamp
+    result = dt.astimezone(UTC) + timedelta(seconds=seconds)
+    return result.replace(microsecond=0).isoformat().replace("+00:00", "Z")

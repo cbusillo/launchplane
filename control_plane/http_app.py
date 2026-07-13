@@ -41,6 +41,7 @@ from control_plane import product_context_cutover as control_plane_product_conte
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_preview_tls as control_plane_product_preview_tls
 from control_plane import product_read_service as control_plane_product_read_service
+from control_plane import route_binding_backfill as control_plane_route_binding_backfill
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
 from control_plane import tracked_target_logs as control_plane_tracked_target_logs
@@ -88,7 +89,7 @@ from control_plane.contracts.every_code_summary_read_model import (
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
-    apply_every_code_work_request_status,
+    _add_seconds_to_timestamp as _add_lease_seconds,
     requeue_every_code_work_request,
 )
 from control_plane.contracts.idempotency_record import (
@@ -100,6 +101,7 @@ from control_plane.contracts.ingress_canary_route_record import IngressCanaryRou
 from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
+    IngressRouteTlsOwner,
     build_ingress_route_audit_record_id,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
@@ -191,9 +193,13 @@ from control_plane.generic_web_promotion_http import (
     GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ACTION,
     GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE as _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
     GenericWebProdPromotionEnvelope,
+    GenericWebProdPromotionResponse,
+    GenericWebProdPromotionResponseResult,
     GenericWebPromotionProductMismatchError,
     GenericWebPromotionRouteDependencyError,
     GenericWebPromotionWorkflowEnvelope,
+    GenericWebPromotionWorkflowResponse,
+    GenericWebPromotionWorkflowResponseResult,
     dispatch_generic_web_promotion_workflow_result,
     execute_generic_web_prod_promotion_result,
     resolve_generic_web_promotion_destination_lane,
@@ -490,6 +496,11 @@ from control_plane.contracts.protected_artifacts import (
     build_protected_artifact_set,
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingReadModel,
+    EnvironmentRouteBindingRecord,
+    redacted_route_binding_record,
+)
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene_evidence import (
     RunnerHostHygieneAuditEvidenceEnvelope,
@@ -531,6 +542,8 @@ from control_plane.preview_lifecycle_cleanup_routes import (
 )
 from control_plane.product_config_http import (
     ProductConfigApplyEnvelope,
+    ProductConfigApplyResponse,
+    ProductConfigApplyResult,
     product_config_live_target_next_actions,
 )
 from control_plane.provider_target_operations_http import (
@@ -581,14 +594,22 @@ from control_plane.launchplane_mutations import (
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.postgres import (
+    DbOnlyMutationRequest,
+    MutationReservationResult,
+    MutationReservationUpdateResult,
+    OutboxWithIdempotencyRequest,
+    PostgresRecordStore,
+    RouteBindingMutationResult,
+)
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     PromotionEvidenceValidationError,
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
-from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
+from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorStore,
     public_ingress_notification_drivers,
@@ -637,8 +658,12 @@ from control_plane.work_graph_issue_inbox import (
 from control_plane.work_graph_service import (
     WorkGraphIssueInboxProvider,
     WorkGraphIssueInboxReconcileProvider,
+    WorkGraphIssueInboxReconcileResponse,
+    WorkGraphIssueInboxReconcileResponseResult,
     WorkGraphPlanningFactsProvider,
     WorkGraphRankEnvelope,
+    WorkGraphRankResponse,
+    WorkGraphRankResult,
     WorkGraphWorkRequestStore,
     build_repo_product_mapping_service_payload,
     build_work_graph_rank_result,
@@ -730,6 +755,7 @@ _LIVE_TARGET_RUNTIME_APPLY_ROUTE = "/v1/live-target-runtime/apply"
 _INGRESS_ROUTE_APPLY_ROUTE = "/v1/drivers/ingress/route-apply"
 _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
+_ROUTE_BINDING_BACKFILL_APPLY_ROUTE = "/v1/route-bindings/backfill/apply"
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
 _PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
@@ -750,7 +776,10 @@ _AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
+_EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE = "/v1/every-code/work-requests/heartbeat"
+_EVERY_CODE_WORK_REQUEST_RECOVER_STALE_ROUTE = "/v1/every-code/work-requests/recover-stale"
 _AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
+_DB_ONLY_MUTATION_LEASE = timedelta(minutes=5)
 
 AuthzPolicyRouteEnvelope = (
     control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope
@@ -859,8 +888,14 @@ class LaunchplaneErrorResponse(BaseModel):
     status: str = "rejected"
     trace_id: str
     error: LaunchplaneErrorDetail
-    records: dict[str, str] | None = None
-    authz: dict[str, object] | None = None
+    records: dict[str, str] | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    authz: dict[str, object] | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class OdooStableBootstrapOperationActiveResponse(BaseModel):
@@ -1558,6 +1593,27 @@ class PrivateHealthEndpointRecordsResponse(BaseModel):
     records: tuple[PrivateHealthEndpointRecord, ...]
 
 
+class RouteBindingRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: EnvironmentRouteBindingReadModel
+
+
+class RouteBindingRecordsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    product: str
+    context: str
+    instance: str
+    limit: int
+    count: int
+    records: tuple[EnvironmentRouteBindingReadModel, ...]
+
+
 class IngressCanaryRouteRecordResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1619,6 +1675,7 @@ class EveryCodeWorkRequestClaimEnvelope(BaseModel):
 
     request_id: str
     host: str
+    lease_seconds: int = Field(default=1800, ge=60, le=86400)
 
     @model_validator(mode="after")
     def _validate_claim(self) -> "EveryCodeWorkRequestClaimEnvelope":
@@ -1629,12 +1686,30 @@ class EveryCodeWorkRequestClaimEnvelope(BaseModel):
         return self
 
 
+class EveryCodeWorkRequestHeartbeatEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    host: str
+    fencing_token: int = Field(ge=1)
+    lease_seconds: int = Field(default=1800, ge=60, le=86400)
+
+    @model_validator(mode="after")
+    def _validate_heartbeat(self) -> "EveryCodeWorkRequestHeartbeatEnvelope":
+        if not self.request_id.strip():
+            raise ValueError("Every Code heartbeat requires request_id")
+        if not self.host.strip():
+            raise ValueError("Every Code heartbeat requires host")
+        return self
+
+
 class EveryCodeWorkRequestStatusEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
     host: str
     state: Literal["running", "done", "blocked"]
+    fencing_token: int = Field(ge=1)
     result_pr_url: str = ""
     result_summary: str = ""
     error_message: str = ""
@@ -2413,6 +2488,40 @@ class IngressCanaryRouteApplyEnvelope(BaseModel):
         return self
 
 
+class RouteBindingBackfillApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    product: str
+    context: str
+    instance: str
+    source_label: str = "operator-backfill"
+    reason: str = ""
+    confirmation: str = ""
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "RouteBindingBackfillApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported route binding backfill schema version")
+        self.product = self.product.strip()
+        self.context = self.context.strip()
+        self.instance = self.instance.strip()
+        self.source_label = self.source_label.strip()
+        self.reason = self.reason.strip()
+        self.confirmation = self.confirmation.strip()
+        if not self.product or not self.context or not self.instance:
+            raise ValueError("Route binding backfill requires product, context, and instance")
+        if not self.source_label:
+            raise ValueError("Route binding backfill requires source_label")
+        if self.mode == "apply":
+            if not self.reason:
+                raise ValueError("Route binding backfill apply requires a reason")
+            if self.confirmation != "APPLY LAUNCHPLANE ROUTE BINDING":
+                raise ValueError("Route binding backfill apply requires exact confirmation text")
+        return self
+
+
 class _RecordStoreFactory(Protocol):
     def __call__(self) -> object: ...
 
@@ -2521,6 +2630,53 @@ class _IngressCanaryRouteRecordApplyStore(Protocol):
         self,
         record: IngressCanaryRouteRecord,
     ) -> object: ...
+
+
+class _RouteBindingApplyStore(
+    control_plane_route_binding_backfill.RouteBindingBackfillStore, Protocol
+):
+    def read_route_binding_record(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentRouteBindingRecord: ...
+
+    def write_route_binding_record(
+        self,
+        record: EnvironmentRouteBindingRecord,
+    ) -> object: ...
+
+
+class _RouteBindingMutationStore(_RouteBindingApplyStore, Protocol):
+    def reserve_mutation(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        lease_owner: str,
+        lease_seconds: int = 300,
+        reconciliation_key: str = "",
+    ) -> MutationReservationResult: ...
+
+    def release_mutation_reservation(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+    ) -> MutationReservationUpdateResult: ...
+
+    def create_route_binding_record_with_mutation(
+        self,
+        *,
+        record: EnvironmentRouteBindingRecord,
+        reservation: LaunchplaneIdempotencyRecord,
+        response_status_code: int,
+        response_trace_id: str,
+        response_payload: dict[str, Any],
+    ) -> RouteBindingMutationResult: ...
 
 
 class _IngressRouteApplyStore(Protocol):
@@ -2645,6 +2801,26 @@ class _PrivateHealthEndpointReadStore(Protocol):
     ) -> tuple[PrivateHealthEndpointRecord, ...]: ...
 
 
+class _RouteBindingReadStore(Protocol):
+    def read_route_binding_record(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentRouteBindingRecord: ...
+
+    def list_route_binding_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EnvironmentRouteBindingRecord, ...]: ...
+
+
 class _IngressCanaryRouteReadStore(Protocol):
     def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord: ...
 
@@ -2700,17 +2876,48 @@ class _EveryCodeWorkRequestClaimStore(Protocol):
         request_id: str,
         host: str,
         claimed_at: str,
+        lease_seconds: int = 1800,
+        idempotency_record_factory: (
+            Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
+        ) = None,
+    ) -> EveryCodeWorkRequestRecord | None: ...
+
+
+class _EveryCodeWorkRequestHeartbeatStore(Protocol):
+    def heartbeat_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        fencing_token: int,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool: ...
+
+
+class _EveryCodeWorkRequestStaleStore(Protocol):
+    def list_stale_every_code_work_request_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
+
+    def recover_stale_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        recovered_at: str,
     ) -> EveryCodeWorkRequestRecord | None: ...
 
 
 class _EveryCodeWorkRequestStatusStore(Protocol):
-    def read_every_code_work_request_record(
-        self, request_id: str
+    def update_every_code_work_request_status_record(
+        self,
+        *,
+        request_id: str,
+        update: EveryCodeWorkRequestStatusUpdate,
     ) -> EveryCodeWorkRequestRecord: ...
-
-    def write_every_code_work_request_record(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> object: ...
 
 
 class _EveryCodeWorkRequestRerunStore(Protocol):
@@ -2718,9 +2925,13 @@ class _EveryCodeWorkRequestRerunStore(Protocol):
         self, request_id: str
     ) -> EveryCodeWorkRequestRecord: ...
 
-    def write_every_code_work_request_record(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> object: ...
+    def compare_and_write_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        record: EveryCodeWorkRequestRecord,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> Literal["updated", "changed", "missing"]: ...
 
 
 class _AgentWriteIntentRecordReadStore(Protocol):
@@ -3278,6 +3489,24 @@ def require_private_health_endpoint_read_store(
     return cast(_PrivateHealthEndpointReadStore, record_store)
 
 
+def require_route_binding_read_store(record_store: object) -> _RouteBindingReadStore:
+    required_methods = (
+        "read_route_binding_record",
+        "list_route_binding_records",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            f"Launchplane record store does not support route binding reads: {missing_summary}"
+        )
+    return cast(_RouteBindingReadStore, record_store)
+
+
 def require_edge_endpoint_apply_store(record_store: object) -> _EdgeEndpointApplyStore:
     required_methods = (
         "write_edge_endpoint_record",
@@ -3315,6 +3544,51 @@ def require_private_health_endpoint_apply_store(
             f"{missing_summary}"
         )
     return cast(_PrivateHealthEndpointApplyStore, record_store)
+
+
+def require_route_binding_apply_store(record_store: object) -> _RouteBindingApplyStore:
+    required_methods = (
+        "read_provider_target_record",
+        "read_dokploy_target_record",
+        "read_dokploy_target_id_record",
+        "read_route_binding_record",
+        "list_edge_endpoint_records",
+        "list_ingress_route_audit_records",
+        "write_route_binding_record",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support route binding backfill applies: "
+            f"{missing_summary}"
+        )
+    return cast(_RouteBindingApplyStore, record_store)
+
+
+def require_route_binding_mutation_store(record_store: object) -> _RouteBindingMutationStore:
+    route_binding_store = require_route_binding_apply_store(record_store)
+    required_methods = (
+        "reserve_mutation",
+        "release_mutation_reservation",
+        "create_route_binding_record_with_mutation",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(route_binding_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support atomic route binding mutations: "
+            f"{missing_summary}"
+        )
+    return cast(_RouteBindingMutationStore, route_binding_store)
 
 
 def require_ingress_canary_route_record_apply_store(
@@ -3725,7 +3999,7 @@ def store_product_config_dry_run_record(
     identity: LaunchplaneIdentity,
     request_payload: dict[str, object],
     trace_id: str,
-    response: AcceptedEvidenceResponse,
+    response: BaseModel,
 ) -> None:
     idempotency_store = idempotency_capable_store(record_store)
     if idempotency_store is None:
@@ -3882,6 +4156,19 @@ class _LaunchplaneFastAPI(FastAPI):
         super().add_api_route(path, endpoint, **kwargs)
         if registers_error_response_model:
             self._launchplane_error_response_model_registered = True
+
+    def openapi(self) -> dict[str, Any]:
+        schema = super().openapi()
+        for path_item in schema.get("paths", {}).values():
+            if not isinstance(path_item, dict):
+                continue
+            for operation in path_item.values():
+                if not isinstance(operation, dict):
+                    continue
+                responses = operation.get("responses")
+                if isinstance(responses, dict):
+                    responses.pop("422", None)
+        return schema
 
     def _response_media_type(self, kwargs: dict[str, Any]) -> str:
         response_class = kwargs.get("response_class", self.router.default_response_class)
@@ -5229,15 +5516,35 @@ def create_launchplane_fastapi_app(
         )
         return cast(_EveryCodeWorkRequestClaimStore, record_store)
 
+    def require_every_code_work_request_heartbeat_store(
+        record_store: object,
+    ) -> _EveryCodeWorkRequestHeartbeatStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("heartbeat_every_code_work_request_record",),
+            capability="Every Code work request heartbeat writes",
+        )
+        return cast(_EveryCodeWorkRequestHeartbeatStore, record_store)
+
+    def require_every_code_work_request_stale_store(
+        record_store: object,
+    ) -> _EveryCodeWorkRequestStaleStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=(
+                "list_stale_every_code_work_request_records",
+                "recover_stale_every_code_work_request_record",
+            ),
+            capability="Every Code stale work request recovery",
+        )
+        return cast(_EveryCodeWorkRequestStaleStore, record_store)
+
     def require_every_code_work_request_status_store(
         record_store: object,
     ) -> _EveryCodeWorkRequestStatusStore:
         require_every_code_read_methods(
             record_store,
-            required_methods=(
-                "read_every_code_work_request_record",
-                "write_every_code_work_request_record",
-            ),
+            required_methods=("update_every_code_work_request_status_record",),
             capability="Every Code work request status writes",
         )
         return cast(_EveryCodeWorkRequestStatusStore, record_store)
@@ -5249,7 +5556,7 @@ def create_launchplane_fastapi_app(
             record_store,
             required_methods=(
                 "read_every_code_work_request_record",
-                "write_every_code_work_request_record",
+                "compare_and_write_every_code_work_request_record",
             ),
             capability="Every Code work request rerun writes",
         )
@@ -5705,7 +6012,7 @@ def create_launchplane_fastapi_app(
             GitHubActionsIdentity | GitHubHumanIdentity,
             Depends(read_browser_work_graph_rank_identity),
         ],
-    ) -> AcceptedEvidenceResponse:
+    ) -> WorkGraphRankResponse:
         trace_id = next_trace_id()
         require_work_graph_rank_authorization(
             identity=identity,
@@ -5713,10 +6020,10 @@ def create_launchplane_fastapi_app(
             message="Workflow cannot rank the Launchplane work graph.",
         )
         _summary, driver_result = build_work_graph_rank_result(payload)
-        return AcceptedEvidenceResponse(
+        return WorkGraphRankResponse(
             trace_id=trace_id,
             records={},
-            result=driver_result,
+            result=WorkGraphRankResult.model_validate(driver_result),
         )
 
     def read_work_graph_issue_inbox(
@@ -5747,7 +6054,7 @@ def create_launchplane_fastapi_app(
     def reconcile_work_graph_issue_inbox(
         payload: GitHubIssueInboxReconcileRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-    ) -> AcceptedEvidenceResponse:
+    ) -> WorkGraphIssueInboxReconcileResponse:
         trace_id = next_trace_id()
         required_action = (
             "work_graph.rank" if payload.mode == "dry_run" else "work_graph.issue_inbox.reconcile"
@@ -5773,10 +6080,10 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message=str(error) or "Request could not be completed.",
             ) from error
-        return AcceptedEvidenceResponse(
+        return WorkGraphIssueInboxReconcileResponse(
             trace_id=trace_id,
             records={},
-            result={"reconcile": reconcile_result.model_dump(mode="json")},
+            result=WorkGraphIssueInboxReconcileResponseResult(reconcile=reconcile_result),
         )
 
     def merge_train_policy_not_configured_error(
@@ -9685,6 +9992,17 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        idempotency_identity = identity or (
+            TerminalAgentIdentity(
+                subject="every-code-worker",
+                token_label="every-code-worker-token",
+            )
+            if worker_token_authorized
+            else None
+        )
         if identity is not None:
             if not resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
@@ -9698,10 +10016,17 @@ def create_launchplane_fastapi_app(
                     code="authorization_denied",
                     message="Workflow cannot claim Every Code work requests.",
                 )
-            _, _, replayed_response = await replay_apply_idempotency(
+        normalized_idempotency_key = ""
+        payload_fingerprint = ""
+        if idempotency_identity is not None:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replayed_response,
+            ) = await replay_apply_idempotency(
                 request=request,
                 record_store=record_store,
-                identity=identity,
+                identity=idempotency_identity,
                 route_path="/v1/every-code/work-requests/claim",
                 idempotency_key=idempotency_key,
                 trace_id=trace_id,
@@ -9727,11 +10052,39 @@ def create_launchplane_fastapi_app(
                 code="invalid_payload",
                 message=str(error),
             ) from error
+
+        def claim_response(record: EveryCodeWorkRequestRecord) -> AcceptedEvidenceResponse:
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={"request_id": record.request_id, "state": record.state},
+                result={"request": record.model_dump(mode="json")},
+            )
+
+        def claim_idempotency_record(
+            record: EveryCodeWorkRequestRecord,
+        ) -> LaunchplaneIdempotencyRecord:
+            if idempotency_identity is None:
+                raise RuntimeError("Every Code claim idempotency requires an identity.")
+            return build_apply_idempotency_record(
+                identity=idempotency_identity,
+                route_path="/v1/every-code/work-requests/claim",
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=claim_response(record),
+            )
+
         try:
             claimed_record = every_code_store.claim_every_code_work_request_record(
                 request_id=claim_request.request_id.strip(),
                 host=claim_request.host.strip(),
                 claimed_at=utc_now_timestamp(),
+                lease_seconds=claim_request.lease_seconds,
+                idempotency_record_factory=(
+                    claim_idempotency_record
+                    if idempotency_identity is not None and normalized_idempotency_key
+                    else None
+                ),
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -9741,16 +10094,160 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         if claimed_record is None:
+            if idempotency_identity is not None and normalized_idempotency_key:
+                _, _, replayed_response = await replay_apply_idempotency(
+                    request=request,
+                    record_store=record_store,
+                    identity=idempotency_identity,
+                    route_path="/v1/every-code/work-requests/claim",
+                    idempotency_key=normalized_idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                )
+                if replayed_response is not None:
+                    return replayed_response
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="work_request_already_claimed",
                 message="Every Code work request is not queued for claim.",
             )
+        return claim_response(claimed_record)
+
+    async def write_every_code_work_request_heartbeat(
+        request: Request,
+        payload: dict[str, object],
+        identity: Annotated[
+            LaunchplaneIdentity | None,
+            Depends(read_every_code_work_request_worker_write_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        if identity is None and not worker_token_authorized:
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=trace_id,
+                code="unauthorized",
+                message="Every Code heartbeat requires authorization.",
+            )
+        try:
+            heartbeat_store = require_every_code_work_request_heartbeat_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            heartbeat_request = EveryCodeWorkRequestHeartbeatEnvelope.model_validate(payload)
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=str(error),
+            ) from error
+        now = utc_now_timestamp()
+        new_lease_expires_at = _add_lease_seconds(now, heartbeat_request.lease_seconds)
+        accepted = heartbeat_store.heartbeat_every_code_work_request_record(
+            request_id=heartbeat_request.request_id.strip(),
+            host=heartbeat_request.host.strip(),
+            fencing_token=heartbeat_request.fencing_token,
+            heartbeat_at=now,
+            lease_expires_at=new_lease_expires_at,
+        )
+        if not accepted:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="heartbeat_rejected",
+                message="Every Code heartbeat rejected: wrong owner, fencing token, or terminal state.",
+            )
         return accepted_evidence_response(
             trace_id=trace_id,
-            records={"request_id": claimed_record.request_id, "state": claimed_record.state},
-            result={"request": claimed_record.model_dump(mode="json")},
+            records={
+                "request_id": heartbeat_request.request_id.strip(),
+                "fencing_token": heartbeat_request.fencing_token,
+            },
+            result={
+                "request_id": heartbeat_request.request_id.strip(),
+                "lease_expires_at": new_lease_expires_at,
+            },
+        )
+
+    async def recover_stale_every_code_work_requests(
+        request: Request,
+        payload: dict[str, object],
+        identity: Annotated[
+            LaunchplaneIdentity | None,
+            Depends(read_every_code_work_request_worker_write_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        if identity is None and not worker_token_authorized:
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=trace_id,
+                code="unauthorized",
+                message="Every Code stale recovery requires authorization.",
+            )
+        if identity is not None and not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="every_code_work_request.update",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot recover stale Every Code work requests.",
+            )
+        try:
+            stale_store = require_every_code_work_request_stale_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        now = utc_now_timestamp()
+        stale_records = stale_store.list_stale_every_code_work_request_records(
+            as_of=now,
+            limit=20,
+        )
+        requeued: list[str] = []
+        flagged: list[str] = []
+        for stale in stale_records:
+            recovered = stale_store.recover_stale_every_code_work_request_record(
+                expected_record=stale,
+                recovered_at=now,
+            )
+            if recovered is None:
+                continue
+            if recovered.state == "queued":
+                requeued.append(recovered.request_id)
+            elif recovered.state == "blocked":
+                flagged.append(recovered.request_id)
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "checked": len(stale_records),
+                "requeued": len(requeued),
+                "flagged": len(flagged),
+            },
+            result={"requeued": requeued, "flagged": flagged},
         )
 
     async def write_every_code_work_request_status(
@@ -9825,8 +10322,17 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         try:
-            existing_record = every_code_store.read_every_code_work_request_record(
-                status_request.request_id.strip()
+            updated_record = every_code_store.update_every_code_work_request_status_record(
+                request_id=status_request.request_id.strip(),
+                update=EveryCodeWorkRequestStatusUpdate(
+                    state=status_request.state,
+                    host=status_request.host,
+                    updated_at=status_request.updated_at.strip() or utc_now_timestamp(),
+                    fencing_token=status_request.fencing_token,
+                    result_pr_url=status_request.result_pr_url,
+                    result_summary=status_request.result_summary,
+                    error_message=status_request.error_message,
+                ),
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -9835,18 +10341,6 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=str(error),
             ) from error
-        try:
-            updated_record = apply_every_code_work_request_status(
-                existing_record,
-                EveryCodeWorkRequestStatusUpdate(
-                    state=status_request.state,
-                    host=status_request.host,
-                    updated_at=status_request.updated_at.strip() or utc_now_timestamp(),
-                    result_pr_url=status_request.result_pr_url,
-                    result_summary=status_request.result_summary,
-                    error_message=status_request.error_message,
-                ),
-            )
         except (ValueError, ValidationError) as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -9854,7 +10348,6 @@ def create_launchplane_fastapi_app(
                 code="invalid_payload",
                 message=str(error),
             ) from error
-        every_code_store.write_every_code_work_request_record(updated_record)
         notification_attempts: tuple[EveryCodeNotificationAttemptRecord, ...] = ()
         if updated_record.state == "blocked":
             notification_attempts = deliver_every_code_blocked_notifications(
@@ -9900,6 +10393,17 @@ def create_launchplane_fastapi_app(
         normalized_idempotency_key = ""
         intent_idempotency_key = idempotency_key.strip()
         payload_fingerprint = ""
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        idempotency_identity = identity or (
+            TerminalAgentIdentity(
+                subject="every-code-worker",
+                token_label="every-code-worker-token",
+            )
+            if worker_token_authorized
+            else None
+        )
         if identity is not None:
             if not resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
@@ -9913,6 +10417,7 @@ def create_launchplane_fastapi_app(
                     code="authorization_denied",
                     message="Workflow cannot rerun Every Code work requests.",
                 )
+        if idempotency_identity is not None:
             (
                 normalized_idempotency_key,
                 payload_fingerprint,
@@ -9920,7 +10425,7 @@ def create_launchplane_fastapi_app(
             ) = await replay_apply_idempotency(
                 request=request,
                 record_store=record_store,
-                identity=identity,
+                identity=idempotency_identity,
                 route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
                 idempotency_key=idempotency_key,
                 trace_id=trace_id,
@@ -10006,7 +10511,6 @@ def create_launchplane_fastapi_app(
                 code="invalid_payload",
                 message=str(error),
             ) from error
-        every_code_store.write_every_code_work_request_record(requeued_record)
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={
@@ -10016,15 +10520,46 @@ def create_launchplane_fastapi_app(
             },
             result={"request": requeued_record.model_dump(mode="json")},
         )
-        if identity is not None:
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
+        idempotency_record = None
+        if idempotency_identity is not None and normalized_idempotency_key:
+            idempotency_record = build_apply_idempotency_record(
+                identity=idempotency_identity,
                 route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
                 idempotency_key=normalized_idempotency_key,
                 request_fingerprint_value=payload_fingerprint,
                 trace_id=trace_id,
                 response=response,
+            )
+        write_status = every_code_store.compare_and_write_every_code_work_request_record(
+            expected_record=existing_record,
+            record=requeued_record,
+            idempotency_record=idempotency_record,
+        )
+        if write_status == "missing":
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"Every Code work request {rerun_request.request_id!r} was not found.",
+            )
+        if write_status == "changed":
+            if idempotency_identity is not None and normalized_idempotency_key:
+                _, _, replayed_response = await replay_apply_idempotency(
+                    request=request,
+                    record_store=record_store,
+                    identity=idempotency_identity,
+                    route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                )
+                if replayed_response is not None:
+                    return replayed_response
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="work_request_changed",
+                message="Every Code work request changed while the rerun was being prepared.",
             )
         return response
 
@@ -11012,6 +11547,152 @@ def create_launchplane_fastapi_app(
             )
         return PrivateHealthEndpointRecordResponse(trace_id=trace_id, record=record)
 
+    def ensure_route_binding_allowed(
+        *,
+        identity: LaunchplaneIdentity,
+        trace_id: str,
+        action: str,
+        product: str,
+        context_name: str,
+        message: str,
+    ) -> None:
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context_name,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=message,
+            )
+
+    def list_route_binding_records(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        product: Annotated[str, Query()] = "",
+        context: Annotated[str, Query()] = "",
+        instance: Annotated[str, Query()] = "",
+        status: Annotated[str, Query()] = "",
+        limit: Annotated[str, Query()] = "25",
+    ) -> RouteBindingRecordsResponse:
+        trace_id = next_trace_id()
+        normalized_product = product.strip()
+        context_name = context.strip()
+        instance_name = instance.strip()
+        if not normalized_product or not context_name:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message="Route binding list requires product and context query parameters.",
+            )
+        ensure_route_binding_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="route_binding.read",
+            product=normalized_product,
+            context_name=context_name,
+            message="Workflow cannot read route bindings for the requested product/context.",
+        )
+        try:
+            normalized_limit = control_plane_service_status.query_int_value(
+                limit,
+                "limit",
+                default=25,
+                minimum=1,
+                maximum=100,
+            )
+            assert normalized_limit is not None
+            route_binding_store = require_route_binding_read_store(record_store)
+            records = route_binding_store.list_route_binding_records(
+                product=normalized_product,
+                context_name=context_name,
+                instance_name=instance_name,
+                status=status.strip(),
+                limit=normalized_limit,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        return RouteBindingRecordsResponse(
+            trace_id=trace_id,
+            product=normalized_product,
+            context=context_name,
+            instance=instance_name,
+            limit=normalized_limit,
+            count=len(records),
+            records=tuple(redacted_route_binding_record(record) for record in records),
+        )
+
+    def read_route_binding_record(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        product: Annotated[str, Query()] = "",
+        context: Annotated[str, Query()] = "",
+        instance: Annotated[str, Query()] = "",
+    ) -> RouteBindingRecordResponse:
+        trace_id = next_trace_id()
+        normalized_product = product.strip()
+        context_name = context.strip()
+        instance_name = instance.strip()
+        if not normalized_product or not context_name or not instance_name:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=(
+                    "Route binding record reads require product, context, and instance "
+                    "query parameters."
+                ),
+            )
+        ensure_route_binding_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="route_binding.read",
+            product=normalized_product,
+            context_name=context_name,
+            message="Workflow cannot read route bindings for the requested product/context.",
+        )
+        try:
+            route_binding_store = require_route_binding_read_store(record_store)
+            record = route_binding_store.read_route_binding_record(
+                product=normalized_product,
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return RouteBindingRecordResponse(
+            trace_id=trace_id,
+            record=redacted_route_binding_record(record),
+        )
+
     def ensure_ingress_canary_route_read_allowed(
         *,
         identity: LaunchplaneIdentity,
@@ -11882,20 +12563,63 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
         payload_fingerprint = ""
-        if preview_tls_request.mode == "apply":
-            (
-                normalized_idempotency_key,
-                payload_fingerprint,
-                replay_response,
-            ) = await replay_apply_idempotency(
-                request=request,
-                record_store=database_store,
-                identity=identity,
+
+        def prepare_product_preview_tls_mutation() -> AcceptedEvidenceResponse | None:
+            preflight = database_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
                 route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
                 idempotency_key=normalized_idempotency_key,
-                trace_id=trace_id,
-                check_replay=True,
+                request_fingerprint=payload_fingerprint,
             )
+            if preflight.status in {"missing", "released"}:
+                return None
+            if preflight.record is None:
+                raise RuntimeError("Product preview TLS mutation preflight requires evidence.")
+            if preflight.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=preflight.record,
+                    route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                )
+            if preflight.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if preflight.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product preview TLS mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if preflight.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product preview TLS mutation requires reconciliation before retry."
+                    ),
+                )
+            raise RuntimeError(
+                f"Unsupported product preview TLS mutation preflight status: {preflight.status}"
+            )
+
+        if preview_tls_request.mode == "apply":
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
+                payload=cast(dict[str, object], raw_payload),
+            )
+            replay_response = prepare_product_preview_tls_mutation()
             if replay_response is not None:
                 return replay_response
         try:
@@ -11930,27 +12654,9 @@ def create_launchplane_fastapi_app(
             preview_tls_request.mode == "apply"
             and preview_tls_request.reviewed_plan_sha256 != plan.plan_sha256
         ):
-            stored_idempotency_record = database_store.read_idempotency_record(
-                scope=idempotency_scope(identity),
-                route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            )
-            if stored_idempotency_record is not None:
-                if stored_idempotency_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=stored_idempotency_record,
-                    route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
-                )
+            replay_response = prepare_product_preview_tls_mutation()
+            if replay_response is not None:
+                return replay_response
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -11988,18 +12694,21 @@ def create_launchplane_fastapi_app(
                 records={"product_profile": preview_tls_request.product},
                 result=result_plan.model_dump(mode="json"),
             )
-            atomic_idempotency_record = build_apply_idempotency_record(
-                identity=identity,
+            mutation = DbOnlyMutationRequest(
+                scope=idempotency_scope(identity),
                 route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
                 idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
             )
             write_result = database_store.compare_and_write_product_profile_record(
                 expected_record=profile,
                 replacement_record=replacement_profile,
-                idempotency_record=atomic_idempotency_record,
+                mutation=mutation,
             )
             if write_result.status == "replayed":
                 if write_result.idempotency_record is None:
@@ -12035,6 +12744,25 @@ def create_launchplane_fastapi_app(
                     code="stale",
                     message=(
                         "Product profile changed while applying the reviewed preview TLS plan."
+                    ),
+                )
+            if write_result.status == "reservation_in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product preview TLS mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if write_result.status == "reconciliation_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product preview TLS mutation requires reconciliation before retry."
                     ),
                 )
             return response
@@ -12468,6 +13196,25 @@ def create_launchplane_fastapi_app(
                             "Launchplane request payload on this route."
                         ),
                     )
+                if stored_record.state == "running":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_in_progress",
+                        message=(
+                            "A matching Launchplane mutation is already running. "
+                            "Retry with the same Idempotency-Key."
+                        ),
+                    )
+                if stored_record.state == "reconcile_required":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_reconciliation_required",
+                        message=(
+                            "The prior Launchplane mutation requires reconciliation before retry."
+                        ),
+                    )
                 return (
                     normalized_idempotency_key,
                     payload_fingerprint,
@@ -12541,6 +13288,25 @@ def create_launchplane_fastapi_app(
                             "Launchplane request payload on this route."
                         ),
                     )
+                if stored_record.state == "running":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_in_progress",
+                        message=(
+                            "A matching Launchplane mutation is already running. "
+                            "Retry with the same Idempotency-Key."
+                        ),
+                    )
+                if stored_record.state == "reconcile_required":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_reconciliation_required",
+                        message=(
+                            "The prior Launchplane mutation requires reconciliation before retry."
+                        ),
+                    )
                 return (
                     normalized_idempotency_key,
                     payload_fingerprint,
@@ -12559,7 +13325,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: str,
         request_fingerprint_value: str,
         trace_id: str,
-        response: AcceptedEvidenceResponse,
+        response: BaseModel,
     ) -> LaunchplaneIdempotencyRecord:
         return LaunchplaneIdempotencyRecord(
             record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
@@ -12581,7 +13347,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: str,
         request_fingerprint_value: str,
         trace_id: str,
-        response: AcceptedEvidenceResponse,
+        response: BaseModel,
     ) -> None:
         idempotency_store = idempotency_capable_store(record_store)
         if idempotency_store is None or not idempotency_key:
@@ -12597,12 +13363,37 @@ def create_launchplane_fastapi_app(
             )
         )
 
+    def authority_bundle_with_apply_idempotency(
+        *,
+        bundle: ProductAuthorityBundle,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint_value: str,
+        trace_id: str,
+        response: BaseModel,
+    ) -> ProductAuthorityBundle:
+        if not idempotency_key.strip():
+            return bundle
+        return bundle.model_copy(
+            update={
+                "idempotency_record": build_apply_idempotency_record(
+                    identity=identity,
+                    route_path=route_path,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint_value=request_fingerprint_value,
+                    trace_id=trace_id,
+                    response=response,
+                )
+            }
+        )
+
     async def apply_product_config(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
+    ) -> ProductConfigApplyResponse:
         trace_id = next_trace_id()
         if isinstance(identity, TerminalAgentIdentity):
             raise _launchplane_http_error(
@@ -12696,23 +13487,27 @@ def create_launchplane_fastapi_app(
             check_replay=bool(idempotency_key.strip()),
         )
         if replay_response is not None:
-            return replay_response
+            return ProductConfigApplyResponse.model_validate(
+                replay_response.model_dump(mode="json")
+            )
         database_store = require_product_config_database_store(
             record_store=record_store,
             trace_id=trace_id,
         )
-        driver_result, product_config_error = (
-            control_plane_product_config_service.apply_product_config_service_request(
-                record_store=database_store,
-                payload=product_config_request.product_config_payload(),
-                mode=cast(
-                    control_plane_product_config.ProductConfigMode, product_config_request.mode
-                ),
-                actor=product_config_identity_actor(identity),
-                source_label=product_config_request.source_label,
+        try:
+            driver_result, authority_bundle = (
+                control_plane_product_config.plan_product_config_authority_bundle(
+                    record_store=database_store,
+                    payload=product_config_request.product_config_payload(),
+                    mode=product_config_request.mode,
+                    actor=product_config_identity_actor(identity),
+                    source_label=product_config_request.source_label,
+                )
             )
-        )
-        if product_config_error is not None:
+        except control_plane_product_config.ProductConfigError as error:
+            product_config_error = (
+                control_plane_product_config_service.product_config_service_error(error)
+            )
             raise _launchplane_http_error(
                 status_code=product_config_error.status_code,
                 trace_id=trace_id,
@@ -12730,10 +13525,10 @@ def create_launchplane_fastapi_app(
                 "status": "records_applied_live_sync_required",
                 "next_actions": next_actions,
             }
-        product_config_response = accepted_evidence_response(
+        product_config_response = ProductConfigApplyResponse(
             trace_id=trace_id,
             records={},
-            result=driver_result,
+            result=ProductConfigApplyResult.model_validate(driver_result),
         )
         if (
             isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity)
@@ -12746,15 +13541,28 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=product_config_response,
             )
-        store_apply_idempotency(
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=product_config_response,
-        )
+        if product_config_request.mode == "dry-run":
+            store_apply_idempotency(
+                record_store=database_store,
+                identity=identity,
+                route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=product_config_response,
+            )
+        else:
+            database_store.write_product_authority_bundle(
+                authority_bundle_with_apply_idempotency(
+                    bundle=authority_bundle,
+                    identity=identity,
+                    route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=product_config_response,
+                )
+            )
         return product_config_response
 
     async def reencrypt_managed_secrets(
@@ -12844,12 +13652,34 @@ def create_launchplane_fastapi_app(
                     "utf-8"
                 )
             ).hexdigest()
+
+        def reencryption_idempotency_record(
+            result_payload: dict[str, object],
+        ) -> LaunchplaneIdempotencyRecord:
+            return build_apply_idempotency_record(
+                identity=identity,
+                route_path=_SECRET_REENCRYPT_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={},
+                    result=result_payload,
+                ),
+            )
+
         try:
             result = control_plane_secrets.reencrypt_secrets(
                 record_store=database_store,
                 apply=reencryption_request.mode == "apply",
                 expected_plan_digest=reencryption_request.expected_plan_digest,
                 operation_token=operation_token,
+                idempotency_record_factory=(
+                    reencryption_idempotency_record
+                    if reencryption_request.mode == "apply"
+                    else None
+                ),
                 actor=actor,
                 source_label=reencryption_request.source_label,
                 reason=reencryption_request.reason,
@@ -12869,16 +13699,6 @@ def create_launchplane_fastapi_app(
                 message="Managed-secret state no longer matches the approved dry-run.",
             )
         response = accepted_evidence_response(trace_id=trace_id, records={}, result=result)
-        if reencryption_request.mode == "apply":
-            store_apply_idempotency(
-                record_store=database_store,
-                identity=identity,
-                route_path=_SECRET_REENCRYPT_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
         return response
 
     async def apply_product_onboarding(
@@ -12945,7 +13765,7 @@ def create_launchplane_fastapi_app(
         if replay_response is not None:
             return replay_response
         try:
-            onboarding_result = apply_product_onboarding_manifest(
+            onboarding_result, authority_bundle = plan_product_onboarding_authority_bundle(
                 record_store=database_store,
                 manifest=onboarding_request.manifest,
             )
@@ -12972,14 +13792,16 @@ def create_launchplane_fastapi_app(
             },
             result=driver_result,
         )
-        store_apply_idempotency(
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=onboarding_response,
+        database_store.write_product_authority_bundle(
+            authority_bundle_with_apply_idempotency(
+                bundle=authority_bundle,
+                identity=identity,
+                route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=onboarding_response,
+            )
         )
         return onboarding_response
 
@@ -13651,9 +14473,11 @@ def create_launchplane_fastapi_app(
                 message="Requested cutover contexts are not owned by the product profile.",
             )
         try:
-            result = control_plane_product_context_cutover.apply_product_context_cutover(
-                record_store=database_store,
-                request=context_cutover_request,
+            result, authority_bundle = (
+                control_plane_product_context_cutover.plan_product_context_cutover_authority_bundle(
+                    record_store=database_store,
+                    request=context_cutover_request,
+                )
             )
         except ValueError as error:
             raise _launchplane_http_error(
@@ -13667,15 +14491,18 @@ def create_launchplane_fastapi_app(
             records={"product_profile": context_cutover_request.product},
             result=result,
         )
-        store_apply_idempotency(
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
+        if context_cutover_request.mode == "apply":
+            database_store.write_product_authority_bundle(
+                authority_bundle_with_apply_idempotency(
+                    bundle=authority_bundle,
+                    identity=identity,
+                    route_path=_PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
+            )
         return response
 
     async def apply_product_legacy_context_cleanup(
@@ -13747,9 +14574,11 @@ def create_launchplane_fastapi_app(
         if replay_response is not None:
             return replay_response
         try:
-            result = control_plane_product_context_cutover.apply_legacy_context_cleanup(
-                record_store=database_store,
-                request=legacy_cleanup_request,
+            result, authority_bundle = (
+                control_plane_product_context_cutover.plan_legacy_context_cleanup_authority_bundle(
+                    record_store=database_store,
+                    request=legacy_cleanup_request,
+                )
             )
         except control_plane_product_context_cutover.LegacyContextCleanupBoundaryError as error:
             raise _launchplane_http_error(
@@ -13777,15 +14606,18 @@ def create_launchplane_fastapi_app(
             records={"product_profile": legacy_cleanup_request.product},
             result=result,
         )
-        store_apply_idempotency(
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
+        if legacy_cleanup_request.mode == "apply":
+            database_store.write_product_authority_bundle(
+                authority_bundle_with_apply_idempotency(
+                    bundle=authority_bundle,
+                    identity=identity,
+                    route_path=_PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
+            )
         return response
 
     def resolve_ingress_edge_endpoint(
@@ -13893,6 +14725,13 @@ def create_launchplane_fastapi_app(
         idempotency_key: str,
     ) -> IngressRouteAuditRecord:
         provider_host_id = result.proxy_host.id if result.proxy_host is not None else None
+        certificate_id = (
+            result.proxy_host.certificate_id
+            if result.proxy_host is not None
+            else request.route.certificate_id
+        )
+        tls_owner: IngressRouteTlsOwner = "none" if certificate_id == 0 else "provider"
+        provider_certificate_ref = "" if certificate_id == 0 else str(certificate_id)
         record = IngressRouteAuditRecord(
             record_id=build_ingress_route_audit_record_id(
                 trace_id=trace_id,
@@ -13908,6 +14747,8 @@ def create_launchplane_fastapi_app(
             dry_run=result.dry_run,
             requested_domains=request.route.domain_names,
             edge_endpoint_key=request.route.edge_endpoint_key,
+            tls_owner=tls_owner,
+            provider_certificate_ref=provider_certificate_ref,
             expected_host_id=request.expected_host_id,
             provider_host_id=provider_host_id,
             operations=tuple(
@@ -13932,6 +14773,9 @@ def create_launchplane_fastapi_app(
         request: NpmplusIngressApplyRequest,
         idempotency_key: str,
     ) -> IngressRouteAuditRecord:
+        certificate_id = request.route.certificate_id
+        tls_owner: IngressRouteTlsOwner = "none" if certificate_id == 0 else "provider"
+        provider_certificate_ref = "" if certificate_id == 0 else str(certificate_id)
         record = IngressRouteAuditRecord(
             record_id=build_ingress_route_audit_record_id(
                 trace_id=trace_id,
@@ -13947,6 +14791,8 @@ def create_launchplane_fastapi_app(
             dry_run=request.mode == "dry-run",
             requested_domains=request.route.domain_names,
             edge_endpoint_key=request.route.edge_endpoint_key,
+            tls_owner=tls_owner,
+            provider_certificate_ref=provider_certificate_ref,
             expected_host_id=request.expected_host_id,
             provider_host_id=None,
             operations=(
@@ -14219,6 +15065,255 @@ def create_launchplane_fastapi_app(
                 request_fingerprint_value=payload_fingerprint,
                 trace_id=trace_id,
                 response=response,
+            )
+        return response
+
+    async def apply_route_binding_backfill(
+        request: Request,
+        binding_request: RouteBindingBackfillApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        ensure_route_binding_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="route_binding.apply",
+            product=binding_request.product,
+            context_name=binding_request.context,
+            message="Workflow cannot apply route bindings for the requested product/context.",
+        )
+        if binding_request.mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Route binding backfill apply requests require an Idempotency-Key header.",
+            )
+        normalized_key = idempotency_key.strip()
+        payload_fingerprint = ""
+        try:
+            route_binding_store = require_route_binding_apply_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        mutation_store: _RouteBindingMutationStore | None = None
+        mutation_reservation: LaunchplaneIdempotencyRecord | None = None
+        if binding_request.mode == "apply":
+            try:
+                mutation_store = require_route_binding_mutation_store(record_store)
+            except TypeError as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message=str(error),
+                ) from error
+            raw_payload = await request.json()
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                payload=cast(dict[str, object], raw_payload),
+            )
+            reservation_result = mutation_store.reserve_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+            )
+            if reservation_result.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=reservation_result.record,
+                    route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                )
+            if reservation_result.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if reservation_result.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching route binding mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if reservation_result.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=("The route binding mutation requires reconciliation before retry."),
+                )
+            mutation_reservation = reservation_result.record
+
+        def release_route_binding_reservation() -> None:
+            if mutation_store is None or mutation_reservation is None:
+                return
+            release_result = mutation_store.release_mutation_reservation(
+                reservation=mutation_reservation,
+            )
+            if release_result.status != "released":
+                raise RuntimeError(
+                    "Route binding mutation reservation could not be released before effects."
+                )
+
+        def existing_route_binding_response(
+            existing_record: EnvironmentRouteBindingRecord,
+        ) -> AcceptedEvidenceResponse:
+            existing_plan = control_plane_route_binding_backfill.RouteBindingBackfillPlan(
+                status="blocked",
+                findings=(
+                    control_plane_route_binding_backfill.RouteBindingBackfillFinding(
+                        code="route_binding_exists",
+                        detail=(
+                            "Backfill will not overwrite an existing environment route-binding "
+                            "record."
+                        ),
+                    ),
+                ),
+            )
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={
+                    "route_binding_status": "blocked",
+                    "product": existing_record.product,
+                    "context": existing_record.context,
+                    "instance": existing_record.instance,
+                },
+                result={
+                    "mode": binding_request.mode,
+                    **existing_plan.model_dump(mode="json", exclude_none=True),
+                },
+            )
+
+        try:
+            existing_record = route_binding_store.read_route_binding_record(
+                product=binding_request.product,
+                context_name=binding_request.context,
+                instance_name=binding_request.instance,
+            )
+        except FileNotFoundError:
+            existing_record = None
+        if existing_record is not None:
+            release_route_binding_reservation()
+            return existing_route_binding_response(existing_record)
+        backfill_plan = control_plane_route_binding_backfill.plan_route_binding_backfill(
+            record_store=route_binding_store,
+            request=control_plane_route_binding_backfill.RouteBindingBackfillRequest(
+                product=binding_request.product,
+                context=binding_request.context,
+                instance=binding_request.instance,
+                source_label=binding_request.source_label,
+                evaluated_at=utc_now_timestamp(),
+            ),
+        )
+        if backfill_plan.status != "ready" or backfill_plan.record is None:
+            release_route_binding_reservation()
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={
+                    "route_binding_status": "blocked",
+                    "product": binding_request.product,
+                    "context": binding_request.context,
+                    "instance": binding_request.instance,
+                },
+                result={
+                    "mode": binding_request.mode,
+                    **backfill_plan.model_dump(mode="json", exclude_none=True),
+                },
+            )
+        record_status = "applied" if binding_request.mode == "apply" else "planned"
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "route_binding_status": record_status,
+                "product": backfill_plan.record.product,
+                "context": backfill_plan.record.context,
+                "instance": backfill_plan.record.instance,
+            },
+            result={
+                "mode": binding_request.mode,
+                "route_binding_status": record_status,
+                "record": redacted_route_binding_record(backfill_plan.record).model_dump(
+                    mode="json"
+                ),
+            },
+        )
+        if binding_request.mode == "apply":
+            if mutation_store is None or mutation_reservation is None:
+                raise RuntimeError("Route binding apply requires a mutation reservation.")
+            mutation_result = mutation_store.create_route_binding_record_with_mutation(
+                record=backfill_plan.record,
+                reservation=mutation_reservation,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+            )
+            if mutation_result.status == "created":
+                return response
+            if mutation_result.status == "replayed":
+                if mutation_result.idempotency_record is None:
+                    raise RuntimeError("Replayed route binding mutation requires evidence.")
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=mutation_result.idempotency_record,
+                    route_path=_ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+                )
+            if mutation_result.status == "exists":
+                if mutation_result.route_binding is None:
+                    raise RuntimeError("Existing route binding mutation requires a record.")
+                return existing_route_binding_response(mutation_result.route_binding)
+            if mutation_result.status == "idempotency_conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if mutation_result.status == "reconciliation_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=("The route binding mutation requires reconciliation before retry."),
+                )
+            if mutation_result.status == "reservation_expired":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_lease_expired",
+                    message=(
+                        "The route binding mutation lease expired before completion. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_in_progress",
+                message=(
+                    "The route binding mutation reservation changed before completion. "
+                    "Retry with the same Idempotency-Key."
+                ),
             )
         return response
 
@@ -15374,7 +16469,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
+    ) -> GenericWebProdPromotionResponse | JSONResponse:
         trace_id = next_trace_id()
         if isinstance(identity, TerminalAgentIdentity):
             raise _launchplane_http_error(
@@ -15448,7 +16543,9 @@ def create_launchplane_fastapi_app(
             check_replay=bool(idempotency_key.strip()),
         )
         if replayed_response is not None:
-            return replayed_response
+            return GenericWebProdPromotionResponse.model_validate(
+                replayed_response.model_dump(mode="json")
+            )
         try:
             records, result = execute_generic_web_prod_promotion_result(
                 control_plane_root=resolved_control_plane_root,
@@ -15469,10 +16566,12 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        response = accepted_evidence_response(
+        response = GenericWebProdPromotionResponse(
             trace_id=trace_id,
             records=records,
-            result=result,
+            result=GenericWebProdPromotionResponseResult.model_validate(
+                result.model_dump(mode="json")
+            ),
         )
         if should_store_generic_web_promotion_idempotency(result):
             store_apply_idempotency(
@@ -15492,7 +16591,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
+    ) -> GenericWebPromotionWorkflowResponse | JSONResponse:
         trace_id = next_trace_id()
         if isinstance(identity, TerminalAgentIdentity):
             raise _launchplane_http_error(
@@ -15555,12 +16654,19 @@ def create_launchplane_fastapi_app(
             check_replay=bool(idempotency_key.strip()),
         )
         if replayed_response is not None:
-            return replayed_response
+            return GenericWebPromotionWorkflowResponse.model_validate(
+                replayed_response.model_dump(mode="json")
+            )
         try:
-            records, result = dispatch_generic_web_promotion_workflow_result(
+            records, result, outbox_delivery = dispatch_generic_web_promotion_workflow_result(
                 control_plane_root=resolved_control_plane_root,
                 request=workflow_request,
                 profile=profile,
+                delivery_key=(
+                    f"{idempotency_scope(identity)}:{normalized_key}"
+                    if normalized_key
+                    else trace_id
+                ),
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -15576,14 +16682,23 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        response = accepted_evidence_response(
+        response = GenericWebPromotionWorkflowResponse(
             trace_id=trace_id,
             records=records,
-            result=result,
+            result=GenericWebPromotionWorkflowResponseResult.model_validate(
+                result.model_dump(mode="json")
+            ),
         )
-        if should_store_generic_web_promotion_idempotency(result):
-            store_apply_idempotency(
-                record_store=record_store,
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="outbox_requires_postgres",
+                message="Workflow dispatch requires PostgreSQL transactional outbox storage.",
+            )
+        idempotency_record = None
+        if normalized_key and should_store_generic_web_promotion_idempotency(result):
+            idempotency_record = build_apply_idempotency_record(
                 identity=identity,
                 route_path=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
                 idempotency_key=normalized_key,
@@ -15591,6 +16706,12 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=response,
             )
+        record_store.enqueue_outbox_delivery_with_idempotency(
+            OutboxWithIdempotencyRequest(
+                delivery=outbox_delivery,
+                idempotency_record=idempotency_record,
+            )
+        )
         return response
 
     def resolve_verireel_route_authorization(
@@ -18623,7 +19744,7 @@ def create_launchplane_fastapi_app(
         apply_generic_web_prod_promotion,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=GenericWebProdPromotionResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {
@@ -18652,7 +19773,7 @@ def create_launchplane_fastapi_app(
         dispatch_generic_web_prod_promotion_workflow,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=GenericWebPromotionWorkflowResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {
@@ -19921,6 +21042,24 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _ROUTE_BINDING_BACKFILL_APPLY_ROUTE,
+        apply_route_binding_backfill,
+        methods=["POST"],
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        status_code=202,
+        operation_id="apply_route_binding_backfill",
+        summary="Plan or apply one provider-neutral environment route binding",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _INGRESS_CANARY_ROUTE_APPLY_ROUTE,
         apply_ingress_canary_route,
         methods=["POST"],
@@ -19934,6 +21073,37 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/route-bindings/records",
+        list_route_binding_records,
+        methods=["GET"],
+        response_model=RouteBindingRecordsResponse,
+        operation_id="list_route_binding_records",
+        summary="List provider-neutral environment route bindings",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/route-bindings/records/current",
+        read_route_binding_record,
+        methods=["GET"],
+        response_model=RouteBindingRecordResponse,
+        operation_id="read_route_binding_record",
+        summary="Read one provider-neutral environment route binding",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )
@@ -20267,8 +21437,7 @@ def create_launchplane_fastapi_app(
         rank_work_graph_snapshot,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
+        response_model=WorkGraphRankResponse,
         operation_id="rank_work_graph_snapshot",
         summary="Rank Launchplane work graph snapshot",
         responses={
@@ -20293,8 +21462,7 @@ def create_launchplane_fastapi_app(
         reconcile_work_graph_issue_inbox,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
+        response_model=WorkGraphIssueInboxReconcileResponse,
         operation_id="reconcile_work_graph_issue_inbox",
         summary="Reconcile Launchplane GitHub issue inbox",
         responses={
@@ -20607,6 +21775,48 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE,
+        write_every_code_work_request_heartbeat,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_every_code_work_request_heartbeat",
+        summary="Heartbeat Every Code work request lease",
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(EveryCodeWorkRequestHeartbeatEnvelope)
+                    }
+                },
+            }
+        },
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _EVERY_CODE_WORK_REQUEST_RECOVER_STALE_ROUTE,
+        recover_stale_every_code_work_requests,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="recover_stale_every_code_work_requests",
+        summary="Recover stale Every Code work requests",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
         rerun_every_code_work_request,
         methods=["POST"],
@@ -20876,7 +22086,7 @@ def create_launchplane_fastapi_app(
         apply_product_config,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=ProductConfigApplyResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {
