@@ -1317,11 +1317,17 @@ SHA-256 and an `Idempotency-Key`; changed reviewed inputs or a profile-row chang
 during apply make the operation stale. A successful apply uses an atomic
 compare-and-write, rebuilds from the current stored record, and changes only the
 preview certificate value plus `updated_at` and server-owned `source`;
-profile-row serialization and idempotency evidence commit in the same
-transaction even when the requested value is already current. The operator
-workflow receives the real target product as dispatch input, and its
-product-specific authz grant comes from operator-supplied configuration rather
-than checked-in runtime authority.
+DB-clock preflight rejects active claims, preserves reconciliation-bound claims,
+and releases only expired unbound orphans that cannot have committed this
+DB-only atomic write. The transaction inserts a typed `running` mutation
+reservation before the profile write and commits the profile plus `completed`
+replay evidence together, even when the requested value is already current.
+Concurrent same-key requests cannot both write; matching requests replay the
+committed response and changed fingerprints fail with
+`409 idempotency_key_reused`. The operator workflow
+receives the real target product as dispatch input, and its product-specific
+authz grant comes from operator-supplied configuration rather than checked-in
+runtime authority.
 
 Public ingress notification policy writes use
 `POST /v1/public-ingress/notification-policies/apply`. The request carries
@@ -2112,6 +2118,19 @@ for all write routes. Launchplane replays the first successful accepted
 response when the same authenticated workflow scope retries the same route
 with the same key and the same request fingerprint. Launchplane rejects reuse
 of the same key for a different payload on the same route.
+
+Reservation-backed mutations strengthen that completed-response contract by
+claiming `(scope, route, key)` before effects. The reservation records a typed
+owner, lease, attempt, state, optional provider reconciliation key, and eventual
+response. A matching active request reports that execution is already in
+progress. An expired reservation without an external operation key may be
+reclaimed; an expired reservation with a bound operation key becomes
+`reconcile_required` and must not repeat the provider effect. DB-only routes
+commit business state and completion evidence atomically. Provider routes must
+bind their stable operation/reconciliation key before invoking the provider.
+Product preview TLS apply is the first DB-only route migrated to this boundary;
+remaining route migrations must preserve the same fail-closed semantics rather
+than relying on process-local locks.
 
 Current VeriReel key shapes:
 

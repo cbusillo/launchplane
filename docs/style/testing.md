@@ -50,12 +50,13 @@ The URL is a temporary/root test service URL, not a Launchplane runtime
 credential. The harness creates and drops isolated databases, upgrades each from
 empty schema through Alembic `head`, verifies the exact checked-in schema head
 and critical indexes/types, and runs focused two-connection concurrency tests
-for idempotency conflicts, operation claims, stale lease owners, lease recovery,
-and active-operation partial uniqueness. Same-repo CI provides the URL via a
-PostgreSQL service container; fork PRs keep the SQLite/unittest path only. Keep
-the integration module focused: target runtime is under 2 minutes in CI, and any
-flake should be treated as a storage or harness bug rather than hidden with a
-retry loop.
+for mutation reservation/replay/conflict, reconciliation-key fencing, atomic
+business-write completion and rollback, operation claims, stale lease owners,
+lease recovery, and active-operation partial uniqueness. Same-repo CI provides
+the URL via a PostgreSQL service container; fork PRs keep the SQLite/unittest
+path only. Keep the integration module focused: target runtime is under 2
+minutes in CI, and any flake should be treated as a storage or harness bug
+rather than hidden with a retry loop.
 
 The lower-level CI shard commands remain available for diagnosis:
 
