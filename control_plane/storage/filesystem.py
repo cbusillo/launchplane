@@ -154,7 +154,10 @@ class FilesystemRecordStore:
         return self.state_dir / record_type / f"{record_id}.json"
 
     def _write_model(self, record_type: str, record_id: str, model: BaseModel) -> Path:
-        self._recover_product_authority_bundle_stages()
+        with self._product_authority_bundle_lock():
+            return self._write_model_locked(record_type, record_id, model)
+
+    def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
@@ -191,7 +194,12 @@ class FilesystemRecordStore:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _create_model_if_absent(self, record_type: str, record_id: str, model: BaseModel) -> bool:
-        self._recover_product_authority_bundle_stages()
+        with self._product_authority_bundle_lock():
+            return self._create_model_if_absent_locked(record_type, record_id, model)
+
+    def _create_model_if_absent_locked(
+        self, record_type: str, record_id: str, model: BaseModel
+    ) -> bool:
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -210,7 +218,12 @@ class FilesystemRecordStore:
     def _read_model(
         self, model_type: type[RecordModel], record_type: str, record_id: str
     ) -> RecordModel:
-        self._recover_product_authority_bundle_stages()
+        with self._product_authority_bundle_lock():
+            return self._read_model_locked(model_type, record_type, record_id)
+
+    def _read_model_locked(
+        self, model_type: type[RecordModel], record_type: str, record_id: str
+    ) -> RecordModel:
         record_path = self._record_path(record_type, record_id)
         payload = json.loads(record_path.read_text(encoding="utf-8"))
         return model_type.model_validate(payload)
@@ -221,7 +234,12 @@ class FilesystemRecordStore:
     def _list_models(
         self, model_type: type[RecordModel], record_type: str
     ) -> tuple[RecordModel, ...]:
-        self._recover_product_authority_bundle_stages()
+        with self._product_authority_bundle_lock():
+            return self._list_models_locked(model_type, record_type)
+
+    def _list_models_locked(
+        self, model_type: type[RecordModel], record_type: str
+    ) -> tuple[RecordModel, ...]:
         record_dir = self._record_dir(record_type)
         if not record_dir.exists():
             return ()
@@ -238,11 +256,11 @@ class FilesystemRecordStore:
     def _after_product_authority_bundle_step(self, step_name: str) -> None:
         _ = step_name
 
-    def _recover_product_authority_bundle_stages(self) -> None:
-        if self._recovering_product_authority_bundle:
-            return
+    @contextmanager
+    def _product_authority_bundle_lock(self) -> Iterator[None]:
         with self._exclusive_record_lock("product_authority_bundles", "global"):
             self._recover_product_authority_bundle_stages_locked()
+            yield
 
     def _recover_product_authority_bundle_stages_locked(self) -> None:
         if self._recovering_product_authority_bundle:
@@ -276,8 +294,7 @@ class FilesystemRecordStore:
     def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
         if not bundle.requires_write():
             return
-        with self._exclusive_record_lock("product_authority_bundles", "global"):
-            self._recover_product_authority_bundle_stages_locked()
+        with self._product_authority_bundle_lock():
             stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
             stage_dir = self._product_authority_bundle_stage_root() / stage_id
             records_dir = stage_dir / "records"
@@ -1619,7 +1636,20 @@ class FilesystemRecordStore:
         record_id: str,
         expected_record: BaseModel,
     ) -> CurrentAuthorityDeleteStatus:
-        self._recover_product_authority_bundle_stages()
+        with self._product_authority_bundle_lock():
+            return self._delete_expected_authority_record_locked(
+                record_type=record_type,
+                record_id=record_id,
+                expected_record=expected_record,
+            )
+
+    def _delete_expected_authority_record_locked(
+        self,
+        *,
+        record_type: str,
+        record_id: str,
+        expected_record: BaseModel,
+    ) -> CurrentAuthorityDeleteStatus:
         record_path = self._record_path(record_type, record_id)
         current_payload = self._read_json_file(record_path)
         if current_payload is None:
@@ -1960,26 +1990,26 @@ class FilesystemRecordStore:
         return tuple(records)
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
-        self._recover_product_authority_bundle_stages()
-        return self._read_product_profile_record_path(
-            self._record_path("launchplane_product_profiles", product)
-        )
+        with self._product_authority_bundle_lock():
+            return self._read_product_profile_record_path(
+                self._record_path("launchplane_product_profiles", product)
+            )
 
     def list_product_profile_records(
         self,
         *,
         driver_id: str = "",
     ) -> tuple[LaunchplaneProductProfileRecord, ...]:
-        self._recover_product_authority_bundle_stages()
-        record_dir = self._record_dir("launchplane_product_profiles")
-        records: list[LaunchplaneProductProfileRecord] = []
-        if record_dir.exists():
-            for record_path in sorted(record_dir.glob("*.json")):
-                record = self._read_product_profile_record_path(record_path)
-                if not driver_id or record.driver_id == driver_id:
-                    records.append(record)
-        records.sort(key=lambda record: record.product)
-        return tuple(records)
+        with self._product_authority_bundle_lock():
+            record_dir = self._record_dir("launchplane_product_profiles")
+            records: list[LaunchplaneProductProfileRecord] = []
+            if record_dir.exists():
+                for record_path in sorted(record_dir.glob("*.json")):
+                    record = self._read_product_profile_record_path(record_path)
+                    if not driver_id or record.driver_id == driver_id:
+                        records.append(record)
+            records.sort(key=lambda record: record.product)
+            return tuple(records)
 
     def _read_product_profile_record_path(
         self, record_path: Path

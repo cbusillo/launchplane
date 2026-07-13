@@ -1,6 +1,9 @@
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+from pydantic import BaseModel
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -57,6 +60,22 @@ class _FailingFilesystemRecordStore(FilesystemRecordStore):
         self.steps.append(step_name)
         if step_name == self.fail_step:
             raise RuntimeError(f"injected failure after {step_name}")
+
+
+class _BlockingFilesystemRecordStore(FilesystemRecordStore):
+    def __init__(self, state_dir: Path) -> None:
+        super().__init__(state_dir)
+        self.block_next_provider_target_write = False
+        self.write_started = threading.Event()
+        self.release_write = threading.Event()
+
+    def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
+        if self.block_next_provider_target_write and record_type == "launchplane_provider_targets":
+            self.block_next_provider_target_write = False
+            self.write_started.set()
+            if not self.release_write.wait(timeout=5):
+                raise TimeoutError("timed out waiting to release provider-target write")
+        return super()._write_model_locked(record_type, record_id, model)
 
 
 def _product_profile() -> LaunchplaneProductProfileRecord:
@@ -607,6 +626,86 @@ class ProductAuthorityBundleTransactionTests(unittest.TestCase):
                 recovered_store = FilesystemRecordStore(state_dir)
                 _assert_cleanup_records_removed(self, recovered_store)
                 self.assertFalse((state_dir / ".product_authority_bundle_stages").exists())
+
+    def test_filesystem_bundle_serializes_with_ordinary_record_write(self) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            state_dir = Path(temporary_dir)
+            store = _BlockingFilesystemRecordStore(state_dir)
+            runtime_record = _seed_cleanup_records(store)
+            replacement_target = _provider_target(
+                context="example-legacy",
+                instance="old-prod",
+                target_id="replacement-app",
+            )
+            write_errors: list[BaseException] = []
+            bundle_errors: list[BaseException] = []
+            bundle_started = threading.Event()
+            bundle_finished = threading.Event()
+
+            def write_target() -> None:
+                try:
+                    store.write_provider_target_record(replacement_target)
+                except BaseException as exc:
+                    write_errors.append(exc)
+
+            def delete_bundle() -> None:
+                bundle_started.set()
+                try:
+                    store.write_product_authority_bundle(_delete_bundle())
+                except BaseException as exc:
+                    bundle_errors.append(exc)
+                finally:
+                    bundle_finished.set()
+
+            store.block_next_provider_target_write = True
+            write_thread = threading.Thread(target=write_target)
+            bundle_thread = threading.Thread(target=delete_bundle)
+            write_thread.start()
+            try:
+                self.assertTrue(store.write_started.wait(timeout=5))
+                bundle_thread.start()
+                self.assertTrue(bundle_started.wait(timeout=5))
+                self.assertFalse(bundle_finished.wait(timeout=0.1))
+            finally:
+                store.release_write.set()
+                write_thread.join(timeout=5)
+                if bundle_thread.ident is not None:
+                    bundle_thread.join(timeout=5)
+
+            self.assertFalse(write_thread.is_alive())
+            self.assertFalse(bundle_thread.is_alive())
+            self.assertEqual(write_errors, [])
+            self.assertEqual(len(bundle_errors), 1)
+            self.assertIsInstance(bundle_errors[0], ValueError)
+            self.assertEqual(
+                store.read_provider_target_record(
+                    context_name="example-legacy",
+                    instance_name="old-prod",
+                ),
+                replacement_target,
+            )
+            self.assertEqual(
+                store.list_runtime_environment_records(
+                    context_name="example-legacy",
+                    instance_name="old-prod",
+                ),
+                (runtime_record,),
+            )
+            self.assertEqual(store.list_runtime_environment_delete_events(), ())
+            self.assertEqual(
+                store.read_dokploy_target_id_record(
+                    context_name="example-legacy",
+                    instance_name="old-prod",
+                ).target_id,
+                "old-app",
+            )
+            self.assertIsNone(
+                store.read_idempotency_record(
+                    scope="test-suite",
+                    route_path="/v1/test/authority-bundle/apply",
+                    idempotency_key="authority-bundle-key",
+                )
+            )
 
 
 if __name__ == "__main__":
