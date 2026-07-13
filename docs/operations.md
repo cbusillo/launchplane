@@ -551,7 +551,8 @@ uv run launchplane service inspect-dokploy-target \
 
 That command reports only non-secret metadata and fails closed when the live
 Launchplane target is missing critical runtime pieces such as
-`LAUNCHPLANE_DATABASE_URL`, `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`,
+`LAUNCHPLANE_DATABASE_URL`, `LAUNCHPLANE_SECRET_KEYS_JSON` (or the
+migration-only legacy `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`),
 Launchplane-managed Dokploy secret bindings, or a Dokploy SSH key for a private
 `git@github.com:...` compose source.
 
@@ -559,8 +560,8 @@ The intended live service contract is now bootstrap-only target env plus
 DB-backed Launchplane records:
 
 - keep bootstrap/process inputs such as `LAUNCHPLANE_DATABASE_URL`,
-  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, and policy selectors on the service
-  target
+  `LAUNCHPLANE_SECRET_KEYS_JSON`, migration-only
+  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, and policy selectors on the service target
 - move Dokploy credentials into Launchplane-managed secret records
 - move per-context runtime values, ship-mode overrides, preview base URLs, and
   product-specific worker config into Launchplane runtime-environment records
@@ -772,7 +773,8 @@ Current derived-state behavior:
   writes non-secret values to runtime-environment records and secret-shaped
   values to managed secret records while returning only key names, actions,
   counts, actor, and source metadata. Bundles with secrets require
-  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`. Runtime and secret scopes default from
+  valid `LAUNCHPLANE_SECRET_KEYS_JSON` or the migration-only legacy key. Runtime
+  and secret scopes default from
   the top-level `context`/`instance`; nested `runtime_env` and secret routes must
   match that top-level target. Dry-run validates secret scope/route
   compatibility and runtime key-safety policy before reporting a plan, so apply
@@ -792,14 +794,23 @@ Current derived-state behavior:
   credentials stay read-only and cannot apply product config. The service
   response is redacted and the route rejects nested runtime or secret targets
   that differ from the authorized top-level context/instance. It fails closed
-  when secret writes are requested without the Launchplane master encryption key
-  in the service runtime or when no active runtime key-safety policy allows the
+  when secret writes are requested without valid Launchplane secret-key
+  configuration in the service runtime or when no active runtime key-safety policy allows the
   requested binding. When apply changes runtime-environment keys for a tracked
   Dokploy target, the response includes a required `live_target_runtime_apply`
   `next_actions` item. Treat product-config apply as a record mutation only
   until that next action has been dry-run and applied through
   `/v1/live-target-runtime/apply`; redeploying the same app image does not sync
   the live Dokploy target environment.
+- `POST /v1/secrets/reencrypt` is the normal shared/production root-rotation
+  path. Run `mode: "dry-run"` with `secret.reencrypt.dry-run`, then submit
+  `mode: "apply"` with the returned plan digest, a reason, an
+  `Idempotency-Key`, and `secret.reencrypt.apply`. Launchplane atomically writes
+  the new versions, current-version pointers, and audit events. If the mutation
+  commits before idempotency evidence is persisted, a retry with the same
+  request recovers from the rotation audit token instead of rotating again.
+  Direct `launchplane secrets reencrypt --apply` remains bootstrap/recovery-only
+  and requires explicit direct-DB acknowledgement.
 - The operator UI uses the same service route. It requires a successful dry-run
   result before enabling apply, clears rendered secret input values after each
   submit, and shows only key/action/count metadata from Launchplane responses.

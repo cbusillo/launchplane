@@ -12,9 +12,46 @@ from control_plane.http_app import BoundedRequestBodyMiddleware
 
 _WEBHOOK_PATH = "/v1/every-code/github-webhook"
 _WEBHOOK_BODY_LIMIT = 2 * 1024 * 1024
+_JSON_MUTATION_ROUTES = (
+    ("/v1/product-config/apply", 2 * 1024 * 1024),
+    ("/v1/secrets/reencrypt", 64 * 1024),
+)
 
 
 class WebhookBodyGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_json_mutation_routes_require_json_content_type(self) -> None:
+        for path, _limit in _JSON_MUTATION_ROUTES:
+            with self.subTest(path=path):
+                guarded_bodies: list[bytes] = []
+                response = await _invoke_guarded_webhook(
+                    path=path,
+                    headers=[("Content-Length", "2")],
+                    chunks=(b"{}",),
+                    guarded_bodies=guarded_bodies,
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["error"]["code"], "invalid_request")
+                self.assertEqual(guarded_bodies, [])
+
+    async def test_json_mutation_routes_reject_oversized_declared_bodies(self) -> None:
+        for path, limit in _JSON_MUTATION_ROUTES:
+            with self.subTest(path=path):
+                guarded_bodies: list[bytes] = []
+                response = await _invoke_guarded_webhook(
+                    path=path,
+                    headers=[
+                        ("Content-Type", "application/json"),
+                        ("Content-Length", str(limit + 1)),
+                    ],
+                    chunks=(b"",),
+                    guarded_bodies=guarded_bodies,
+                )
+
+                self.assertEqual(response.status_code, 413)
+                self.assertEqual(response.receive_count, 0)
+                self.assertEqual(guarded_bodies, [])
+
     async def test_exact_declared_chunked_asgi_body_reaches_downstream(self) -> None:
         guarded_bodies: list[bytes] = []
         response = await _invoke_guarded_webhook(
@@ -123,13 +160,14 @@ class _GuardResponse:
 
 async def _invoke_guarded_webhook(
     *,
+    path: str = _WEBHOOK_PATH,
     headers: list[tuple[str, str]],
     chunks: tuple[bytes, ...],
     guarded_bodies: list[bytes],
 ) -> _GuardResponse:
     downstream = _body_capturing_app(guarded_bodies)
     app = BoundedRequestBodyMiddleware(downstream)
-    scope = _webhook_scope(headers=headers)
+    scope = _webhook_scope(path=path, headers=headers)
     messages: list[Message] = [
         {
             "type": "http.request",
@@ -159,15 +197,15 @@ async def _invoke_guarded_webhook(
     return _GuardResponse(start["status"], body, receive_count)
 
 
-def _webhook_scope(*, headers: list[tuple[str, str]]) -> Scope:
+def _webhook_scope(*, path: str = _WEBHOOK_PATH, headers: list[tuple[str, str]]) -> Scope:
     return {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
         "http_version": "1.1",
         "method": "POST",
         "scheme": "https",
-        "path": _WEBHOOK_PATH,
-        "raw_path": _WEBHOOK_PATH.encode("ascii"),
+        "path": path,
+        "raw_path": path.encode("ascii"),
         "query_string": b"",
         "headers": [
             (name.lower().encode("ascii"), value.encode("latin-1")) for name, value in headers

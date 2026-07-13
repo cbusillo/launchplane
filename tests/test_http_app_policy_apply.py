@@ -2066,6 +2066,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             app,
             {},
             authorization="Bearer terminal-agent-token",
+            headers={"Content-Type": "application/json"},
             raw_body=b"not-json",
         )
 
