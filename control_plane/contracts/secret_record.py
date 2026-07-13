@@ -141,7 +141,9 @@ class SecretRotationWrite(BaseModel):
         if self.record.secret_id != self.version.secret_id:
             raise ValueError("secret rotation record and version must reference the same secret")
         if self.record.secret_id != self.audit_event.secret_id:
-            raise ValueError("secret rotation record and audit event must reference the same secret")
+            raise ValueError(
+                "secret rotation record and audit event must reference the same secret"
+            )
         if self.record.current_version_id != self.version.version_id:
             raise ValueError("secret rotation record must point to the new version")
         if self.expected_current_version_id == self.version.version_id:

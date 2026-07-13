@@ -311,7 +311,6 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                 )
             store.close()
 
-
     def test_json_encryption_keys_are_exact_and_fail_closed(self) -> None:
         key1 = _test_fernet_key(0)
         key2 = _test_fernet_key(32)
@@ -385,7 +384,9 @@ class LaunchplaneSecretsTests(unittest.TestCase):
             try:
                 with patch.dict(
                     os.environ,
-                    {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "legacy-passphrase"},
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "legacy-passphrase"
+                    },
                     clear=True,
                 ):
                     control_plane_secrets.write_secret_value(
@@ -446,9 +447,7 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                         integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
                     )
                     self.assertEqual(values["DOKPLOY_HOST"], "https://dokploy.db.example")
-                    audit_events = store.list_secret_audit_events(
-                        secret_id="secret-dokploy-host"
-                    )
+                    audit_events = store.list_secret_audit_events(secret_id="secret-dokploy-host")
                     rotation_event = next(
                         event for event in audit_events if event.event_type == "rotated"
                     )
@@ -466,7 +465,9 @@ class LaunchplaneSecretsTests(unittest.TestCase):
         key1 = _test_fernet_key(0)
         key2 = _test_fernet_key(32)
         with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             try:
@@ -488,7 +489,7 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                         binding_key="DOKPLOY_HOST",
                         actor="test",
                     )
-                secret_id = cast(str, write_result["secret_id"])
+                secret_id = write_result["secret_id"]
                 original_record = store.read_secret_record(secret_id)
                 original_version_count = len(store.list_secret_versions(secret_id=secret_id))
                 original_event_count = len(store.list_secret_audit_events(secret_id=secret_id))
@@ -527,6 +528,7 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

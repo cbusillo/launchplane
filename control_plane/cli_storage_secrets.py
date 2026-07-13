@@ -271,7 +271,7 @@ def secrets_reencrypt(
         )
     finally:
         postgres_store.close()
-    
+
     click.echo(json.dumps(result, indent=2, sort_keys=True))
     if result["status"] == "error":
         raise click.exceptions.Exit(1)
