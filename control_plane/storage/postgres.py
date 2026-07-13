@@ -40,8 +40,10 @@ from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationPolicyRecord,
 )
 from control_plane.contracts.every_code_work_request import (
+    EveryCodeWorkRequestHeartbeat,
     EveryCodeWorkRequestRecord,
     claim_every_code_work_request,
+    heartbeat_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
@@ -998,6 +1000,11 @@ class LaunchplaneEveryCodeWorkRequestRow(Base):
             "repository",
             "issue_number",
         ),
+        Index(
+            "launchplane_every_code_work_requests_lease_idx",
+            "state",
+            "lease_expires_at",
+        ),
     )
 
     request_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1008,6 +1015,9 @@ class LaunchplaneEveryCodeWorkRequestRow(Base):
     trigger_label: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     claimed_by_host: Mapped[str] = mapped_column(String, nullable=False)
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -4016,6 +4026,9 @@ class PostgresRecordStore(HumanSessionStore):
                 trigger_label=record.trigger_label,
                 updated_at=record.updated_at,
                 claimed_by_host=record.claimed_by_host,
+                lease_expires_at=record.lease_expires_at,
+                fencing_token=record.fencing_token,
+                attempt=record.attempt,
                 payload=self._payload_dict(record),
             )
         )
@@ -4034,6 +4047,9 @@ class PostgresRecordStore(HumanSessionStore):
                     trigger_label=record.trigger_label,
                     updated_at=record.updated_at,
                     claimed_by_host=record.claimed_by_host,
+                    lease_expires_at=record.lease_expires_at,
+                    fencing_token=record.fencing_token,
+                    attempt=record.attempt,
                     payload=self._payload_dict(record),
                 )
             )
@@ -4082,6 +4098,7 @@ class PostgresRecordStore(HumanSessionStore):
         request_id: str,
         host: str,
         claimed_at: str,
+        lease_seconds: int = 1800,
     ) -> EveryCodeWorkRequestRecord | None:
         with self._session_factory() as session:
             statement = (
@@ -4099,15 +4116,80 @@ class PostgresRecordStore(HumanSessionStore):
                 record,
                 host=host,
                 claimed_at=claimed_at,
+                lease_seconds=lease_seconds,
             )
             if claimed_record is None:
                 return None
             row.state = claimed_record.state
             row.updated_at = claimed_record.updated_at
             row.claimed_by_host = claimed_record.claimed_by_host
+            row.lease_expires_at = claimed_record.lease_expires_at
+            row.fencing_token = claimed_record.fencing_token
+            row.attempt = claimed_record.attempt
             row.payload = self._payload_dict(claimed_record)
             session.commit()
             return claimed_record
+
+    def heartbeat_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        fencing_token: int,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneEveryCodeWorkRequestRow)
+                .where(LaunchplaneEveryCodeWorkRequestRow.request_id == request_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                return False
+            record = self._read_payload(model_type=EveryCodeWorkRequestRecord, payload=row.payload)
+            updated = heartbeat_every_code_work_request(
+                record,
+                EveryCodeWorkRequestHeartbeat(
+                    host=host,
+                    fencing_token=fencing_token,
+                    heartbeat_at=heartbeat_at,
+                    lease_expires_at=lease_expires_at,
+                ),
+            )
+            if updated is None:
+                return False
+            row.lease_expires_at = updated.lease_expires_at
+            row.updated_at = updated.updated_at
+            row.payload = self._payload_dict(updated)
+            session.commit()
+            return True
+
+    def list_stale_every_code_work_request_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
+        stale_states = ("claimed", "running")
+        filters: list[Any] = [
+            LaunchplaneEveryCodeWorkRequestRow.state.in_(stale_states),
+            LaunchplaneEveryCodeWorkRequestRow.lease_expires_at != "",
+            LaunchplaneEveryCodeWorkRequestRow.lease_expires_at < as_of,
+        ]
+        return self._list_models(
+            model_type=EveryCodeWorkRequestRecord,
+            orm_model=LaunchplaneEveryCodeWorkRequestRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEveryCodeWorkRequestRow.lease_expires_at.asc(),
+                LaunchplaneEveryCodeWorkRequestRow.request_id.asc(),
+            ),
+            limit=limit,
+        )
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> None:
         self._write_row(

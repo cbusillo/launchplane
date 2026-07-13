@@ -22,8 +22,10 @@ from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationPolicyRecord,
 )
 from control_plane.contracts.every_code_work_request import (
+    EveryCodeWorkRequestHeartbeat,
     EveryCodeWorkRequestRecord,
     claim_every_code_work_request,
+    heartbeat_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
@@ -554,13 +556,63 @@ class FilesystemRecordStore:
         request_id: str,
         host: str,
         claimed_at: str,
+        lease_seconds: int = 1800,
     ) -> EveryCodeWorkRequestRecord | None:
         record = self.read_every_code_work_request_record(request_id)
-        claimed_record = claim_every_code_work_request(record, host=host, claimed_at=claimed_at)
+        claimed_record = claim_every_code_work_request(
+            record, host=host, claimed_at=claimed_at, lease_seconds=lease_seconds
+        )
         if claimed_record is None:
             return None
         self.write_every_code_work_request_record(claimed_record)
         return claimed_record
+
+    def heartbeat_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        fencing_token: int,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        try:
+            record = self.read_every_code_work_request_record(request_id)
+        except FileNotFoundError:
+            return False
+        updated = heartbeat_every_code_work_request(
+            record,
+            EveryCodeWorkRequestHeartbeat(
+                host=host,
+                fencing_token=fencing_token,
+                heartbeat_at=heartbeat_at,
+                lease_expires_at=lease_expires_at,
+            ),
+        )
+        if updated is None:
+            return False
+        self.write_every_code_work_request_record(updated)
+        return True
+
+    def list_stale_every_code_work_request_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
+        stale_states = {"claimed", "running"}
+        records = [
+            record
+            for record in self._list_models(
+                EveryCodeWorkRequestRecord,
+                "launchplane_every_code_work_requests",
+            )
+            if record.state in stale_states
+            and record.lease_expires_at
+            and record.lease_expires_at < as_of
+        ]
+        records.sort(key=lambda r: (r.lease_expires_at, r.request_id))
+        return tuple(records[:limit])
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> Path:
         return self._write_model("launchplane_every_code_pr_feedback", record.feedback_id, record)

@@ -87,7 +87,9 @@ from control_plane.contracts.every_code_summary_read_model import (
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
+    _add_seconds_to_timestamp as _add_lease_seconds,
     apply_every_code_work_request_status,
+    classify_stale_every_code_work_request_recovery,
     requeue_every_code_work_request,
 )
 from control_plane.contracts.idempotency_record import (
@@ -759,6 +761,8 @@ _AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
+_EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE = "/v1/every-code/work-requests/heartbeat"
+_EVERY_CODE_WORK_REQUEST_RECOVER_STALE_ROUTE = "/v1/every-code/work-requests/recover-stale"
 _AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
 _DB_ONLY_MUTATION_LEASE = timedelta(minutes=5)
 
@@ -1635,6 +1639,7 @@ class EveryCodeWorkRequestClaimEnvelope(BaseModel):
 
     request_id: str
     host: str
+    lease_seconds: int = Field(default=1800, ge=60, le=86400)
 
     @model_validator(mode="after")
     def _validate_claim(self) -> "EveryCodeWorkRequestClaimEnvelope":
@@ -1645,12 +1650,30 @@ class EveryCodeWorkRequestClaimEnvelope(BaseModel):
         return self
 
 
+class EveryCodeWorkRequestHeartbeatEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    host: str
+    fencing_token: int = Field(ge=1)
+    lease_seconds: int = Field(default=1800, ge=60, le=86400)
+
+    @model_validator(mode="after")
+    def _validate_heartbeat(self) -> "EveryCodeWorkRequestHeartbeatEnvelope":
+        if not self.request_id.strip():
+            raise ValueError("Every Code heartbeat requires request_id")
+        if not self.host.strip():
+            raise ValueError("Every Code heartbeat requires host")
+        return self
+
+
 class EveryCodeWorkRequestStatusEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
     host: str
     state: Literal["running", "done", "blocked"]
+    fencing_token: int = Field(default=0, ge=0)
     result_pr_url: str = ""
     result_summary: str = ""
     error_message: str = ""
@@ -2716,7 +2739,33 @@ class _EveryCodeWorkRequestClaimStore(Protocol):
         request_id: str,
         host: str,
         claimed_at: str,
+        lease_seconds: int = 1800,
     ) -> EveryCodeWorkRequestRecord | None: ...
+
+
+class _EveryCodeWorkRequestHeartbeatStore(Protocol):
+    def heartbeat_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        fencing_token: int,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool: ...
+
+
+class _EveryCodeWorkRequestStaleStore(Protocol):
+    def list_stale_every_code_work_request_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
+
+    def write_every_code_work_request_record(
+        self, record: EveryCodeWorkRequestRecord
+    ) -> object: ...
 
 
 class _EveryCodeWorkRequestStatusStore(Protocol):
@@ -5257,6 +5306,29 @@ def create_launchplane_fastapi_app(
             capability="Every Code work request claim writes",
         )
         return cast(_EveryCodeWorkRequestClaimStore, record_store)
+
+    def require_every_code_work_request_heartbeat_store(
+        record_store: object,
+    ) -> _EveryCodeWorkRequestHeartbeatStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("heartbeat_every_code_work_request_record",),
+            capability="Every Code work request heartbeat writes",
+        )
+        return cast(_EveryCodeWorkRequestHeartbeatStore, record_store)
+
+    def require_every_code_work_request_stale_store(
+        record_store: object,
+    ) -> _EveryCodeWorkRequestStaleStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=(
+                "list_stale_every_code_work_request_records",
+                "write_every_code_work_request_record",
+            ),
+            capability="Every Code stale work request recovery",
+        )
+        return cast(_EveryCodeWorkRequestStaleStore, record_store)
 
     def require_every_code_work_request_status_store(
         record_store: object,
@@ -9761,6 +9833,7 @@ def create_launchplane_fastapi_app(
                 request_id=claim_request.request_id.strip(),
                 host=claim_request.host.strip(),
                 claimed_at=utc_now_timestamp(),
+                lease_seconds=claim_request.lease_seconds,
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -9780,6 +9853,135 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             records={"request_id": claimed_record.request_id, "state": claimed_record.state},
             result={"request": claimed_record.model_dump(mode="json")},
+        )
+
+    async def write_every_code_work_request_heartbeat(
+        request: Request,
+        payload: dict[str, object],
+        identity: Annotated[
+            LaunchplaneIdentity | None,
+            Depends(read_every_code_work_request_worker_write_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        if identity is None and not worker_token_authorized:
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=trace_id,
+                code="unauthorized",
+                message="Every Code heartbeat requires authorization.",
+            )
+        try:
+            heartbeat_store = require_every_code_work_request_heartbeat_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            heartbeat_request = EveryCodeWorkRequestHeartbeatEnvelope.model_validate(payload)
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=str(error),
+            ) from error
+        now = utc_now_timestamp()
+        new_lease_expires_at = _add_lease_seconds(now, heartbeat_request.lease_seconds)
+        accepted = heartbeat_store.heartbeat_every_code_work_request_record(
+            request_id=heartbeat_request.request_id.strip(),
+            host=heartbeat_request.host.strip(),
+            fencing_token=heartbeat_request.fencing_token,
+            heartbeat_at=now,
+            lease_expires_at=new_lease_expires_at,
+        )
+        if not accepted:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="heartbeat_rejected",
+                message="Every Code heartbeat rejected: wrong owner, fencing token, or terminal state.",
+            )
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "request_id": heartbeat_request.request_id.strip(),
+                "fencing_token": heartbeat_request.fencing_token,
+            },
+            result={
+                "request_id": heartbeat_request.request_id.strip(),
+                "lease_expires_at": new_lease_expires_at,
+            },
+        )
+
+    async def recover_stale_every_code_work_requests(
+        request: Request,
+        payload: dict[str, object],
+        identity: Annotated[
+            LaunchplaneIdentity | None,
+            Depends(read_every_code_work_request_worker_write_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        if identity is None and not worker_token_authorized:
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=trace_id,
+                code="unauthorized",
+                message="Every Code stale recovery requires authorization.",
+            )
+        try:
+            stale_store = require_every_code_work_request_stale_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        now = utc_now_timestamp()
+        stale_records = stale_store.list_stale_every_code_work_request_records(
+            as_of=now,
+            limit=20,
+        )
+        requeued: list[str] = []
+        flagged: list[str] = []
+        for stale in stale_records:
+            policy = classify_stale_every_code_work_request_recovery(stale)
+            if policy == "safe_requeue":
+                requeued_record = requeue_every_code_work_request(stale, queued_at=now)
+                stale_store.write_every_code_work_request_record(requeued_record)
+                requeued.append(stale.request_id)
+            else:
+                flagged_record = stale.model_copy(
+                    update={
+                        "state": "blocked",
+                        "finished_at": now,
+                        "updated_at": now,
+                        "error_message": (
+                            f"Stale lease expired after {stale.attempt} attempt(s); "
+                            "manual review required before requeue."
+                        ),
+                    }
+                )
+                stale_store.write_every_code_work_request_record(flagged_record)
+                flagged.append(stale.request_id)
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={"checked": len(stale_records), "requeued": len(requeued), "flagged": len(flagged)},
+            result={"requeued": requeued, "flagged": flagged},
         )
 
     async def write_every_code_work_request_status(
@@ -9871,6 +10073,7 @@ def create_launchplane_fastapi_app(
                     state=status_request.state,
                     host=status_request.host,
                     updated_at=status_request.updated_at.strip() or utc_now_timestamp(),
+                    fencing_token=status_request.fencing_token,
                     result_pr_url=status_request.result_pr_url,
                     result_summary=status_request.result_summary,
                     error_message=status_request.error_message,
@@ -20724,6 +20927,48 @@ def create_launchplane_fastapi_app(
             }
         },
         responses=every_code_worker_status_error_responses,
+    )
+
+    app.add_api_route(
+        _EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE,
+        write_every_code_work_request_heartbeat,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_every_code_work_request_heartbeat",
+        summary="Heartbeat Every Code work request lease",
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(EveryCodeWorkRequestHeartbeatEnvelope)
+                    }
+                },
+            }
+        },
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _EVERY_CODE_WORK_REQUEST_RECOVER_STALE_ROUTE,
+        recover_stale_every_code_work_requests,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="recover_stale_every_code_work_requests",
+        summary="Recover stale Every Code work requests",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(

@@ -10,6 +10,7 @@ import re
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from typing import Callable, Literal, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
@@ -32,7 +33,10 @@ from control_plane.contracts.every_code_preview_gate_record import (
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
+    _add_seconds_to_timestamp as _add_lease_seconds,
     apply_every_code_work_request_status,
+    classify_stale_every_code_work_request_recovery,
+    requeue_every_code_work_request,
     resume_every_code_work_request,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -69,7 +73,26 @@ class EveryCodeWorkerStore(Protocol):
         request_id: str,
         host: str,
         claimed_at: str,
+        lease_seconds: int = 1800,
     ) -> EveryCodeWorkRequestRecord | None: ...
+
+    def heartbeat_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        fencing_token: int,
+        heartbeat_at: str,
+        lease_expires_at: str,
+        lease_seconds: int = 1800,
+    ) -> bool: ...
+
+    def list_stale_every_code_work_request_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
 
     def write_every_code_work_request_record(
         self, record: EveryCodeWorkRequestRecord
@@ -113,6 +136,8 @@ class EveryCodeWorkerStore(Protocol):
 Runner = Callable[[Sequence[str], Mapping[str, str] | None], subprocess.CompletedProcess[str]]
 EVERY_CODE_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN"
 EVERY_CODE_GITHUB_ACTOR_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR"
+EVERY_CODE_LEASE_SECONDS = 1800
+EVERY_CODE_HEARTBEAT_INTERVAL_SECONDS = 300
 
 
 class DaemonProcess(Protocol):
@@ -120,6 +145,39 @@ class DaemonProcess(Protocol):
 
 
 ProcessLauncher = Callable[[Sequence[str], Path, Path], DaemonProcess]
+
+
+def start_every_code_heartbeat_thread(
+    *,
+    record_store: EveryCodeWorkerStore,
+    request_id: str,
+    host: str,
+    fencing_token: int,
+    lease_seconds: int = EVERY_CODE_LEASE_SECONDS,
+    interval_seconds: float = EVERY_CODE_HEARTBEAT_INTERVAL_SECONDS,
+    stop_event: threading.Event | None = None,
+) -> threading.Thread:
+    resolved_stop = stop_event if stop_event is not None else threading.Event()
+
+    def _run() -> None:
+        while not resolved_stop.wait(timeout=interval_seconds):
+            now = utc_now_timestamp()
+            new_lease = _add_lease_seconds(now, lease_seconds)
+            try:
+                record_store.heartbeat_every_code_work_request_record(
+                    request_id=request_id,
+                    host=host,
+                    fencing_token=fencing_token,
+                    heartbeat_at=now,
+                    lease_expires_at=new_lease,
+                    lease_seconds=lease_seconds,
+                )
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_run, name=f"every-code-heartbeat-{request_id}", daemon=True)
+    thread.start()
+    return thread
 
 
 class EveryCodeWorkerApiError(RuntimeError):
@@ -189,13 +247,18 @@ class EveryCodeWorkerApiStore:
         request_id: str,
         host: str,
         claimed_at: str,
+        lease_seconds: int = 1800,
     ) -> EveryCodeWorkRequestRecord | None:
         del claimed_at
         try:
             payload = self._request(
                 "POST",
                 "/v1/every-code/work-requests/claim",
-                body={"request_id": request_id.strip(), "host": host.strip()},
+                body={
+                    "request_id": request_id.strip(),
+                    "host": host.strip(),
+                    "lease_seconds": lease_seconds,
+                },
                 idempotency_key=f"every-code-claim-{request_id.strip()}-{host.strip()}",
             )
         except EveryCodeWorkerApiError as error:
@@ -212,19 +275,60 @@ class EveryCodeWorkerApiStore:
             raise EveryCodeWorkerApiError("Launchplane claim response is invalid")
         return EveryCodeWorkRequestRecord.model_validate(request_payload)
 
+    def heartbeat_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        fencing_token: int,
+        heartbeat_at: str,
+        lease_expires_at: str,
+        lease_seconds: int = 1800,
+    ) -> bool:
+        del heartbeat_at, lease_expires_at
+        try:
+            self._request(
+                "POST",
+                "/v1/every-code/work-requests/heartbeat",
+                body={
+                    "request_id": request_id.strip(),
+                    "host": host.strip(),
+                    "fencing_token": fencing_token,
+                    "lease_seconds": lease_seconds,
+                },
+                idempotency_key="",
+            )
+        except EveryCodeWorkerApiError as error:
+            if "HTTP 409" in str(error):
+                return False
+            raise
+        return True
+
+    def list_stale_every_code_work_request_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
+        del as_of
+        return ()
+
     def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> object:
+        body: dict[str, object] = {
+            "request_id": record.request_id,
+            "host": record.claimed_by_host,
+            "state": record.state,
+            "result_pr_url": record.result_pr_url,
+            "result_summary": record.result_summary,
+            "error_message": record.error_message,
+            "updated_at": record.updated_at,
+        }
+        if record.fencing_token > 0:
+            body["fencing_token"] = record.fencing_token
         payload = self._request(
             "POST",
             "/v1/every-code/work-requests/status",
-            body={
-                "request_id": record.request_id,
-                "host": record.claimed_by_host,
-                "state": record.state,
-                "result_pr_url": record.result_pr_url,
-                "result_summary": record.result_summary,
-                "error_message": record.error_message,
-                "updated_at": record.updated_at,
-            },
+            body=body,
             idempotency_key=f"every-code-status-{record.request_id}-{record.state}-{record.updated_at}",
         )
         return payload
@@ -1370,12 +1474,14 @@ def run_every_code_worker_once(
             worktree_branch=prepared_checkout.worktree_branch,
             host=normalized_host,
         )
+    fresh_claimed = record_store.read_every_code_work_request_record(claimed_record.request_id)
     running_record = apply_every_code_work_request_status(
-        record_store.read_every_code_work_request_record(claimed_record.request_id),
+        fresh_claimed,
         EveryCodeWorkRequestStatusUpdate(
             state="running",
             host=normalized_host,
             updated_at=utc_now_timestamp(),
+            fencing_token=fresh_claimed.fencing_token,
             result_summary="; ".join(
                 part
                 for part in (
@@ -1387,6 +1493,13 @@ def run_every_code_worker_once(
         ),
     )
     record_store.write_every_code_work_request_record(running_record)
+    if running_record.fencing_token > 0:
+        start_every_code_heartbeat_thread(
+            record_store=record_store,
+            request_id=running_record.request_id,
+            host=normalized_host,
+            fencing_token=running_record.fencing_token,
+        )
     return EveryCodeWorkerHandoffResult(
         status="running",
         detail="Every Code work request handed off to a visible tmux session.",
@@ -1536,6 +1649,10 @@ def run_every_code_worker_loop(
                         runner=runner,
                     ),
                 ),
+                _try_every_code_worker_maintenance(
+                    "Every Code stale lease recovery",
+                    lambda: recover_stale_every_code_work_requests(record_store=record_store),
+                ),
             )
             if error
         )
@@ -1583,6 +1700,39 @@ def run_every_code_worker_loop(
         stopped_reason="stopped",
         last_result=last_result,
     )
+
+
+def recover_stale_every_code_work_requests(
+    *,
+    record_store: EveryCodeWorkerStore,
+    limit: int = 20,
+) -> int:
+    now = utc_now_timestamp()
+    stale_records = record_store.list_stale_every_code_work_request_records(
+        as_of=now,
+        limit=limit,
+    )
+    recovered = 0
+    for stale in stale_records:
+        policy = classify_stale_every_code_work_request_recovery(stale)
+        if policy == "safe_requeue":
+            requeued = requeue_every_code_work_request(stale, queued_at=now)
+            record_store.write_every_code_work_request_record(requeued)
+        else:
+            flagged = stale.model_copy(
+                update={
+                    "state": "blocked",
+                    "finished_at": now,
+                    "updated_at": now,
+                    "error_message": (
+                        f"Stale lease expired after {stale.attempt} attempt(s); "
+                        "manual review required before requeue."
+                    ),
+                }
+            )
+            record_store.write_every_code_work_request_record(flagged)
+        recovered += 1
+    return recovered
 
 
 def close_terminal_every_code_sessions(
