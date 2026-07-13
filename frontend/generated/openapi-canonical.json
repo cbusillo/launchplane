@@ -2676,6 +2676,73 @@
         "title": "EnvironmentInventoryResponse",
         "type": "object"
       },
+      "EnvironmentRouteBindingReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "domains": {
+            "items": {
+              "$ref": "#/components/schemas/RouteBindingDomain"
+            },
+            "title": "Domains",
+            "type": "array"
+          },
+          "ingress": {
+            "$ref": "#/components/schemas/RouteBindingIngressReadModel"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "provider_target": {
+            "$ref": "#/components/schemas/RouteBindingProviderTargetReadModel"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/components/schemas/RouteBindingSource"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "disabled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tls": {
+            "$ref": "#/components/schemas/RouteBindingTlsReadModel"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "product",
+          "context",
+          "instance",
+          "provider_target",
+          "ingress",
+          "domains",
+          "tls",
+          "status",
+          "source",
+          "updated_at"
+        ],
+        "title": "EnvironmentRouteBindingReadModel",
+        "type": "object"
+      },
       "EveryCodeNotificationAttemptRecord": {
         "additionalProperties": false,
         "properties": {
@@ -5807,6 +5874,11 @@
             "title": "Provider",
             "type": "string"
           },
+          "provider_certificate_ref": {
+            "default": "",
+            "title": "Provider Certificate Ref",
+            "type": "string"
+          },
           "provider_host_id": {
             "anyOf": [
               {
@@ -5852,6 +5924,18 @@
               "unchanged"
             ],
             "title": "Status",
+            "type": "string"
+          },
+          "tls_owner": {
+            "default": "unknown",
+            "enum": [
+              "launchplane",
+              "provider",
+              "external",
+              "none",
+              "unknown"
+            ],
+            "title": "Tls Owner",
             "type": "string"
           },
           "trace_id": {
@@ -13403,6 +13487,299 @@
           }
         },
         "title": "RollbackExecutionEvidence",
+        "type": "object"
+      },
+      "RouteBindingBackfillApplyEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmation": {
+            "default": "",
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_label": {
+            "default": "operator-backfill",
+            "title": "Source Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance"
+        ],
+        "title": "RouteBindingBackfillApplyEnvelope",
+        "type": "object"
+      },
+      "RouteBindingDomain": {
+        "additionalProperties": false,
+        "properties": {
+          "domain_name": {
+            "title": "Domain Name",
+            "type": "string"
+          },
+          "role": {
+            "default": "primary",
+            "enum": [
+              "primary",
+              "alias"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain_name"
+        ],
+        "title": "RouteBindingDomain",
+        "type": "object"
+      },
+      "RouteBindingIngressReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint_key": {
+            "default": "",
+            "title": "Endpoint Key",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "termination_kind": {
+            "enum": [
+              "edge",
+              "direct",
+              "none"
+            ],
+            "title": "Termination Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "termination_kind"
+        ],
+        "title": "RouteBindingIngressReadModel",
+        "type": "object"
+      },
+      "RouteBindingProviderTargetReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "provider_id": {
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "provider_target_type": {
+            "default": "",
+            "title": "Provider Target Type",
+            "type": "string"
+          },
+          "target_category": {
+            "title": "Target Category",
+            "type": "string"
+          },
+          "target_name": {
+            "title": "Target Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id",
+          "target_category",
+          "target_name"
+        ],
+        "title": "RouteBindingProviderTargetReadModel",
+        "type": "object"
+      },
+      "RouteBindingRecordResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/EnvironmentRouteBindingReadModel"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "record"
+        ],
+        "title": "RouteBindingRecordResponse",
+        "type": "object"
+      },
+      "RouteBindingRecordsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentRouteBindingReadModel"
+            },
+            "title": "Records",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "context",
+          "instance",
+          "limit",
+          "count",
+          "records"
+        ],
+        "title": "RouteBindingRecordsResponse",
+        "type": "object"
+      },
+      "RouteBindingSource": {
+        "additionalProperties": false,
+        "properties": {
+          "freshness_status": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Freshness Status",
+            "type": "string"
+          },
+          "refreshed_at": {
+            "title": "Refreshed At",
+            "type": "string"
+          },
+          "source_kind": {
+            "default": "operator",
+            "enum": [
+              "operator",
+              "backfill",
+              "service"
+            ],
+            "title": "Source Kind",
+            "type": "string"
+          },
+          "source_label": {
+            "title": "Source Label",
+            "type": "string"
+          },
+          "source_record_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Record Ids",
+            "type": "array"
+          },
+          "source_versions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Source Versions",
+            "type": "object"
+          },
+          "stale_after": {
+            "default": "",
+            "title": "Stale After",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_label",
+          "refreshed_at"
+        ],
+        "title": "RouteBindingSource",
+        "type": "object"
+      },
+      "RouteBindingTlsReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "enum": [
+              "launchplane",
+              "provider",
+              "external",
+              "none"
+            ],
+            "title": "Owner",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner"
+        ],
+        "title": "RouteBindingTlsReadModel",
         "type": "object"
       },
       "RunnerHostDockerToolchainObservation": {
@@ -38442,6 +38819,356 @@
           }
         },
         "summary": "Read repository product mapping"
+      }
+    },
+    "/v1/route-bindings/backfill/apply": {
+      "post": {
+        "operationId": "apply_route_binding_backfill",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteBindingBackfillApplyEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan or apply one provider-neutral environment route binding"
+      }
+    },
+    "/v1/route-bindings/records": {
+      "get": {
+        "operationId": "list_route_binding_records",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": "25",
+              "title": "Limit",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteBindingRecordsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List provider-neutral environment route bindings"
+      }
+    },
+    "/v1/route-bindings/records/current": {
+      "get": {
+        "operationId": "read_route_binding_record",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteBindingRecordResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read one provider-neutral environment route binding"
       }
     },
     "/v1/runtime-key-safety/policies/apply": {
