@@ -419,12 +419,28 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                         record_store=store,
                         apply=True,
                         expected_plan_digest=cast(str, dry_run["plan_digest"]),
+                        operation_token="test-operation-token",
                         reason="Rotate the managed-secret root.",
                         actor="operator:test",
                         source_label="test-migration",
                     )
                     self.assertEqual(applied["status"], "ok")
                     self.assertEqual(applied["rotated_count"], 1)
+
+                    recovered = control_plane_secrets.reencrypt_secrets(
+                        record_store=store,
+                        apply=True,
+                        expected_plan_digest=cast(str, dry_run["plan_digest"]),
+                        operation_token="test-operation-token",
+                        reason="Rotate the managed-secret root.",
+                        actor="operator:test",
+                        source_label="test-migration",
+                    )
+                    self.assertEqual(recovered["status"], "ok")
+                    self.assertTrue(recovered["recovered"])
+                    self.assertEqual(
+                        len(store.list_secret_versions(secret_id="secret-dokploy-host")), 2
+                    )
 
                     follow_up = control_plane_secrets.reencrypt_secrets(record_store=store)
                     self.assertEqual(follow_up["rotated_count"], 0)

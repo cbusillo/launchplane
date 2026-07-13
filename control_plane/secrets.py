@@ -717,11 +717,73 @@ def list_secret_statuses(
     return statuses
 
 
+def _recover_completed_reencryption(
+    *,
+    record_store: SecretRotationStore,
+    records: tuple[SecretRecord, ...],
+    expected_plan_digest: str,
+    operation_token: str,
+    active_key_id: str,
+) -> dict[str, object] | None:
+    if not expected_plan_digest or not operation_token:
+        return None
+    matching_events: list[SecretAuditEvent] = []
+    for record in records:
+        matching_events.extend(
+            event
+            for event in record_store.list_secret_audit_events(secret_id=record.secret_id)
+            if event.event_type == "rotated"
+            and event.metadata.get("rotation_plan_digest") == expected_plan_digest
+            and event.metadata.get("operation_token") == operation_token
+        )
+    if not matching_events:
+        return None
+    first_metadata = matching_events[0].metadata
+    try:
+        rotated_count = int(first_metadata["rotation_candidate_count"])
+        unchanged_count = int(first_metadata["rotation_unchanged_count"])
+        retirement_blocked_key_ids = json.loads(first_metadata["retirement_blocked_key_ids"])
+        retirement_ready_key_ids = json.loads(first_metadata["retirement_ready_key_ids"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        rotated_count != len(matching_events)
+        or not isinstance(retirement_blocked_key_ids, list)
+        or not all(isinstance(key_id, str) for key_id in retirement_blocked_key_ids)
+        or not isinstance(retirement_ready_key_ids, list)
+        or not all(isinstance(key_id, str) for key_id in retirement_ready_key_ids)
+        or any(
+            event.metadata.get("new_key_id") != active_key_id
+            or event.metadata.get("rotation_candidate_count") != str(rotated_count)
+            or event.metadata.get("rotation_unchanged_count") != str(unchanged_count)
+            for event in matching_events
+        )
+    ):
+        return None
+    return {
+        "status": "ok",
+        "dry_run": False,
+        "plan_digest": expected_plan_digest,
+        "rotated_count": rotated_count,
+        "unchanged_count": unchanged_count,
+        "error_count": 0,
+        "errors": [],
+        "active_key_id": active_key_id,
+        "retirement_blocked_key_ids": retirement_blocked_key_ids,
+        "retirement_ready_key_ids": retirement_ready_key_ids,
+        "legacy_compatibility_key_loaded": (
+            first_metadata.get("legacy_compatibility_key_loaded") == "true"
+        ),
+        "recovered": True,
+    }
+
+
 def reencrypt_secrets(
     *,
     record_store: SecretRotationStore,
     apply: bool = False,
     expected_plan_digest: str = "",
+    operation_token: str = "",
     actor: str = "cli",
     source_label: str = "manual",
     reason: str = "",
@@ -729,13 +791,10 @@ def reencrypt_secrets(
     key_ring = _get_key_ring()
     active_key_id = key_ring.active_key_id
 
+    all_records = tuple(record_store.list_secret_records(limit=None))
     records = tuple(
         sorted(
-            (
-                record
-                for record in record_store.list_secret_records(limit=None)
-                if record.status == SECRET_STATUS_CONFIGURED
-            ),
+            (record for record in all_records if record.status == SECRET_STATUS_CONFIGURED),
             key=lambda item: item.secret_id,
         )
     )
@@ -793,6 +852,7 @@ def reencrypt_secrets(
         "retirement_blocked_key_ids": retirement_blocked_key_ids,
         "retirement_ready_key_ids": retirement_ready_key_ids,
         "legacy_compatibility_key_loaded": key_ring.legacy_compatibility_key_loaded,
+        "recovered": False,
     }
     if errors or not apply:
         return result
@@ -804,6 +864,15 @@ def reencrypt_secrets(
             "errors": ["Managed-secret re-encryption apply requires a reason."],
         }
     if expected_plan_digest != plan_digest:
+        recovered_result = _recover_completed_reencryption(
+            record_store=record_store,
+            records=all_records,
+            expected_plan_digest=expected_plan_digest,
+            operation_token=operation_token,
+            active_key_id=active_key_id,
+        )
+        if recovered_result is not None:
+            return recovered_result
         return {
             **result,
             "status": "error",
@@ -851,6 +920,18 @@ def reencrypt_secrets(
                 "source": safe_source_label,
                 "reason": safe_reason,
                 "rotation_plan_digest": plan_digest,
+                "operation_token": operation_token,
+                "rotation_candidate_count": str(candidate_count),
+                "rotation_unchanged_count": str(unchanged_count),
+                "retirement_blocked_key_ids": json.dumps(
+                    retirement_blocked_key_ids, separators=(",", ":")
+                ),
+                "retirement_ready_key_ids": json.dumps(
+                    retirement_ready_key_ids, separators=(",", ":")
+                ),
+                "legacy_compatibility_key_loaded": str(
+                    key_ring.legacy_compatibility_key_loaded
+                ).lower(),
                 "old_key_id": current_version.key_id,
                 "new_key_id": new_key_id,
                 "old_version_id": current_version.version_id,

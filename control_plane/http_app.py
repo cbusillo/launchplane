@@ -662,8 +662,12 @@ _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
 _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
+_PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
+_SECRET_REENCRYPT_ROUTE = "/v1/secrets/reencrypt"
 _EVIDENCE_INGRESS_MAX_BODY_BYTES = 2 * 1024 * 1024
 _GITHUB_WEBHOOK_MAX_BODY_BYTES = 2 * 1024 * 1024
+_PRODUCT_CONFIG_MAX_BODY_BYTES = 2 * 1024 * 1024
+_SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _EVIDENCE_INGRESS_ROUTES = frozenset(
     {
         _DEPLOYMENT_EVIDENCE_ROUTE,
@@ -684,6 +688,18 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
         "GitHub webhook",
         _GITHUB_WEBHOOK_MAX_BODY_BYTES,
         False,
+        True,
+    ),
+    _PRODUCT_CONFIG_APPLY_ROUTE: (
+        "Product config",
+        _PRODUCT_CONFIG_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _SECRET_REENCRYPT_ROUTE: (
+        "Managed-secret re-encryption",
+        _SECRET_REENCRYPT_MAX_BODY_BYTES,
+        True,
         True,
     ),
 }
@@ -717,8 +733,6 @@ _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/app
 _PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
-_PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
-_SECRET_REENCRYPT_ROUTE = "/v1/secrets/reencrypt"
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
 _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_GITHUB_ACTIONS_GRANTS_ROUTE = "/v1/authz-policies/github-actions/grants"
@@ -12721,12 +12735,21 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
+        actor = product_config_identity_actor(identity)
+        operation_token = ""
+        if reencryption_request.mode == "apply":
+            operation_token = hashlib.sha256(
+                "\x1f".join((actor, normalized_idempotency_key, payload_fingerprint)).encode(
+                    "utf-8"
+                )
+            ).hexdigest()
         try:
             result = control_plane_secrets.reencrypt_secrets(
                 record_store=database_store,
                 apply=reencryption_request.mode == "apply",
                 expected_plan_digest=reencryption_request.expected_plan_digest,
-                actor=product_config_identity_actor(identity),
+                operation_token=operation_token,
+                actor=actor,
                 source_label=reencryption_request.source_label,
                 reason=reencryption_request.reason,
             )
