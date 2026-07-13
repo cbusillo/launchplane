@@ -37,6 +37,7 @@ DEFAULT_LOCAL_TIMINGS_FILE = Path(".ci-cache/unittest-timings/history.json")
 LOCAL_RUN_RECORD_TYPE = "unittest_local_shard_run"
 LOCAL_PROCESS_POLL_SECONDS = 0.05
 LOCAL_PROCESS_TERMINATE_SECONDS = 5.0
+POSTGRES_INTEGRATION_MODULE = "tests.test_postgres_integration"
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,40 @@ def register_ci_commands(main: click.Group) -> None:
 @click.group()
 def ci() -> None:
     """CI support commands."""
+
+
+@ci.command("postgres-integration")
+@click.option(
+    "--database-url",
+    envvar="LAUNCHPLANE_TEST_POSTGRES_URL",
+    default="",
+    help=(
+        "Root PostgreSQL service URL used to create an isolated test database. "
+        "Defaults to LAUNCHPLANE_TEST_POSTGRES_URL."
+    ),
+)
+@click.option("--verbosity", type=int, default=2, show_default=True)
+def run_postgres_integration_tests(database_url: str, verbosity: int) -> None:
+    """Run real-PostgreSQL schema and concurrency integration tests."""
+    normalized_database_url = database_url.strip()
+    if not normalized_database_url:
+        raise click.ClickException(
+            "Set LAUNCHPLANE_TEST_POSTGRES_URL or pass --database-url with a "
+            "PostgreSQL service URL. The test harness creates an isolated database."
+        )
+    environment = os.environ.copy()
+    environment["LAUNCHPLANE_TEST_POSTGRES_URL"] = normalized_database_url
+    command = [
+        sys.executable,
+        "-m",
+        "unittest",
+        "-v" if verbosity > 1 else "",
+        POSTGRES_INTEGRATION_MODULE,
+    ]
+    command = [argument for argument in command if argument]
+    result = subprocess.run(command, cwd=Path.cwd(), env=environment, check=False)
+    if result.returncode != 0:
+        raise click.ClickException("PostgreSQL integration tests failed")
 
 
 @ci.group("unittest-shard")

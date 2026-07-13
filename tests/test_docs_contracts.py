@@ -16,6 +16,7 @@ class DocsContractsTests(TestCase):
         self.assertIn("CONTAINER_SCAN_FORK_RESULT", ci_workflow)
         self.assertIn("FRONTEND_VALIDATE_FORK_RESULT", ci_workflow)
         self.assertIn("TEST_FORK_RESULT", ci_workflow)
+        self.assertIn("POSTGRES_INTEGRATION_RESULT", ci_workflow)
         self.assertIn("  workflow_lint_fork:", security_workflow)
         self.assertIn("  secret_scan_fork:", security_workflow)
         self.assertIn("  security_gate:\n    name: security-gate", security_workflow)
@@ -35,9 +36,15 @@ class DocsContractsTests(TestCase):
             "uv run python -m unittest {modules}",
             metadata["qualityGate"]["test"]["targeted"],
         )
+        self.assertIn(
+            "uv run launchplane ci postgres-integration",
+            metadata["qualityGate"]["test"]["postgresIntegration"],
+        )
         self.assertIn("uv run launchplane ci unittest-shard local", testing_docs)
+        self.assertIn("uv run launchplane ci postgres-integration", testing_docs)
         self.assertIn("12 shards with a 20-test/30-second split threshold", testing_docs)
         self.assertIn("GitHub Actions remains the source of truth", testing_docs)
+        self.assertIn("  postgres_integration:", ci_workflow)
         self.assertIn("  test_timing_snapshot:", ci_workflow)
         self.assertIn('UNITTEST_SHARD_COUNT: "12"', ci_workflow)
         self.assertIn('UNITTEST_MAX_TESTS_PER_TARGET: "20"', ci_workflow)

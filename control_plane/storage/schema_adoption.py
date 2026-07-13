@@ -9,6 +9,11 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 from control_plane.storage.postgres import Base, _build_engine
+from control_plane.storage.schema_invariants import (
+    critical_column_type_errors,
+    critical_index_errors,
+    postgres_index_definitions,
+)
 
 LEGACY_BASELINE_REVISION = "fe94a0486977"
 LEGACY_CURRENT_SCHEMA_REVISION = "b1c3d5e7f9a1"
@@ -140,11 +145,16 @@ class SchemaInspectorProtocol(Protocol):
     def get_columns(self, table_name: str) -> Sequence[Mapping[str, object]]:
         raise NotImplementedError
 
+    def get_indexes(self, table_name: str) -> Sequence[Mapping[str, object]]:
+        raise NotImplementedError
+
 
 def verify_existing_schema_for_stamp(
     *,
     inspector: SchemaInspectorProtocol,
     expected_schema: Mapping[str, frozenset[str]],
+    index_definitions: Mapping[tuple[str, str], str] | None = None,
+    verify_column_types: bool = False,
 ) -> None:
     existing_tables = set(inspector.get_table_names())
     expected_tables = set(expected_schema)
@@ -177,6 +187,16 @@ def verify_existing_schema_for_stamp(
                 f"{table_name} has unexpected columns: {', '.join(unexpected_columns)}"
             )
 
+    errors.extend(
+        critical_index_errors(
+            inspector=inspector,
+            table_names=existing_tables,
+            index_definitions=index_definitions,
+        )
+    )
+    if verify_column_types:
+        errors.extend(critical_column_type_errors(inspector, table_names=existing_tables))
+
     if errors:
         joined_errors = "; ".join(errors)
         raise SchemaAdoptionError(
@@ -202,14 +222,24 @@ def schema_stamp_revision_for_engine(engine: Engine) -> str:
             version_rows = connection.execute(text("select version_num from alembic_version")).fetchall()
         version_numbers = {str(row[0]).strip() for row in version_rows if str(row[0]).strip()}
         if version_numbers == {LEGACY_BASELINE_REVISION} and has_current_marker_table:
-            verify_existing_schema_for_stamp(inspector=inspector, expected_schema=expected_schema)
+            verify_existing_schema_for_stamp(
+                inspector=inspector,
+                expected_schema=expected_schema,
+                index_definitions=_index_definitions_for_engine(engine),
+                verify_column_types=_uses_postgresql(engine),
+            )
             return LEGACY_CURRENT_SCHEMA_REVISION
         return ""
 
     if not existing_tables.intersection(expected_schema):
         return ""
 
-    verify_existing_schema_for_stamp(inspector=inspector, expected_schema=expected_schema)
+    verify_existing_schema_for_stamp(
+        inspector=inspector,
+        expected_schema=expected_schema,
+        index_definitions=_index_definitions_for_engine(engine),
+        verify_column_types=_uses_postgresql(engine),
+    )
     if has_current_marker_table:
         return LEGACY_CURRENT_SCHEMA_REVISION
     return LEGACY_BASELINE_REVISION
@@ -221,6 +251,16 @@ def schema_stamp_revision(database_url: str) -> str:
         return schema_stamp_revision_for_engine(engine)
     finally:
         engine.dispose()
+
+
+def _index_definitions_for_engine(engine: Engine) -> Mapping[tuple[str, str], str] | None:
+    if _uses_postgresql(engine):
+        return postgres_index_definitions(engine)
+    return None
+
+
+def _uses_postgresql(engine: Engine) -> bool:
+    return engine.url.get_backend_name() == "postgresql"
 
 
 def main() -> int:

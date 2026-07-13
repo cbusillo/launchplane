@@ -115,6 +115,7 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 from control_plane.service_auth import GitHubHumanIdentity
 from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 ConnectionFactory = Callable[[], Any]
@@ -1537,6 +1538,7 @@ class PostgresRecordStore(HumanSessionStore):
         Base.metadata.create_all(self._engine)
 
     def verify_schema(self) -> None:
+        backend_name = self._engine.url.get_backend_name()
         inspector = inspect(self._engine)
         existing_tables = set(inspector.get_table_names())
         missing_tables = tuple(
@@ -1564,6 +1566,8 @@ class PostgresRecordStore(HumanSessionStore):
                 "Launchplane shared storage schema is missing required column(s): "
                 f"{missing}. Run Alembic migrations before starting the hosted service."
             )
+        if backend_name == "postgresql":
+            verify_postgres_schema_invariants(self._engine)
 
     def close(self) -> None:
         self._engine.dispose()
