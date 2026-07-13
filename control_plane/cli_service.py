@@ -11,6 +11,7 @@ import uuid
 import click
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.openapi_export import write_canonical_openapi
 from control_plane.contracts.driver_descriptor import DriverContextView
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.service import serve_launchplane_service
@@ -1044,3 +1045,15 @@ def service_inspect_data_freshness(
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
     if payload["status"] != "ok":
         raise click.ClickException("Launchplane data freshness report is missing provenance.")
+
+
+@service.command("export-openapi")
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Write canonical Launchplane OpenAPI JSON to this path.",
+)
+def service_export_openapi(output: Path) -> None:
+    written_path = write_canonical_openapi(output)
+    click.echo(str(written_path))

@@ -10,9 +10,11 @@
   "scripts": {
     "build": "pnpm typecheck && vite build && node scripts/assert-production-fixtures.mjs",
     "dev": "vite --host 127.0.0.1",
+    "generate:openapi": "uv run launchplane service export-openapi --output generated/openapi-canonical.json && node scripts/build-openapi-ui-schema.mjs && node scripts/generate-openapi-types.mjs",
     "preview": "vite preview --host 127.0.0.1",
+    "check:openapi-drift": "node scripts/check-openapi-drift.mjs",
     "typecheck": "tsc --noEmit",
-    "validate": "pnpm build"
+    "validate": "pnpm check:openapi-drift && pnpm build"
   },
   "dependencies": {
     "lucide-react": "1.12.0",
@@ -20,6 +22,7 @@
     "react-dom": "19.2.5"
   },
   "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0",
     "@vitejs/plugin-react": "6.0.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",

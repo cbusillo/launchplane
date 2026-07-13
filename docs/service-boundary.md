@@ -355,6 +355,20 @@ New or changed service route families must preserve the completed HTTP boundary:
 typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
+Frontend read-contract generation uses the same boundary. Run
+`uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`
+to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
+without live credentials, managed-secret values, or runtime-authority examples.
+The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
+and checked `frontend/src/generated/openapi.ts/` types from that canonical
+export. `pnpm --dir frontend check:openapi-drift` regenerates those artifacts in
+temporary paths and fails when the checked schema or generated types drift from
+the backend contract. The canonical `x-launchplane-ui-read-operations` manifest
+owns each selected GET path and stable operation id; slicing fails closed when a
+route, operation id, success response, or referenced schema drifts. Generated
+response envelopes are the API boundary consumed by the UI. Handwritten
+frontend types remain only for write requests and explicit UI normalization.
+
 The human auth/session family uses FastAPI routes in the production service:
 `GET /auth/github/login`, `GET /auth/github/callback`, `GET /v1/auth/session`,
 and `POST /auth/logout`. GitHub OAuth login preserves PKCE state, same-origin

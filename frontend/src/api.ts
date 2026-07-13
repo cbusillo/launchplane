@@ -62,11 +62,18 @@ async function requestJson<T>(
   const payload = (await response.json()) as T | ApiErrorPayload;
   if (!response.ok) {
     const errorPayload = payload as ApiErrorPayload;
+    const errorMessage =
+      "error" in errorPayload && errorPayload.error
+        ? errorPayload.error.message ?? `Launchplane API returned ${response.status}.`
+        : `Launchplane API returned ${response.status}.`;
+    const traceId =
+      "trace_id" in errorPayload && typeof errorPayload.trace_id === "string"
+        ? errorPayload.trace_id
+        : "";
     throw new LaunchplaneApiError(
-      errorPayload.error?.message ??
-        `Launchplane API returned ${response.status}.`,
+      errorMessage,
       response.status,
-      errorPayload.trace_id,
+      traceId,
     );
   }
   return payload as T;

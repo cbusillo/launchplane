@@ -26,6 +26,7 @@ from control_plane.http_app import (
     _openapi_model_schema,
     create_launchplane_fastapi_app,
 )
+from control_plane.openapi_export import canonical_openapi_document
 from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateRequest
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -214,6 +215,37 @@ class FastApiConstructionMetadataTests(unittest.TestCase):
         self.assertIn(
             "LaunchplaneErrorResponse",
             openapi["components"]["schemas"],
+        )
+
+    def test_canonical_openapi_export_is_deterministic_and_scrubbed(self) -> None:
+        first_payload = canonical_openapi_document()
+        second_payload = canonical_openapi_document()
+
+        self.assertEqual(first_payload, second_payload)
+        serialized_payload = json.dumps(first_payload, sort_keys=True)
+        self.assertNotIn('"examples"', serialized_payload)
+        self.assertNotIn('"example"', serialized_payload)
+        self.assertIn(
+            "/v1/products/{product}/environments/{environment}/config-status",
+            first_payload["paths"],
+        )
+        self.assertIn(
+            "/v1/work-graph/merge-train/controller/status",
+            first_payload["paths"],
+        )
+        self.assertIn(
+            "/v1/every-code/summary",
+            first_payload["paths"],
+        )
+        self.assertIn(
+            "/v1/every-code/summary",
+            first_payload["x-launchplane-ui-read-operations"],
+        )
+        self.assertEqual(
+            first_payload["x-launchplane-ui-read-operations"][
+                "/v1/products/{product}/environments/{environment}/config-status"
+            ],
+            "read_product_environment_config_status",
         )
 
 

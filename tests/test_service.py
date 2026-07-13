@@ -5978,6 +5978,32 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, msg=result.output)
         self.assertIn("refuses startup without --audience", result.output)
 
+    def test_service_export_openapi_writes_canonical_schema(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            output_path = Path(temporary_directory_name) / "openapi.json"
+
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "export-openapi",
+                    "--output",
+                    str(output_path),
+                ],
+            )
+
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(result.output.strip(), str(output_path))
+        self.assertIn("/v1/drivers", payload["paths"])
+        self.assertIn(
+            "/v1/products/{product}/environments/{environment}/config-status",
+            payload["paths"],
+        )
+        self.assertNotIn('"examples"', json.dumps(payload, sort_keys=True))
+
     def test_service_serve_runs_fastapi_app(self) -> None:
         fastapi_response: _AsgiServiceTestResponse | None = None
         ui_response: _AsgiServiceTestResponse | None = None
