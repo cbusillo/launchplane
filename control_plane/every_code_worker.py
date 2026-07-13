@@ -838,12 +838,18 @@ class EveryCodeCleanupReconciliationResult:
         }
 
 
+def _every_code_tmux_fenced_prefix(request_id: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
+    prefix = f"every-code-{normalized or 'request'}"
+    return prefix[:60].rstrip("-._:")
+
+
 def every_code_tmux_session_name(request_id: str, *, fencing_token: int = 0) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
     prefix = f"every-code-{normalized or 'request'}"
     if fencing_token < 1:
         return prefix[:80]
-    fenced_prefix = prefix[:60].rstrip("-._:")
+    fenced_prefix = _every_code_tmux_fenced_prefix(request_id)
     suffix = f"-f{fencing_token}"
     if len(fenced_prefix) + len(suffix) > 80:
         suffix = f"-f{hashlib.sha256(str(fencing_token).encode('utf-8')).hexdigest()[:16]}"
@@ -868,8 +874,7 @@ def _every_code_tmux_session_names(
             return ()
         return None
     legacy_name = every_code_tmux_session_name(request_id)
-    fenced_name = every_code_tmux_session_name(request_id, fencing_token=1)
-    fenced_prefix = fenced_name.rsplit("-f1", 1)[0] + "-f"
+    fenced_prefix = _every_code_tmux_fenced_prefix(request_id) + "-f"
     names = []
     for line in result.stdout.splitlines():
         session_name = line.strip()

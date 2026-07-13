@@ -1122,6 +1122,15 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(session_name, "every-code-every-code-cbusillo-code-123")
         self.assertEqual(fenced_session_name, "every-code-every-code-cbusillo-code-123-f2")
 
+    def test_long_session_names_keep_a_stable_fenced_prefix(self) -> None:
+        request_id = "every-code-" + ("very-long-request-" * 10)
+        first_name = every_code_tmux_session_name(request_id, fencing_token=1)
+        huge_token_name = every_code_tmux_session_name(request_id, fencing_token=10**100)
+
+        self.assertLessEqual(len(first_name), 80)
+        self.assertLessEqual(len(huge_token_name), 80)
+        self.assertEqual(first_name.rsplit("-f", 1)[0], huge_token_name.rsplit("-f", 1)[0])
+
     def test_default_command_includes_issue_and_request(self) -> None:
         command = default_every_code_command(_queued_record())
 
