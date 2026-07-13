@@ -14,9 +14,11 @@ title: Secrets
   shared-service backend when `LAUNCHPLANE_DATABASE_URL` is configured.
   Secret versions are encrypted before Launchplane stores them.
 - New deployments must use `LAUNCHPLANE_SECRET_KEYS_JSON` with explicit, canonical
-  high-entropy Fernet roots to manage encryption keys. Existing deployments can
-  continue to use `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` as a legacy fallback, but
-  should migrate to the JSON format to support explicit rotation and key retirement.
+  high-entropy Fernet roots to manage encryption keys. Generate roots with a
+  cryptographically secure secret manager or `Fernet.generate_key()` and store
+  the JSON value in the Launchplane service bootstrap secret, never in the repo.
+  Existing deployments can temporarily keep `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
+  as a migration-only historical root.
 - Keep bootstrap values only in process env long enough to write the real
   Launchplane-managed secret records.
 - Runtime environment truth should live in Launchplane DB records in steady
@@ -86,12 +88,58 @@ The target rotation model is:
    active `encryption_key_id` in `LAUNCHPLANE_SECRET_KEYS_JSON`.
 2. Keep the previous decryption root available only as an allowed historical key
    in the JSON keys map for versions that still carry its key id.
-3. Re-encrypt managed-secret versions under the new key id through a
-   Launchplane-owned rotation path that writes audit evidence:
-   `uv run launchplane secrets reencrypt --apply`.
-4. Verify that all active versions are readable under the new key id.
-5. Retire the old key id by removing it from `LAUNCHPLANE_SECRET_KEYS_JSON` so
-   later reads fail closed if any active secret still depends on it.
+3. Run the deployed Launchplane service re-encryption endpoint in dry-run mode.
+   The response reports unreadable versions, the active-key usage summary, keys
+   blocked from retirement, and a digest bound to the current secret versions.
+4. Apply through the same service endpoint with the dry-run digest, an operator
+   reason, and an idempotency key. Launchplane atomically writes every new
+   ciphertext version, current-version pointer, and audit event.
+5. Run dry-run again and verify the previous key id is reported as ready for
+   retirement.
+6. Retire the previous root by removing it from the service bootstrap key ring.
+   Later reads fail closed if any active secret still depends on that id.
+
+`LAUNCHPLANE_SECRET_KEYS_JSON` has this bootstrap-only shape:
+
+```json
+{
+  "active_key_id": "root-2026-07",
+  "keys": {
+    "root-2026-07": "<canonical-url-safe-base64-fernet-key>",
+    "root-2026-04": "<historical-canonical-url-safe-base64-fernet-key>"
+  }
+}
+```
+
+Key ids use 1-64 ASCII letters, digits, dots, underscores, or hyphens. Each key
+must be the exact URL-safe base64 encoding of 32 high-entropy bytes. Launchplane
+rejects passphrases, whitespace-normalized values, low-diversity test material,
+unknown JSON fields, missing active keys, and mismatches between the JSON legacy
+entry and the legacy bootstrap variable.
+
+### Migrating The Legacy Root
+
+Existing secret-version payloads without an explicit historical label resolve
+to the compatibility id `launchplane-master-key`. To migrate without deriving or
+printing the old root:
+
+1. Keep the existing `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` set on the deployed
+   Launchplane service.
+2. Add `LAUNCHPLANE_SECRET_KEYS_JSON` with a new canonical active key. Do not
+   copy a legacy passphrase into the JSON map. Launchplane loads the legacy env
+   value as the historical `launchplane-master-key` only for this migration
+   window.
+3. Run dry-run and stop if any version is unreadable or the reported plan does
+   not include the expected legacy-key usage.
+4. Apply with the matching digest and verify the next dry-run reports
+   `launchplane-master-key` as ready for retirement.
+5. Remove `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` and restart the service. A final
+   dry-run must remain clean before the old bootstrap secret is destroyed.
+
+Old ciphertext versions and audit metadata retain the old/new key ids and
+version ids as rollback evidence. To roll back before destroying an old root,
+restore that root as an allowed active key and run the same audited dry-run/apply
+flow in reverse; Launchplane creates new versions instead of mutating history.
 
 Rotation is a service/storage operation, not a product workflow shortcut. It
 must not copy plaintext into GitHub issues, workflow logs, checked-in files,
@@ -277,6 +325,11 @@ decryption key state denies the reveal or resolution.
   writes. Routine shared and production secret changes should use product-config
   dry-run/apply through the deployed service route or operator UI instead of
   arbitrary local secret writes.
+- `uv run launchplane secrets reencrypt --allow-direct-db-mutation` is a
+  bootstrap/recovery-only dry-run. A direct apply additionally requires
+  `--expected-plan-digest`, `--reason`, and `--apply`. Routine shared and
+  production root rotation must use the deployed service endpoint rather than
+  an arbitrary checkout.
 - `uv run launchplane product-config apply --input-file bundle.json --dry-run`
   previews an approved product runtime/secret bundle without printing plaintext
   values or writing records. `--apply` writes non-secret runtime keys and

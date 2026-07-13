@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Mapping, Protocol
 
 import click
 from cryptography.fernet import Fernet, InvalidToken
@@ -15,6 +17,7 @@ from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
     SecretRecord,
+    SecretRotationWrite,
     SecretScope,
     SecretVersion,
 )
@@ -28,6 +31,9 @@ LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS = (LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR,
 DOKPLOY_SECRET_INTEGRATION = "dokploy"
 RUNTIME_ENVIRONMENT_SECRET_INTEGRATION = "runtime_environment"
 SECRET_STATUS_CONFIGURED = "configured"
+LEGACY_SECRET_KEY_ID = "launchplane-master-key"
+_KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_MIN_UNIQUE_KEY_BYTES = 16
 
 SecretWriteAction = Literal["created", "rotated", "unchanged"]
 SecretBindingRelabelAction = Literal["relabelled", "unchanged"]
@@ -80,6 +86,8 @@ class SecretWriteStore(SecretReadStore, Protocol):
 
     def write_secret_audit_event(self, event: SecretAuditEvent) -> None: ...
 
+    def write_secret_rotations(self, rotations: tuple[SecretRotationWrite, ...]) -> None: ...
+
 
 def _secret_slug(value: str) -> str:
     compact = "".join(
@@ -118,46 +126,111 @@ def _scope_rank(scope: str) -> int:
     return 2
 
 
-@dataclass
+@dataclass(frozen=True)
 class KeyRing:
     active_key_id: str
-    keys: dict[str, Fernet]
+    keys: Mapping[str, Fernet]
+    legacy_compatibility_key_loaded: bool = False
+
+
+def _validated_key_id(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not _KEY_ID_PATTERN.fullmatch(value):
+        raise click.ClickException(
+            f"Invalid {LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR} configuration: "
+            f"{label} must match {_KEY_ID_PATTERN.pattern!r}."
+        )
+    return value
+
+
+def _canonical_fernet_key(raw_key: object, *, key_id: str) -> bytes:
+    if not isinstance(raw_key, str) or raw_key != raw_key.strip():
+        raise click.ClickException(
+            f"Invalid canonical key material for key {key_id!r}: expected an exact string."
+        )
+    try:
+        encoded = raw_key.encode("ascii")
+        decoded = base64.b64decode(encoded, altchars=b"-_", validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError) as error:
+        raise click.ClickException(
+            f"Invalid canonical key material for key {key_id!r}: expected URL-safe base64."
+        ) from error
+    if len(decoded) != 32 or base64.urlsafe_b64encode(decoded) != encoded:
+        raise click.ClickException(
+            f"Invalid canonical key material for key {key_id!r}: expected 32 canonical bytes."
+        )
+    if len(set(decoded)) < _MIN_UNIQUE_KEY_BYTES:
+        raise click.ClickException(
+            f"Invalid canonical key material for key {key_id!r}: key material lacks entropy."
+        )
+    return encoded
 
 def _get_key_ring() -> KeyRing:
     keys_json = os.environ.get(LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR, "").strip()
     if keys_json:
         try:
             parsed = json.loads(keys_json)
-            active_key_id = parsed["active_key_id"]
+            if not isinstance(parsed, dict):
+                raise ValueError("configuration must be a JSON object")
+            unexpected_fields = sorted(set(parsed) - {"active_key_id", "keys"})
+            if unexpected_fields:
+                raise ValueError(f"unexpected fields: {', '.join(unexpected_fields)}")
+            active_key_id = _validated_key_id(
+                parsed["active_key_id"], label="active_key_id"
+            )
             keys_dict = parsed["keys"]
-            if not isinstance(active_key_id, str) or not isinstance(keys_dict, dict):
-                raise ValueError("JSON must contain string active_key_id and dict keys")
-        except (KeyError, ValueError, TypeError) as e:
-            raise click.ClickException(f"Invalid {LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR} configuration: {e}")
+            if not isinstance(keys_dict, dict) or not keys_dict:
+                raise ValueError("keys must be a non-empty object")
+        except (KeyError, ValueError, TypeError) as error:
+            raise click.ClickException(
+                f"Invalid {LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR} configuration: {error}"
+            ) from error
 
-        fernet_keys = {}
+        encoded_keys: dict[str, bytes] = {}
         for key_id, raw_key in keys_dict.items():
-            encoded = str(raw_key).encode("utf-8")
-            try:
-                fernet_keys[key_id] = Fernet(encoded)
-            except (ValueError, TypeError) as e:
-                raise click.ClickException(f"Invalid canonical key material for key '{key_id}': {e}")
+            validated_key_id = _validated_key_id(key_id, label="key id")
+            encoded_keys[validated_key_id] = _canonical_fernet_key(
+                raw_key, key_id=validated_key_id
+            )
 
-        if active_key_id not in fernet_keys:
+        if active_key_id not in encoded_keys:
             raise click.ClickException(f"Active key id '{active_key_id}' not found in keys.")
 
-        return KeyRing(active_key_id, fernet_keys)
-    
+        legacy_compatibility_key_loaded = False
+        legacy_value = os.environ.get(LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR, "").strip()
+        if legacy_value:
+            legacy_key = _master_fernet_key(legacy_value)
+            configured_legacy_key = encoded_keys.get(LEGACY_SECRET_KEY_ID)
+            if configured_legacy_key is not None and configured_legacy_key != legacy_key:
+                raise click.ClickException(
+                    f"{LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR} key {LEGACY_SECRET_KEY_ID!r} "
+                    f"does not match {LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR}."
+                )
+            if configured_legacy_key is None:
+                encoded_keys[LEGACY_SECRET_KEY_ID] = legacy_key
+                legacy_compatibility_key_loaded = True
+
+        return KeyRing(
+            active_key_id=active_key_id,
+            keys={key_id: Fernet(encoded) for key_id, encoded in encoded_keys.items()},
+            legacy_compatibility_key_loaded=legacy_compatibility_key_loaded,
+        )
+
     for environment_key in LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS:
         configured_value = os.environ.get(environment_key, "")
         if configured_value.strip():
-            key_id = "launchplane-master-key"
             fernet = Fernet(_master_fernet_key(configured_value))
-            return KeyRing(key_id, {key_id: fernet})
-    
-    key_id = "launchplane-master-key"
-    fernet = Fernet(_master_fernet_key(""))
-    return KeyRing(key_id, {key_id: fernet})
+            return KeyRing(
+                active_key_id=LEGACY_SECRET_KEY_ID,
+                keys={LEGACY_SECRET_KEY_ID: fernet},
+                legacy_compatibility_key_loaded=True,
+            )
+
+    expected_keys = " or ".join(
+        (LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR, *LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS)
+    )
+    raise click.ClickException(
+        f"Launchplane managed secrets require {expected_keys} to read or write encrypted values."
+    )
 
 def _master_fernet_key(raw_key: str) -> bytes:
     normalized = raw_key.strip()
@@ -173,6 +246,10 @@ def _master_fernet_key(raw_key: str) -> bytes:
     except (ValueError, TypeError):
         digest = hashlib.sha256(encoded).digest()
         return base64.urlsafe_b64encode(digest)
+
+
+def validate_secret_key_configuration() -> None:
+    _get_key_ring()
 
 def _encrypt_secret_value(plaintext_value: str) -> tuple[str, str]:
     key_ring = _get_key_ring()
@@ -636,80 +713,146 @@ def reencrypt_secrets(
     *,
     record_store: SecretWriteStore,
     apply: bool = False,
+    expected_plan_digest: str = "",
     actor: str = "cli",
     source_label: str = "manual",
+    reason: str = "",
 ) -> dict[str, object]:
     key_ring = _get_key_ring()
     active_key_id = key_ring.active_key_id
-    
-    rotated_count = 0
-    unchanged_count = 0
-    error_count = 0
+
+    records = tuple(
+        sorted(
+            (
+                record
+                for record in record_store.list_secret_records(limit=None)
+                if record.status == SECRET_STATUS_CONFIGURED
+            ),
+            key=lambda item: item.secret_id,
+        )
+    )
+    versions = tuple(record_store.read_secret_version(record.current_version_id) for record in records)
+    plan_entries = tuple(
+        {
+            "secret_id": record.secret_id,
+            "current_version_id": version.version_id,
+            "key_id": version.key_id,
+        }
+        for record, version in zip(records, versions, strict=True)
+    )
+    plan_digest = hashlib.sha256(
+        json.dumps(
+            {"active_key_id": active_key_id, "entries": plan_entries},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    key_usage: dict[str, int] = {}
+    for version in versions:
+        key_usage[version.key_id] = key_usage.get(version.key_id, 0) + 1
+
     errors: list[str] = []
-    
-    records = record_store.list_secret_records(limit=None)
-    for record in records:
-        if record.status != SECRET_STATUS_CONFIGURED:
-            continue
-        current_version = record_store.read_secret_version(record.current_version_id)
-        if current_version.key_id == active_key_id:
-            unchanged_count += 1
-            continue
-        
+    for record, version in zip(records, versions, strict=True):
         try:
-            plaintext = _decrypt_secret_value(current_version.ciphertext, current_version.key_id)
-        except click.ClickException as e:
-            error_count += 1
-            errors.append(f"Failed to decrypt secret {record.secret_id}: {e}")
-            continue
+            _decrypt_secret_value(version.ciphertext, version.key_id)
+        except click.ClickException as error:
+            errors.append(f"Managed secret {record.secret_id} is not decryptable: {error}")
 
-        if apply:
-            now = utc_now_timestamp()
-            ciphertext, new_key_id = _encrypt_secret_value(plaintext)
-            version_id = _version_id(secret_id=record.secret_id)
-            
-            record_store.write_secret_version(
-                SecretVersion(
-                    version_id=version_id,
-                    secret_id=record.secret_id,
-                    created_at=now,
-                    created_by=actor,
-                    key_id=new_key_id,
-                    ciphertext=ciphertext,
-                )
-            )
-            
-            record_store.write_secret_record(
-                record.model_copy(update={"current_version_id": version_id, "updated_at": now, "updated_by": actor})
-            )
-            
-            record_store.write_secret_audit_event(
-                SecretAuditEvent(
-                    event_id=_audit_event_id(secret_id=record.secret_id, event_type="rotated"),
-                    secret_id=record.secret_id,
-                    event_type="rotated",
-                    recorded_at=now,
-                    actor=actor,
-                    detail=f"Launchplane re-encrypted managed secret from {source_label}.",
-                    metadata={
-                        "source": source_label, 
-                        "old_key_id": current_version.key_id,
-                        "new_key_id": new_key_id,
-                        "old_version_id": current_version.version_id,
-                        "new_version_id": version_id,
-                    },
-                )
-            )
-        rotated_count += 1
+    candidate_count = sum(version.key_id != active_key_id for version in versions)
+    unchanged_count = len(versions) - candidate_count
+    retirement_blocked_key_ids = sorted(
+        key_id
+        for key_id in key_ring.keys
+        if key_id != active_key_id and key_usage.get(key_id, 0) > 0
+    )
+    retirement_ready_key_ids = sorted(
+        key_id
+        for key_id in key_ring.keys
+        if key_id != active_key_id and key_usage.get(key_id, 0) == 0
+    )
 
-    return {
-        "status": "ok" if error_count == 0 else "error",
+    result: dict[str, object] = {
+        "status": "ok" if not errors else "error",
         "dry_run": not apply,
-        "rotated_count": rotated_count,
+        "plan_digest": plan_digest,
+        "rotated_count": candidate_count,
         "unchanged_count": unchanged_count,
-        "error_count": error_count,
+        "error_count": len(errors),
         "errors": errors,
         "active_key_id": active_key_id,
-        "allowed_key_ids": list(key_ring.keys.keys()),
+        "retirement_blocked_key_ids": retirement_blocked_key_ids,
+        "retirement_ready_key_ids": retirement_ready_key_ids,
+        "legacy_compatibility_key_loaded": key_ring.legacy_compatibility_key_loaded,
     }
+    if errors or not apply:
+        return result
+    if not reason.strip():
+        return {
+            **result,
+            "status": "error",
+            "error_count": 1,
+            "errors": ["Managed-secret re-encryption apply requires a reason."],
+        }
+    if expected_plan_digest != plan_digest:
+        return {
+            **result,
+            "status": "error",
+            "error_count": 1,
+            "errors": ["Managed-secret re-encryption apply requires the matching dry-run digest."],
+        }
 
+    rotations: list[SecretRotationWrite] = []
+    for record, current_version in zip(records, versions, strict=True):
+        if current_version.key_id == active_key_id:
+            continue
+        plaintext = _decrypt_secret_value(current_version.ciphertext, current_version.key_id)
+        ciphertext, new_key_id = _encrypt_secret_value(plaintext)
+        now = utc_now_timestamp()
+        version_id = _version_id(secret_id=record.secret_id)
+        new_version = SecretVersion(
+            version_id=version_id,
+            secret_id=record.secret_id,
+            created_at=now,
+            created_by=actor,
+            key_id=new_key_id,
+            ciphertext=ciphertext,
+        )
+        updated_record = record.model_copy(
+            update={"current_version_id": version_id, "updated_at": now, "updated_by": actor}
+        )
+        audit_event = SecretAuditEvent(
+            event_id=_audit_event_id(secret_id=record.secret_id, event_type="rotated"),
+            secret_id=record.secret_id,
+            event_type="rotated",
+            recorded_at=now,
+            actor=actor,
+            detail="Launchplane re-encrypted a managed secret under the active key.",
+            metadata={
+                "source": source_label,
+                "reason": reason.strip(),
+                "rotation_plan_digest": plan_digest,
+                "old_key_id": current_version.key_id,
+                "new_key_id": new_key_id,
+                "old_version_id": current_version.version_id,
+                "new_version_id": version_id,
+            },
+        )
+        rotations.append(
+            SecretRotationWrite(
+                expected_current_version_id=current_version.version_id,
+                record=updated_record,
+                version=new_version,
+                audit_event=audit_event,
+            )
+        )
+
+    try:
+        record_store.write_secret_rotations(tuple(rotations))
+    except (FileNotFoundError, ValueError):
+        return {
+            **result,
+            "status": "error",
+            "error_count": 1,
+            "errors": ["Managed-secret state changed after the matching dry-run."],
+        }
+    return result
