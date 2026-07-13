@@ -34,7 +34,6 @@ from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
 )
-from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service as control_plane_product_config_service
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
@@ -191,9 +190,13 @@ from control_plane.generic_web_promotion_http import (
     GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ACTION,
     GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE as _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
     GenericWebProdPromotionEnvelope,
+    GenericWebProdPromotionResponse,
+    GenericWebProdPromotionResponseResult,
     GenericWebPromotionProductMismatchError,
     GenericWebPromotionRouteDependencyError,
     GenericWebPromotionWorkflowEnvelope,
+    GenericWebPromotionWorkflowResponse,
+    GenericWebPromotionWorkflowResponseResult,
     dispatch_generic_web_promotion_workflow_result,
     execute_generic_web_prod_promotion_result,
     resolve_generic_web_promotion_destination_lane,
@@ -531,6 +534,8 @@ from control_plane.preview_lifecycle_cleanup_routes import (
 )
 from control_plane.product_config_http import (
     ProductConfigApplyEnvelope,
+    ProductConfigApplyResponse,
+    ProductConfigApplyResult,
     product_config_live_target_next_actions,
 )
 from control_plane.provider_target_operations_http import (
@@ -637,8 +642,12 @@ from control_plane.work_graph_issue_inbox import (
 from control_plane.work_graph_service import (
     WorkGraphIssueInboxProvider,
     WorkGraphIssueInboxReconcileProvider,
+    WorkGraphIssueInboxReconcileResponse,
+    WorkGraphIssueInboxReconcileResponseResult,
     WorkGraphPlanningFactsProvider,
     WorkGraphRankEnvelope,
+    WorkGraphRankResponse,
+    WorkGraphRankResult,
     WorkGraphWorkRequestStore,
     build_repo_product_mapping_service_payload,
     build_work_graph_rank_result,
@@ -860,8 +869,14 @@ class LaunchplaneErrorResponse(BaseModel):
     status: str = "rejected"
     trace_id: str
     error: LaunchplaneErrorDetail
-    records: dict[str, str] | None = None
-    authz: dict[str, object] | None = None
+    records: dict[str, str] | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    authz: dict[str, object] | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class OdooStableBootstrapOperationActiveResponse(BaseModel):
@@ -3726,7 +3741,7 @@ def store_product_config_dry_run_record(
     identity: LaunchplaneIdentity,
     request_payload: dict[str, object],
     trace_id: str,
-    response: AcceptedEvidenceResponse,
+    response: BaseModel,
 ) -> None:
     idempotency_store = idempotency_capable_store(record_store)
     if idempotency_store is None:
@@ -3883,6 +3898,19 @@ class _LaunchplaneFastAPI(FastAPI):
         super().add_api_route(path, endpoint, **kwargs)
         if registers_error_response_model:
             self._launchplane_error_response_model_registered = True
+
+    def openapi(self) -> dict[str, Any]:
+        schema = super().openapi()
+        for path_item in schema.get("paths", {}).values():
+            if not isinstance(path_item, dict):
+                continue
+            for operation in path_item.values():
+                if not isinstance(operation, dict):
+                    continue
+                responses = operation.get("responses")
+                if isinstance(responses, dict):
+                    responses.pop("422", None)
+        return schema
 
     def _response_media_type(self, kwargs: dict[str, Any]) -> str:
         response_class = kwargs.get("response_class", self.router.default_response_class)
@@ -5706,7 +5734,7 @@ def create_launchplane_fastapi_app(
             GitHubActionsIdentity | GitHubHumanIdentity,
             Depends(read_browser_work_graph_rank_identity),
         ],
-    ) -> AcceptedEvidenceResponse:
+    ) -> WorkGraphRankResponse:
         trace_id = next_trace_id()
         require_work_graph_rank_authorization(
             identity=identity,
@@ -5714,10 +5742,10 @@ def create_launchplane_fastapi_app(
             message="Workflow cannot rank the Launchplane work graph.",
         )
         _summary, driver_result = build_work_graph_rank_result(payload)
-        return AcceptedEvidenceResponse(
+        return WorkGraphRankResponse(
             trace_id=trace_id,
             records={},
-            result=driver_result,
+            result=WorkGraphRankResult.model_validate(driver_result),
         )
 
     def read_work_graph_issue_inbox(
@@ -5748,7 +5776,7 @@ def create_launchplane_fastapi_app(
     def reconcile_work_graph_issue_inbox(
         payload: GitHubIssueInboxReconcileRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-    ) -> AcceptedEvidenceResponse:
+    ) -> WorkGraphIssueInboxReconcileResponse:
         trace_id = next_trace_id()
         required_action = (
             "work_graph.rank" if payload.mode == "dry_run" else "work_graph.issue_inbox.reconcile"
@@ -5774,10 +5802,10 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message=str(error) or "Request could not be completed.",
             ) from error
-        return AcceptedEvidenceResponse(
+        return WorkGraphIssueInboxReconcileResponse(
             trace_id=trace_id,
             records={},
-            result={"reconcile": reconcile_result.model_dump(mode="json")},
+            result=WorkGraphIssueInboxReconcileResponseResult(reconcile=reconcile_result),
         )
 
     def merge_train_policy_not_configured_error(
@@ -12645,7 +12673,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: str,
         request_fingerprint_value: str,
         trace_id: str,
-        response: AcceptedEvidenceResponse,
+        response: BaseModel,
     ) -> LaunchplaneIdempotencyRecord:
         return LaunchplaneIdempotencyRecord(
             record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
@@ -12667,7 +12695,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: str,
         request_fingerprint_value: str,
         trace_id: str,
-        response: AcceptedEvidenceResponse,
+        response: BaseModel,
     ) -> None:
         idempotency_store = idempotency_capable_store(record_store)
         if idempotency_store is None or not idempotency_key:
@@ -12688,7 +12716,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
+    ) -> ProductConfigApplyResponse:
         trace_id = next_trace_id()
         if isinstance(identity, TerminalAgentIdentity):
             raise _launchplane_http_error(
@@ -12782,7 +12810,9 @@ def create_launchplane_fastapi_app(
             check_replay=bool(idempotency_key.strip()),
         )
         if replay_response is not None:
-            return replay_response
+            return ProductConfigApplyResponse.model_validate(
+                replay_response.model_dump(mode="json")
+            )
         database_store = require_product_config_database_store(
             record_store=record_store,
             trace_id=trace_id,
@@ -12791,9 +12821,7 @@ def create_launchplane_fastapi_app(
             control_plane_product_config_service.apply_product_config_service_request(
                 record_store=database_store,
                 payload=product_config_request.product_config_payload(),
-                mode=cast(
-                    control_plane_product_config.ProductConfigMode, product_config_request.mode
-                ),
+                mode=product_config_request.mode,
                 actor=product_config_identity_actor(identity),
                 source_label=product_config_request.source_label,
             )
@@ -12816,10 +12844,10 @@ def create_launchplane_fastapi_app(
                 "status": "records_applied_live_sync_required",
                 "next_actions": next_actions,
             }
-        product_config_response = accepted_evidence_response(
+        product_config_response = ProductConfigApplyResponse(
             trace_id=trace_id,
             records={},
-            result=driver_result,
+            result=ProductConfigApplyResult.model_validate(driver_result),
         )
         if (
             isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity)
@@ -15460,7 +15488,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
+    ) -> GenericWebProdPromotionResponse | JSONResponse:
         trace_id = next_trace_id()
         if isinstance(identity, TerminalAgentIdentity):
             raise _launchplane_http_error(
@@ -15534,7 +15562,9 @@ def create_launchplane_fastapi_app(
             check_replay=bool(idempotency_key.strip()),
         )
         if replayed_response is not None:
-            return replayed_response
+            return GenericWebProdPromotionResponse.model_validate(
+                replayed_response.model_dump(mode="json")
+            )
         try:
             records, result = execute_generic_web_prod_promotion_result(
                 control_plane_root=resolved_control_plane_root,
@@ -15555,10 +15585,12 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        response = accepted_evidence_response(
+        response = GenericWebProdPromotionResponse(
             trace_id=trace_id,
             records=records,
-            result=result,
+            result=GenericWebProdPromotionResponseResult.model_validate(
+                result.model_dump(mode="json")
+            ),
         )
         if should_store_generic_web_promotion_idempotency(result):
             store_apply_idempotency(
@@ -15578,7 +15610,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
+    ) -> GenericWebPromotionWorkflowResponse | JSONResponse:
         trace_id = next_trace_id()
         if isinstance(identity, TerminalAgentIdentity):
             raise _launchplane_http_error(
@@ -15641,7 +15673,9 @@ def create_launchplane_fastapi_app(
             check_replay=bool(idempotency_key.strip()),
         )
         if replayed_response is not None:
-            return replayed_response
+            return GenericWebPromotionWorkflowResponse.model_validate(
+                replayed_response.model_dump(mode="json")
+            )
         try:
             records, result = dispatch_generic_web_promotion_workflow_result(
                 control_plane_root=resolved_control_plane_root,
@@ -15662,10 +15696,12 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        response = accepted_evidence_response(
+        response = GenericWebPromotionWorkflowResponse(
             trace_id=trace_id,
             records=records,
-            result=result,
+            result=GenericWebPromotionWorkflowResponseResult.model_validate(
+                result.model_dump(mode="json")
+            ),
         )
         if should_store_generic_web_promotion_idempotency(result):
             store_apply_idempotency(
@@ -18709,7 +18745,7 @@ def create_launchplane_fastapi_app(
         apply_generic_web_prod_promotion,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=GenericWebProdPromotionResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {
@@ -18738,7 +18774,7 @@ def create_launchplane_fastapi_app(
         dispatch_generic_web_prod_promotion_workflow,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=GenericWebPromotionWorkflowResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {
@@ -20353,8 +20389,7 @@ def create_launchplane_fastapi_app(
         rank_work_graph_snapshot,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
+        response_model=WorkGraphRankResponse,
         operation_id="rank_work_graph_snapshot",
         summary="Rank Launchplane work graph snapshot",
         responses={
@@ -20379,8 +20414,7 @@ def create_launchplane_fastapi_app(
         reconcile_work_graph_issue_inbox,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
+        response_model=WorkGraphIssueInboxReconcileResponse,
         operation_id="reconcile_work_graph_issue_inbox",
         summary="Reconcile Launchplane GitHub issue inbox",
         responses={
@@ -20962,7 +20996,7 @@ def create_launchplane_fastapi_app(
         apply_product_config,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=ProductConfigApplyResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {
