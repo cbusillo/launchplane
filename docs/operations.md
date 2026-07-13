@@ -334,6 +334,20 @@ names are compatibility names for the existing health-monitor observation
 family. Observations are sensor evidence; incident records are keyed by product,
 lane, and health-check name so public, private, and provider failures do not
 overwrite each other.
+
+`public_http` uses the centralized public outbound HTTP policy. Every initial
+destination and redirect hop is resolved independently; all IPv4 and IPv6
+answers must be globally routable, and any private, loopback, link-local,
+multicast, reserved, unspecified, unsupported-family, or mixed public/private
+answer set fails closed before a connection is opened. Launchplane connects to
+the validated socket address directly while retaining the original hostname for
+the HTTP `Host` header and TLS SNI/certificate validation, so the connect step
+does not perform a second DNS lookup. The monitor timeout is shared across
+connect, request, response read, and redirect hops; the operating-system
+resolver still owns its own DNS lookup timeout. `private_http` is intentionally
+separate: only a scoped active private-health endpoint record can select the
+explicit private client, and public checks never fall back to that path.
+
 Notification routing is a separate service-backed policy and delivery concern,
 not lane-owned text config. The initial notification destinations are GitHub
 issues, email, and Discord; each is selected by DB-backed policy and evidenced

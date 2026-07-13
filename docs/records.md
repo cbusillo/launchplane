@@ -483,8 +483,10 @@ a configured transition notification.
 
 These records are the source for the product environment read model's
 `public_ingress` summary. A passing observation is verified evidence, a failing
-observation marks the lane stale/unhealthy, and a skipped private URL is treated
-as unsupported rather than silently healthy.
+observation marks the lane stale/unhealthy, and a public check whose literal or
+resolved destination is non-public records a failing `private_url` observation.
+The `skipped` status remains readable for historical records, but current public
+checks do not treat a private destination as unsupported or silently healthy.
 
 ## Public Ingress Incident Records
 
