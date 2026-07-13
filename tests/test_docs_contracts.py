@@ -2,30 +2,66 @@ import json
 from pathlib import Path
 from unittest import TestCase
 
+from tests.support.workflows import WorkflowInvariantViolation
+from tests.support.workflows import check_ci_aggregate_gate
+from tests.support.workflows import check_fork_runner_isolation
+from tests.support.workflows import check_security_aggregate_gate
+from tests.support.workflows import check_unittest_timing_snapshot
+from tests.support.workflows import load_workflow
+
+
+def _assert_no_workflow_violations(
+    test_case: TestCase,
+    violations: tuple[WorkflowInvariantViolation, ...],
+) -> None:
+    test_case.assertEqual([], [str(violation) for violation in violations])
+
 
 class DocsContractsTests(TestCase):
     def test_required_status_checks_use_fork_aware_aggregate_gates(self) -> None:
         metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
-        ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-        security_workflow = Path(".github/workflows/security.yml").read_text(encoding="utf-8")
+        ci_workflow = load_workflow(".github/workflows/ci.yml")
+        security_workflow = load_workflow(".github/workflows/security.yml")
 
         self.assertEqual(["ci-gate", "security-gate"], metadata["requiredStatusChecks"])
-        self.assertIn("  container_scan_fork:", ci_workflow)
-        self.assertIn("  ci_gate:\n    name: ci-gate", ci_workflow)
-        self.assertIn("STATIC_CHECKS_FORK_RESULT", ci_workflow)
-        self.assertIn("CONTAINER_SCAN_FORK_RESULT", ci_workflow)
-        self.assertIn("FRONTEND_VALIDATE_FORK_RESULT", ci_workflow)
-        self.assertIn("TEST_FORK_RESULT", ci_workflow)
-        self.assertIn("POSTGRES_INTEGRATION_RESULT", ci_workflow)
-        self.assertIn("  workflow_lint_fork:", security_workflow)
-        self.assertIn("  secret_scan_fork:", security_workflow)
-        self.assertIn("  security_gate:\n    name: security-gate", security_workflow)
-        self.assertIn("WORKFLOW_LINT_FORK_RESULT", security_workflow)
-        self.assertIn("SECRET_SCAN_FORK_RESULT", security_workflow)
+        _assert_no_workflow_violations(
+            self,
+            check_fork_runner_isolation(
+                ci_workflow,
+                same_repo_jobs=(
+                    "static_checks",
+                    "container_scan",
+                    "frontend_validate",
+                    "test_timing_snapshot",
+                    "test_shards",
+                    "test",
+                    "postgres_integration",
+                ),
+                fork_jobs=(
+                    "static_checks_fork",
+                    "container_scan_fork",
+                    "frontend_validate_fork",
+                    "test_fork",
+                ),
+            ),
+        )
+        _assert_no_workflow_violations(self, check_ci_aggregate_gate(ci_workflow))
+        _assert_no_workflow_violations(
+            self,
+            check_fork_runner_isolation(
+                security_workflow,
+                same_repo_jobs=("workflow_lint", "secret_scan"),
+                fork_jobs=("workflow_lint_fork", "secret_scan_fork"),
+            ),
+        )
+        _assert_no_workflow_violations(
+            self,
+            check_security_aggregate_gate(security_workflow),
+        )
 
     def test_ci_shards_share_one_unittest_timing_snapshot(self) -> None:
         metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
-        ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        ci_workflow = load_workflow(".github/workflows/ci.yml")
         testing_docs = Path("docs/style/testing.md").read_text(encoding="utf-8")
 
         self.assertEqual(
@@ -44,24 +80,7 @@ class DocsContractsTests(TestCase):
         self.assertIn("uv run --extra dev launchplane ci postgres-integration", testing_docs)
         self.assertIn("12 shards with a 20-test/30-second split threshold", testing_docs)
         self.assertIn("GitHub Actions remains the source of truth", testing_docs)
-        self.assertIn("  postgres_integration:", ci_workflow)
-        self.assertIn("  test_timing_snapshot:", ci_workflow)
-        self.assertIn('UNITTEST_SHARD_COUNT: "12"', ci_workflow)
-        self.assertIn('UNITTEST_MAX_TESTS_PER_TARGET: "20"', ci_workflow)
-        self.assertIn('UNITTEST_MAX_SECONDS_PER_TARGET: "30"', ci_workflow)
-        self.assertIn("name: unittest-timing-snapshot", ci_workflow)
-        self.assertEqual(1, ci_workflow.count("name: Restore unittest timings"))
-        self.assertEqual(2, ci_workflow.count("name: Download unittest timing snapshot"))
-        self.assertEqual(2, ci_workflow.count("overwrite: true"))
-        self.assertEqual(2, ci_workflow.count("retention-days: 30"))
-        self.assertIn("needs: test_timing_snapshot", ci_workflow)
-        self.assertIn("needs: [test_timing_snapshot, test_shards]", ci_workflow)
-        self.assertEqual(
-            3,
-            ci_workflow.count(
-                '--timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"'
-            ),
-        )
+        _assert_no_workflow_violations(self, check_unittest_timing_snapshot(ci_workflow))
 
     def test_frontend_openapi_codegen_gates_are_documented_and_wired(self) -> None:
         metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
