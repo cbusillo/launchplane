@@ -1471,6 +1471,7 @@ def _human_session_payload(session: LaunchplaneHumanSession) -> PayloadDict:
         "session_id": session.session_id,
         "created_at": session.created_at.isoformat(),
         "expires_at": session.expires_at.isoformat(),
+        "csrf_generation": session.csrf_generation,
         "identity": {
             "login": session.identity.login,
             "github_id": session.identity.github_id,
@@ -1487,10 +1488,18 @@ def _human_session_from_payload(payload: PayloadDict) -> LaunchplaneHumanSession
     identity_payload = payload.get("identity")
     if not isinstance(identity_payload, dict):
         raise ValueError("Launchplane human session payload is missing identity.")
+    csrf_generation = payload.get("csrf_generation", 0)
+    if (
+        not isinstance(csrf_generation, int)
+        or isinstance(csrf_generation, bool)
+        or csrf_generation < 0
+    ):
+        raise ValueError("Launchplane human session payload has invalid CSRF generation.")
     return LaunchplaneHumanSession(
         session_id=str(payload.get("session_id") or ""),
         created_at=datetime.fromisoformat(str(payload.get("created_at") or "")),
         expires_at=datetime.fromisoformat(str(payload.get("expires_at") or "")),
+        csrf_generation=csrf_generation,
         identity=GitHubHumanIdentity(
             login=str(identity_payload.get("login") or ""),
             github_id=int(identity_payload.get("github_id") or 0),
@@ -2840,6 +2849,38 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             session.commit()
+
+    def write_session_if_csrf_generation(
+        self,
+        human_session: LaunchplaneHumanSession,
+        *,
+        expected_generation: int,
+    ) -> bool:
+        statement = (
+            select(LaunchplaneHumanSessionRow)
+            .where(LaunchplaneHumanSessionRow.session_id == human_session.session_id)
+            .with_for_update()
+            .limit(1)
+        )
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return False
+            current_session = _human_session_from_payload(row.payload)
+            if current_session.expires_at <= datetime.now(timezone.utc):
+                session.delete(row)
+                session.commit()
+                return False
+            if current_session.csrf_generation != expected_generation:
+                return False
+            row.login = human_session.identity.login
+            row.github_id = human_session.identity.github_id
+            row.role = human_session.identity.role
+            row.created_at = human_session.created_at.isoformat()
+            row.expires_at = human_session.expires_at.isoformat()
+            row.payload = _human_session_payload(human_session)
+            session.commit()
+        return True
 
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self._write_row(

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
 import hmac
 import os
 import secrets
+from threading import RLock
 import warnings
 from typing import TYPE_CHECKING, Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import hashes, hmac as cryptography_hmac
 
@@ -33,6 +35,8 @@ SESSION_COOKIE_NAME = "launchplane_session"
 SESSION_TTL_SECONDS = 14 * 24 * 60 * 60
 SESSION_RENEW_AFTER_SECONDS = 24 * 60 * 60
 OAUTH_STATE_TTL_SECONDS = 10 * 60
+BROWSER_CSRF_HEADER_NAME = "X-CSRF-Token"
+_BROWSER_CSRF_TOKEN_VERSION = "v1"
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,7 @@ class LaunchplaneHumanSession:
     identity: GitHubHumanIdentity
     created_at: datetime
     expires_at: datetime
+    csrf_generation: int = 0
 
 
 class HumanSessionStore(Protocol):
@@ -73,25 +78,49 @@ class HumanSessionStore(Protocol):
 
     def delete_session(self, session_id: str) -> None: ...
 
+    def write_session_if_csrf_generation(
+        self,
+        human_session: LaunchplaneHumanSession,
+        *,
+        expected_generation: int,
+    ) -> bool: ...
+
 
 class InMemoryHumanSessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, LaunchplaneHumanSession] = {}
+        self._lock = RLock()
 
     def write_session(self, session: LaunchplaneHumanSession) -> None:
-        self._sessions[session.session_id] = session
+        with self._lock:
+            self._sessions[session.session_id] = session
 
     def read_session(self, session_id: str) -> LaunchplaneHumanSession | None:
-        session = self._sessions.get(session_id)
-        if session is None:
-            return None
-        if session.expires_at <= datetime.now(timezone.utc):
-            self._sessions.pop(session_id, None)
-            return None
-        return session
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return None
+            if session.expires_at <= datetime.now(timezone.utc):
+                self._sessions.pop(session_id, None)
+                return None
+            return session
 
     def delete_session(self, session_id: str) -> None:
-        self._sessions.pop(session_id, None)
+        with self._lock:
+            self._sessions.pop(session_id, None)
+
+    def write_session_if_csrf_generation(
+        self,
+        human_session: LaunchplaneHumanSession,
+        *,
+        expected_generation: int,
+    ) -> bool:
+        with self._lock:
+            current_session = self.read_session(human_session.session_id)
+            if current_session is None or current_session.csrf_generation != expected_generation:
+                return False
+            self.write_session(human_session)
+            return True
 
 
 class OAuthLoginStateStore:
@@ -301,6 +330,10 @@ class HumanSessionManager:
         self._session_store = session_store
         self._now = now or _utc_now
 
+    @property
+    def public_origin(self) -> str:
+        return browser_origin_from_url(self._config.public_url)
+
     def issue(self, identity: GitHubHumanIdentity) -> LaunchplaneHumanSession:
         now = self._now()
         session = LaunchplaneHumanSession(
@@ -335,9 +368,47 @@ class HumanSessionManager:
             identity=session.identity,
             created_at=session.created_at,
             expires_at=now + timedelta(seconds=SESSION_TTL_SECONDS),
+            csrf_generation=session.csrf_generation,
         )
-        self._session_store.write_session(renewed_session)
-        return renewed_session
+        if self._session_store.write_session_if_csrf_generation(
+            renewed_session,
+            expected_generation=session.csrf_generation,
+        ):
+            return renewed_session
+        current_session = self._session_store.read_session(session.session_id)
+        if current_session is None or current_session.expires_at <= now:
+            return None
+        return current_session
+
+    def csrf_token(self, session: LaunchplaneHumanSession) -> str:
+        generation = session.csrf_generation
+        if generation < 0:
+            raise ValueError("Launchplane human session CSRF generation must be non-negative.")
+        signature = self._csrf_signature(
+            session_id=session.session_id,
+            generation=generation,
+        )
+        return f"{_BROWSER_CSRF_TOKEN_VERSION}.{generation}.{signature}"
+
+    def consume_csrf_token(
+        self,
+        session: LaunchplaneHumanSession,
+        token: str,
+    ) -> LaunchplaneHumanSession | None:
+        normalized_token = token.strip()
+        generation = _csrf_token_generation(normalized_token)
+        if generation is None or generation != session.csrf_generation:
+            return None
+        expected_token = self.csrf_token(session)
+        if not hmac.compare_digest(normalized_token, expected_token):
+            return None
+        rotated_session = replace(session, csrf_generation=generation + 1)
+        if not self._session_store.write_session_if_csrf_generation(
+            rotated_session,
+            expected_generation=generation,
+        ):
+            return None
+        return rotated_session
 
     def delete_cookie_session(self, cookie_header: str) -> None:
         signed_session_id = _cookie_value(cookie_header, SESSION_COOKIE_NAME)
@@ -373,6 +444,17 @@ class HumanSessionManager:
         signature = signer.finalize().hex()
         return f"{normalized_session_id}.{signature}"
 
+    def _csrf_signature(self, *, session_id: str, generation: int) -> str:
+        signer = cryptography_hmac.HMAC(
+            self._config.session_secret.encode("utf-8"),
+            hashes.SHA256(),
+        )
+        signer.update(b"launchplane-browser-csrf-v1\0")
+        signer.update(session_id.encode("utf-8"))
+        signer.update(b"\0")
+        signer.update(str(generation).encode("ascii"))
+        return base64.urlsafe_b64encode(signer.finalize()).decode("ascii").rstrip("=")
+
     def _verify_cookie_value(self, cookie_session_id: str) -> str:
         session_id, separator, signature = cookie_session_id.strip().partition(".")
         if not separator or not signature:
@@ -391,6 +473,104 @@ CallableNow = Callable[[], datetime]
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def browser_origin_from_url(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Launchplane browser origin requires an HTTP(S) URL.")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Launchplane browser origin must not include userinfo.")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("Launchplane browser origin has an invalid port.") from error
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = 443 if scheme == "https" else 80
+    port_suffix = f":{port}" if port is not None and port != default_port else ""
+    return f"{scheme}://{host}{port_suffix}"
+
+
+def build_browser_mutation_request_headers(*, origin: str, csrf_token: str) -> dict[str, str]:
+    normalized_token = csrf_token.strip()
+    if not normalized_token:
+        raise ValueError("Launchplane browser mutation CSRF token is required.")
+    return {
+        "Origin": browser_origin_from_url(origin),
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        BROWSER_CSRF_HEADER_NAME: normalized_token,
+    }
+
+
+def validate_browser_mutation_request_headers(
+    *,
+    expected_origin: str,
+    origin_values: tuple[str, ...],
+    sec_fetch_site_values: tuple[str, ...],
+    sec_fetch_mode_values: tuple[str, ...],
+    sec_fetch_dest_values: tuple[str, ...],
+    csrf_token_values: tuple[str, ...],
+) -> str:
+    if not all(
+        len(values) == 1
+        for values in (
+            origin_values,
+            sec_fetch_site_values,
+            sec_fetch_mode_values,
+            sec_fetch_dest_values,
+            csrf_token_values,
+        )
+    ):
+        raise PermissionError("Browser mutation request metadata is invalid.")
+    origin = origin_values[0].strip()
+    parsed_origin = urlsplit(origin)
+    if parsed_origin.path not in {"", "/"} or parsed_origin.query or parsed_origin.fragment:
+        raise PermissionError("Browser mutation request metadata is invalid.")
+    try:
+        normalized_origin = browser_origin_from_url(origin)
+    except ValueError as error:
+        raise PermissionError("Browser mutation request metadata is invalid.") from error
+    if normalized_origin != expected_origin:
+        raise PermissionError("Browser mutation request metadata is invalid.")
+    if sec_fetch_site_values[0].strip().lower() != "same-origin":
+        raise PermissionError("Browser mutation request metadata is invalid.")
+    if sec_fetch_mode_values[0].strip().lower() not in {"cors", "same-origin"}:
+        raise PermissionError("Browser mutation request metadata is invalid.")
+    if sec_fetch_dest_values[0].strip().lower() != "empty":
+        raise PermissionError("Browser mutation request metadata is invalid.")
+    csrf_token = csrf_token_values[0].strip()
+    if not csrf_token:
+        raise PermissionError("Browser mutation request metadata is invalid.")
+    return csrf_token
+
+
+def _csrf_token_generation(token: str) -> int | None:
+    if len(token) > 256:
+        return None
+    version, separator, remainder = token.partition(".")
+    generation_text, generation_separator, signature = remainder.partition(".")
+    if (
+        version != _BROWSER_CSRF_TOKEN_VERSION
+        or not separator
+        or not generation_separator
+        or not signature
+        or not generation_text.isascii()
+        or not generation_text.isdecimal()
+        or len(generation_text) > 20
+    ):
+        return None
+    try:
+        generation = int(generation_text)
+    except ValueError:
+        return None
+    if generation_text != str(generation):
+        return None
+    return generation
 
 
 def _cookie_value(cookie_header: str, name: str) -> str:
