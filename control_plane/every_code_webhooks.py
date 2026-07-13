@@ -5,6 +5,8 @@ import json
 import subprocess
 from typing import Callable, Sequence
 
+from control_plane.child_process_errors import ChildProcessFailure, normalize_child_process_failure
+
 
 EVERY_CODE_WEBHOOK_EVENTS = (
     "issues",
@@ -65,6 +67,8 @@ class EveryCodeWebhookSyncResult:
     hook_id: int = 0
     events: tuple[str, ...] = EVERY_CODE_WEBHOOK_EVENTS
     error: str = ""
+    error_code: str = ""
+    error_correlation_id: str = ""
     labels_synced: int = 0
 
     def as_payload(self) -> dict[str, object]:
@@ -78,7 +82,17 @@ class EveryCodeWebhookSyncResult:
             payload["hook_id"] = self.hook_id
         if self.error:
             payload["error"] = self.error
+        if self.error_code:
+            payload["error_code"] = self.error_code
+        if self.error_correlation_id:
+            payload["error_correlation_id"] = self.error_correlation_id
         return payload
+
+
+class EveryCodeWebhookSyncError(RuntimeError):
+    def __init__(self, failure: ChildProcessFailure) -> None:
+        super().__init__(failure.operator_message())
+        self.failure = failure
 
 
 def sync_every_code_webhooks(
@@ -99,7 +113,16 @@ def sync_every_code_webhooks(
     if not webhook_url.strip():
         raise ValueError("Every Code webhook sync requires webhook_url")
     run = runner or _run_gh
-    repos = _topic_repositories(owner=normalized_owner, topic=topic, runner=run)
+    try:
+        repos = _topic_repositories(owner=normalized_owner, topic=topic, runner=run)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise EveryCodeWebhookSyncError(
+            normalize_child_process_failure(
+                operation="List Every Code webhook repositories",
+                tool="github_cli",
+                exception=error,
+            )
+        ) from error
     results: list[EveryCodeWebhookSyncResult] = []
     for repo in repos:
         try:
@@ -112,9 +135,21 @@ def sync_every_code_webhooks(
                     runner=run,
                 )
             )
-        except subprocess.CalledProcessError as error:
-            detail = (error.stderr or error.stdout or str(error)).strip()
-            results.append(EveryCodeWebhookSyncResult(repo=repo, status="error", error=detail))
+        except (OSError, subprocess.CalledProcessError) as error:
+            failure = normalize_child_process_failure(
+                operation="Sync Every Code webhook",
+                tool="github_cli",
+                exception=error,
+            )
+            results.append(
+                EveryCodeWebhookSyncResult(
+                    repo=repo,
+                    status="error",
+                    error=failure.detail,
+                    error_code=failure.code,
+                    error_correlation_id=failure.correlation_id,
+                )
+            )
     return tuple(results)
 
 
