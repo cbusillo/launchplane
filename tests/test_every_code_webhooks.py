@@ -59,6 +59,21 @@ class _WebhookRunner:
         raise AssertionError(f"unexpected command: {command}")
 
 
+class _FailingWebhookRunner(_WebhookRunner):
+    def __init__(self, *, error_detail: str) -> None:
+        super().__init__(hooks={"cbusillo/code": [], "cbusillo/launchplane": []})
+        self.error_detail = error_detail
+
+    def __call__(
+        self, args: Sequence[str], input_text: str | None
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(args)
+        if command[:3] == ("gh", "api", "repos/cbusillo/code/hooks"):
+            self.calls.append((command, input_text))
+            raise subprocess.CalledProcessError(1, command, stderr=self.error_detail)
+        return super().__call__(args, input_text)
+
+
 class EveryCodeWebhookSyncTests(unittest.TestCase):
     def test_sync_updates_existing_hook_and_creates_missing_hook(self) -> None:
         webhook_url = "https://launchplane.example/v1/every-code/github-webhook"
@@ -150,6 +165,38 @@ class EveryCodeWebhookSyncTests(unittest.TestCase):
                 webhook_url="",
                 runner=_WebhookRunner(hooks={}),
             )
+
+    def test_sync_redacts_github_cli_failure_in_operator_payload(self) -> None:
+        runner = _FailingWebhookRunner(
+            error_detail=(
+                "github_pat_example_token_value\n"
+                "Authorization: Bearer example-bearer-value\n"
+                "https://operator:password@hooks.internal/private\n"
+                "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN=example-token-value"
+            )
+        )
+
+        results = sync_every_code_webhooks(
+            owner="cbusillo",
+            webhook_secret="secret",
+            webhook_url="https://launchplane.example/v1/every-code/github-webhook",
+            runner=runner,
+        )
+
+        failed = results[0]
+        payload = json.dumps(failed.as_payload())
+        self.assertEqual(failed.status, "error")
+        self.assertEqual(failed.error_code, "github_cli_failed")
+        self.assertTrue(failed.error_correlation_id.startswith("cpf-"))
+        self.assertNotIn("\n", failed.error)
+        for value in (
+            "github_pat_example_token_value",
+            "example-bearer-value",
+            "operator:password",
+            "hooks.internal",
+            "example-token-value",
+        ):
+            self.assertNotIn(value, payload)
 
     def test_cli_sync_webhooks_requires_webhook_url_config(self) -> None:
         result = CliRunner().invoke(

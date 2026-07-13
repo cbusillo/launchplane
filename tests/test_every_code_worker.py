@@ -224,6 +224,7 @@ class _Runner:
         self,
         *,
         fail_issue_comment: bool = False,
+        issue_comment_error_detail: str = "rate limited",
         existing_branch: bool = False,
         pr_view_payload: dict[str, object] | None = None,
         pr_list_payload: list[dict[str, object]] | None = None,
@@ -231,6 +232,7 @@ class _Runner:
     ) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.fail_issue_comment = fail_issue_comment
+        self.issue_comment_error_detail = issue_comment_error_detail
         self.existing_branch = existing_branch
         self.pr_view_payload = pr_view_payload
         self.pr_list_payload = pr_list_payload
@@ -268,7 +270,7 @@ class _Runner:
             if env is None or env.get("GH_TOKEN") != "bot-token":
                 return subprocess.CompletedProcess(args, 1, "", "missing bot token")
             if self.fail_issue_comment:
-                return subprocess.CompletedProcess(args, 1, "", "rate limited")
+                return subprocess.CompletedProcess(args, 1, "", self.issue_comment_error_detail)
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[:3] == ("gh", "issue", "edit"):
             if env is None or env.get("GH_TOKEN") != "bot-token":
@@ -336,6 +338,25 @@ class _GoneSessionRunner(_Runner):
             return subprocess.CompletedProcess(args, 1, "", "no session")
         if args[0] == "tmux" and args[1] == "new-session":
             return subprocess.CompletedProcess(args, 0, "", "")
+        return super().__call__(args, env)
+
+
+class _FailingFeedbackRelaunchRunner(_GoneSessionRunner):
+    def __call__(
+        self, args: Sequence[str], env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if args[0] == "tmux" and args[1] == "new-session":
+            self.calls.append(tuple(args))
+            return subprocess.CompletedProcess(
+                args,
+                1,
+                "",
+                (
+                    "Authorization: Basic dXNlcjpzaG91bGQtbm90LXN1cnZpdmU=\n"
+                    "Cookie: launchplane_session=short-cookie-secret\n"
+                    "connect worker.internal failed"
+                ),
+            )
         return super().__call__(args, env)
 
 
@@ -1961,6 +1982,63 @@ class EveryCodeWorkerTests(unittest.TestCase):
         )
         self.assertIn("Every Code received new PR feedback", launch_call[-1])
 
+    def test_apply_feedback_persists_redacted_relaunch_failure(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            finished_record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "finished_at": "2026-05-06T19:05:00Z",
+                    "updated_at": "2026-05-06T19:05:00Z",
+                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    "result_summary": "Opened PR.",
+                }
+            )
+            store.write_every_code_work_request_record(finished_record)
+            store.write_every_code_pr_feedback_record(_feedback_record())
+
+            result = apply_every_code_pr_feedback_for_host(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=temporary_root / "state",
+                runner=_FailingFeedbackRelaunchRunner(),
+            )
+            feedback = store.list_every_code_pr_feedback_records(limit=1)[0]
+            blocked_record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            )
+
+        payload = json.dumps({"result": result.as_payload(), "record": blocked_record.model_dump()})
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.error_code, "child_process_failed")
+        self.assertTrue(result.error_correlation_id.startswith("cpf-"))
+        self.assertEqual(feedback.status, "pending")
+        self.assertEqual(blocked_record.state, "blocked")
+        self.assertIn(f"error_code={result.error_code}", blocked_record.error_message)
+        self.assertIn(
+            f"correlation_id={result.error_correlation_id}", blocked_record.error_message
+        )
+        for value in (
+            "dXNlcjpzaG91bGQtbm90LXN1cnZpdmU=",
+            "short-cookie-secret",
+            "worker.internal",
+        ):
+            self.assertNotIn(value, payload)
+
     def test_apply_feedback_ignores_request_closed_by_linked_pr(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
@@ -2786,6 +2864,55 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertFalse(any(call[1] == "new-session" for call in runner.calls))
         self.assertTrue(any(call[:3] == ("gh", "issue", "comment") for call in runner.calls))
 
+    def test_run_once_redacts_claim_comment_failure_before_persistence(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            runner = _Runner(
+                fail_issue_comment=True,
+                issue_comment_error_detail=(
+                    "Bearer example-bearer-value\n"
+                    "Authorization: Basic dXNlcjpzaG91bGQtbm90LXN1cnZpdmU=\n"
+                    "Cookie: launchplane_session=short-cookie-secret\n"
+                    "GH_TOKEN=example-token-value\n"
+                    "https://operator:password@worker.internal/private/log\n"
+                    "/Users/operator/.config/launchplane/token"
+                ),
+            )
+
+            result = run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=runner,
+            )
+            record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
+
+        payload = json.dumps({"result": result.as_payload(), "record": record.model_dump()})
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.error_code, "github_cli_failed")
+        self.assertTrue(result.error_correlation_id.startswith("cpf-"))
+        self.assertIn(f"error_code={result.error_code}", record.error_message)
+        self.assertIn(f"correlation_id={result.error_correlation_id}", record.error_message)
+        self.assertNotIn("error_code", record.model_dump())
+        self.assertNotIn("error_correlation_id", record.model_dump())
+        self.assertNotIn("\n", record.error_message)
+        for value in (
+            "example-bearer-value",
+            "dXNlcjpzaG91bGQtbm90LXN1cnZpdmU=",
+            "short-cookie-secret",
+            "example-token-value",
+            "operator:password",
+            "worker.internal",
+            "/Users/operator/.config/launchplane/token",
+        ):
+            self.assertNotIn(value, payload)
+
     def test_run_once_blocks_before_launch_without_claim_comment_token(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
@@ -2806,7 +2933,9 @@ class EveryCodeWorkerTests(unittest.TestCase):
                     runner=runner,
                 )
             record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
-            worktree_exists = every_code_worktree_root(_queued_record(), state_dir=state_dir).exists()
+            worktree_exists = every_code_worktree_root(
+                _queued_record(), state_dir=state_dir
+            ).exists()
 
         self.assertEqual(result.status, "blocked")
         self.assertEqual(record.state, "blocked")

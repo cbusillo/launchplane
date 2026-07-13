@@ -415,8 +415,10 @@ class GitHubIssueInboxTests(unittest.TestCase):
 
         self.assertEqual(result.failed_count, 1)
         self.assertEqual(result.items[0].action, "failed")
-        self.assertIn("[redacted]", result.items[0].detail)
+        self.assertIn("[redacted-token]", result.items[0].detail)
         self.assertNotIn("ghp_supersecret", result.items[0].detail)
+        self.assertEqual(result.items[0].error_code, "github_cli_failed")
+        self.assertTrue(result.items[0].error_correlation_id.startswith("cpf-"))
 
     def test_reconcile_issue_inbox_apply_reports_empty_and_already_present(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

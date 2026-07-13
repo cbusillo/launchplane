@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import click
 
+from control_plane.child_process_errors import normalize_child_process_failure
 from control_plane.contracts.work_graph_read_model import (
     WorkGraphPlanningIssueFacts,
     WorkItemFocus,
@@ -156,14 +157,19 @@ def _run_gh_json(command: Sequence[str]) -> dict[str, Any]:
             text=True,
         )
     except FileNotFoundError as error:
-        raise click.ClickException(
-            "GitHub CLI is required for work graph Project facts."
-        ) from error
+        failure = normalize_child_process_failure(
+            operation="Load GitHub Project planning facts",
+            tool="github_cli",
+            exception=error,
+        )
+        raise click.ClickException(failure.operator_message()) from error
     except subprocess.CalledProcessError as error:
-        detail = (error.stderr or error.stdout or str(error)).strip()
-        raise click.ClickException(
-            f"GitHub Project planning facts could not be loaded: {detail}"
-        ) from error
+        failure = normalize_child_process_failure(
+            operation="Load GitHub Project planning facts",
+            tool="github_cli",
+            exception=error,
+        )
+        raise click.ClickException(failure.operator_message()) from error
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as error:
@@ -298,18 +304,23 @@ def _run_optional_gh_json(command: Sequence[str]) -> object | None:
             text=True,
         )
     except FileNotFoundError as error:
-        raise click.ClickException(
-            "GitHub CLI is required for work graph Project facts."
-        ) from error
+        failure = normalize_child_process_failure(
+            operation="Load GitHub Project planning signals",
+            tool="github_cli",
+            exception=error,
+        )
+        raise click.ClickException(failure.operator_message()) from error
     except subprocess.CalledProcessError as error:
         if error.returncode == 8 and tuple(command[1:3]) == ("pr", "checks"):
             return [{"bucket": "pending"}]
-        detail = (error.stderr or error.stdout or str(error)).strip()
-        if "not found" in detail.lower() or "does not exist" in detail.lower():
+        failure = normalize_child_process_failure(
+            operation="Load GitHub Project planning signals",
+            tool="github_cli",
+            exception=error,
+        )
+        if "not found" in failure.detail.lower() or "does not exist" in failure.detail.lower():
             return None
-        raise click.ClickException(
-            f"GitHub Project planning signals could not be loaded: {detail}"
-        ) from error
+        raise click.ClickException(failure.operator_message()) from error
     try:
         payload: object = json.loads(result.stdout)
         return payload
