@@ -129,6 +129,7 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 from control_plane.service_auth import GitHubHumanIdentity
 from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
@@ -1749,6 +1750,339 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             session.merge(row)
             session.commit()
+
+    def _after_product_authority_bundle_step(self, step_name: str) -> None:
+        return None
+
+    def _merge_authority_row(self, session: Any, row: Base, *, step_name: str) -> None:
+        session.merge(row)
+        self._after_product_authority_bundle_step(step_name)
+
+    def _product_profile_row(
+        self, record: LaunchplaneProductProfileRecord
+    ) -> LaunchplaneProductProfileRow:
+        return LaunchplaneProductProfileRow(
+            product=record.product,
+            display_name=record.display_name,
+            repository=record.repository,
+            driver_id=record.driver_id,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _dokploy_target_id_row(
+        self, record: DokployTargetIdRecord
+    ) -> LaunchplaneDokployTargetIdRow:
+        return LaunchplaneDokployTargetIdRow(
+            context=record.context,
+            instance=record.instance,
+            target_id=record.target_id,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _dokploy_target_row(self, record: DokployTargetRecord) -> LaunchplaneDokployTargetRow:
+        return LaunchplaneDokployTargetRow(
+            context=record.context,
+            instance=record.instance,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _provider_target_row(self, record: ProviderTargetRecord) -> LaunchplaneProviderTargetRow:
+        return LaunchplaneProviderTargetRow(
+            context=record.context,
+            instance=record.instance,
+            provider_id=record.provider_id,
+            target_category=record.target_category,
+            target_id=record.target_id,
+            display_name=record.display_name,
+            provider_target_type=record.provider_target_type,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _runtime_environment_row(
+        self, record: RuntimeEnvironmentRecord
+    ) -> LaunchplaneRuntimeEnvironmentRow:
+        return LaunchplaneRuntimeEnvironmentRow(
+            scope=record.scope,
+            context=record.context,
+            instance=record.instance,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _runtime_environment_delete_event_row(
+        self, event: RuntimeEnvironmentDeleteEvent
+    ) -> LaunchplaneRuntimeEnvironmentDeleteEventRow:
+        return LaunchplaneRuntimeEnvironmentDeleteEventRow(
+            event_id=event.event_id,
+            scope=event.scope,
+            context=event.context,
+            instance=event.instance,
+            recorded_at=event.recorded_at,
+            payload=self._payload_dict(event),
+        )
+
+    def _secret_row(self, record: SecretRecord) -> LaunchplaneSecretRow:
+        return LaunchplaneSecretRow(
+            secret_id=record.secret_id,
+            scope=record.scope,
+            integration=record.integration,
+            name=record.name,
+            context=record.context,
+            instance=record.instance,
+            status=record.status,
+            current_version_id=record.current_version_id,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _secret_version_row(self, version: SecretVersion) -> LaunchplaneSecretVersionRow:
+        return LaunchplaneSecretVersionRow(
+            version_id=version.version_id,
+            secret_id=version.secret_id,
+            created_at=version.created_at,
+            payload=self._payload_dict(version),
+        )
+
+    def _secret_binding_row(self, binding: SecretBinding) -> LaunchplaneSecretBindingRow:
+        return LaunchplaneSecretBindingRow(
+            binding_id=binding.binding_id,
+            secret_id=binding.secret_id,
+            integration=binding.integration,
+            binding_key=binding.binding_key,
+            context=binding.context,
+            instance=binding.instance,
+            status=binding.status,
+            updated_at=binding.updated_at,
+            payload=self._payload_dict(binding),
+        )
+
+    def _secret_audit_event_row(self, event: SecretAuditEvent) -> LaunchplaneSecretAuditEventRow:
+        return LaunchplaneSecretAuditEventRow(
+            event_id=event.event_id,
+            secret_id=event.secret_id,
+            event_type=event.event_type,
+            recorded_at=event.recorded_at,
+            payload=self._payload_dict(event),
+        )
+
+    def _environment_inventory_row(self, record: EnvironmentInventory) -> LaunchplaneInventoryRow:
+        return LaunchplaneInventoryRow(
+            context=record.context,
+            instance=record.instance,
+            artifact_id=_artifact_id_from_model(record),
+            source_git_ref=record.source_git_ref,
+            updated_at=record.updated_at,
+            deployment_record_id=record.deployment_record_id,
+            promotion_record_id=record.promotion_record_id,
+            promoted_from_instance=record.promoted_from_instance,
+            payload=self._payload_dict(record),
+        )
+
+    def _release_tuple_row(self, record: ReleaseTupleRecord) -> LaunchplaneReleaseTupleRow:
+        return LaunchplaneReleaseTupleRow(
+            context=record.context,
+            channel=record.channel,
+            tuple_id=record.tuple_id,
+            artifact_id=record.artifact_id,
+            minted_at=record.minted_at,
+            provenance=record.provenance,
+            payload=self._payload_dict(record),
+        )
+
+    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
+        if not bundle.requires_write():
+            return
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            for delete_item in bundle.delete_runtime_environments:
+                row = session.scalar(
+                    self._runtime_environment_statement(
+                        scope=delete_item.expected_record.scope,
+                        context=delete_item.expected_record.context,
+                        instance=delete_item.expected_record.instance,
+                        for_update=True,
+                    )
+                )
+                if row is None:
+                    raise FileNotFoundError("Runtime environment record was already deleted.")
+                current_record = self._read_payload(
+                    model_type=RuntimeEnvironmentRecord,
+                    payload=row.payload,
+                )
+                if self._payload_dict(current_record) != self._payload_dict(
+                    delete_item.expected_record
+                ):
+                    raise ValueError("Runtime environment record changed during bundle write.")
+                session.delete(row)
+                self._after_product_authority_bundle_step("delete_runtime_environment")
+                self._merge_authority_row(
+                    session,
+                    self._runtime_environment_delete_event_row(delete_item.event),
+                    step_name="write_runtime_environment_delete_event",
+                )
+
+            for provider_target_delete in bundle.delete_provider_targets:
+                self._delete_current_authority_row(
+                    session=session,
+                    orm_model=LaunchplaneProviderTargetRow,
+                    model_type=ProviderTargetRecord,
+                    filters=(
+                        LaunchplaneProviderTargetRow.context == provider_target_delete.context,
+                        LaunchplaneProviderTargetRow.instance == provider_target_delete.instance,
+                    ),
+                    expected_record=provider_target_delete,
+                    label="Provider target record",
+                    step_name="delete_provider_target",
+                )
+            for target_id_delete in bundle.delete_dokploy_target_ids:
+                self._delete_current_authority_row(
+                    session=session,
+                    orm_model=LaunchplaneDokployTargetIdRow,
+                    model_type=DokployTargetIdRecord,
+                    filters=(
+                        LaunchplaneDokployTargetIdRow.context == target_id_delete.context,
+                        LaunchplaneDokployTargetIdRow.instance == target_id_delete.instance,
+                    ),
+                    expected_record=target_id_delete,
+                    label="Dokploy target ID record",
+                    step_name="delete_dokploy_target_id",
+                )
+            for target_delete in bundle.delete_dokploy_targets:
+                self._delete_current_authority_row(
+                    session=session,
+                    orm_model=LaunchplaneDokployTargetRow,
+                    model_type=DokployTargetRecord,
+                    filters=(
+                        LaunchplaneDokployTargetRow.context == target_delete.context,
+                        LaunchplaneDokployTargetRow.instance == target_delete.instance,
+                    ),
+                    expected_record=target_delete,
+                    label="Dokploy target record",
+                    step_name="delete_dokploy_target",
+                )
+
+            for profile_record in bundle.product_profiles:
+                self._merge_authority_row(
+                    session,
+                    self._product_profile_row(profile_record),
+                    step_name="write_product_profile",
+                )
+            for target_record in bundle.dokploy_targets:
+                self._merge_authority_row(
+                    session,
+                    self._dokploy_target_row(target_record),
+                    step_name="write_dokploy_target",
+                )
+            for target_id_record in bundle.dokploy_target_ids:
+                self._merge_authority_row(
+                    session,
+                    self._dokploy_target_id_row(target_id_record),
+                    step_name="write_dokploy_target_id",
+                )
+            for provider_target_record in bundle.provider_targets:
+                self._merge_authority_row(
+                    session,
+                    self._provider_target_row(provider_target_record),
+                    step_name="write_provider_target",
+                )
+            for runtime_record in bundle.runtime_environments:
+                self._merge_authority_row(
+                    session,
+                    self._runtime_environment_row(runtime_record),
+                    step_name="write_runtime_environment",
+                )
+            for version in bundle.secret_versions:
+                self._merge_authority_row(
+                    session,
+                    self._secret_version_row(version),
+                    step_name="write_secret_version",
+                )
+            for secret_record in bundle.secret_records:
+                self._merge_authority_row(
+                    session, self._secret_row(secret_record), step_name="write_secret_record"
+                )
+            for binding in bundle.secret_bindings:
+                self._merge_authority_row(
+                    session,
+                    self._secret_binding_row(binding),
+                    step_name="write_secret_binding",
+                )
+            for event in bundle.secret_audit_events:
+                self._merge_authority_row(
+                    session,
+                    self._secret_audit_event_row(event),
+                    step_name="write_secret_audit_event",
+                )
+            for inventory_record in bundle.environment_inventory:
+                self._merge_authority_row(
+                    session,
+                    self._environment_inventory_row(inventory_record),
+                    step_name="write_environment_inventory",
+                )
+            for release_record in bundle.release_tuples:
+                self._merge_authority_row(
+                    session,
+                    self._release_tuple_row(release_record),
+                    step_name="write_release_tuple",
+                )
+            if bundle.idempotency_record is not None:
+                self._merge_authority_row(
+                    session,
+                    self._idempotency_row(bundle.idempotency_record),
+                    step_name="write_idempotency",
+                )
+            session.commit()
+
+    def _delete_current_authority_row(
+        self,
+        *,
+        session: Any,
+        orm_model: type[Base],
+        model_type: type[RecordModel],
+        filters: Sequence[object],
+        expected_record: RecordModel,
+        label: str,
+        step_name: str,
+    ) -> None:
+        statement = select(orm_model).where(*cast(Any, filters)).limit(1)
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        row = session.scalar(statement)
+        if row is None:
+            raise FileNotFoundError(f"{label} was already deleted.")
+        current_record = self._read_payload(
+            model_type=model_type,
+            payload=cast(_PayloadRow, row).payload,
+        )
+        if self._payload_dict(current_record) != self._payload_dict(expected_record):
+            raise ValueError(f"{label} changed during bundle write.")
+        session.delete(row)
+        self._after_product_authority_bundle_step(step_name)
+
+    def _runtime_environment_statement(
+        self,
+        *,
+        scope: str,
+        context: str,
+        instance: str,
+        for_update: bool = False,
+    ) -> Any:
+        statement = (
+            select(LaunchplaneRuntimeEnvironmentRow)
+            .where(
+                LaunchplaneRuntimeEnvironmentRow.scope == scope,
+                LaunchplaneRuntimeEnvironmentRow.context == context,
+                LaunchplaneRuntimeEnvironmentRow.instance == instance,
+            )
+            .limit(1)
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return statement
 
     def _read_model(
         self,
@@ -3845,19 +4179,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
-        self._write_row(
-            LaunchplaneInventoryRow(
-                context=record.context,
-                instance=record.instance,
-                artifact_id=_artifact_id_from_model(record),
-                source_git_ref=record.source_git_ref,
-                updated_at=record.updated_at,
-                deployment_record_id=record.deployment_record_id,
-                promotion_record_id=record.promotion_record_id,
-                promoted_from_instance=record.promoted_from_instance,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._environment_inventory_row(record))
 
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
@@ -5215,17 +5537,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> None:
-        self._write_row(
-            LaunchplaneReleaseTupleRow(
-                context=record.context,
-                channel=record.channel,
-                tuple_id=record.tuple_id,
-                artifact_id=record.artifact_id,
-                minted_at=record.minted_at,
-                provenance=record.provenance,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._release_tuple_row(record))
 
     def read_release_tuple_record(
         self, *, context_name: str, channel_name: str
@@ -5284,16 +5596,7 @@ class PostgresRecordStore(HumanSessionStore):
         return records
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None:
-        self._write_row(
-            LaunchplaneProductProfileRow(
-                product=record.product,
-                display_name=record.display_name,
-                repository=record.repository,
-                driver_id=record.driver_id,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._product_profile_row(record))
 
     def compare_and_write_product_profile_record(
         self,
@@ -6161,15 +6464,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None:
-        self._write_row(
-            LaunchplaneDokployTargetIdRow(
-                context=record.context,
-                instance=record.instance,
-                target_id=record.target_id,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._dokploy_target_id_row(record))
 
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
@@ -6222,14 +6517,7 @@ class PostgresRecordStore(HumanSessionStore):
             return "deleted"
 
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
-        self._write_row(
-            LaunchplaneDokployTargetRow(
-                context=record.context,
-                instance=record.instance,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._dokploy_target_row(record))
 
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
@@ -6293,19 +6581,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_provider_target_record(self, record: ProviderTargetRecord) -> None:
-        self._write_row(
-            LaunchplaneProviderTargetRow(
-                context=record.context,
-                instance=record.instance,
-                provider_id=record.provider_id,
-                target_category=record.target_category,
-                target_id=record.target_id,
-                display_name=record.display_name,
-                provider_target_type=record.provider_target_type,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._provider_target_row(record))
 
     def create_provider_target_record_if_absent(
         self, record: ProviderTargetRecord
@@ -6387,15 +6663,7 @@ class PostgresRecordStore(HumanSessionStore):
             return "deleted"
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
-        self._write_row(
-            LaunchplaneRuntimeEnvironmentRow(
-                scope=record.scope,
-                context=record.context,
-                instance=record.instance,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._runtime_environment_row(record))
 
     def delete_runtime_environment_record_with_event(
         self,
@@ -6438,16 +6706,7 @@ class PostgresRecordStore(HumanSessionStore):
             return "deleted"
 
     def write_runtime_environment_delete_event(self, event: RuntimeEnvironmentDeleteEvent) -> None:
-        self._write_row(
-            LaunchplaneRuntimeEnvironmentDeleteEventRow(
-                event_id=event.event_id,
-                scope=event.scope,
-                context=event.context,
-                instance=event.instance,
-                recorded_at=event.recorded_at,
-                payload=self._payload_dict(event),
-            )
-        )
+        self._write_row(self._runtime_environment_delete_event_row(event))
 
     def list_runtime_environment_delete_events(
         self,
@@ -6692,20 +6951,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_record(self, record: SecretRecord) -> None:
-        self._write_row(
-            LaunchplaneSecretRow(
-                secret_id=record.secret_id,
-                scope=record.scope,
-                integration=record.integration,
-                name=record.name,
-                context=record.context,
-                instance=record.instance,
-                status=record.status,
-                current_version_id=record.current_version_id,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._secret_row(record))
 
     def read_secret_record(self, secret_id: str) -> SecretRecord:
         return self._read_model(
@@ -6768,14 +7014,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_version(self, version: SecretVersion) -> None:
-        self._write_row(
-            LaunchplaneSecretVersionRow(
-                version_id=version.version_id,
-                secret_id=version.secret_id,
-                created_at=version.created_at,
-                payload=self._payload_dict(version),
-            )
-        )
+        self._write_row(self._secret_version_row(version))
 
     def read_secret_version(self, version_id: str) -> SecretVersion:
         return self._read_model(
@@ -6796,19 +7035,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_binding(self, binding: SecretBinding) -> None:
-        self._write_row(
-            LaunchplaneSecretBindingRow(
-                binding_id=binding.binding_id,
-                secret_id=binding.secret_id,
-                integration=binding.integration,
-                binding_key=binding.binding_key,
-                context=binding.context,
-                instance=binding.instance,
-                status=binding.status,
-                updated_at=binding.updated_at,
-                payload=self._payload_dict(binding),
-            )
-        )
+        self._write_row(self._secret_binding_row(binding))
 
     def list_secret_bindings(
         self,
@@ -6837,19 +7064,17 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_audit_event(self, event: SecretAuditEvent) -> None:
-        self._write_row(
-            LaunchplaneSecretAuditEventRow(
-                event_id=event.event_id,
-                secret_id=event.secret_id,
-                event_type=event.event_type,
-                recorded_at=event.recorded_at,
-                payload=self._payload_dict(event),
-            )
-        )
+        self._write_row(self._secret_audit_event_row(event))
 
-    def write_secret_rotations(self, rotations: tuple[SecretRotationWrite, ...]) -> None:
+    def write_secret_rotations(
+        self,
+        rotations: tuple[SecretRotationWrite, ...],
+        *,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> None:
         ordered_rotations = tuple(sorted(rotations, key=lambda item: item.record.secret_id))
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
             for rotation in ordered_rotations:
                 statement = (
                     select(LaunchplaneSecretRow)
@@ -6867,37 +7092,15 @@ class PostgresRecordStore(HumanSessionStore):
                 version = rotation.version
                 record = rotation.record
                 event = rotation.audit_event
-                session.merge(
-                    LaunchplaneSecretVersionRow(
-                        version_id=version.version_id,
-                        secret_id=version.secret_id,
-                        created_at=version.created_at,
-                        payload=self._payload_dict(version),
-                    )
-                )
-                session.merge(
-                    LaunchplaneSecretRow(
-                        secret_id=record.secret_id,
-                        scope=record.scope,
-                        integration=record.integration,
-                        name=record.name,
-                        context=record.context,
-                        instance=record.instance,
-                        status=record.status,
-                        current_version_id=record.current_version_id,
-                        updated_at=record.updated_at,
-                        payload=self._payload_dict(record),
-                    )
-                )
-                session.merge(
-                    LaunchplaneSecretAuditEventRow(
-                        event_id=event.event_id,
-                        secret_id=event.secret_id,
-                        event_type=event.event_type,
-                        recorded_at=event.recorded_at,
-                        payload=self._payload_dict(event),
-                    )
-                )
+                session.merge(self._secret_version_row(version))
+                self._after_product_authority_bundle_step("write_secret_rotation_version")
+                session.merge(self._secret_row(record))
+                self._after_product_authority_bundle_step("write_secret_rotation_record")
+                session.merge(self._secret_audit_event_row(event))
+                self._after_product_authority_bundle_step("write_secret_rotation_audit")
+            if idempotency_record is not None:
+                session.merge(self._idempotency_row(idempotency_record))
+                self._after_product_authority_bundle_step("write_idempotency")
             session.commit()
 
     def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]:

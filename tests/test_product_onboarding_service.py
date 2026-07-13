@@ -10,6 +10,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.product_onboarding_service import build_product_onboarding_service_result
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 
 
@@ -65,6 +66,20 @@ class _ProductOnboardingStore:
 
     def write_secret_binding(self, binding: SecretBinding) -> None:
         self.secret_bindings.append(binding)
+
+    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
+        for profile_record in bundle.product_profiles:
+            self.write_product_profile_record(profile_record)
+        for target_record in bundle.dokploy_targets:
+            self.write_dokploy_target_record(target_record)
+        for target_id_record in bundle.dokploy_target_ids:
+            self.write_dokploy_target_id_record(target_id_record)
+        for provider_target_record in bundle.provider_targets:
+            self.write_provider_target_record(provider_target_record)
+        for runtime_record in bundle.runtime_environments:
+            self.write_runtime_environment_record(runtime_record)
+        for binding in bundle.secret_bindings:
+            self.write_secret_binding(binding)
 
 
 class ProductOnboardingServiceTests(unittest.TestCase):

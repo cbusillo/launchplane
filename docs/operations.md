@@ -835,22 +835,26 @@ Current derived-state behavior:
   response is redacted and the route rejects nested runtime or secret targets
   that differ from the authorized top-level context/instance. It fails closed
   when secret writes are requested without valid Launchplane secret-key
-  configuration in the service runtime or when no active runtime key-safety policy allows the
-  requested binding. When apply changes runtime-environment keys for a tracked
-  Dokploy target, the response includes a required `live_target_runtime_apply`
-  `next_actions` item. Treat product-config apply as a record mutation only
-  until that next action has been dry-run and applied through
-  `/v1/live-target-runtime/apply`; redeploying the same app image does not sync
-  the live Dokploy target environment.
+  configuration in the service runtime or when no active runtime key-safety
+  policy allows the requested binding. Apply commits through a product
+  authority bundle, so runtime-environment records, managed-secret versions,
+  current secret pointers, bindings, audit events, and idempotency completion
+  publish together or roll back together. When apply changes
+  runtime-environment keys for a tracked Dokploy target, the response includes a
+  required `live_target_runtime_apply` `next_actions` item. Treat
+  product-config apply as a record mutation only until that next action has
+  been dry-run and applied through `/v1/live-target-runtime/apply`; redeploying
+  the same app image does not sync the live Dokploy target environment.
 - `POST /v1/secrets/reencrypt` is the normal shared/production root-rotation
   path. Run `mode: "dry-run"` with `secret.reencrypt.dry-run`, then submit
   `mode: "apply"` with the returned plan digest, a reason, an
   `Idempotency-Key`, and `secret.reencrypt.apply`. Launchplane atomically writes
-  the new versions, current-version pointers, and audit events. If the mutation
-  commits before idempotency evidence is persisted, a retry with the same
-  request recovers from the rotation audit token instead of rotating again.
-  Direct `launchplane secrets reencrypt --apply` remains bootstrap/recovery-only
-  and requires explicit direct-DB acknowledgement.
+  the new versions, current-version pointers, audit events, and idempotency
+  completion evidence in one storage transaction. A failure before commit leaves
+  current pointers and replay evidence unchanged; a committed apply is replayable
+  by the same idempotency key. Direct `launchplane secrets reencrypt --apply`
+  remains bootstrap/recovery-only and requires explicit direct-DB
+  acknowledgement.
 - The operator UI uses the same service route. It requires a successful dry-run
   result before enabling apply, clears rendered secret input values after each
   submit, and shows only key/action/count metadata from Launchplane responses.

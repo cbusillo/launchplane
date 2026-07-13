@@ -16,12 +16,15 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
 )
+from control_plane.contracts.secret_record import SecretAuditEvent, SecretRecord, SecretVersion
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
     latest_active_runtime_key_safety_policy,
 )
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundleStore
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -30,7 +33,11 @@ ProductConfigMode = Literal["dry-run", "apply"]
 _VALID_SECRET_SCOPES: tuple[SecretScope, ...] = ("global", "context", "context_instance")
 
 
-class ProductConfigStore(control_plane_secrets.SecretWriteStore, Protocol):
+class ProductConfigStore(
+    control_plane_secrets.SecretWriteStore,
+    ProductAuthorityBundleStore,
+    Protocol,
+):
     def list_runtime_environment_records(
         self, *, context_name: str = "", instance_name: str = ""
     ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
@@ -50,6 +57,17 @@ class _SecretBindingLookupKwargs(TypedDict, total=False):
     context_name: str
     instance_name: str
     limit: int | None
+
+
+class _ProductConfigSecretWritePlan(TypedDict):
+    secret_id: str
+    action: str
+    updated_at: str
+    configured_binding: SecretBinding
+    secret_versions: list[SecretVersion]
+    secret_records: list[SecretRecord]
+    secret_bindings: list[SecretBinding]
+    secret_audit_events: list[SecretAuditEvent]
 
 
 class ProductConfigError(ValueError):
@@ -123,6 +141,26 @@ def apply_product_config_bundle(
     actor: str,
     source_label: str,
 ) -> dict[str, object]:
+    result, bundle = plan_product_config_authority_bundle(
+        record_store=record_store,
+        payload=payload,
+        mode=mode,
+        actor=actor,
+        source_label=source_label,
+    )
+    if mode == "apply":
+        record_store.write_product_authority_bundle(bundle)
+    return result
+
+
+def plan_product_config_authority_bundle(
+    *,
+    record_store: ProductConfigStore,
+    payload: dict[str, object],
+    mode: ProductConfigMode,
+    actor: str,
+    source_label: str,
+) -> tuple[dict[str, object], ProductAuthorityBundle]:
     if mode not in {"dry-run", "apply"}:
         raise ProductConfigError("Product config mode must be 'dry-run' or 'apply'.")
     product, context_name, instance_name = product_context(payload)
@@ -155,13 +193,17 @@ def apply_product_config_bundle(
         secrets=secrets,
     )
     apply_changes = mode == "apply"
+    secret_versions: list[SecretVersion] = []
+    secret_records: list[SecretRecord] = []
+    secret_bindings: list[SecretBinding] = []
+    secret_audit_events: list[SecretAuditEvent] = []
     for secret in secrets:
         planned_action, existing_secret_id = _product_config_secret_current_action(
             record_store=record_store,
             secret=secret,
         )
         if apply_changes:
-            result = control_plane_secrets.write_secret_value(
+            secret_plan = _plan_product_config_secret_write(
                 record_store=record_store,
                 scope=cast(SecretScope, str(secret["scope"])),
                 integration=str(secret["integration"]),
@@ -174,30 +216,21 @@ def apply_product_config_bundle(
                 actor=actor,
                 source_label=source_label,
             )
-            secret_id = str(result["secret_id"])
-            binding_key = str(secret["binding_key"])
-            now = utc_now_timestamp()
-            _retire_disabled_runtime_secret_placeholders(
-                record_store=record_store,
-                configured_binding=SecretBinding(
-                    binding_id=control_plane_secrets.expected_secret_binding_id(
-                        secret_id=secret_id,
-                        binding_key=binding_key,
-                    ),
-                    secret_id=secret_id,
-                    integration=str(secret["integration"]),
-                    binding_key=binding_key,
-                    context=str(secret["context"]),
-                    instance=str(secret["instance"]),
-                    status="configured",
-                    created_at=now,
-                    updated_at=now,
+            secret_id = secret_plan["secret_id"]
+            secret_versions.extend(secret_plan["secret_versions"])
+            secret_records.extend(secret_plan["secret_records"])
+            secret_bindings.extend(secret_plan["secret_bindings"])
+            secret_audit_events.extend(secret_plan["secret_audit_events"])
+            secret_bindings.extend(
+                _planned_disabled_runtime_secret_placeholder_retirements(
+                    record_store=record_store,
+                    configured_binding=secret_plan["configured_binding"],
+                    updated_at=secret_plan["updated_at"],
                 ),
-                updated_at=now,
             )
             secret_summaries.append(
                 _summarize_product_config_secret_input(
-                    action=str(result["action"]),
+                    action=secret_plan["action"],
                     secret=secret,
                     secret_id=secret_id,
                 )
@@ -210,8 +243,9 @@ def apply_product_config_bundle(
                 secret_id=existing_secret_id,
             )
         )
+    runtime_records: tuple[RuntimeEnvironmentRecord, ...] = ()
     if apply_changes and runtime_record is not None and runtime_summary["action"] != "unchanged":
-        record_store.write_runtime_environment_record(runtime_record)
+        runtime_records = (runtime_record,)
         runtime_summary = {
             **runtime_summary,
             "record": summarize_runtime_environment_record(runtime_record),
@@ -220,7 +254,7 @@ def apply_product_config_bundle(
     changed_secret_count = sum(
         1 for item in secret_summaries if item["action"] in {"created", "rotated"}
     )
-    return {
+    result: dict[str, object] = {
         "status": "ok",
         "mode": mode,
         "product": product,
@@ -238,6 +272,14 @@ def apply_product_config_bundle(
             "secret_change_count": changed_secret_count,
         },
     }
+    bundle = ProductAuthorityBundle(
+        runtime_environments=runtime_records,
+        secret_versions=tuple(secret_versions),
+        secret_records=tuple(secret_records),
+        secret_bindings=tuple(secret_bindings),
+        secret_audit_events=tuple(secret_audit_events),
+    )
+    return result, bundle
 
 
 def _default_runtime_scope(*, context_name: str, instance_name: str) -> str:
@@ -482,6 +524,122 @@ def _product_config_secret_current_action(
     return "rotated", existing_record.secret_id
 
 
+def _plan_product_config_secret_write(
+    *,
+    record_store: control_plane_secrets.SecretWriteStore,
+    scope: SecretScope,
+    integration: str,
+    name: str,
+    plaintext_value: str,
+    binding_key: str,
+    context_name: str = "",
+    instance_name: str = "",
+    description: str = "",
+    actor: str = "",
+    source_label: str = "manual",
+) -> _ProductConfigSecretWritePlan:
+    if not plaintext_value.strip():
+        raise ProductConfigError("Product config secret values must be non-empty.")
+    now = utc_now_timestamp()
+    existing_record = record_store.find_secret_record(
+        scope=scope,
+        integration=integration,
+        name=name,
+        context=context_name,
+        instance=instance_name,
+    )
+    secret_id = (
+        existing_record.secret_id
+        if existing_record is not None
+        else control_plane_secrets.expected_secret_id(
+            integration=integration,
+            name=name,
+            context=context_name,
+            instance=instance_name,
+        )
+    )
+    created_at = existing_record.created_at if existing_record is not None else now
+    binding = SecretBinding(
+        binding_id=control_plane_secrets.expected_secret_binding_id(
+            secret_id=secret_id,
+            binding_key=binding_key,
+        ),
+        secret_id=secret_id,
+        integration=integration,
+        binding_key=binding_key,
+        context=context_name,
+        instance=instance_name,
+        created_at=created_at,
+        updated_at=now,
+    )
+    if existing_record is not None:
+        current_version = record_store.read_secret_version(existing_record.current_version_id)
+        if (
+            control_plane_secrets._decrypt_secret_value(
+                current_version.ciphertext,
+                current_version.key_id,
+            )
+            == plaintext_value
+        ):
+            return {
+                "secret_id": secret_id,
+                "action": "unchanged",
+                "updated_at": now,
+                "configured_binding": binding,
+                "secret_versions": [],
+                "secret_records": [],
+                "secret_bindings": [binding],
+                "secret_audit_events": [],
+            }
+    action = "created" if existing_record is None else "rotated"
+    version_id = control_plane_secrets._version_id(secret_id=secret_id)
+    ciphertext, key_id = control_plane_secrets._encrypt_secret_value(plaintext_value)
+    version = SecretVersion(
+        version_id=version_id,
+        secret_id=secret_id,
+        created_at=now,
+        created_by=actor,
+        key_id=key_id,
+        ciphertext=ciphertext,
+    )
+    record = SecretRecord(
+        secret_id=secret_id,
+        scope=scope,
+        integration=integration,
+        name=name,
+        context=context_name,
+        instance=instance_name,
+        description=description,
+        current_version_id=version_id,
+        created_at=created_at,
+        updated_at=now,
+        updated_by=actor,
+        last_validated_at=existing_record.last_validated_at if existing_record is not None else "",
+    )
+    event = SecretAuditEvent(
+        event_id=control_plane_secrets._audit_event_id(
+            secret_id=secret_id,
+            event_type=action,
+        ),
+        secret_id=secret_id,
+        event_type="created" if action == "created" else "rotated",
+        recorded_at=now,
+        actor=actor,
+        detail=f"Launchplane {action} managed secret from {source_label}.",
+        metadata={"source": source_label, "binding_key": binding_key},
+    )
+    return {
+        "secret_id": secret_id,
+        "action": action,
+        "updated_at": now,
+        "configured_binding": binding,
+        "secret_versions": [version],
+        "secret_records": [record],
+        "secret_bindings": [binding],
+        "secret_audit_events": [event],
+    }
+
+
 def _evaluate_product_config_runtime_key_safety(
     *,
     record_store: ProductConfigStore,
@@ -638,6 +796,48 @@ def _retire_disabled_runtime_secret_placeholders(
                 }
             )
         )
+
+
+def _planned_disabled_runtime_secret_placeholder_retirements(
+    *,
+    record_store: ProductConfigStore,
+    configured_binding: SecretBinding,
+    updated_at: str,
+) -> tuple[SecretBinding, ...]:
+    if (
+        configured_binding.integration
+        != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+    ):
+        return ()
+    context_name = configured_binding.context.strip()
+    instance_name = configured_binding.instance.strip()
+    lookup_kwargs: _SecretBindingLookupKwargs = {
+        "integration": configured_binding.integration,
+        "limit": None,
+    }
+    if context_name:
+        lookup_kwargs["context_name"] = context_name
+    if instance_name:
+        lookup_kwargs["instance_name"] = instance_name
+    retirements: list[SecretBinding] = []
+    for binding in record_store.list_secret_bindings(**lookup_kwargs):
+        if binding.binding_id == configured_binding.binding_id:
+            continue
+        if binding.context != context_name or binding.instance != instance_name:
+            continue
+        if binding.binding_key != configured_binding.binding_key:
+            continue
+        if binding.status != "disabled":
+            continue
+        retirements.append(
+            binding.model_copy(
+                update={
+                    "integration": f"retired:{binding.integration}",
+                    "updated_at": updated_at,
+                }
+            )
+        )
+    return tuple(retirements)
 
 
 def _product_config_runtime_environment_class(

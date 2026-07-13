@@ -22,6 +22,9 @@ from control_plane.contracts.secret_record import (
     SecretRecord,
     SecretVersion,
 )
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundleStore
+from control_plane.storage.product_authority_bundle import RuntimeEnvironmentDelete
 from control_plane.workflows.provider_target_dual_write import (
     prepare_provider_target_from_dokploy_records,
 )
@@ -82,7 +85,11 @@ class ProductContextCutoverReadStore(Protocol):
     def list_release_tuple_records(self) -> tuple[ReleaseTupleRecord, ...]: ...
 
 
-class ProductContextCutoverStore(ProductContextCutoverReadStore, Protocol):
+class ProductContextCutoverStore(
+    ProductContextCutoverReadStore,
+    ProductAuthorityBundleStore,
+    Protocol,
+):
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None: ...
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None: ...
@@ -328,6 +335,16 @@ def _target_instance_exists(
         getattr(record, "context", "") == target_context
         and getattr(record, "instance", "") == instance
         for record in records
+    )
+
+
+def _source_provider_targets(
+    *, record_store: ProductContextCutoverStore, source_context: str
+) -> tuple[ProviderTargetRecord, ...]:
+    return tuple(
+        record
+        for record in record_store.list_physical_provider_target_records()
+        if record.context == source_context
     )
 
 
@@ -584,9 +601,23 @@ def apply_product_context_cutover(
     record_store: ProductContextCutoverStore,
     request: ProductContextCutoverRequest,
 ) -> dict[str, object]:
+    result, bundle = plan_product_context_cutover_authority_bundle(
+        record_store=record_store,
+        request=request,
+    )
+    if request.mode == "apply":
+        record_store.write_product_authority_bundle(bundle)
+    return result
+
+
+def plan_product_context_cutover_authority_bundle(
+    *,
+    record_store: ProductContextCutoverStore,
+    request: ProductContextCutoverRequest,
+) -> tuple[dict[str, object], ProductAuthorityBundle]:
     plan = plan_product_context_cutover(record_store=record_store, request=request)
     if request.mode == "dry-run":
-        return plan
+        return plan, ProductAuthorityBundle()
 
     now = utc_now_timestamp()
     source_target_records = tuple(
@@ -650,6 +681,7 @@ def apply_product_context_cutover(
             target_id_record=target_id_record,
         )
 
+    runtime_records: list[RuntimeEnvironmentRecord] = []
     for runtime_record in record_store.list_runtime_environment_records(
         context_name=request.source_context
     ):
@@ -660,7 +692,7 @@ def apply_product_context_cutover(
             )
         )
         if not exists:
-            record_store.write_runtime_environment_record(
+            runtime_records.append(
                 runtime_record.model_copy(
                     update={
                         "context": request.target_context,
@@ -670,15 +702,10 @@ def apply_product_context_cutover(
                 )
             )
 
-    for copied_target_record in planned_target_records.values():
-        record_store.write_dokploy_target_record(copied_target_record)
-
-    for copied_target_id_record in planned_target_id_records.values():
-        record_store.write_dokploy_target_id_record(copied_target_id_record)
-
-    for provider_target_record in planned_provider_target_records.values():
-        record_store.write_provider_target_record(provider_target_record)
-
+    secret_versions: list[SecretVersion] = []
+    secret_records: list[SecretRecord] = []
+    secret_bindings: list[SecretBinding] = []
+    secret_audit_events: list[SecretAuditEvent] = []
     for secret_record in record_store.list_secret_records(
         context_name=request.source_context,
         limit=None,
@@ -701,7 +728,7 @@ def apply_product_context_cutover(
             secret_id=target_secret_id,
             source_version_id=source_version.version_id,
         )
-        record_store.write_secret_version(
+        secret_versions.append(
             SecretVersion(
                 version_id=target_version_id,
                 secret_id=target_secret_id,
@@ -712,7 +739,7 @@ def apply_product_context_cutover(
                 ciphertext=source_version.ciphertext,
             )
         )
-        record_store.write_secret_record(
+        secret_records.append(
             SecretRecord(
                 secret_id=target_secret_id,
                 scope=secret_record.scope,
@@ -740,7 +767,7 @@ def apply_product_context_cutover(
             )
             if item.secret_id == secret_record.secret_id
         ):
-            record_store.write_secret_binding(
+            secret_bindings.append(
                 SecretBinding(
                     binding_id=_target_secret_binding_id(
                         secret_id=target_secret_id,
@@ -757,7 +784,7 @@ def apply_product_context_cutover(
                     updated_at=now,
                 )
             )
-        record_store.write_secret_audit_event(
+        secret_audit_events.append(
             SecretAuditEvent(
                 event_id=_target_secret_event_id(
                     secret_id=target_secret_id,
@@ -777,6 +804,7 @@ def apply_product_context_cutover(
             )
         )
 
+    inventory_records: list[EnvironmentInventory] = []
     for inventory_record in tuple(
         item
         for item in record_store.list_environment_inventory()
@@ -788,12 +816,13 @@ def apply_product_context_cutover(
             for target in record_store.list_environment_inventory()
         )
         if not exists:
-            record_store.write_environment_inventory(
+            inventory_records.append(
                 inventory_record.model_copy(
                     update={"context": request.target_context, "updated_at": now}
                 )
             )
 
+    release_tuple_records: list[ReleaseTupleRecord] = []
     for release_tuple_record in tuple(
         item
         for item in record_store.list_release_tuple_records()
@@ -805,7 +834,7 @@ def apply_product_context_cutover(
             for target in record_store.list_release_tuple_records()
         )
         if not exists:
-            record_store.write_release_tuple_record(
+            release_tuple_records.append(
                 release_tuple_record.model_copy(
                     update={
                         "context": request.target_context,
@@ -823,9 +852,23 @@ def apply_product_context_cutover(
         now=now,
         source_label=request.source_label,
     )
+    profile_records: tuple[LaunchplaneProductProfileRecord, ...] = ()
     if _profile_semantic_payload(profile) != _profile_semantic_payload(next_profile):
-        record_store.write_product_profile_record(next_profile)
-    return {**plan, "applied": True}
+        profile_records = (next_profile,)
+    bundle = ProductAuthorityBundle(
+        product_profiles=profile_records,
+        dokploy_targets=tuple(planned_target_records.values()),
+        dokploy_target_ids=tuple(planned_target_id_records.values()),
+        provider_targets=tuple(planned_provider_target_records.values()),
+        runtime_environments=tuple(runtime_records),
+        secret_versions=tuple(secret_versions),
+        secret_records=tuple(secret_records),
+        secret_bindings=tuple(secret_bindings),
+        secret_audit_events=tuple(secret_audit_events),
+        environment_inventory=tuple(inventory_records),
+        release_tuples=tuple(release_tuple_records),
+    )
+    return {**plan, "applied": True}, bundle
 
 
 def plan_legacy_context_cleanup(
@@ -973,35 +1016,53 @@ def apply_legacy_context_cleanup(
     record_store: ProductContextCutoverStore,
     request: LegacyContextCleanupRequest,
 ) -> dict[str, object]:
+    result, bundle = plan_legacy_context_cleanup_authority_bundle(
+        record_store=record_store,
+        request=request,
+    )
+    if request.mode == "apply":
+        record_store.write_product_authority_bundle(bundle)
+    return result
+
+
+def plan_legacy_context_cleanup_authority_bundle(
+    *,
+    record_store: ProductContextCutoverStore,
+    request: LegacyContextCleanupRequest,
+) -> tuple[dict[str, object], ProductAuthorityBundle]:
     plan = plan_legacy_context_cleanup(record_store=record_store, request=request)
     if request.mode == "dry-run":
-        return plan
+        return plan, ProductAuthorityBundle()
     if plan["blocked"]:
         raise ValueError("Legacy context cleanup plan has blocked records.")
 
     now = utc_now_timestamp()
     actor = request.actor or request.source_label
+    runtime_deletes: list[RuntimeEnvironmentDelete] = []
     for runtime_record in record_store.list_runtime_environment_records(
         context_name=request.source_context
     ):
-        status = record_store.delete_runtime_environment_record_with_event(
-            event=_runtime_delete_event(
-                record=runtime_record,
-                actor=actor,
-                source_label=request.source_label,
-                now=now,
-            ),
-            expected_record=runtime_record,
+        runtime_deletes.append(
+            RuntimeEnvironmentDelete(
+                expected_record=runtime_record,
+                event=_runtime_delete_event(
+                    record=runtime_record,
+                    actor=actor,
+                    source_label=request.source_label,
+                    now=now,
+                ),
+            )
         )
-        if status == "changed":
-            raise ValueError("Runtime environment record changed during cleanup.")
 
+    secret_records: list[SecretRecord] = []
+    secret_bindings: list[SecretBinding] = []
+    secret_audit_events: list[SecretAuditEvent] = []
     for secret_record in record_store.list_secret_records(
         context_name=request.source_context,
         limit=None,
     ):
         if secret_record.status != "disabled":
-            record_store.write_secret_record(
+            secret_records.append(
                 secret_record.model_copy(
                     update={
                         "status": "disabled",
@@ -1010,7 +1071,7 @@ def apply_legacy_context_cleanup(
                     }
                 )
             )
-            record_store.write_secret_audit_event(
+            secret_audit_events.append(
                 SecretAuditEvent(
                     event_id=_secret_cleanup_event_id(secret_record.secret_id),
                     secret_id=secret_record.secret_id,
@@ -1027,26 +1088,32 @@ def apply_legacy_context_cleanup(
             )
         for binding in _source_secret_bindings(record_store=record_store, record=secret_record):
             if binding.status != "disabled":
-                record_store.write_secret_binding(
+                secret_bindings.append(
                     binding.model_copy(update={"status": "disabled", "updated_at": now})
                 )
 
-    for target_id_record in tuple(
+    target_id_deletes = tuple(
         item
         for item in record_store.list_dokploy_target_id_records()
         if item.context == request.source_context
-    ):
-        status = record_store.delete_dokploy_target_id_record(expected_record=target_id_record)
-        if status == "changed":
-            raise ValueError("Dokploy target ID record changed during cleanup.")
+    )
 
-    for dokploy_target_record in tuple(
+    target_deletes = tuple(
         item
         for item in record_store.list_dokploy_target_records()
         if item.context == request.source_context
-    ):
-        status = record_store.delete_dokploy_target_record(expected_record=dokploy_target_record)
-        if status == "changed":
-            raise ValueError("Dokploy target record changed during cleanup.")
-
-    return {**plan, "applied": True}
+    )
+    provider_target_deletes = _source_provider_targets(
+        record_store=record_store,
+        source_context=request.source_context,
+    )
+    bundle = ProductAuthorityBundle(
+        delete_runtime_environments=tuple(runtime_deletes),
+        secret_records=tuple(secret_records),
+        secret_bindings=tuple(secret_bindings),
+        secret_audit_events=tuple(secret_audit_events),
+        delete_provider_targets=provider_target_deletes,
+        delete_dokploy_target_ids=target_id_deletes,
+        delete_dokploy_targets=target_deletes,
+    )
+    return {**plan, "applied": True}, bundle
