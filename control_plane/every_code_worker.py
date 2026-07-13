@@ -2648,6 +2648,7 @@ def _persist_every_code_pr_feedback_failure(
             state="blocked",
             host=host,
             updated_at=utc_now_timestamp(),
+            fencing_token=record.fencing_token,
             error_message=failure.operator_message(),
         ),
     )
@@ -2905,6 +2906,7 @@ def finish_every_code_work_request(
             state="done" if succeeded else "blocked",
             host=host.strip(),
             updated_at=utc_now_timestamp(),
+            fencing_token=record.fencing_token,
             result_pr_url=resolved_pr_url,
             result_summary=summary,
             error_message="" if succeeded else summary,
@@ -4412,12 +4414,14 @@ def _block_every_code_request(
     error_code = failure.code if failure is not None else ""
     error_correlation_id = failure.correlation_id if failure is not None else ""
     persisted_error = failure.operator_message() if failure is not None else safe_detail
+    current_record = record_store.read_every_code_work_request_record(record.request_id)
     blocked_record = apply_every_code_work_request_status(
-        record_store.read_every_code_work_request_record(record.request_id),
+        current_record,
         EveryCodeWorkRequestStatusUpdate(
             state="blocked",
             host=host,
             updated_at=utc_now_timestamp(),
+            fencing_token=current_record.fencing_token,
             error_message=persisted_error,
         ),
     )

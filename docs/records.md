@@ -1139,9 +1139,10 @@ preflights.
   integer equal to the cumulative claim count for this request id), and `attempt`
   (same value, kept separately for readability). The fencing token starts at 1 on
   the first claim and increments on every subsequent requeue-and-reclaim cycle.
-  Status updates and heartbeats that carry a non-zero `fencing_token` are
-  rejected with a conflict error if the token does not match the stored value,
-  preventing stale-owner writes after a lease expires and a new worker reclaims.
+  Once a record has a non-zero fence, service status updates must carry that
+  exact `fencing_token`; missing and stale tokens are rejected before the row is
+  changed. Heartbeats enforce the same host-and-fence match, preventing
+  stale-owner writes after a lease expires and a new worker reclaims.
 - Workers send periodic heartbeats through `POST /v1/every-code/work-requests/heartbeat`
   to extend `lease_expires_at` before it lapses. A heartbeat is rejected (409)
   when the host or fencing token does not match, or when the request is already
@@ -1152,7 +1153,15 @@ preflights.
   `safe_requeue` (attempt ≤ 3) resets the record to `queued` with all lease
   fields cleared so another worker can pick it up; `manual_review` (attempt > 3)
   marks the record `blocked` with an error message requiring operator inspection
-  before any requeue.
+  before any requeue. Recovery locks and compares the exact stale snapshot, so a
+  concurrent heartbeat or status transition wins cleanly instead of being
+  overwritten by a stale recovery decision.
+- Worker-token claim and rerun requests use a stable synthetic idempotency scope.
+  PostgreSQL claim commits the claimed record and completed replay evidence in
+  one transaction; rerun uses compare-and-write with the completed response in
+  the same transaction. Same-key retries replay the original response, changed
+  payloads conflict, and a lost HTTP response does not permit a second claim or
+  rerun mutation.
 - The local worker handoff is `uv run launchplane every-code run` for polling or
   `uv run launchplane every-code run-once` for a single scan. Each pass applies
   trusted PR feedback, reconciles preview gates and ready preview labels, removes

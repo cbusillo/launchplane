@@ -235,19 +235,29 @@ VeriReel product paths:
     worker-token callers and bearer-token callers with
     `every_code_work_request.claim`, record-store claim capability checks,
     `404 not_found` for missing requests, `409 work_request_already_claimed`
-    for non-queued requests, and workflow `Idempotency-Key` replay/conflict
-    handling)
+    for non-queued requests, and bearer or worker-token `Idempotency-Key`
+    replay/conflict handling; PostgreSQL commits the claim and completed replay
+    evidence atomically)
+  - `POST /v1/every-code/work-requests/heartbeat` (native FastAPI for Every Code
+    worker-token callers and authorized bearer callers, extending the lease only
+    when host and fencing token still match the active record)
+  - `POST /v1/every-code/work-requests/recover-stale` (native FastAPI for Every
+    Code worker-token callers and bearer-token callers with
+    `every_code_work_request.update`, using a locked stale-snapshot compare to
+    requeue bounded attempts or block for manual review)
   - `POST /v1/every-code/work-requests/status` (native FastAPI for Every Code
     worker-token callers and bearer-token callers with
     `every_code_work_request.update`, replay-before-write idempotency handling,
-    record-store status capability checks, `404 not_found` for missing requests,
-    and blocked-notification delivery)
+    record-store status capability checks, exact fencing-token enforcement for
+    leased requests, `404 not_found` for missing requests, and
+    blocked-notification delivery)
   - `POST /v1/every-code/work-requests/rerun` (native FastAPI for Every Code
     worker-token callers and bearer-token callers with
     `every_code_work_request.rerun`, approved `every_code_rerun` write-intent
     evidence, workflow replay-before-write idempotency handling, record-store
-    rerun capability checks, `404 not_found` for missing requests, and
-    terminal-only requeue semantics)
+    rerun capability checks, `404 not_found` for missing requests, terminal-only
+    compare-and-write requeue semantics, and atomic replay evidence for bearer
+    and worker-token callers)
   - `POST /v1/every-code/pr-feedback` (native FastAPI for Every Code
     worker-token callers, direct PR-feedback record writes, and DB-backed
     storage capability enforcement without idempotency state)

@@ -1,7 +1,7 @@
 """add Every Code work request leases
 
 Revision ID: be91f3a5c7d2
-Revises: c9d1e3f5a7b9
+Revises: d0e2f4a6b8c0
 Create Date: 2026-07-13 00:00:00.000000+00:00
 """
 
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 
 
 revision: str = "be91f3a5c7d2"
-down_revision: str | None = "c9d1e3f5a7b9"
+down_revision: str | None = "d0e2f4a6b8c0"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

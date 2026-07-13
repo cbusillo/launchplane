@@ -42,8 +42,11 @@ from control_plane.contracts.every_code_notifications import (
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestHeartbeat,
     EveryCodeWorkRequestRecord,
+    EveryCodeWorkRequestStatusUpdate,
+    apply_every_code_work_request_status,
     claim_every_code_work_request,
     heartbeat_every_code_work_request,
+    recover_stale_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
@@ -4099,6 +4102,9 @@ class PostgresRecordStore(HumanSessionStore):
         host: str,
         claimed_at: str,
         lease_seconds: int = 1800,
+        idempotency_record_factory: (
+            Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
+        ) = None,
     ) -> EveryCodeWorkRequestRecord | None:
         with self._session_factory() as session:
             statement = (
@@ -4120,14 +4126,16 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if claimed_record is None:
                 return None
-            row.state = claimed_record.state
-            row.updated_at = claimed_record.updated_at
-            row.claimed_by_host = claimed_record.claimed_by_host
-            row.lease_expires_at = claimed_record.lease_expires_at
-            row.fencing_token = claimed_record.fencing_token
-            row.attempt = claimed_record.attempt
-            row.payload = self._payload_dict(claimed_record)
-            session.commit()
+            self._sync_every_code_work_request_row(row, claimed_record)
+            if idempotency_record_factory is not None:
+                session.merge(self._idempotency_row(idempotency_record_factory(claimed_record)))
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                if idempotency_record_factory is not None:
+                    return None
+                raise
             return claimed_record
 
     def heartbeat_every_code_work_request_record(
@@ -4138,7 +4146,9 @@ class PostgresRecordStore(HumanSessionStore):
         fencing_token: int,
         heartbeat_at: str,
         lease_expires_at: str,
+        lease_seconds: int = 1800,
     ) -> bool:
+        del lease_seconds
         with self._session_factory() as session:
             statement = (
                 select(LaunchplaneEveryCodeWorkRequestRow)
@@ -4162,11 +4172,72 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if updated is None:
                 return False
-            row.lease_expires_at = updated.lease_expires_at
-            row.updated_at = updated.updated_at
-            row.payload = self._payload_dict(updated)
+            self._sync_every_code_work_request_row(row, updated)
             session.commit()
             return True
+
+    def update_every_code_work_request_status_record(
+        self,
+        *,
+        request_id: str,
+        update: EveryCodeWorkRequestStatusUpdate,
+    ) -> EveryCodeWorkRequestRecord:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneEveryCodeWorkRequestRow)
+                .where(LaunchplaneEveryCodeWorkRequestRow.request_id == request_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(request_id)
+            record = self._read_payload(model_type=EveryCodeWorkRequestRecord, payload=row.payload)
+            if record.fencing_token > 0 and update.fencing_token != record.fencing_token:
+                raise ValueError(
+                    f"Every Code status update fencing token {update.fencing_token} "
+                    f"does not match record fencing token {record.fencing_token}"
+                )
+            updated = apply_every_code_work_request_status(record, update)
+            self._sync_every_code_work_request_row(row, updated)
+            session.commit()
+            return updated
+
+    def compare_and_write_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        record: EveryCodeWorkRequestRecord,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> Literal["updated", "changed", "missing"]:
+        if expected_record.request_id != record.request_id:
+            raise ValueError("Every Code compare-and-write requires matching request IDs")
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneEveryCodeWorkRequestRow)
+                .where(LaunchplaneEveryCodeWorkRequestRow.request_id == expected_record.request_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                return "missing"
+            current = self._read_payload(model_type=EveryCodeWorkRequestRecord, payload=row.payload)
+            if self._payload_dict(current) != self._payload_dict(expected_record):
+                return "changed"
+            self._sync_every_code_work_request_row(row, record)
+            if idempotency_record is not None:
+                session.merge(self._idempotency_row(idempotency_record))
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                if idempotency_record is not None:
+                    return "changed"
+                raise
+            return "updated"
 
     def list_stale_every_code_work_request_records(
         self,
@@ -4190,6 +4261,49 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def recover_stale_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        recovered_at: str,
+    ) -> EveryCodeWorkRequestRecord | None:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneEveryCodeWorkRequestRow)
+                .where(LaunchplaneEveryCodeWorkRequestRow.request_id == expected_record.request_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                return None
+            current = self._read_payload(model_type=EveryCodeWorkRequestRecord, payload=row.payload)
+            if self._payload_dict(current) != self._payload_dict(expected_record):
+                return None
+            if not current.lease_expires_at or current.lease_expires_at >= recovered_at:
+                return None
+            recovered = recover_stale_every_code_work_request(
+                current,
+                recovered_at=recovered_at,
+            )
+            self._sync_every_code_work_request_row(row, recovered)
+            session.commit()
+            return recovered
+
+    def _sync_every_code_work_request_row(
+        self,
+        row: LaunchplaneEveryCodeWorkRequestRow,
+        record: EveryCodeWorkRequestRecord,
+    ) -> None:
+        row.state = record.state
+        row.updated_at = record.updated_at
+        row.claimed_by_host = record.claimed_by_host
+        row.lease_expires_at = record.lease_expires_at
+        row.fencing_token = record.fencing_token
+        row.attempt = record.attempt
+        row.payload = self._payload_dict(record)
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> None:
         self._write_row(

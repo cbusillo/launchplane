@@ -308,6 +308,30 @@ def requeue_every_code_work_request(
     )
 
 
+def recover_stale_every_code_work_request(
+    record: EveryCodeWorkRequestRecord,
+    *,
+    recovered_at: str,
+) -> EveryCodeWorkRequestRecord:
+    if record.state not in {"claimed", "running"}:
+        raise ValueError("Every Code stale recovery requires an active work request")
+    if not recovered_at.strip():
+        raise ValueError("Every Code stale recovery requires recovered_at")
+    if classify_stale_every_code_work_request_recovery(record) == "safe_requeue":
+        return requeue_every_code_work_request(record, queued_at=recovered_at)
+    return record.model_copy(
+        update={
+            "state": "blocked",
+            "finished_at": recovered_at,
+            "updated_at": recovered_at,
+            "error_message": (
+                f"Stale lease expired after {record.attempt} attempt(s); "
+                "manual review required before requeue."
+            ),
+        }
+    )
+
+
 def close_every_code_work_request_for_pull_request(
     record: EveryCodeWorkRequestRecord,
     *,

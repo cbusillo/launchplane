@@ -2,10 +2,11 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from json import JSONDecodeError
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from pydantic import BaseModel
 
@@ -24,8 +25,11 @@ from control_plane.contracts.every_code_notifications import (
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestHeartbeat,
     EveryCodeWorkRequestRecord,
+    EveryCodeWorkRequestStatusUpdate,
+    apply_every_code_work_request_status,
     claim_every_code_work_request,
     heartbeat_every_code_work_request,
+    recover_stale_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
@@ -557,6 +561,9 @@ class FilesystemRecordStore:
         host: str,
         claimed_at: str,
         lease_seconds: int = 1800,
+        idempotency_record_factory: (
+            Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
+        ) = None,
     ) -> EveryCodeWorkRequestRecord | None:
         record = self.read_every_code_work_request_record(request_id)
         claimed_record = claim_every_code_work_request(
@@ -565,6 +572,8 @@ class FilesystemRecordStore:
         if claimed_record is None:
             return None
         self.write_every_code_work_request_record(claimed_record)
+        if idempotency_record_factory is not None:
+            self.write_idempotency_record(idempotency_record_factory(claimed_record))
         return claimed_record
 
     def heartbeat_every_code_work_request_record(
@@ -575,7 +584,9 @@ class FilesystemRecordStore:
         fencing_token: int,
         heartbeat_at: str,
         lease_expires_at: str,
+        lease_seconds: int = 1800,
     ) -> bool:
+        del lease_seconds
         try:
             record = self.read_every_code_work_request_record(request_id)
         except FileNotFoundError:
@@ -593,6 +604,42 @@ class FilesystemRecordStore:
             return False
         self.write_every_code_work_request_record(updated)
         return True
+
+    def update_every_code_work_request_status_record(
+        self,
+        *,
+        request_id: str,
+        update: EveryCodeWorkRequestStatusUpdate,
+    ) -> EveryCodeWorkRequestRecord:
+        record = self.read_every_code_work_request_record(request_id)
+        if record.fencing_token > 0 and update.fencing_token != record.fencing_token:
+            raise ValueError(
+                f"Every Code status update fencing token {update.fencing_token} "
+                f"does not match record fencing token {record.fencing_token}"
+            )
+        updated = apply_every_code_work_request_status(record, update)
+        self.write_every_code_work_request_record(updated)
+        return updated
+
+    def compare_and_write_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        record: EveryCodeWorkRequestRecord,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> Literal["updated", "changed", "missing"]:
+        if expected_record.request_id != record.request_id:
+            raise ValueError("Every Code compare-and-write requires matching request IDs")
+        try:
+            current = self.read_every_code_work_request_record(expected_record.request_id)
+        except FileNotFoundError:
+            return "missing"
+        if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
+            return "changed"
+        self.write_every_code_work_request_record(record)
+        if idempotency_record is not None:
+            self.write_idempotency_record(idempotency_record)
+        return "updated"
 
     def list_stale_every_code_work_request_records(
         self,
@@ -613,6 +660,27 @@ class FilesystemRecordStore:
         ]
         records.sort(key=lambda r: (r.lease_expires_at, r.request_id))
         return tuple(records[:limit])
+
+    def recover_stale_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        recovered_at: str,
+    ) -> EveryCodeWorkRequestRecord | None:
+        try:
+            current = self.read_every_code_work_request_record(expected_record.request_id)
+        except FileNotFoundError:
+            return None
+        if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
+            return None
+        if not current.lease_expires_at or current.lease_expires_at >= recovered_at:
+            return None
+        recovered = recover_stale_every_code_work_request(
+            current,
+            recovered_at=recovered_at,
+        )
+        self.write_every_code_work_request_record(recovered)
+        return recovered
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> Path:
         return self._write_model("launchplane_every_code_pr_feedback", record.feedback_id, record)

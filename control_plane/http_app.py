@@ -88,8 +88,6 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
     _add_seconds_to_timestamp as _add_lease_seconds,
-    apply_every_code_work_request_status,
-    classify_stale_every_code_work_request_recovery,
     requeue_every_code_work_request,
 )
 from control_plane.contracts.idempotency_record import (
@@ -2740,6 +2738,9 @@ class _EveryCodeWorkRequestClaimStore(Protocol):
         host: str,
         claimed_at: str,
         lease_seconds: int = 1800,
+        idempotency_record_factory: (
+            Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
+        ) = None,
     ) -> EveryCodeWorkRequestRecord | None: ...
 
 
@@ -2763,19 +2764,21 @@ class _EveryCodeWorkRequestStaleStore(Protocol):
         limit: int = 50,
     ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
 
-    def write_every_code_work_request_record(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> object: ...
+    def recover_stale_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        recovered_at: str,
+    ) -> EveryCodeWorkRequestRecord | None: ...
 
 
 class _EveryCodeWorkRequestStatusStore(Protocol):
-    def read_every_code_work_request_record(
-        self, request_id: str
+    def update_every_code_work_request_status_record(
+        self,
+        *,
+        request_id: str,
+        update: EveryCodeWorkRequestStatusUpdate,
     ) -> EveryCodeWorkRequestRecord: ...
-
-    def write_every_code_work_request_record(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> object: ...
 
 
 class _EveryCodeWorkRequestRerunStore(Protocol):
@@ -2783,9 +2786,13 @@ class _EveryCodeWorkRequestRerunStore(Protocol):
         self, request_id: str
     ) -> EveryCodeWorkRequestRecord: ...
 
-    def write_every_code_work_request_record(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> object: ...
+    def compare_and_write_every_code_work_request_record(
+        self,
+        *,
+        expected_record: EveryCodeWorkRequestRecord,
+        record: EveryCodeWorkRequestRecord,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> Literal["updated", "changed", "missing"]: ...
 
 
 class _AgentWriteIntentRecordReadStore(Protocol):
@@ -5324,7 +5331,7 @@ def create_launchplane_fastapi_app(
             record_store,
             required_methods=(
                 "list_stale_every_code_work_request_records",
-                "write_every_code_work_request_record",
+                "recover_stale_every_code_work_request_record",
             ),
             capability="Every Code stale work request recovery",
         )
@@ -5335,10 +5342,7 @@ def create_launchplane_fastapi_app(
     ) -> _EveryCodeWorkRequestStatusStore:
         require_every_code_read_methods(
             record_store,
-            required_methods=(
-                "read_every_code_work_request_record",
-                "write_every_code_work_request_record",
-            ),
+            required_methods=("update_every_code_work_request_status_record",),
             capability="Every Code work request status writes",
         )
         return cast(_EveryCodeWorkRequestStatusStore, record_store)
@@ -5350,7 +5354,7 @@ def create_launchplane_fastapi_app(
             record_store,
             required_methods=(
                 "read_every_code_work_request_record",
-                "write_every_code_work_request_record",
+                "compare_and_write_every_code_work_request_record",
             ),
             capability="Every Code work request rerun writes",
         )
@@ -9786,6 +9790,17 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        idempotency_identity = identity or (
+            TerminalAgentIdentity(
+                subject="every-code-worker",
+                token_label="every-code-worker-token",
+            )
+            if worker_token_authorized
+            else None
+        )
         if identity is not None:
             if not resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
@@ -9799,10 +9814,17 @@ def create_launchplane_fastapi_app(
                     code="authorization_denied",
                     message="Workflow cannot claim Every Code work requests.",
                 )
-            _, _, replayed_response = await replay_apply_idempotency(
+        normalized_idempotency_key = ""
+        payload_fingerprint = ""
+        if idempotency_identity is not None:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replayed_response,
+            ) = await replay_apply_idempotency(
                 request=request,
                 record_store=record_store,
-                identity=identity,
+                identity=idempotency_identity,
                 route_path="/v1/every-code/work-requests/claim",
                 idempotency_key=idempotency_key,
                 trace_id=trace_id,
@@ -9828,12 +9850,39 @@ def create_launchplane_fastapi_app(
                 code="invalid_payload",
                 message=str(error),
             ) from error
+
+        def claim_response(record: EveryCodeWorkRequestRecord) -> AcceptedEvidenceResponse:
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={"request_id": record.request_id, "state": record.state},
+                result={"request": record.model_dump(mode="json")},
+            )
+
+        def claim_idempotency_record(
+            record: EveryCodeWorkRequestRecord,
+        ) -> LaunchplaneIdempotencyRecord:
+            if idempotency_identity is None:
+                raise RuntimeError("Every Code claim idempotency requires an identity.")
+            return build_apply_idempotency_record(
+                identity=idempotency_identity,
+                route_path="/v1/every-code/work-requests/claim",
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=claim_response(record),
+            )
+
         try:
             claimed_record = every_code_store.claim_every_code_work_request_record(
                 request_id=claim_request.request_id.strip(),
                 host=claim_request.host.strip(),
                 claimed_at=utc_now_timestamp(),
                 lease_seconds=claim_request.lease_seconds,
+                idempotency_record_factory=(
+                    claim_idempotency_record
+                    if idempotency_identity is not None and normalized_idempotency_key
+                    else None
+                ),
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -9843,17 +9892,25 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         if claimed_record is None:
+            if idempotency_identity is not None and normalized_idempotency_key:
+                _, _, replayed_response = await replay_apply_idempotency(
+                    request=request,
+                    record_store=record_store,
+                    identity=idempotency_identity,
+                    route_path="/v1/every-code/work-requests/claim",
+                    idempotency_key=normalized_idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                )
+                if replayed_response is not None:
+                    return replayed_response
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="work_request_already_claimed",
                 message="Every Code work request is not queued for claim.",
             )
-        return accepted_evidence_response(
-            trace_id=trace_id,
-            records={"request_id": claimed_record.request_id, "state": claimed_record.state},
-            result={"request": claimed_record.model_dump(mode="json")},
-        )
+        return claim_response(claimed_record)
 
     async def write_every_code_work_request_heartbeat(
         request: Request,
@@ -9942,6 +9999,18 @@ def create_launchplane_fastapi_app(
                 code="unauthorized",
                 message="Every Code stale recovery requires authorization.",
             )
+        if identity is not None and not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="every_code_work_request.update",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot recover stale Every Code work requests.",
+            )
         try:
             stale_store = require_every_code_work_request_stale_store(record_store)
         except TypeError as error:
@@ -9959,28 +10028,23 @@ def create_launchplane_fastapi_app(
         requeued: list[str] = []
         flagged: list[str] = []
         for stale in stale_records:
-            policy = classify_stale_every_code_work_request_recovery(stale)
-            if policy == "safe_requeue":
-                requeued_record = requeue_every_code_work_request(stale, queued_at=now)
-                stale_store.write_every_code_work_request_record(requeued_record)
-                requeued.append(stale.request_id)
-            else:
-                flagged_record = stale.model_copy(
-                    update={
-                        "state": "blocked",
-                        "finished_at": now,
-                        "updated_at": now,
-                        "error_message": (
-                            f"Stale lease expired after {stale.attempt} attempt(s); "
-                            "manual review required before requeue."
-                        ),
-                    }
-                )
-                stale_store.write_every_code_work_request_record(flagged_record)
-                flagged.append(stale.request_id)
+            recovered = stale_store.recover_stale_every_code_work_request_record(
+                expected_record=stale,
+                recovered_at=now,
+            )
+            if recovered is None:
+                continue
+            if recovered.state == "queued":
+                requeued.append(recovered.request_id)
+            elif recovered.state == "blocked":
+                flagged.append(recovered.request_id)
         return accepted_evidence_response(
             trace_id=trace_id,
-            records={"checked": len(stale_records), "requeued": len(requeued), "flagged": len(flagged)},
+            records={
+                "checked": len(stale_records),
+                "requeued": len(requeued),
+                "flagged": len(flagged),
+            },
             result={"requeued": requeued, "flagged": flagged},
         )
 
@@ -10056,20 +10120,9 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         try:
-            existing_record = every_code_store.read_every_code_work_request_record(
-                status_request.request_id.strip()
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        try:
-            updated_record = apply_every_code_work_request_status(
-                existing_record,
-                EveryCodeWorkRequestStatusUpdate(
+            updated_record = every_code_store.update_every_code_work_request_status_record(
+                request_id=status_request.request_id.strip(),
+                update=EveryCodeWorkRequestStatusUpdate(
                     state=status_request.state,
                     host=status_request.host,
                     updated_at=status_request.updated_at.strip() or utc_now_timestamp(),
@@ -10079,6 +10132,13 @@ def create_launchplane_fastapi_app(
                     error_message=status_request.error_message,
                 ),
             )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
         except (ValueError, ValidationError) as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -10086,7 +10146,6 @@ def create_launchplane_fastapi_app(
                 code="invalid_payload",
                 message=str(error),
             ) from error
-        every_code_store.write_every_code_work_request_record(updated_record)
         notification_attempts: tuple[EveryCodeNotificationAttemptRecord, ...] = ()
         if updated_record.state == "blocked":
             notification_attempts = deliver_every_code_blocked_notifications(
@@ -10132,6 +10191,17 @@ def create_launchplane_fastapi_app(
         normalized_idempotency_key = ""
         intent_idempotency_key = idempotency_key.strip()
         payload_fingerprint = ""
+        worker_token_authorized = every_code_worker_token_authorized(
+            request.headers.get("Authorization", "")
+        )
+        idempotency_identity = identity or (
+            TerminalAgentIdentity(
+                subject="every-code-worker",
+                token_label="every-code-worker-token",
+            )
+            if worker_token_authorized
+            else None
+        )
         if identity is not None:
             if not resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
@@ -10145,6 +10215,7 @@ def create_launchplane_fastapi_app(
                     code="authorization_denied",
                     message="Workflow cannot rerun Every Code work requests.",
                 )
+        if idempotency_identity is not None:
             (
                 normalized_idempotency_key,
                 payload_fingerprint,
@@ -10152,7 +10223,7 @@ def create_launchplane_fastapi_app(
             ) = await replay_apply_idempotency(
                 request=request,
                 record_store=record_store,
-                identity=identity,
+                identity=idempotency_identity,
                 route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
                 idempotency_key=idempotency_key,
                 trace_id=trace_id,
@@ -10238,7 +10309,6 @@ def create_launchplane_fastapi_app(
                 code="invalid_payload",
                 message=str(error),
             ) from error
-        every_code_store.write_every_code_work_request_record(requeued_record)
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={
@@ -10248,15 +10318,46 @@ def create_launchplane_fastapi_app(
             },
             result={"request": requeued_record.model_dump(mode="json")},
         )
-        if identity is not None:
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
+        idempotency_record = None
+        if idempotency_identity is not None and normalized_idempotency_key:
+            idempotency_record = build_apply_idempotency_record(
+                identity=idempotency_identity,
                 route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
                 idempotency_key=normalized_idempotency_key,
                 request_fingerprint_value=payload_fingerprint,
                 trace_id=trace_id,
                 response=response,
+            )
+        write_status = every_code_store.compare_and_write_every_code_work_request_record(
+            expected_record=existing_record,
+            record=requeued_record,
+            idempotency_record=idempotency_record,
+        )
+        if write_status == "missing":
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"Every Code work request {rerun_request.request_id!r} was not found.",
+            )
+        if write_status == "changed":
+            if idempotency_identity is not None and normalized_idempotency_key:
+                _, _, replayed_response = await replay_apply_idempotency(
+                    request=request,
+                    record_store=record_store,
+                    identity=idempotency_identity,
+                    route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                )
+                if replayed_response is not None:
+                    return replayed_response
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="work_request_changed",
+                message="Every Code work request changed while the rerun was being prepared.",
             )
         return response
 

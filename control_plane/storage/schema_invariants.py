@@ -8,7 +8,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-EXPECTED_ALEMBIC_HEAD_REVISION = "d0e2f4a6b8c0"
+EXPECTED_ALEMBIC_HEAD_REVISION = "be91f3a5c7d2"
 
 
 class SchemaInspectorProtocol(Protocol):
@@ -48,6 +48,21 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_idempotency_records",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_work_requests",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_work_requests",
+        "fencing_token",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_work_requests",
         "attempt",
         ("integer", "int4"),
     ),
@@ -96,6 +111,11 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_idempotency_records",
         "launchplane_idempotency_state_lease_idx",
         ("state", "lease_expires_at", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_every_code_work_requests",
+        "launchplane_every_code_work_requests_lease_idx",
+        ("state", "lease_expires_at"),
     ),
     CriticalIndex(
         "launchplane_odoo_stable_bootstrap_operations",
