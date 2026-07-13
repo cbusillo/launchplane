@@ -28,6 +28,10 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
 )
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    build_merge_train_controller_key,
+)
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapRequest
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
@@ -251,6 +255,39 @@ def _db_only_mutation(
         response_status_code=202,
         response_trace_id=response_trace_id,
         response_payload={"status": "accepted", "trace_id": response_trace_id},
+    )
+
+
+def _merge_train_controller_state(
+    *,
+    updated_at: str = "2026-07-13T00:00:00Z",
+    lease_owner: str = "controller-a",
+    lease_acquired_at: str = "2026-07-13T00:00:00Z",
+    lease_expires_at: str = "2026-07-13T00:05:00Z",
+    status: str = "running",
+) -> MergeTrainControllerStateRecord:
+    repository = "cbusillo/sellyouroutboard"
+    base_branch = "main"
+    return MergeTrainControllerStateRecord(
+        controller_key=build_merge_train_controller_key(
+            repository=repository,
+            base_branch=base_branch,
+        ),
+        repository=repository,
+        base_branch=base_branch,
+        policy_key=f"{repository}:{base_branch}",
+        policy_sha256="policy-sha",
+        status=status,  # type: ignore[arg-type]
+        updated_at=updated_at,
+        lease_owner=lease_owner if status == "running" else "",
+        lease_acquired_at=lease_acquired_at if status == "running" else "",
+        lease_expires_at=lease_expires_at if status == "running" else "",
+        heartbeat_at=updated_at if status == "running" else "",
+        active_action="land_batch" if status == "running" else "",
+        active_phase="cleanup_candidate_ref" if status == "running" else "",
+        active_record_id="landing-record" if status == "running" else "",
+        step_payload={"candidate_ref": "refs/heads/launchplane/train/x"},
+        reconciliation_status="clean",
     )
 
 
@@ -1196,6 +1233,73 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         assert recovered_claim is not None
         self.assertEqual(recovered_claim.lease_owner, "worker-b")
         self.assertEqual(recovered_claim.attempt, 2)
+
+    def test_merge_train_controller_lease_blocks_other_owner_until_expiry(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            try:
+                first = store.acquire_merge_train_controller_state_record(
+                    repository="cbusillo/sellyouroutboard",
+                    base_branch="main",
+                    policy_key="cbusillo/sellyouroutboard:main",
+                    policy_sha256="policy-sha",
+                    lease_owner="controller-a",
+                    lease_acquired_at="2026-07-13T00:00:00Z",
+                    lease_expires_at="2026-07-13T00:05:00Z",
+                )
+                with self.assertRaisesRegex(ValueError, "held by another owner"):
+                    second_store.acquire_merge_train_controller_state_record(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                        policy_key="cbusillo/sellyouroutboard:main",
+                        policy_sha256="policy-sha",
+                        lease_owner="controller-b",
+                        lease_acquired_at="2026-07-13T00:01:00Z",
+                        lease_expires_at="2026-07-13T00:06:00Z",
+                    )
+            finally:
+                second_store.close()
+
+        self.assertEqual(first.lease_owner, "controller-a")
+
+    def test_merge_train_controller_compare_and_set_rejects_stale_lease_token(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            try:
+                first = store.acquire_merge_train_controller_state_record(
+                    repository="cbusillo/sellyouroutboard",
+                    base_branch="main",
+                    policy_key="cbusillo/sellyouroutboard:main",
+                    policy_sha256="policy-sha",
+                    lease_owner="controller-a",
+                    lease_acquired_at="2026-07-13T00:00:00Z",
+                    lease_expires_at="2026-07-13T00:05:00Z",
+                )
+                renewed = second_store.acquire_merge_train_controller_state_record(
+                    repository="cbusillo/sellyouroutboard",
+                    base_branch="main",
+                    policy_key="cbusillo/sellyouroutboard:main",
+                    policy_sha256="policy-sha",
+                    lease_owner="controller-a",
+                    lease_acquired_at="2026-07-13T00:06:00Z",
+                    lease_expires_at="2026-07-13T00:11:00Z",
+                )
+                with self.assertRaisesRegex(ValueError, "lease token changed"):
+                    store.compare_and_set_merge_train_controller_state_record(
+                        record=first.model_copy(
+                            update={
+                                "updated_at": "2026-07-13T00:06:30Z",
+                                "heartbeat_at": "2026-07-13T00:06:30Z",
+                                "lease_expires_at": "2026-07-13T00:11:30Z",
+                            }
+                        ),
+                        expected_lease_owner="controller-a",
+                        expected_lease_acquired_at=first.lease_acquired_at,
+                    )
+            finally:
+                second_store.close()
+
+        self.assertEqual(renewed.lease_acquired_at, "2026-07-13T00:06:00Z")
 
     def test_row_lock_blocks_stale_owner_completion_until_claim_commits(self) -> None:
         with _store_for_fresh_head_database() as store:

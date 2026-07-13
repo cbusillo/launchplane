@@ -8,7 +8,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-EXPECTED_ALEMBIC_HEAD_REVISION = "b4d6f8a0c2e4"
+EXPECTED_ALEMBIC_HEAD_REVISION = "e1f3a5c7d9b1"
 
 
 class SchemaInspectorProtocol(Protocol):
@@ -125,6 +125,11 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "max_attempts",
         ("integer", "int4"),
     ),
+    CriticalColumnType(
+        "launchplane_merge_train_controller_states",
+        "payload",
+        ("jsonb",),
+    ),
 )
 
 _ACTIVE_OPERATION_PREDICATE_TOKENS = ("status", "pending", "running")
@@ -219,6 +224,21 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_outbox_deliveries",
         "launchplane_outbox_deliveries_claim_idx",
         ("state", "next_attempt_at", "lease_expires_at", "created_at"),
+    ),
+    CriticalIndex(
+        "launchplane_merge_train_controller_states",
+        "launchplane_merge_train_controller_states_repository_base_idx",
+        ("repository", "base_branch", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_merge_train_controller_states",
+        "launchplane_merge_train_controller_states_status_idx",
+        ("status", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_merge_train_controller_states",
+        "launchplane_merge_train_controller_states_lease_idx",
+        ("status", "lease_expires_at", "updated_at"),
     ),
 )
 

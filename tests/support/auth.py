@@ -35,7 +35,12 @@ def _identity(
         environment=environment,
         subject="repo:every/verireel:pull_request",
         sha="6b3c9d7e8f901234567890abcdef1234567890ab",
-        raw_claims={"repository": repository, "workflow_ref": workflow_ref},
+        raw_claims={
+            "repository": repository,
+            "workflow_ref": workflow_ref,
+            "run_id": "1001",
+            "run_attempt": "1",
+        },
     )
 
 

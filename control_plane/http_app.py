@@ -151,6 +151,7 @@ from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRequestError,
     MergeTrainControllerRunOnceEnvelope,
     execute_merge_train_controller_run_once,
+    require_merge_train_controller_state_record_store,
 )
 from control_plane.merge_train_github import MergeTrainGitHubError, MergeTrainGitHubStaleHeadError
 from control_plane.merge_train_pr_feedback import (
@@ -6846,6 +6847,9 @@ def create_launchplane_fastapi_app(
             stack_collapse_store = require_merge_train_stack_collapse_plan_record_store(
                 record_store
             )
+            controller_state_store = require_merge_train_controller_state_record_store(
+                record_store
+            )
         except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -6865,6 +6869,7 @@ def create_launchplane_fastapi_app(
                 candidate_store=candidate_store,
                 landing_store=landing_store,
                 stack_collapse_store=stack_collapse_store,
+                controller_state_store=controller_state_store,
             )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)

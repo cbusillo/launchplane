@@ -48,6 +48,10 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_id,
     build_merge_train_batch_landing_plan,
 )
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    build_merge_train_controller_key,
+)
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
@@ -258,6 +262,41 @@ def _merge_train_batch_candidate_record(
             created_at="2026-05-14T00:59:00Z",
             updated_at=updated_at,
         ),
+    )
+
+
+def _merge_train_controller_state_record(
+    *,
+    updated_at: str = "2026-05-14T01:00:00Z",
+    status: str = "running",
+) -> MergeTrainControllerStateRecord:
+    repository = "example/merge-train-repo"
+    base_branch = "main"
+    return MergeTrainControllerStateRecord(
+        controller_key=build_merge_train_controller_key(
+            repository=repository,
+            base_branch=base_branch,
+        ),
+        repository=repository,
+        base_branch=base_branch,
+        policy_key=f"{repository}:{base_branch}",
+        policy_sha256="policy-digest",
+        status=status,  # type: ignore[arg-type]
+        updated_at=updated_at,
+        lease_owner="github-actions:example/merge-train-repo:run-1001",
+        lease_acquired_at="2026-05-14T00:59:00Z",
+        lease_expires_at="2026-05-14T01:05:00Z",
+        heartbeat_at=updated_at,
+        active_action="land_batch" if status == "running" else "",
+        active_phase="cleanup_candidate_ref" if status == "running" else "",
+        active_record_id="landing-record" if status == "running" else "",
+        step_payload={"candidate_ref": "refs/heads/launchplane/train/example/merge-train-repo/main/batch-1"},
+        last_owner="github-actions:example/merge-train-repo:run-1000",
+        last_action="plan_landing",
+        last_phase="planned",
+        last_record_id="candidate-record",
+        last_transition_at="2026-05-14T00:58:00Z",
+        reconciliation_status="clean",
     )
 
 
@@ -1352,6 +1391,42 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         )
         self.assertEqual([record.record_id for record in listed_records], [active_record.record_id])
         self.assertEqual(listed_records[0].candidate.entries[1].pull_request_number, 11)
+
+    def test_write_and_list_merge_train_controller_state_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            active_record = _merge_train_controller_state_record()
+            idle_record = _merge_train_controller_state_record(
+                updated_at="2026-05-14T00:55:00Z",
+                status="idle",
+            )
+
+            store.write_merge_train_controller_state_record(idle_record)
+            written_path = store.write_merge_train_controller_state_record(active_record)
+            listed_records = store.list_merge_train_controller_state_records(
+                repository="example/merge-train-repo",
+                base_branch="main",
+                status="running",
+            )
+            loaded_record = store.read_merge_train_controller_state_record(
+                active_record.controller_key
+            )
+
+        self.assertEqual(
+            written_path.relative_to(state_dir).as_posix(),
+            "launchplane_merge_train_controller_states/"
+            f"{active_record.controller_key}.json",
+        )
+        self.assertEqual(
+            [record.controller_key for record in listed_records],
+            [active_record.controller_key],
+        )
+        self.assertEqual(loaded_record.active_phase, "cleanup_candidate_ref")
+        self.assertEqual(
+            loaded_record.step_payload["candidate_ref"],
+            "refs/heads/launchplane/train/example/merge-train-repo/main/batch-1",
+        )
 
     def test_write_and_list_merge_train_batch_landing_plan_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

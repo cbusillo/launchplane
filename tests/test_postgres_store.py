@@ -75,6 +75,10 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_id,
     build_merge_train_batch_landing_plan,
 )
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    build_merge_train_controller_key,
+)
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapseEntry,
     MergeTrainStackCollapseMutation,
@@ -1054,6 +1058,41 @@ def _merge_train_batch_candidate_record(
             created_at="2026-05-14T00:59:00Z",
             updated_at=updated_at,
         ),
+    )
+
+
+def _merge_train_controller_state_record(
+    *,
+    updated_at: str = "2026-05-14T01:00:00Z",
+    status: str = "running",
+) -> MergeTrainControllerStateRecord:
+    repository = "example/merge-train-repo"
+    base_branch = "main"
+    return MergeTrainControllerStateRecord(
+        controller_key=build_merge_train_controller_key(
+            repository=repository,
+            base_branch=base_branch,
+        ),
+        repository=repository,
+        base_branch=base_branch,
+        policy_key=f"{repository}:{base_branch}",
+        policy_sha256="policy-digest",
+        status=status,  # type: ignore[arg-type]
+        updated_at=updated_at,
+        lease_owner="github-actions:example/merge-train-repo:run-1001",
+        lease_acquired_at="2026-05-14T00:59:00Z",
+        lease_expires_at="2026-05-14T01:05:00Z",
+        heartbeat_at=updated_at,
+        active_action="land_batch" if status == "running" else "",
+        active_phase="cleanup_candidate_ref" if status == "running" else "",
+        active_record_id="landing-record" if status == "running" else "",
+        step_payload={"candidate_ref": "refs/heads/launchplane/train/example/merge-train-repo/main/batch-1"},
+        last_owner="github-actions:example/merge-train-repo:run-1000",
+        last_action="plan_landing",
+        last_phase="planned",
+        last_record_id="candidate-record",
+        last_transition_at="2026-05-14T00:58:00Z",
+        reconciliation_status="clean",
     )
 
 
@@ -4908,6 +4947,42 @@ env_var = "GH_TOKEN"
         self.assertEqual(listed_records[0].candidate.entries[1].pull_request_number, 11)
         self.assertEqual(listed_records[0].candidate.required_checks_status, "pass")
 
+    def test_merge_train_controller_state_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            idle_record = _merge_train_controller_state_record(
+                updated_at="2026-05-14T00:55:00Z",
+                status="idle",
+            )
+            active_record = _merge_train_controller_state_record()
+            store.write_merge_train_controller_state_record(idle_record)
+            store.write_merge_train_controller_state_record(active_record)
+            listed_records = store.list_merge_train_controller_state_records(
+                repository="example/merge-train-repo",
+                base_branch="main",
+                status="running",
+            )
+            loaded_record = store.read_merge_train_controller_state_record(
+                active_record.controller_key
+            )
+            store.close()
+
+        self.assertEqual(
+            [record.controller_key for record in listed_records],
+            [active_record.controller_key],
+        )
+        self.assertEqual(loaded_record.active_phase, "cleanup_candidate_ref")
+        self.assertEqual(loaded_record.lease_owner, active_record.lease_owner)
+        self.assertEqual(
+            loaded_record.step_payload["candidate_ref"],
+            "refs/heads/launchplane/train/example/merge-train-repo/main/batch-1",
+        )
+
     def test_merge_train_batch_landing_plan_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -5542,6 +5617,7 @@ env_var = "GH_TOKEN"
                     "agent_write_intents": 0,
                     "merge_train_pr_feedback": 0,
                     "merge_train_batch_candidates": 1,
+                    "merge_train_controller_states": 0,
                     "merge_train_batch_landing_plans": 1,
                     "merge_train_stack_collapse_plans": 1,
                     "merge_train_policies": 1,

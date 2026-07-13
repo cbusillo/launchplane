@@ -10,6 +10,9 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate,
     build_merge_train_batch_candidate_record,
 )
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+)
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicy,
     MergeTrainPolicyRecord,
@@ -103,6 +106,37 @@ class _FakeMergeTrainGitHubClient:
         type(self).cleanup_batch_candidate_ref_calls += 1
         return True
 
+    def candidate_ref_exists(self, *, repository: str, reference: str) -> bool:
+        return True
+
+    def pull_request_has_label(
+        self, *, repository: str, pull_request_number: int, label: str
+    ) -> bool:
+        return True
+
+    def pull_request_is_closed(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> bool:
+        return True
+
+    def find_pull_request_comment_url(
+        self, *, repository: str, pull_request_number: int, body_contains: str
+    ) -> str:
+        return f"https://github.com/{repository}/pull/{pull_request_number}#issuecomment-1"
+
+    def pull_request_is_merged(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> str:
+        return f"merge-{pull_request_number}"
+
+    def branch_contains_commit(
+        self, *, repository: str, branch_ref: str, commit_sha: str
+    ) -> bool:
+        return True
+
+    def branch_head_sha(self, *, repository: str, branch_ref: str) -> str:
+        return f"branch-head:{branch_ref}"
+
     def merge_stack_child_into_parent(
         self,
         *,
@@ -161,6 +195,9 @@ class _CleanupFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
 class _CleanupAlreadyMissingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     cleanup_batch_candidate_ref_calls = 0
 
+    def candidate_ref_exists(self, *, repository: str, reference: str) -> bool:
+        return False
+
     def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
         type(self).cleanup_batch_candidate_ref_calls += 1
         return False
@@ -184,6 +221,14 @@ class _FailingChildDispositionMergeTrainGitHubClient(_FakeMergeTrainGitHubClient
 class _StackCollapseWriteFailingFilesystemRecordStore(FilesystemRecordStore):
     def write_merge_train_stack_collapse_plan_record(self, record: object) -> Path:
         raise RuntimeError("stack collapse persistence unavailable")
+
+
+class _ControllerStateWriteFailingFilesystemRecordStore(FilesystemRecordStore):
+    def write_merge_train_controller_state_record(self, record: object) -> Path:
+        controller_record = cast(MergeTrainControllerStateRecord, record)
+        if controller_record.active_phase == "cleanup_candidate_ref":
+            raise RuntimeError("controller state persistence unavailable")
+        return super().write_merge_train_controller_state_record(controller_record)
 
 
 class _CandidateReflowWriteFailingFilesystemRecordStore(FilesystemRecordStore):

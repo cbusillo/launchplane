@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import logging
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -12,6 +14,10 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate_record,
     build_merge_train_batch_landing_plan,
     build_merge_train_batch_landing_plan_record,
+)
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    build_merge_train_controller_state_record,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainRepositoryPolicy
 from control_plane.contracts.merge_train_stack_collapse import (
@@ -55,6 +61,7 @@ from control_plane.workflows.merge_train_controller import (
 
 
 _LOGGER = logging.getLogger(__name__)
+DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS = 300
 
 
 class MergeTrainControllerRunOnceEnvelope(BaseModel):
@@ -84,6 +91,51 @@ class MergeTrainControllerRequestError(ValueError):
     pass
 
 
+class MergeTrainControllerLeaseLostError(RuntimeError):
+    pass
+
+
+class MergeTrainControllerStateRecordStore(Protocol):
+    def write_merge_train_controller_state_record(
+        self, record: MergeTrainControllerStateRecord
+    ) -> object: ...
+
+    def list_merge_train_controller_state_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainControllerStateRecord, ...]: ...
+
+    def acquire_merge_train_controller_state_record(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        policy_key: str,
+        policy_sha256: str,
+        lease_owner: str,
+        lease_acquired_at: str,
+        lease_expires_at: str,
+    ) -> MergeTrainControllerStateRecord: ...
+
+    def compare_and_set_merge_train_controller_state_record(
+        self,
+        *,
+        record: MergeTrainControllerStateRecord,
+        expected_lease_owner: str,
+        expected_lease_acquired_at: str,
+    ) -> MergeTrainControllerStateRecord: ...
+
+    def force_write_merge_train_controller_state_record(
+        self,
+        *,
+        record: MergeTrainControllerStateRecord,
+    ) -> MergeTrainControllerStateRecord: ...
+
+
 @dataclass(frozen=True)
 class MergeTrainControllerRunOnceResult:
     accepted_result: dict[str, object]
@@ -102,47 +154,105 @@ def execute_merge_train_controller_run_once(
     candidate_store: MergeTrainBatchCandidateRecordStore,
     landing_store: MergeTrainBatchLandingPlanRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    controller_state_store: MergeTrainControllerStateRecordStore,
 ) -> MergeTrainControllerRunOnceResult:
     transport = UrllibMergeTrainGitHubTransport(
         token=token,
         api_base_url=request.github_api_base_url,
     )
     github_client = GitHubMergeTrainClient(transport=transport)
+    lease_owner = merge_train_controller_lease_owner(trace_id=trace_id)
+    controller_state = controller_state_store.acquire_merge_train_controller_state_record(
+        repository=request.repository,
+        base_branch=request.base_branch,
+        policy_key=repository_policy.policy_key,
+        policy_sha256=policy_sha256,
+        lease_owner=lease_owner,
+        lease_acquired_at=recorded_at,
+        lease_expires_at=merge_train_controller_lease_expires_at(
+            recorded_at=recorded_at,
+            lease_seconds=DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS,
+        ),
+    )
     active_landing_record = latest_merge_train_batch_landing_plan_record(
         record_store=landing_store,
         repository=request.repository,
         base_branch=request.base_branch,
     )
     if active_landing_record is not None:
-        result = _advance_active_landing_record(
-            request=request,
-            policy_sha256=policy_sha256,
-            repository_policy=repository_policy,
-            trace_id=trace_id,
-            recorded_at=recorded_at,
-            github_client=github_client,
-            landing_store=landing_store,
-            stack_collapse_store=stack_collapse_store,
-            active_landing_record=active_landing_record,
-        )
+        try:
+            result = _advance_active_landing_record(
+                request=request,
+                policy_sha256=policy_sha256,
+                repository_policy=repository_policy,
+                trace_id=trace_id,
+                recorded_at=recorded_at,
+                github_client=github_client,
+                landing_store=landing_store,
+                stack_collapse_store=stack_collapse_store,
+                active_landing_record=active_landing_record,
+                controller_state_store=controller_state_store,
+                controller_state=controller_state,
+                lease_owner=lease_owner,
+                lease_acquired_at=controller_state.lease_acquired_at,
+            )
+            release_merge_train_controller_lease(
+                record_store=controller_state_store,
+                current_record=controller_state,
+                lease_owner=lease_owner,
+                lease_acquired_at=controller_state.lease_acquired_at,
+                recorded_at=recorded_at,
+            )
+        except Exception:
+            release_merge_train_controller_lease(
+                record_store=controller_state_store,
+                current_record=controller_state,
+                lease_owner=lease_owner,
+                lease_acquired_at=controller_state.lease_acquired_at,
+                recorded_at=recorded_at,
+                reconciliation_status="required",
+                reconciliation_detail="controller_exception",
+                clear_active_state=False,
+            )
+            raise
         return MergeTrainControllerRunOnceResult(
             accepted_result=result,
             records=_records_for_result(result),
         )
 
-    result = _advance_without_active_landing(
-        request=request,
-        policy=policy,
-        policy_sha256=policy_sha256,
-        repository_policy=repository_policy,
-        transport=transport,
-        github_client=github_client,
-        trace_id=trace_id,
-        recorded_at=recorded_at,
-        candidate_store=candidate_store,
-        landing_store=landing_store,
-        stack_collapse_store=stack_collapse_store,
-    )
+    try:
+        result = _advance_without_active_landing(
+            request=request,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            repository_policy=repository_policy,
+            transport=transport,
+            github_client=github_client,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            candidate_store=candidate_store,
+            landing_store=landing_store,
+            stack_collapse_store=stack_collapse_store,
+        )
+        release_merge_train_controller_lease(
+            record_store=controller_state_store,
+            current_record=controller_state,
+            lease_owner=lease_owner,
+            lease_acquired_at=controller_state.lease_acquired_at,
+            recorded_at=recorded_at,
+        )
+    except Exception:
+        release_merge_train_controller_lease(
+            record_store=controller_state_store,
+            current_record=controller_state,
+            lease_owner=lease_owner,
+            lease_acquired_at=controller_state.lease_acquired_at,
+            recorded_at=recorded_at,
+            reconciliation_status="required",
+            reconciliation_detail="controller_exception",
+            clear_active_state=False,
+        )
+        raise
     return MergeTrainControllerRunOnceResult(
         accepted_result=result,
         records=_records_for_result(result),
@@ -294,6 +404,10 @@ def _advance_active_landing_record(
     landing_store: MergeTrainBatchLandingPlanRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     active_landing_record: MergeTrainBatchLandingPlanRecord,
+    controller_state_store: MergeTrainControllerStateRecordStore,
+    controller_state: MergeTrainControllerStateRecord,
+    lease_owner: str,
+    lease_acquired_at: str,
 ) -> dict[str, object]:
     try:
         validate_merge_train_landing_record_for_controller(
@@ -335,6 +449,19 @@ def _advance_active_landing_record(
             result["merge_train_stack_collapse_plan_record_id"] = collapse_record.record_id
         return result
 
+    controller_state = update_merge_train_controller_state(
+        record_store=controller_state_store,
+        current_record=controller_state,
+        lease_owner=lease_owner,
+        lease_acquired_at=lease_acquired_at,
+        recorded_at=recorded_at,
+        active_action="land_batch",
+        active_phase="merge_batch_entries",
+        active_record_id=active_landing_record.record_id,
+        active_pull_request_number=None,
+        step_payload={"landing_plan_record_id": active_landing_record.record_id},
+    )
+
     try:
         landed_plan = github_client.land_batch_candidate(
             landing_plan=active_landing_record.landing_plan
@@ -370,10 +497,30 @@ def _advance_active_landing_record(
         updated_at=recorded_at,
     )
     landing_store.write_merge_train_batch_landing_plan_record(landed_record)
+    controller_state = update_merge_train_controller_state(
+        record_store=controller_state_store,
+        current_record=controller_state,
+        lease_owner=lease_owner,
+        lease_acquired_at=lease_acquired_at,
+        recorded_at=recorded_at,
+        active_action="land_batch",
+        active_phase="cleanup_candidate_ref",
+        active_record_id=landed_record.record_id,
+        active_pull_request_number=None,
+        step_payload={
+            "landing_plan_record_id": landed_record.record_id,
+            "candidate_ref": landed_plan.candidate_ref,
+        },
+    )
     candidate_ref_cleanup_result = cleanup_merge_train_batch_candidate_ref(
         github_client=github_client,
         landing_plan=landed_plan,
         trace_id=trace_id,
+        controller_state_store=controller_state_store,
+        controller_state=controller_state,
+        lease_owner=lease_owner,
+        lease_acquired_at=lease_acquired_at,
+        recorded_at=recorded_at,
     )
     result = {
         "merge_train_batch_landing_plan_record_id": landed_record.record_id,
@@ -386,6 +533,27 @@ def _advance_active_landing_record(
     }
     if collapse_record is None:
         return result
+
+    controller_state = update_merge_train_controller_state(
+        record_store=controller_state_store,
+        current_record=controller_state,
+        lease_owner=lease_owner,
+        lease_acquired_at=lease_acquired_at,
+        recorded_at=recorded_at,
+        active_action="land_batch",
+        active_phase="reconcile_stack_children",
+        active_record_id=collapse_record.record_id,
+        active_pull_request_number=collapse_record.plan.root_pull_request_number,
+        step_payload={
+            "landing_plan_record_id": landed_record.record_id,
+            "stack_collapse_plan_record_id": collapse_record.record_id,
+            "root_merge_commit_sha": next(
+                entry.merge_commit_sha
+                for entry in landed_plan.entries
+                if entry.pull_request_number == collapse_record.plan.root_pull_request_number
+            ),
+        },
+    )
 
     root_entry = next(
         (
@@ -1075,7 +1243,32 @@ def cleanup_merge_train_batch_candidate_ref(
     github_client: GitHubMergeTrainClient,
     landing_plan: MergeTrainBatchLandingPlan,
     trace_id: str,
+    controller_state_store: MergeTrainControllerStateRecordStore,
+    controller_state: MergeTrainControllerStateRecord,
+    lease_owner: str,
+    lease_acquired_at: str,
+    recorded_at: str,
 ) -> dict[str, object]:
+    candidate_ref = str(controller_state.step_payload.get("candidate_ref") or landing_plan.candidate_ref)
+    if controller_state.step_payload.get("cleanup_status") == "deleted":
+        return {"candidate_ref_cleanup_status": "deleted"}
+    if not github_client.candidate_ref_exists(
+        repository=landing_plan.repository,
+        reference=candidate_ref,
+    ):
+        update_merge_train_controller_state(
+            record_store=controller_state_store,
+            current_record=controller_state,
+            lease_owner=lease_owner,
+            lease_acquired_at=lease_acquired_at,
+            recorded_at=recorded_at,
+            step_payload={
+                **controller_state.step_payload,
+                "candidate_ref": candidate_ref,
+                "cleanup_status": "already_missing",
+            },
+        )
+        return {"candidate_ref_cleanup_status": "already_missing"}
     try:
         deleted = github_client.cleanup_batch_candidate_ref(landing_plan=landing_plan)
     except MergeTrainGitHubError as error:
@@ -1097,8 +1290,21 @@ def cleanup_merge_train_batch_candidate_ref(
         if error.status_code is not None:
             result["candidate_ref_cleanup_github_status_code"] = error.status_code
         return result
+    cleanup_status = "deleted" if deleted else "already_missing"
+    update_merge_train_controller_state(
+        record_store=controller_state_store,
+        current_record=controller_state,
+        lease_owner=lease_owner,
+        lease_acquired_at=lease_acquired_at,
+        recorded_at=recorded_at,
+        step_payload={
+            **controller_state.step_payload,
+            "candidate_ref": candidate_ref,
+            "cleanup_status": cleanup_status,
+        },
+    )
     return {
-        "candidate_ref_cleanup_status": "deleted" if deleted else "already_missing",
+        "candidate_ref_cleanup_status": cleanup_status,
     }
 
 
@@ -1174,3 +1380,223 @@ def _records_for_result(result: dict[str, object]) -> dict[str, str]:
     return {
         key: value for key in record_keys if isinstance((value := result.get(key)), str) and value
     }
+
+
+def merge_train_controller_lease_owner(*, trace_id: str) -> str:
+    normalized_trace_id = trace_id.strip()
+    if not normalized_trace_id:
+        raise ValueError("merge train controller lease owner requires trace_id")
+    return f"merge-train-controller:{normalized_trace_id}"
+
+
+def merge_train_controller_lease_expires_at(*, recorded_at: str, lease_seconds: int) -> str:
+    if lease_seconds < 1:
+        raise ValueError("merge train controller lease_seconds must be positive")
+    parsed = _parse_timestamp(recorded_at)
+    return _format_timestamp(parsed + timedelta(seconds=lease_seconds))
+
+
+def latest_merge_train_controller_state_record(
+    *,
+    record_store: MergeTrainControllerStateRecordStore,
+    repository: str,
+    base_branch: str,
+) -> MergeTrainControllerStateRecord | None:
+    records = record_store.list_merge_train_controller_state_records(
+        repository=repository,
+        base_branch=base_branch,
+        limit=1,
+    )
+    return records[0] if records else None
+
+
+def require_merge_train_controller_state_record_store(
+    record_store: object,
+) -> MergeTrainControllerStateRecordStore:
+    required_methods = (
+        "write_merge_train_controller_state_record",
+        "list_merge_train_controller_state_records",
+        "acquire_merge_train_controller_state_record",
+        "compare_and_set_merge_train_controller_state_record",
+        "force_write_merge_train_controller_state_record",
+    )
+    if all(hasattr(record_store, method_name) for method_name in required_methods):
+        return cast(MergeTrainControllerStateRecordStore, record_store)
+    raise TypeError("record store does not support merge train controller state records")
+
+
+def active_merge_train_controller_state_record(
+    *,
+    record_store: MergeTrainControllerStateRecordStore,
+    repository: str,
+    base_branch: str,
+) -> MergeTrainControllerStateRecord | None:
+    record = latest_merge_train_controller_state_record(
+        record_store=record_store,
+        repository=repository,
+        base_branch=base_branch,
+    )
+    if record is None or record.status != "running":
+        return None
+    return record
+
+
+def acquire_merge_train_controller_lease(
+    *,
+    record_store: MergeTrainControllerStateRecordStore,
+    repository: str,
+    base_branch: str,
+    policy_key: str,
+    policy_sha256: str,
+    lease_owner: str,
+    recorded_at: str,
+    lease_seconds: int = DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS,
+) -> MergeTrainControllerStateRecord:
+    existing_record = latest_merge_train_controller_state_record(
+        record_store=record_store,
+        repository=repository,
+        base_branch=base_branch,
+    )
+    lease_expires_at = merge_train_controller_lease_expires_at(
+        recorded_at=recorded_at,
+        lease_seconds=lease_seconds,
+    )
+    if (
+        existing_record is not None
+        and existing_record.status == "running"
+        and existing_record.lease_expires_at
+        and existing_record.lease_expires_at > recorded_at
+        and existing_record.lease_owner != lease_owner
+    ):
+        raise MergeTrainControllerRequestError(
+            "merge train controller lease is held by another owner"
+        )
+    base_record = existing_record or build_merge_train_controller_state_record(
+        repository=repository,
+        base_branch=base_branch,
+        policy_key=policy_key,
+        policy_sha256=policy_sha256,
+        updated_at=recorded_at,
+    )
+    leased_record = base_record.model_copy(
+        update={
+            "status": "running",
+            "policy_key": policy_key,
+            "policy_sha256": policy_sha256,
+            "updated_at": recorded_at,
+            "lease_owner": lease_owner,
+            "lease_acquired_at": recorded_at,
+            "lease_expires_at": lease_expires_at,
+            "heartbeat_at": recorded_at,
+            "reconciliation_status": "clean",
+            "reconciliation_detail": "",
+        }
+    )
+    record_store.write_merge_train_controller_state_record(leased_record)
+    return leased_record
+
+
+def update_merge_train_controller_state(
+    *,
+    record_store: MergeTrainControllerStateRecordStore,
+    current_record: MergeTrainControllerStateRecord,
+    lease_owner: str,
+    lease_acquired_at: str,
+    recorded_at: str,
+    lease_seconds: int = DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS,
+    **updates: object,
+) -> MergeTrainControllerStateRecord:
+    latest_record = latest_merge_train_controller_state_record(
+        record_store=record_store,
+        repository=current_record.repository,
+        base_branch=current_record.base_branch,
+    )
+    if latest_record is None:
+        raise MergeTrainControllerLeaseLostError("merge train controller state is missing")
+    if latest_record.lease_owner != lease_owner:
+        raise MergeTrainControllerLeaseLostError("merge train controller lease owner changed")
+    if latest_record.lease_acquired_at != lease_acquired_at:
+        raise MergeTrainControllerLeaseLostError("merge train controller lease token changed")
+    if not latest_record.lease_expires_at or latest_record.lease_expires_at <= recorded_at:
+        raise MergeTrainControllerLeaseLostError("merge train controller lease expired")
+    next_record = latest_record.model_copy(
+        update={
+            **updates,
+            "updated_at": recorded_at,
+            "heartbeat_at": recorded_at,
+            "lease_expires_at": merge_train_controller_lease_expires_at(
+                recorded_at=recorded_at,
+                lease_seconds=lease_seconds,
+            ),
+        }
+    )
+    record_store.write_merge_train_controller_state_record(next_record)
+    return next_record
+
+
+def release_merge_train_controller_lease(
+    *,
+    record_store: MergeTrainControllerStateRecordStore,
+    current_record: MergeTrainControllerStateRecord,
+    lease_owner: str,
+    lease_acquired_at: str,
+    recorded_at: str,
+    reconciliation_status: str = "clean",
+    reconciliation_detail: str = "",
+    clear_active_state: bool = True,
+) -> MergeTrainControllerStateRecord:
+    latest_record = latest_merge_train_controller_state_record(
+        record_store=record_store,
+        repository=current_record.repository,
+        base_branch=current_record.base_branch,
+    )
+    if latest_record is None:
+        raise MergeTrainControllerLeaseLostError("merge train controller state is missing")
+    if latest_record.lease_owner != lease_owner:
+        raise MergeTrainControllerLeaseLostError("merge train controller lease owner changed")
+    if latest_record.lease_acquired_at != lease_acquired_at:
+        raise MergeTrainControllerLeaseLostError("merge train controller lease token changed")
+    released_record = latest_record.model_copy(
+        update={
+            "status": "idle" if reconciliation_status == "clean" else "reconcile_required",
+            "updated_at": recorded_at,
+            "lease_owner": "",
+            "lease_expires_at": "",
+            "heartbeat_at": "",
+            "active_action": "" if clear_active_state else latest_record.active_action,
+            "active_phase": "" if clear_active_state else latest_record.active_phase,
+            "active_record_id": "" if clear_active_state else latest_record.active_record_id,
+            "active_pull_request_number": (
+                None if clear_active_state else latest_record.active_pull_request_number
+            ),
+            "step_payload": {} if clear_active_state else latest_record.step_payload,
+            "last_owner": lease_owner,
+            "last_action": latest_record.active_action,
+            "last_phase": latest_record.active_phase,
+            "last_record_id": latest_record.active_record_id,
+            "last_pull_request_number": latest_record.active_pull_request_number,
+            "last_transition_at": recorded_at,
+            "reconciliation_status": reconciliation_status,
+            "reconciliation_detail": reconciliation_detail,
+        }
+    )
+    record_store.write_merge_train_controller_state_record(released_record)
+    return released_record
+
+
+def _parse_timestamp(value: str) -> datetime:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("merge train controller timestamp is required")
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )

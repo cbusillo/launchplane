@@ -31,6 +31,32 @@ If no active record exists, service routes fail closed with
 new DB-backed policy record, not by relying on checked-in config files,
 service-host env, or generic service-code conditionals.
 
+## Controller Lease And Resume State
+
+Mutating controller passes are fenced by a Launchplane-owned repository/base
+controller lease record. One controller owner may actively mutate one
+`repository/base_branch` pair at a time; a second owner must fail closed while
+the current lease is still valid. The lease record stores owner, expiry,
+active action/phase, and reconciliation detail under Launchplane storage, not
+in workflow inputs or checked-in config.
+
+Every GitHub effect that can cross a crash window must have a durable resume
+checkpoint before the controller is allowed to continue. The current guarded
+checkpoints cover candidate/landing progression plus post-landing
+candidate-ref cleanup and stack child disposition. When a controller restarts
+after a crash, it re-reads GitHub state and adopts already-completed effects
+when the stored phase evidence still matches the live repository/base policy
+and expected SHAs. If lease ownership, expected SHA guards, or reconciliation
+evidence no longer match, the controller must stop in `reconcile_required`
+state instead of continuing optimistically.
+
+Lease expiry semantics are fail closed: once a lease token expires and another
+controller acquires the same repository/base fence, the stale owner must not
+continue mutating even if it shares the same logical workflow identity. The
+lease token therefore includes the acquisition timestamp, and every durable
+step update compares both owner and acquisition token before it can heartbeat,
+checkpoint, or release state.
+
 ## Fields
 
 Each repository policy contains:
@@ -273,8 +299,9 @@ uv run launchplane merge-train-policies import-policy \
   --apply
 ```
 
-Direct `--database-url --apply` import is reserved for local development and DB repair, requires
-`--allow-direct-db-mutation`, and is not for shared or production live mutation.
+Direct `--database-url --apply` import is reserved for local development and
+DB repair, requires `--allow-direct-db-mutation`, and is not for shared or
+production live mutation.
 
 For local development or DB repair only:
 

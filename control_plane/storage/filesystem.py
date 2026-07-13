@@ -41,6 +41,7 @@ from control_plane.contracts.ingress_canary_route_record import IngressCanaryRou
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
@@ -795,6 +796,123 @@ class FilesystemRecordStore:
         return self._write_model(
             "launchplane_merge_train_batch_candidates", record.record_id, record
         )
+
+    def write_merge_train_controller_state_record(
+        self, record: MergeTrainControllerStateRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_merge_train_controller_states", record.controller_key, record
+        )
+
+    def read_merge_train_controller_state_record(
+        self, controller_key: str
+    ) -> MergeTrainControllerStateRecord:
+        return MergeTrainControllerStateRecord.model_validate(
+            self._read_model(
+                MergeTrainControllerStateRecord,
+                "launchplane_merge_train_controller_states",
+                controller_key,
+            ).model_dump(mode="json")
+        )
+
+    def list_merge_train_controller_state_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeTrainControllerStateRecord,
+                "launchplane_merge_train_controller_states",
+            )
+            if (not repository or record.repository == repository)
+            and (not base_branch or record.base_branch == base_branch)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.controller_key), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def acquire_merge_train_controller_state_record(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        policy_key: str,
+        policy_sha256: str,
+        lease_owner: str,
+        lease_acquired_at: str,
+        lease_expires_at: str,
+    ) -> MergeTrainControllerStateRecord:
+        from control_plane.contracts.merge_train_controller_state import (
+            build_merge_train_controller_state_record,
+        )
+
+        records = self.list_merge_train_controller_state_records(
+            repository=repository,
+            base_branch=base_branch,
+            limit=1,
+        )
+        current_record = records[0] if records else build_merge_train_controller_state_record(
+            repository=repository,
+            base_branch=base_branch,
+            policy_key=policy_key,
+            policy_sha256=policy_sha256,
+            updated_at=lease_acquired_at,
+        )
+        if (
+            current_record.status == "running"
+            and current_record.lease_expires_at
+            and current_record.lease_expires_at > lease_acquired_at
+            and current_record.lease_owner != lease_owner
+        ):
+            raise ValueError("merge train controller lease is held by another owner")
+        leased_record = current_record.model_copy(
+            update={
+                "policy_key": policy_key,
+                "policy_sha256": policy_sha256,
+                "status": "running",
+                "updated_at": lease_acquired_at,
+                "lease_owner": lease_owner,
+                "lease_acquired_at": lease_acquired_at,
+                "lease_expires_at": lease_expires_at,
+                "heartbeat_at": lease_acquired_at,
+                "reconciliation_status": "clean",
+                "reconciliation_detail": "",
+            }
+        )
+        self.write_merge_train_controller_state_record(leased_record)
+        return leased_record
+
+    def compare_and_set_merge_train_controller_state_record(
+        self,
+        *,
+        record: MergeTrainControllerStateRecord,
+        expected_lease_owner: str,
+        expected_lease_acquired_at: str,
+    ) -> MergeTrainControllerStateRecord:
+        current_record = self.read_merge_train_controller_state_record(record.controller_key)
+        if current_record.lease_owner != expected_lease_owner:
+            raise ValueError("merge train controller lease owner changed")
+        if current_record.lease_acquired_at != expected_lease_acquired_at:
+            raise ValueError("merge train controller lease token changed")
+        if not current_record.lease_expires_at or current_record.lease_expires_at <= record.updated_at:
+            raise ValueError("merge train controller lease expired")
+        self.write_merge_train_controller_state_record(record)
+        return record
+
+    def force_write_merge_train_controller_state_record(
+        self,
+        *,
+        record: MergeTrainControllerStateRecord,
+    ) -> MergeTrainControllerStateRecord:
+        self.write_merge_train_controller_state_record(record)
+        return record
 
     def list_merge_train_batch_candidate_records(
         self,

@@ -99,6 +99,116 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         self.assertEqual(transport.requests[0].body, {"body": "landed through root"})
 
+    def test_find_pull_request_comment_url_returns_matching_comment(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                [
+                    {
+                        "body": "other comment",
+                        "html_url": "https://github.com/example/repo/pull/11#issuecomment-1",
+                    },
+                    {
+                        "body": "Launchplane landed this stacked PR through root PR #10.",
+                        "html_url": "https://github.com/example/repo/pull/11#issuecomment-2",
+                    },
+                ],
+            )
+        )
+
+        comment_url = GitHubMergeTrainClient(transport=transport).find_pull_request_comment_url(
+            repository="example/merge-train-repo",
+            pull_request_number=11,
+            body_contains="root PR #10",
+        )
+
+        self.assertEqual(comment_url, "https://github.com/example/repo/pull/11#issuecomment-2")
+
+    def test_pull_request_has_label_reads_pr_labels(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=({"labels": [{"name": "stack-landed"}]},)
+        )
+
+        has_label = GitHubMergeTrainClient(transport=transport).pull_request_has_label(
+            repository="example/merge-train-repo",
+            pull_request_number=11,
+            label="stack-landed",
+        )
+
+        self.assertTrue(has_label)
+
+    def test_pull_request_is_closed_checks_head_sha(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=({"state": "closed", "head": {"sha": "child-head"}},)
+        )
+
+        is_closed = GitHubMergeTrainClient(transport=transport).pull_request_is_closed(
+            repository="example/merge-train-repo",
+            pull_request_number=11,
+            expected_head_sha="child-head",
+        )
+
+        self.assertTrue(is_closed)
+
+    def test_pull_request_is_merged_returns_merge_commit_sha(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {
+                    "merged": True,
+                    "merge_commit_sha": "merge-commit",
+                    "head": {"sha": "head-11"},
+                },
+            )
+        )
+
+        merge_commit_sha = GitHubMergeTrainClient(transport=transport).pull_request_is_merged(
+            repository="example/merge-train-repo",
+            pull_request_number=11,
+            expected_head_sha="head-11",
+        )
+
+        self.assertEqual(merge_commit_sha, "merge-commit")
+
+    def test_branch_contains_commit_uses_compare_endpoint(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(responses=({"status": "ahead"},))
+
+        contains_commit = GitHubMergeTrainClient(transport=transport).branch_contains_commit(
+            repository="example/merge-train-repo",
+            branch_ref="feature/root",
+            commit_sha="merge-31-30",
+        )
+
+        self.assertTrue(contains_commit)
+        self.assertEqual(
+            transport.requests[0].path,
+            "/repos/example/merge-train-repo/compare/merge-31-30...feature%2Froot",
+        )
+
+    def test_branch_head_sha_reads_branch_endpoint(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(_github_branch(sha="parent-after-child"),)
+        )
+
+        branch_head_sha = GitHubMergeTrainClient(transport=transport).branch_head_sha(
+            repository="example/merge-train-repo",
+            branch_ref="feature/root",
+        )
+
+        self.assertEqual(branch_head_sha, "parent-after-child")
+
+    def test_candidate_ref_exists_uses_git_ref_endpoint(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(responses=({"ref": "refs/heads/x"},))
+
+        exists = GitHubMergeTrainClient(transport=transport).candidate_ref_exists(
+            repository="example/merge-train-repo",
+            reference="refs/heads/launchplane/train/example/merge-train-repo/main/batch-1",
+        )
+
+        self.assertTrue(exists)
+        self.assertIn(
+            "/repos/example/merge-train-repo/git/ref/heads/launchplane/train/example/merge-train-repo/main/batch-1",
+            transport.requests[0].path,
+        )
+
     def test_close_pull_request_checks_head_sha_before_closing(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(

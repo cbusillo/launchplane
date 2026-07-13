@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
 from control_plane.contracts.merge_train_admission import MergeTrainAdmissionDecision
 from control_plane.contracts.merge_train_admission import (
     build_merge_train_controller_admission_decision,
@@ -84,6 +85,7 @@ class MergeTrainControllerStatusReadModel(BaseModel):
     admission: MergeTrainAdmissionDecision
     latest_run: MergeTrainRunRecord | None = None
     latest_dry_run: MergeTrainLatestDryRunSummary | None = None
+    controller_state: MergeTrainControllerStateRecord | None = None
     controller_records: tuple[MergeTrainControllerRecordSummary, ...]
 
 
@@ -118,6 +120,15 @@ class MergeTrainRunHistoryStore(Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]: ...
+
+    def list_merge_train_controller_state_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainControllerStateRecord, ...]: ...
 
 
 def evaluate_merge_train_admission_from_store(
@@ -207,6 +218,11 @@ def build_merge_train_controller_status_read_model(
         admission=admission,
         latest_run=latest_run,
         latest_dry_run=_summarize_latest_dry_run(latest_run),
+        controller_state=_latest_controller_state(
+            store=store,
+            repository=repository,
+            base_branch=base_branch,
+        ),
         controller_records=_summarize_controller_records(
             controller_records=controller_records,
             current_policy_key=current_policy_key,
@@ -238,6 +254,17 @@ def _list_active_controller_records(
             limit=25,
         ),
     )
+
+
+def _latest_controller_state(
+    *, store: MergeTrainRunHistoryStore, repository: str, base_branch: str
+) -> MergeTrainControllerStateRecord | None:
+    records = store.list_merge_train_controller_state_records(
+        repository=repository,
+        base_branch=base_branch,
+        limit=1,
+    )
+    return records[0] if records else None
 
 
 def _summarize_latest_dry_run(
