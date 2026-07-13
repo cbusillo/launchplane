@@ -34,6 +34,11 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationPhase,
     OdooStableBootstrapOperationStatus,
 )
+from control_plane.contracts.outbox_delivery import (
+    OutboxDeliveryRecord,
+    build_outbox_delivery_id,
+    build_outbox_dedupe_key,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -50,8 +55,10 @@ from control_plane.contracts.route_binding_record import (
 from control_plane.storage.postgres import (
     DbOnlyMutationRequest,
     MutationReservationResult,
+    OutboxWithIdempotencyRequest,
     PostgresRecordStore,
 )
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
@@ -304,6 +311,27 @@ def _route_binding() -> EnvironmentRouteBindingRecord:
     )
 
 
+def _outbox_delivery(*, suffix: str = "one") -> OutboxDeliveryRecord:
+    dedupe_key = build_outbox_dedupe_key(
+        kind="github_workflow_dispatch",
+        parts=("postgres", suffix),
+    )
+    return OutboxDeliveryRecord(
+        delivery_id=build_outbox_delivery_id(
+            kind="github_workflow_dispatch",
+            dedupe_key=dedupe_key,
+        ),
+        kind="github_workflow_dispatch",
+        aggregate_type="postgres_test",
+        aggregate_id=suffix,
+        dedupe_key=dedupe_key,
+        created_at="2026-07-13T00:00:00Z",
+        updated_at="2026-07-13T00:00:00Z",
+        next_attempt_at="2026-07-13T00:00:00Z",
+        payload={"repository": "example/repo", "workflow_id": "deploy.yml"},
+    )
+
+
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_alembic_from_empty_database_reaches_exact_head_and_required_invariants(
         self,
@@ -329,6 +357,14 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     column["name"]: column
                     for column in inspector.get_columns("launchplane_idempotency_records")
                 }
+                outbox_indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes("launchplane_outbox_deliveries")
+                }
+                outbox_columns = {
+                    column["name"]: column
+                    for column in inspector.get_columns("launchplane_outbox_deliveries")
+                }
                 payload_type = _column_type(
                     engine,
                     table_name="launchplane_idempotency_records",
@@ -339,6 +375,21 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     table_name="launchplane_idempotency_records",
                     column_name="attempt",
                 )
+                outbox_payload_type = _column_type(
+                    engine,
+                    table_name="launchplane_outbox_deliveries",
+                    column_name="payload",
+                )
+                outbox_attempt_type = _column_type(
+                    engine,
+                    table_name="launchplane_outbox_deliveries",
+                    column_name="attempt",
+                )
+                outbox_max_attempts_type = _column_type(
+                    engine,
+                    table_name="launchplane_outbox_deliveries",
+                    column_name="max_attempts",
+                )
                 alembic_version = _current_alembic_version(engine)
             finally:
                 store.close()
@@ -346,7 +397,13 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(alembic_version, EXPECTED_ALEMBIC_HEAD_REVISION)
         self.assertEqual(payload_type, "jsonb")
         self.assertEqual(attempt_type, "integer")
+        self.assertEqual(outbox_payload_type, "jsonb")
+        self.assertEqual(outbox_attempt_type, "integer")
+        self.assertEqual(outbox_max_attempts_type, "integer")
         self.assertTrue(idempotency_columns["response_status_code"]["nullable"])
+        self.assertFalse(outbox_columns["payload"]["nullable"])
+        self.assertTrue(outbox_indexes["launchplane_outbox_deliveries_dedupe_uidx"]["unique"])
+        self.assertFalse(outbox_indexes["launchplane_outbox_deliveries_claim_idx"]["unique"])
         self.assertTrue(
             idempotency_indexes["launchplane_idempotency_scope_route_key_idx"]["unique"]
         )
@@ -557,8 +614,135 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_startup_verification_fails_closed_when_outbox_claim_index_is_missing(
+        self,
+    ) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(text("drop index launchplane_outbox_deliveries_claim_idx"))
+            engine.dispose()
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "launchplane_outbox_deliveries_claim_idx",
+                ):
+                    store.verify_schema()
+            finally:
+                store.close()
+
+    def test_startup_verification_fails_closed_when_outbox_payload_is_not_jsonb(
+        self,
+    ) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "alter table launchplane_outbox_deliveries "
+                        "alter column payload type json using payload::json"
+                    )
+                )
+            engine.dispose()
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "launchplane_outbox_deliveries.payload has type",
+                ):
+                    store.verify_schema()
+            finally:
+                store.close()
+
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_concurrent_outbox_enqueue_reuses_one_delivery(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            delivery = _outbox_delivery(suffix="concurrent-enqueue")
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def enqueue(active_store: PostgresRecordStore) -> OutboxDeliveryRecord:
+                barrier.wait(timeout=5)
+                return active_store.enqueue_outbox_delivery_with_idempotency(
+                    OutboxWithIdempotencyRequest(delivery=delivery)
+                )
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first_future = executor.submit(enqueue, store)
+                    second_future = executor.submit(enqueue, second_store)
+                    first = first_future.result(timeout=10)
+                    second = second_future.result(timeout=10)
+                rows = store.list_outbox_delivery_records()
+            finally:
+                second_store.close()
+
+        self.assertEqual(first.delivery_id, delivery.delivery_id)
+        self.assertEqual(second.delivery_id, delivery.delivery_id)
+        self.assertEqual([row.delivery_id for row in rows], [delivery.delivery_id])
+
+    def test_lane_summary_waits_for_authority_bundle_commit(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            bundle_step_reached = threading.Event()
+            release_bundle = threading.Event()
+            read_started = threading.Event()
+            read_finished = threading.Event()
+            errors: list[BaseException] = []
+
+            class _BlockingStore(PostgresRecordStore):
+                def _after_product_authority_bundle_step(self, step_name: str) -> None:
+                    if step_name == "write_product_profile":
+                        bundle_step_reached.set()
+                        if not release_bundle.wait(timeout=5):
+                            raise TimeoutError("timed out waiting to release authority bundle")
+
+            blocking_store = _BlockingStore(database_url=store.database_url)
+            reader_store = PostgresRecordStore(database_url=store.database_url)
+
+            def write_bundle() -> None:
+                try:
+                    blocking_store.write_product_authority_bundle(
+                        ProductAuthorityBundle(product_profiles=(_product_profile(),))
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            def read_lane_summary() -> None:
+                read_started.set()
+                try:
+                    reader_store.read_lane_summary(
+                        context_name="example-product",
+                        instance_name="prod",
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    read_finished.set()
+
+            writer_thread = threading.Thread(target=write_bundle)
+            reader_thread = threading.Thread(target=read_lane_summary)
+            writer_thread.start()
+            try:
+                self.assertTrue(bundle_step_reached.wait(timeout=5))
+                reader_thread.start()
+                self.assertTrue(read_started.wait(timeout=5))
+                self.assertFalse(read_finished.wait(timeout=0.1))
+            finally:
+                release_bundle.set()
+                writer_thread.join(timeout=5)
+                if reader_thread.ident is not None:
+                    reader_thread.join(timeout=5)
+                blocking_store.close()
+                reader_store.close()
+
+        self.assertFalse(writer_thread.is_alive())
+        self.assertFalse(reader_thread.is_alive())
+        self.assertEqual(errors, [])
+
     def test_every_code_two_workers_claim_exactly_once(self) -> None:
         with _store_for_fresh_head_database() as store:
             record = _every_code_work_request()
@@ -727,6 +911,85 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(loaded.state, "claimed")
         assert replay_evidence is not None
         self.assertEqual(replay_evidence.state, "completed")
+
+    def test_outbox_claim_skips_locked_pending_row_and_claims_next_delivery(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            first = _outbox_delivery(suffix="first").model_copy(
+                update={
+                    "created_at": "2026-07-13T00:00:00Z",
+                    "updated_at": "2026-07-13T00:00:00Z",
+                    "next_attempt_at": "2026-07-13T00:00:00Z",
+                }
+            )
+            second = _outbox_delivery(suffix="second").model_copy(
+                update={
+                    "created_at": "2026-07-13T00:00:01Z",
+                    "updated_at": "2026-07-13T00:00:01Z",
+                    "next_attempt_at": "2026-07-13T00:00:00Z",
+                }
+            )
+            store.write_outbox_delivery_record(first)
+            store.write_outbox_delivery_record(second)
+            blocker = create_engine(store.database_url)
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            try:
+                with blocker.connect() as connection:
+                    transaction = connection.begin()
+                    try:
+                        locked_delivery_id = connection.execute(
+                            text(
+                                "select delivery_id from launchplane_outbox_deliveries "
+                                "where delivery_id = :delivery_id for update"
+                            ),
+                            {"delivery_id": first.delivery_id},
+                        ).scalar_one()
+                        claimed = second_store.claim_next_outbox_delivery_record(
+                            lease_owner="worker-b",
+                            now="2026-07-13T00:00:02Z",
+                        )
+                    finally:
+                        transaction.rollback()
+                first_claim = store.claim_next_outbox_delivery_record(
+                    lease_owner="worker-a",
+                    now="2026-07-13T00:00:03Z",
+                )
+            finally:
+                second_store.close()
+                blocker.dispose()
+
+        self.assertEqual(locked_delivery_id, first.delivery_id)
+        self.assertEqual(claimed.status, "claimed")
+        assert claimed.record is not None
+        self.assertEqual(claimed.record.delivery_id, second.delivery_id)
+        self.assertEqual(claimed.record.lease_owner, "worker-b")
+        self.assertEqual(first_claim.status, "claimed")
+        assert first_claim.record is not None
+        self.assertEqual(first_claim.record.delivery_id, first.delivery_id)
+        self.assertEqual(first_claim.record.lease_owner, "worker-a")
+
+    def test_outbox_enqueue_with_idempotency_is_atomic_on_validation_failure(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            delivery = _outbox_delivery(suffix="atomic-validation")
+            invalid_reservation = _mutation_reservation(
+                lease_owner="worker-a",
+                idempotency_key="product-preview-tls:postgres:outbox-invalid",
+            )
+            with self.assertRaisesRegex(ValueError, "completed replay evidence"):
+                store.enqueue_outbox_delivery_with_idempotency(
+                    OutboxWithIdempotencyRequest(
+                        delivery=delivery,
+                        idempotency_record=invalid_reservation,
+                    )
+                )
+            rows = store.list_outbox_delivery_records()
+            stored_reservation = store.read_idempotency_record(
+                scope=invalid_reservation.scope,
+                route_path=invalid_reservation.route_path,
+                idempotency_key=invalid_reservation.idempotency_key,
+            )
+
+        self.assertEqual(rows, ())
+        self.assertIsNone(stored_reservation)
 
     def test_two_connections_claim_exactly_one_pending_operation_and_recover_lease(
         self,

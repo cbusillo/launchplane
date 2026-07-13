@@ -34,6 +34,7 @@ from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
 )
+from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service as control_plane_product_config_service
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
@@ -593,10 +594,12 @@ from control_plane.launchplane_mutations import (
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.postgres import (
     DbOnlyMutationRequest,
     MutationReservationResult,
     MutationReservationUpdateResult,
+    OutboxWithIdempotencyRequest,
     PostgresRecordStore,
     RouteBindingMutationResult,
 )
@@ -606,7 +609,7 @@ from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
-from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
+from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorStore,
     public_ingress_notification_drivers,
@@ -13360,6 +13363,31 @@ def create_launchplane_fastapi_app(
             )
         )
 
+    def authority_bundle_with_apply_idempotency(
+        *,
+        bundle: ProductAuthorityBundle,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint_value: str,
+        trace_id: str,
+        response: BaseModel,
+    ) -> ProductAuthorityBundle:
+        if not idempotency_key.strip():
+            return bundle
+        return bundle.model_copy(
+            update={
+                "idempotency_record": build_apply_idempotency_record(
+                    identity=identity,
+                    route_path=route_path,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint_value=request_fingerprint_value,
+                    trace_id=trace_id,
+                    response=response,
+                )
+            }
+        )
+
     async def apply_product_config(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
@@ -13466,16 +13494,20 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
-        driver_result, product_config_error = (
-            control_plane_product_config_service.apply_product_config_service_request(
-                record_store=database_store,
-                payload=product_config_request.product_config_payload(),
-                mode=product_config_request.mode,
-                actor=product_config_identity_actor(identity),
-                source_label=product_config_request.source_label,
+        try:
+            driver_result, authority_bundle = (
+                control_plane_product_config.plan_product_config_authority_bundle(
+                    record_store=database_store,
+                    payload=product_config_request.product_config_payload(),
+                    mode=product_config_request.mode,
+                    actor=product_config_identity_actor(identity),
+                    source_label=product_config_request.source_label,
+                )
             )
-        )
-        if product_config_error is not None:
+        except control_plane_product_config.ProductConfigError as error:
+            product_config_error = (
+                control_plane_product_config_service.product_config_service_error(error)
+            )
             raise _launchplane_http_error(
                 status_code=product_config_error.status_code,
                 trace_id=trace_id,
@@ -13509,15 +13541,28 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=product_config_response,
             )
-        store_apply_idempotency(
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=product_config_response,
-        )
+        if product_config_request.mode == "dry-run":
+            store_apply_idempotency(
+                record_store=database_store,
+                identity=identity,
+                route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=product_config_response,
+            )
+        else:
+            database_store.write_product_authority_bundle(
+                authority_bundle_with_apply_idempotency(
+                    bundle=authority_bundle,
+                    identity=identity,
+                    route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=product_config_response,
+                )
+            )
         return product_config_response
 
     async def reencrypt_managed_secrets(
@@ -13607,12 +13652,34 @@ def create_launchplane_fastapi_app(
                     "utf-8"
                 )
             ).hexdigest()
+
+        def reencryption_idempotency_record(
+            result_payload: dict[str, object],
+        ) -> LaunchplaneIdempotencyRecord:
+            return build_apply_idempotency_record(
+                identity=identity,
+                route_path=_SECRET_REENCRYPT_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={},
+                    result=result_payload,
+                ),
+            )
+
         try:
             result = control_plane_secrets.reencrypt_secrets(
                 record_store=database_store,
                 apply=reencryption_request.mode == "apply",
                 expected_plan_digest=reencryption_request.expected_plan_digest,
                 operation_token=operation_token,
+                idempotency_record_factory=(
+                    reencryption_idempotency_record
+                    if reencryption_request.mode == "apply"
+                    else None
+                ),
                 actor=actor,
                 source_label=reencryption_request.source_label,
                 reason=reencryption_request.reason,
@@ -13632,16 +13699,6 @@ def create_launchplane_fastapi_app(
                 message="Managed-secret state no longer matches the approved dry-run.",
             )
         response = accepted_evidence_response(trace_id=trace_id, records={}, result=result)
-        if reencryption_request.mode == "apply":
-            store_apply_idempotency(
-                record_store=database_store,
-                identity=identity,
-                route_path=_SECRET_REENCRYPT_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
         return response
 
     async def apply_product_onboarding(
@@ -13708,7 +13765,7 @@ def create_launchplane_fastapi_app(
         if replay_response is not None:
             return replay_response
         try:
-            onboarding_result = apply_product_onboarding_manifest(
+            onboarding_result, authority_bundle = plan_product_onboarding_authority_bundle(
                 record_store=database_store,
                 manifest=onboarding_request.manifest,
             )
@@ -13735,14 +13792,16 @@ def create_launchplane_fastapi_app(
             },
             result=driver_result,
         )
-        store_apply_idempotency(
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=onboarding_response,
+        database_store.write_product_authority_bundle(
+            authority_bundle_with_apply_idempotency(
+                bundle=authority_bundle,
+                identity=identity,
+                route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=onboarding_response,
+            )
         )
         return onboarding_response
 
@@ -14414,9 +14473,11 @@ def create_launchplane_fastapi_app(
                 message="Requested cutover contexts are not owned by the product profile.",
             )
         try:
-            result = control_plane_product_context_cutover.apply_product_context_cutover(
-                record_store=database_store,
-                request=context_cutover_request,
+            result, authority_bundle = (
+                control_plane_product_context_cutover.plan_product_context_cutover_authority_bundle(
+                    record_store=database_store,
+                    request=context_cutover_request,
+                )
             )
         except ValueError as error:
             raise _launchplane_http_error(
@@ -14430,15 +14491,18 @@ def create_launchplane_fastapi_app(
             records={"product_profile": context_cutover_request.product},
             result=result,
         )
-        store_apply_idempotency(
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
+        if context_cutover_request.mode == "apply":
+            database_store.write_product_authority_bundle(
+                authority_bundle_with_apply_idempotency(
+                    bundle=authority_bundle,
+                    identity=identity,
+                    route_path=_PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
+            )
         return response
 
     async def apply_product_legacy_context_cleanup(
@@ -14510,9 +14574,11 @@ def create_launchplane_fastapi_app(
         if replay_response is not None:
             return replay_response
         try:
-            result = control_plane_product_context_cutover.apply_legacy_context_cleanup(
-                record_store=database_store,
-                request=legacy_cleanup_request,
+            result, authority_bundle = (
+                control_plane_product_context_cutover.plan_legacy_context_cleanup_authority_bundle(
+                    record_store=database_store,
+                    request=legacy_cleanup_request,
+                )
             )
         except control_plane_product_context_cutover.LegacyContextCleanupBoundaryError as error:
             raise _launchplane_http_error(
@@ -14540,15 +14606,18 @@ def create_launchplane_fastapi_app(
             records={"product_profile": legacy_cleanup_request.product},
             result=result,
         )
-        store_apply_idempotency(
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
+        if legacy_cleanup_request.mode == "apply":
+            database_store.write_product_authority_bundle(
+                authority_bundle_with_apply_idempotency(
+                    bundle=authority_bundle,
+                    identity=identity,
+                    route_path=_PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
+            )
         return response
 
     def resolve_ingress_edge_endpoint(
@@ -16589,10 +16658,15 @@ def create_launchplane_fastapi_app(
                 replayed_response.model_dump(mode="json")
             )
         try:
-            records, result = dispatch_generic_web_promotion_workflow_result(
+            records, result, outbox_delivery = dispatch_generic_web_promotion_workflow_result(
                 control_plane_root=resolved_control_plane_root,
                 request=workflow_request,
                 profile=profile,
+                delivery_key=(
+                    f"{idempotency_scope(identity)}:{normalized_key}"
+                    if normalized_key
+                    else trace_id
+                ),
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -16615,9 +16689,16 @@ def create_launchplane_fastapi_app(
                 result.model_dump(mode="json")
             ),
         )
-        if should_store_generic_web_promotion_idempotency(result):
-            store_apply_idempotency(
-                record_store=record_store,
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="outbox_requires_postgres",
+                message="Workflow dispatch requires PostgreSQL transactional outbox storage.",
+            )
+        idempotency_record = None
+        if normalized_key and should_store_generic_web_promotion_idempotency(result):
+            idempotency_record = build_apply_idempotency_record(
                 identity=identity,
                 route_path=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
                 idempotency_key=normalized_key,
@@ -16625,6 +16706,12 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=response,
             )
+        record_store.enqueue_outbox_delivery_with_idempotency(
+            OutboxWithIdempotencyRequest(
+                delivery=outbox_delivery,
+                idempotency_record=idempotency_record,
+            )
+        )
         return response
 
     def resolve_verireel_route_authorization(

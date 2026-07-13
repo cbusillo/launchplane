@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast
@@ -16,6 +17,7 @@ from sqlalchemy import (
     desc,
     func,
     inspect,
+    or_,
     text,
     select,
 )
@@ -79,6 +81,7 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
+from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -129,6 +132,10 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 from control_plane.service_auth import GitHubHumanIdentity
 from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProviderTargetWrite,
+)
 from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
@@ -227,6 +234,26 @@ class RouteBindingMutationResult(NamedTuple):
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
+OutboxDeliveryClaimStatus = Literal["claimed", "empty"]
+OutboxDeliveryCompletionStatus = Literal[
+    "updated",
+    "missing",
+    "not_running",
+    "owner_mismatch",
+    "lease_expired",
+]
+
+
+class OutboxDeliveryClaimResult(NamedTuple):
+    status: OutboxDeliveryClaimStatus
+    record: OutboxDeliveryRecord | None = None
+
+
+class OutboxDeliveryCompletionResult(NamedTuple):
+    status: OutboxDeliveryCompletionStatus
+    record: OutboxDeliveryRecord | None = None
+
+
 @dataclass(frozen=True)
 class DbOnlyMutationRequest:
     scope: str
@@ -238,6 +265,12 @@ class DbOnlyMutationRequest:
     response_trace_id: str
     response_payload: dict[str, Any]
     lease_seconds: int = 300
+
+
+@dataclass(frozen=True)
+class OutboxWithIdempotencyRequest:
+    delivery: OutboxDeliveryRecord
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
 def _utc_now_timestamp() -> str:
@@ -1353,6 +1386,51 @@ class LaunchplaneIdempotencyRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneOutboxDeliveryRow(Base):
+    __tablename__ = "launchplane_outbox_deliveries"
+    __table_args__ = (
+        Index("launchplane_outbox_deliveries_dedupe_uidx", "dedupe_key", unique=True),
+        Index(
+            "launchplane_outbox_deliveries_claim_idx",
+            "state",
+            "next_attempt_at",
+            "lease_expires_at",
+            "created_at",
+        ),
+        Index(
+            "launchplane_outbox_deliveries_aggregate_idx",
+            "aggregate_type",
+            "aggregate_id",
+            desc("created_at"),
+        ),
+        Index(
+            "launchplane_outbox_deliveries_provider_key_idx",
+            "provider_operation_key",
+        ),
+    )
+
+    delivery_id: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    aggregate_type: Mapped[str] = mapped_column(String, nullable=False)
+    aggregate_id: Mapped[str] = mapped_column(String, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    next_attempt_at: Mapped[str] = mapped_column(String, nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="6")
+    provider_operation_key: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    provider_id: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    external_id: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    external_url: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    action: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    error_code: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneOdooStableBootstrapOperationRow(Base):
     __tablename__ = "launchplane_odoo_stable_bootstrap_operations"
     __table_args__ = (
@@ -1750,6 +1828,387 @@ class PostgresRecordStore(HumanSessionStore):
             session.merge(row)
             session.commit()
 
+    def _after_product_authority_bundle_step(self, step_name: str) -> None:
+        return None
+
+    def _merge_authority_row(self, session: Any, row: Base, *, step_name: str) -> None:
+        session.merge(row)
+        self._after_product_authority_bundle_step(step_name)
+
+    def _product_profile_row(
+        self, record: LaunchplaneProductProfileRecord
+    ) -> LaunchplaneProductProfileRow:
+        return LaunchplaneProductProfileRow(
+            product=record.product,
+            display_name=record.display_name,
+            repository=record.repository,
+            driver_id=record.driver_id,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _dokploy_target_id_row(
+        self, record: DokployTargetIdRecord
+    ) -> LaunchplaneDokployTargetIdRow:
+        return LaunchplaneDokployTargetIdRow(
+            context=record.context,
+            instance=record.instance,
+            target_id=record.target_id,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _dokploy_target_row(self, record: DokployTargetRecord) -> LaunchplaneDokployTargetRow:
+        return LaunchplaneDokployTargetRow(
+            context=record.context,
+            instance=record.instance,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _provider_target_row(self, record: ProviderTargetRecord) -> LaunchplaneProviderTargetRow:
+        return LaunchplaneProviderTargetRow(
+            context=record.context,
+            instance=record.instance,
+            provider_id=record.provider_id,
+            target_category=record.target_category,
+            target_id=record.target_id,
+            display_name=record.display_name,
+            provider_target_type=record.provider_target_type,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _runtime_environment_row(
+        self, record: RuntimeEnvironmentRecord
+    ) -> LaunchplaneRuntimeEnvironmentRow:
+        return LaunchplaneRuntimeEnvironmentRow(
+            scope=record.scope,
+            context=record.context,
+            instance=record.instance,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _runtime_environment_delete_event_row(
+        self, event: RuntimeEnvironmentDeleteEvent
+    ) -> LaunchplaneRuntimeEnvironmentDeleteEventRow:
+        return LaunchplaneRuntimeEnvironmentDeleteEventRow(
+            event_id=event.event_id,
+            scope=event.scope,
+            context=event.context,
+            instance=event.instance,
+            recorded_at=event.recorded_at,
+            payload=self._payload_dict(event),
+        )
+
+    def _secret_row(self, record: SecretRecord) -> LaunchplaneSecretRow:
+        return LaunchplaneSecretRow(
+            secret_id=record.secret_id,
+            scope=record.scope,
+            integration=record.integration,
+            name=record.name,
+            context=record.context,
+            instance=record.instance,
+            status=record.status,
+            current_version_id=record.current_version_id,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _secret_version_row(self, version: SecretVersion) -> LaunchplaneSecretVersionRow:
+        return LaunchplaneSecretVersionRow(
+            version_id=version.version_id,
+            secret_id=version.secret_id,
+            created_at=version.created_at,
+            payload=self._payload_dict(version),
+        )
+
+    def _secret_binding_row(self, binding: SecretBinding) -> LaunchplaneSecretBindingRow:
+        return LaunchplaneSecretBindingRow(
+            binding_id=binding.binding_id,
+            secret_id=binding.secret_id,
+            integration=binding.integration,
+            binding_key=binding.binding_key,
+            context=binding.context,
+            instance=binding.instance,
+            status=binding.status,
+            updated_at=binding.updated_at,
+            payload=self._payload_dict(binding),
+        )
+
+    def _secret_audit_event_row(self, event: SecretAuditEvent) -> LaunchplaneSecretAuditEventRow:
+        return LaunchplaneSecretAuditEventRow(
+            event_id=event.event_id,
+            secret_id=event.secret_id,
+            event_type=event.event_type,
+            recorded_at=event.recorded_at,
+            payload=self._payload_dict(event),
+        )
+
+    def _environment_inventory_row(self, record: EnvironmentInventory) -> LaunchplaneInventoryRow:
+        return LaunchplaneInventoryRow(
+            context=record.context,
+            instance=record.instance,
+            artifact_id=_artifact_id_from_model(record),
+            source_git_ref=record.source_git_ref,
+            updated_at=record.updated_at,
+            deployment_record_id=record.deployment_record_id,
+            promotion_record_id=record.promotion_record_id,
+            promoted_from_instance=record.promoted_from_instance,
+            payload=self._payload_dict(record),
+        )
+
+    def _release_tuple_row(self, record: ReleaseTupleRecord) -> LaunchplaneReleaseTupleRow:
+        return LaunchplaneReleaseTupleRow(
+            context=record.context,
+            channel=record.channel,
+            tuple_id=record.tuple_id,
+            artifact_id=record.artifact_id,
+            minted_at=record.minted_at,
+            provenance=record.provenance,
+            payload=self._payload_dict(record),
+        )
+
+    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
+        if not bundle.requires_write():
+            return
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            for delete_item in bundle.delete_runtime_environments:
+                row = session.scalar(
+                    self._runtime_environment_statement(
+                        scope=delete_item.expected_record.scope,
+                        context=delete_item.expected_record.context,
+                        instance=delete_item.expected_record.instance,
+                        for_update=True,
+                    )
+                )
+                if row is None:
+                    raise FileNotFoundError("Runtime environment record was already deleted.")
+                current_record = self._read_payload(
+                    model_type=RuntimeEnvironmentRecord,
+                    payload=row.payload,
+                )
+                if self._payload_dict(current_record) != self._payload_dict(
+                    delete_item.expected_record
+                ):
+                    raise ValueError("Runtime environment record changed during bundle write.")
+                session.delete(row)
+                self._after_product_authority_bundle_step("delete_runtime_environment")
+                self._merge_authority_row(
+                    session,
+                    self._runtime_environment_delete_event_row(delete_item.event),
+                    step_name="write_runtime_environment_delete_event",
+                )
+
+            for provider_target_delete in bundle.delete_provider_targets:
+                self._delete_current_authority_row(
+                    session=session,
+                    orm_model=LaunchplaneProviderTargetRow,
+                    model_type=ProviderTargetRecord,
+                    filters=(
+                        LaunchplaneProviderTargetRow.context == provider_target_delete.context,
+                        LaunchplaneProviderTargetRow.instance == provider_target_delete.instance,
+                    ),
+                    expected_record=provider_target_delete,
+                    label="Provider target record",
+                    step_name="delete_provider_target",
+                )
+            for target_id_delete in bundle.delete_dokploy_target_ids:
+                self._delete_current_authority_row(
+                    session=session,
+                    orm_model=LaunchplaneDokployTargetIdRow,
+                    model_type=DokployTargetIdRecord,
+                    filters=(
+                        LaunchplaneDokployTargetIdRow.context == target_id_delete.context,
+                        LaunchplaneDokployTargetIdRow.instance == target_id_delete.instance,
+                    ),
+                    expected_record=target_id_delete,
+                    label="Dokploy target ID record",
+                    step_name="delete_dokploy_target_id",
+                )
+            for target_delete in bundle.delete_dokploy_targets:
+                self._delete_current_authority_row(
+                    session=session,
+                    orm_model=LaunchplaneDokployTargetRow,
+                    model_type=DokployTargetRecord,
+                    filters=(
+                        LaunchplaneDokployTargetRow.context == target_delete.context,
+                        LaunchplaneDokployTargetRow.instance == target_delete.instance,
+                    ),
+                    expected_record=target_delete,
+                    label="Dokploy target record",
+                    step_name="delete_dokploy_target",
+                )
+
+            for profile_record in bundle.product_profiles:
+                self._merge_authority_row(
+                    session,
+                    self._product_profile_row(profile_record),
+                    step_name="write_product_profile",
+                )
+            for target_record in bundle.dokploy_targets:
+                self._merge_authority_row(
+                    session,
+                    self._dokploy_target_row(target_record),
+                    step_name="write_dokploy_target",
+                )
+            for target_id_record in bundle.dokploy_target_ids:
+                self._merge_authority_row(
+                    session,
+                    self._dokploy_target_id_row(target_id_record),
+                    step_name="write_dokploy_target_id",
+                )
+            for provider_target_write in bundle.provider_target_writes:
+                self._write_provider_target_with_expectation(
+                    session=session,
+                    write=provider_target_write,
+                )
+            for runtime_record in bundle.runtime_environments:
+                self._merge_authority_row(
+                    session,
+                    self._runtime_environment_row(runtime_record),
+                    step_name="write_runtime_environment",
+                )
+            for version in bundle.secret_versions:
+                self._merge_authority_row(
+                    session,
+                    self._secret_version_row(version),
+                    step_name="write_secret_version",
+                )
+            for secret_record in bundle.secret_records:
+                self._merge_authority_row(
+                    session, self._secret_row(secret_record), step_name="write_secret_record"
+                )
+            for binding in bundle.secret_bindings:
+                self._merge_authority_row(
+                    session,
+                    self._secret_binding_row(binding),
+                    step_name="write_secret_binding",
+                )
+            for event in bundle.secret_audit_events:
+                self._merge_authority_row(
+                    session,
+                    self._secret_audit_event_row(event),
+                    step_name="write_secret_audit_event",
+                )
+            for inventory_record in bundle.environment_inventory:
+                self._merge_authority_row(
+                    session,
+                    self._environment_inventory_row(inventory_record),
+                    step_name="write_environment_inventory",
+                )
+            for release_record in bundle.release_tuples:
+                self._merge_authority_row(
+                    session,
+                    self._release_tuple_row(release_record),
+                    step_name="write_release_tuple",
+                )
+            if bundle.idempotency_record is not None:
+                self._merge_authority_row(
+                    session,
+                    self._idempotency_row(bundle.idempotency_record),
+                    step_name="write_idempotency",
+                )
+            session.commit()
+
+    def _write_provider_target_with_expectation(
+        self,
+        *,
+        session: Any,
+        write: ProviderTargetWrite,
+    ) -> None:
+        statement = (
+            select(LaunchplaneProviderTargetRow)
+            .where(
+                LaunchplaneProviderTargetRow.context == write.record.context,
+                LaunchplaneProviderTargetRow.instance == write.record.instance,
+            )
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        row = session.scalar(statement)
+        if write.expected_absent:
+            if row is not None:
+                raise ValueError(
+                    "Provider target record was created after authority bundle planning."
+                )
+            session.add(self._provider_target_row(write.record))
+            try:
+                session.flush()
+            except IntegrityError as error:
+                raise ValueError(
+                    "Provider target record was created after authority bundle planning."
+                ) from error
+            self._after_product_authority_bundle_step("write_provider_target")
+            return
+        expected_record = write.expected_record
+        if expected_record is None:
+            raise ValueError("Provider target write expectation is missing.")
+        if row is None:
+            raise ValueError("Provider target record changed after authority bundle planning.")
+        current_record = self._read_payload(
+            model_type=ProviderTargetRecord,
+            payload=row.payload,
+        )
+        if self._payload_dict(current_record) != self._payload_dict(expected_record):
+            raise ValueError("Provider target record changed after authority bundle planning.")
+        self._merge_authority_row(
+            session,
+            self._provider_target_row(write.record),
+            step_name="write_provider_target",
+        )
+
+    def _delete_current_authority_row(
+        self,
+        *,
+        session: Any,
+        orm_model: type[Base],
+        model_type: type[RecordModel],
+        filters: Sequence[object],
+        expected_record: RecordModel,
+        label: str,
+        step_name: str,
+    ) -> None:
+        statement = select(orm_model).where(*cast(Any, filters)).limit(1)
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        row = session.scalar(statement)
+        if row is None:
+            raise FileNotFoundError(f"{label} was already deleted.")
+        current_record = self._read_payload(
+            model_type=model_type,
+            payload=cast(_PayloadRow, row).payload,
+        )
+        if self._payload_dict(current_record) != self._payload_dict(expected_record):
+            raise ValueError(f"{label} changed during bundle write.")
+        session.delete(row)
+        self._after_product_authority_bundle_step(step_name)
+
+    def _runtime_environment_statement(
+        self,
+        *,
+        scope: str,
+        context: str,
+        instance: str,
+        for_update: bool = False,
+    ) -> Any:
+        statement = (
+            select(LaunchplaneRuntimeEnvironmentRow)
+            .where(
+                LaunchplaneRuntimeEnvironmentRow.scope == scope,
+                LaunchplaneRuntimeEnvironmentRow.context == context,
+                LaunchplaneRuntimeEnvironmentRow.instance == instance,
+            )
+            .limit(1)
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return statement
+
     def _read_model(
         self,
         *,
@@ -1915,6 +2374,55 @@ class PostgresRecordStore(HumanSessionStore):
         row.recorded_at = record.recorded_at
         row.payload = self._payload_dict(record)
 
+    def _outbox_delivery_row(self, record: OutboxDeliveryRecord) -> LaunchplaneOutboxDeliveryRow:
+        return LaunchplaneOutboxDeliveryRow(
+            delivery_id=record.delivery_id,
+            kind=record.kind,
+            state=record.state,
+            aggregate_type=record.aggregate_type,
+            aggregate_id=record.aggregate_id,
+            dedupe_key=record.dedupe_key,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            next_attempt_at=record.next_attempt_at,
+            lease_owner=record.lease_owner,
+            lease_expires_at=record.lease_expires_at,
+            attempt=record.attempt,
+            max_attempts=record.max_attempts,
+            provider_operation_key=record.provider_operation_key,
+            provider_id=record.provider_id,
+            external_id=record.external_id,
+            external_url=record.external_url,
+            action=record.action,
+            error_code=record.error_code,
+            payload=self._payload_dict(record),
+        )
+
+    def _sync_outbox_delivery_row(
+        self,
+        row: LaunchplaneOutboxDeliveryRow,
+        record: OutboxDeliveryRecord,
+    ) -> None:
+        row.kind = record.kind
+        row.state = record.state
+        row.aggregate_type = record.aggregate_type
+        row.aggregate_id = record.aggregate_id
+        row.dedupe_key = record.dedupe_key
+        row.created_at = record.created_at
+        row.updated_at = record.updated_at
+        row.next_attempt_at = record.next_attempt_at
+        row.lease_owner = record.lease_owner
+        row.lease_expires_at = record.lease_expires_at
+        row.attempt = record.attempt
+        row.max_attempts = record.max_attempts
+        row.provider_operation_key = record.provider_operation_key
+        row.provider_id = record.provider_id
+        row.external_id = record.external_id
+        row.external_url = record.external_url
+        row.action = record.action
+        row.error_code = record.error_code
+        row.payload = self._payload_dict(record)
+
     def _idempotency_statement(
         self,
         *,
@@ -1939,6 +2447,29 @@ class PostgresRecordStore(HumanSessionStore):
     def _begin_serialized_write(self, session: Any) -> None:
         if self.database_url.startswith("sqlite"):
             session.execute(text("BEGIN IMMEDIATE"))
+
+    def _lock_product_authority_bundle_write(self, session: Any) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "launchplane:product-authority-bundle"},
+        )
+
+    @contextmanager
+    def _product_authority_bundle_read_guard(self) -> Iterator[None]:
+        with self._session_factory() as session:
+            if self.database_url.startswith("sqlite"):
+                session.execute(text("BEGIN IMMEDIATE"))
+            else:
+                session.execute(
+                    text("select pg_advisory_xact_lock_shared(hashtextextended(:lock_name, 0))"),
+                    {"lock_name": "launchplane:product-authority-bundle"},
+                )
+            try:
+                yield
+            finally:
+                session.rollback()
 
     def _database_mutation_timestamp(self, session: Any) -> str:
         if self.database_url.startswith("sqlite"):
@@ -1973,6 +2504,15 @@ class PostgresRecordStore(HumanSessionStore):
         payload.update(updates)
         return LaunchplaneIdempotencyRecord.model_validate(payload)
 
+    def _updated_outbox_delivery_record(
+        self,
+        record: OutboxDeliveryRecord,
+        **updates: object,
+    ) -> OutboxDeliveryRecord:
+        payload = record.model_dump(mode="json")
+        payload.update(updates)
+        return OutboxDeliveryRecord.model_validate(payload)
+
     def _mutation_transition_identity(
         self,
         record: LaunchplaneIdempotencyRecord,
@@ -2005,6 +2545,283 @@ class PostgresRecordStore(HumanSessionStore):
                 "Running or reconcile-required reservations must use mutation reservation methods."
             )
         self._write_row(self._idempotency_row(record))
+
+    def write_outbox_delivery_record(self, record: OutboxDeliveryRecord) -> None:
+        self._write_row(self._outbox_delivery_row(record))
+
+    def enqueue_outbox_delivery_with_idempotency(
+        self, request: OutboxWithIdempotencyRequest
+    ) -> OutboxDeliveryRecord:
+        if (
+            request.idempotency_record is not None
+            and request.idempotency_record.state != "completed"
+        ):
+            raise ValueError("Outbox idempotency evidence must be completed replay evidence.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_outbox_dedupe_keys(
+                session,
+                dedupe_keys=(request.delivery.dedupe_key,),
+            )
+            existing_row = session.scalar(
+                select(LaunchplaneOutboxDeliveryRow)
+                .where(LaunchplaneOutboxDeliveryRow.dedupe_key == request.delivery.dedupe_key)
+                .limit(1)
+            )
+            if existing_row is None:
+                delivery = request.delivery
+                session.add(self._outbox_delivery_row(delivery))
+            else:
+                delivery = self._read_payload(
+                    model_type=OutboxDeliveryRecord,
+                    payload=existing_row.payload,
+                )
+            if request.idempotency_record is not None:
+                session.merge(self._idempotency_row(request.idempotency_record))
+            session.commit()
+            return delivery
+
+    def _lock_outbox_dedupe_keys(
+        self,
+        session: Any,
+        *,
+        dedupe_keys: tuple[str, ...],
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        for dedupe_key in sorted(set(dedupe_keys)):
+            session.execute(
+                text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                {"lock_name": f"launchplane:outbox:{dedupe_key}"},
+            )
+
+    def read_outbox_delivery_record(self, delivery_id: str) -> OutboxDeliveryRecord:
+        return self._read_model(
+            model_type=OutboxDeliveryRecord,
+            orm_model=LaunchplaneOutboxDeliveryRow,
+            filters=(LaunchplaneOutboxDeliveryRow.delivery_id == delivery_id,),
+        )
+
+    def list_outbox_delivery_records(
+        self,
+        *,
+        states: tuple[str, ...] = (),
+        kind: str = "",
+        aggregate_type: str = "",
+        aggregate_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[OutboxDeliveryRecord, ...]:
+        filters: list[object] = []
+        if states:
+            filters.append(LaunchplaneOutboxDeliveryRow.state.in_(states))
+        if kind:
+            filters.append(LaunchplaneOutboxDeliveryRow.kind == kind)
+        if aggregate_type:
+            filters.append(LaunchplaneOutboxDeliveryRow.aggregate_type == aggregate_type)
+        if aggregate_id:
+            filters.append(LaunchplaneOutboxDeliveryRow.aggregate_id == aggregate_id)
+        return self._list_models(
+            model_type=OutboxDeliveryRecord,
+            orm_model=LaunchplaneOutboxDeliveryRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneOutboxDeliveryRow.created_at.asc(),
+                LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
+            ),
+            limit=limit,
+        )
+
+    def claim_next_outbox_delivery_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_seconds: int = 300,
+        now: str = "",
+    ) -> OutboxDeliveryClaimResult:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("Outbox delivery claim requires lease_owner.")
+        observed_at = now.strip()
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            if not observed_at:
+                observed_at = self._database_mutation_timestamp(session)
+            lease_expires_at = self._mutation_lease_expiry(
+                observed_at=observed_at,
+                lease_seconds=lease_seconds,
+            )
+            statement = (
+                select(LaunchplaneOutboxDeliveryRow)
+                .where(
+                    LaunchplaneOutboxDeliveryRow.state.in_(
+                        ("pending", "running", "reconcile_required")
+                    ),
+                    LaunchplaneOutboxDeliveryRow.next_attempt_at <= observed_at,
+                    or_(
+                        LaunchplaneOutboxDeliveryRow.state == "pending",
+                        LaunchplaneOutboxDeliveryRow.state == "reconcile_required",
+                        LaunchplaneOutboxDeliveryRow.lease_expires_at == "",
+                        LaunchplaneOutboxDeliveryRow.lease_expires_at < observed_at,
+                    ),
+                )
+                .order_by(
+                    LaunchplaneOutboxDeliveryRow.next_attempt_at.asc(),
+                    LaunchplaneOutboxDeliveryRow.created_at.asc(),
+                    LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update(skip_locked=True)
+            row = session.scalar(statement)
+            if row is None:
+                return OutboxDeliveryClaimResult(status="empty")
+            record = self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
+            if record.state == "running" and record.provider_operation_key:
+                record = self._updated_outbox_delivery_record(
+                    record,
+                    state="reconcile_required",
+                    lease_owner="",
+                    lease_expires_at="",
+                    updated_at=observed_at,
+                    next_attempt_at=observed_at,
+                    error_code="lease_expired_after_provider_marker",
+                )
+            if record.attempt >= record.max_attempts:
+                failed_record = self._updated_outbox_delivery_record(
+                    record,
+                    state="failed",
+                    lease_owner="",
+                    lease_expires_at="",
+                    updated_at=observed_at,
+                    next_attempt_at=observed_at,
+                    error_code="max_attempts_exhausted",
+                )
+                self._sync_outbox_delivery_row(row, failed_record)
+                session.commit()
+                return OutboxDeliveryClaimResult(status="empty")
+            claimed_record = self._updated_outbox_delivery_record(
+                record,
+                state="running",
+                updated_at=observed_at,
+                lease_owner=normalized_lease_owner,
+                lease_expires_at=lease_expires_at,
+                attempt=record.attempt + 1,
+                error_code="",
+            )
+            self._sync_outbox_delivery_row(row, claimed_record)
+            session.commit()
+            return OutboxDeliveryClaimResult(status="claimed", record=claimed_record)
+
+    def mark_outbox_delivery_provider_started(
+        self,
+        *,
+        record: OutboxDeliveryRecord,
+        lease_owner: str,
+        provider_operation_key: str,
+        provider_id: str = "",
+        updated_at: str = "",
+    ) -> OutboxDeliveryCompletionResult:
+        normalized_provider_operation_key = provider_operation_key.strip()
+        if not normalized_provider_operation_key:
+            raise ValueError("Outbox provider start requires provider_operation_key.")
+        return self._update_running_outbox_delivery(
+            record=record,
+            lease_owner=lease_owner,
+            updates={
+                "provider_operation_key": normalized_provider_operation_key,
+                "provider_id": provider_id.strip(),
+                "updated_at": updated_at.strip(),
+            },
+        )
+
+    def complete_outbox_delivery_record(
+        self,
+        *,
+        record: OutboxDeliveryRecord,
+        lease_owner: str,
+    ) -> OutboxDeliveryCompletionResult:
+        return self._update_running_outbox_delivery(
+            record=record,
+            lease_owner=lease_owner,
+            updates=record.model_dump(mode="json"),
+            require_terminal=True,
+        )
+
+    def _update_running_outbox_delivery(
+        self,
+        *,
+        record: OutboxDeliveryRecord,
+        lease_owner: str,
+        updates: dict[str, object],
+        require_terminal: bool = False,
+    ) -> OutboxDeliveryCompletionResult:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("Outbox delivery update requires lease_owner.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_at = self._database_mutation_timestamp(session)
+            statement = (
+                select(LaunchplaneOutboxDeliveryRow)
+                .where(LaunchplaneOutboxDeliveryRow.delivery_id == record.delivery_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                return OutboxDeliveryCompletionResult(status="missing")
+            current_record = self._read_payload(
+                model_type=OutboxDeliveryRecord,
+                payload=row.payload,
+            )
+            if current_record.state != "running":
+                return OutboxDeliveryCompletionResult(status="not_running", record=current_record)
+            if current_record.lease_owner != normalized_lease_owner:
+                return OutboxDeliveryCompletionResult(
+                    status="owner_mismatch", record=current_record
+                )
+            if current_record.lease_expires_at <= observed_at:
+                return OutboxDeliveryCompletionResult(status="lease_expired", record=current_record)
+            next_updates = dict(updates)
+            if not str(next_updates.get("updated_at") or "").strip():
+                next_updates["updated_at"] = observed_at
+            if require_terminal:
+                next_updates["lease_owner"] = ""
+                next_updates["lease_expires_at"] = ""
+                if next_updates.get("state") in {"pending", "reconcile_required"}:
+                    retry_seconds = min(
+                        300,
+                        5 * (2 ** min(max(current_record.attempt - 1, 0), 6)),
+                    )
+                    next_updates["next_attempt_at"] = self._mutation_lease_expiry(
+                        observed_at=observed_at,
+                        lease_seconds=retry_seconds,
+                    )
+            else:
+                next_updates["state"] = "running"
+                next_updates["lease_owner"] = normalized_lease_owner
+                next_updates["lease_expires_at"] = current_record.lease_expires_at
+            updated_record = self._updated_outbox_delivery_record(current_record, **next_updates)
+            if require_terminal and updated_record.kind == "public_ingress_notification":
+                attempt_payload = updated_record.payload.get("attempt_result")
+                if isinstance(attempt_payload, dict):
+                    attempt = PublicIngressNotificationAttemptRecord.model_validate(attempt_payload)
+                    session.merge(
+                        LaunchplanePublicIngressNotificationAttemptRow(
+                            attempt_id=attempt.attempt_id,
+                            incident_id=attempt.incident_id,
+                            event=attempt.event,
+                            destination_kind=attempt.destination_kind,
+                            delivery_status=attempt.delivery_status,
+                            attempted_at=attempt.attempted_at,
+                            payload=self._payload_dict(attempt),
+                        )
+                    )
+            self._sync_outbox_delivery_row(row, updated_record)
+            session.commit()
+            return OutboxDeliveryCompletionResult(status="updated", record=updated_record)
 
     def read_idempotency_record(
         self,
@@ -3845,19 +4662,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
-        self._write_row(
-            LaunchplaneInventoryRow(
-                context=record.context,
-                instance=record.instance,
-                artifact_id=_artifact_id_from_model(record),
-                source_git_ref=record.source_git_ref,
-                updated_at=record.updated_at,
-                deployment_record_id=record.deployment_record_id,
-                promotion_record_id=record.promotion_record_id,
-                promoted_from_instance=record.promoted_from_instance,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._environment_inventory_row(record))
 
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
@@ -5215,17 +6020,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> None:
-        self._write_row(
-            LaunchplaneReleaseTupleRow(
-                context=record.context,
-                channel=record.channel,
-                tuple_id=record.tuple_id,
-                artifact_id=record.artifact_id,
-                minted_at=record.minted_at,
-                provenance=record.provenance,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._release_tuple_row(record))
 
     def read_release_tuple_record(
         self, *, context_name: str, channel_name: str
@@ -5284,16 +6079,7 @@ class PostgresRecordStore(HumanSessionStore):
         return records
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None:
-        self._write_row(
-            LaunchplaneProductProfileRow(
-                product=record.product,
-                display_name=record.display_name,
-                repository=record.repository,
-                driver_id=record.driver_id,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._product_profile_row(record))
 
     def compare_and_write_product_profile_record(
         self,
@@ -6018,6 +6804,53 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def write_public_ingress_transition_with_outbox(
+        self,
+        *,
+        observation: PublicIngressObservationRecord,
+        incidents: tuple[PublicIngressIncidentRecord, ...],
+        outbox_deliveries: tuple[OutboxDeliveryRecord, ...] = (),
+    ) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_outbox_dedupe_keys(
+                session,
+                dedupe_keys=tuple(delivery.dedupe_key for delivery in outbox_deliveries),
+            )
+            session.merge(
+                LaunchplanePublicIngressObservationRow(
+                    record_id=observation.record_id,
+                    product=observation.product,
+                    context=observation.context,
+                    instance=observation.instance,
+                    status=observation.status,
+                    observed_at=observation.observed_at,
+                    payload=self._payload_dict(observation),
+                )
+            )
+            for incident in incidents:
+                session.merge(
+                    LaunchplanePublicIngressIncidentRow(
+                        incident_id=incident.incident_id,
+                        product=incident.product,
+                        context=incident.context,
+                        instance=incident.instance,
+                        status=incident.status,
+                        opened_at=incident.opened_at,
+                        latest_observed_at=incident.latest_observed_at,
+                        payload=self._payload_dict(incident),
+                    )
+                )
+            for delivery in outbox_deliveries:
+                existing_delivery = session.scalar(
+                    select(LaunchplaneOutboxDeliveryRow)
+                    .where(LaunchplaneOutboxDeliveryRow.dedupe_key == delivery.dedupe_key)
+                    .limit(1)
+                )
+                if existing_delivery is None:
+                    session.add(self._outbox_delivery_row(delivery))
+            session.commit()
+
     def list_public_ingress_incident_records(
         self,
         *,
@@ -6161,15 +6994,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None:
-        self._write_row(
-            LaunchplaneDokployTargetIdRow(
-                context=record.context,
-                instance=record.instance,
-                target_id=record.target_id,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._dokploy_target_id_row(record))
 
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
@@ -6222,14 +7047,7 @@ class PostgresRecordStore(HumanSessionStore):
             return "deleted"
 
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
-        self._write_row(
-            LaunchplaneDokployTargetRow(
-                context=record.context,
-                instance=record.instance,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._dokploy_target_row(record))
 
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
@@ -6293,19 +7111,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_provider_target_record(self, record: ProviderTargetRecord) -> None:
-        self._write_row(
-            LaunchplaneProviderTargetRow(
-                context=record.context,
-                instance=record.instance,
-                provider_id=record.provider_id,
-                target_category=record.target_category,
-                target_id=record.target_id,
-                display_name=record.display_name,
-                provider_target_type=record.provider_target_type,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._provider_target_row(record))
 
     def create_provider_target_record_if_absent(
         self, record: ProviderTargetRecord
@@ -6387,15 +7193,7 @@ class PostgresRecordStore(HumanSessionStore):
             return "deleted"
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
-        self._write_row(
-            LaunchplaneRuntimeEnvironmentRow(
-                scope=record.scope,
-                context=record.context,
-                instance=record.instance,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._runtime_environment_row(record))
 
     def delete_runtime_environment_record_with_event(
         self,
@@ -6438,16 +7236,7 @@ class PostgresRecordStore(HumanSessionStore):
             return "deleted"
 
     def write_runtime_environment_delete_event(self, event: RuntimeEnvironmentDeleteEvent) -> None:
-        self._write_row(
-            LaunchplaneRuntimeEnvironmentDeleteEventRow(
-                event_id=event.event_id,
-                scope=event.scope,
-                context=event.context,
-                instance=event.instance,
-                recorded_at=event.recorded_at,
-                payload=self._payload_dict(event),
-            )
-        )
+        self._write_row(self._runtime_environment_delete_event_row(event))
 
     def list_runtime_environment_delete_events(
         self,
@@ -6530,6 +7319,15 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def read_lane_summary(self, *, context_name: str, instance_name: str) -> LaunchplaneLaneSummary:
+        with self._product_authority_bundle_read_guard():
+            return self._read_lane_summary_unlocked(
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+
+    def _read_lane_summary_unlocked(
+        self, *, context_name: str, instance_name: str
+    ) -> LaunchplaneLaneSummary:
         runtime_environment_records = (
             *self.list_runtime_environment_records(scope="global"),
             *self.list_runtime_environment_records(scope="context", context_name=context_name),
@@ -6692,20 +7490,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_record(self, record: SecretRecord) -> None:
-        self._write_row(
-            LaunchplaneSecretRow(
-                secret_id=record.secret_id,
-                scope=record.scope,
-                integration=record.integration,
-                name=record.name,
-                context=record.context,
-                instance=record.instance,
-                status=record.status,
-                current_version_id=record.current_version_id,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+        self._write_row(self._secret_row(record))
 
     def read_secret_record(self, secret_id: str) -> SecretRecord:
         return self._read_model(
@@ -6768,14 +7553,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_version(self, version: SecretVersion) -> None:
-        self._write_row(
-            LaunchplaneSecretVersionRow(
-                version_id=version.version_id,
-                secret_id=version.secret_id,
-                created_at=version.created_at,
-                payload=self._payload_dict(version),
-            )
-        )
+        self._write_row(self._secret_version_row(version))
 
     def read_secret_version(self, version_id: str) -> SecretVersion:
         return self._read_model(
@@ -6796,19 +7574,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_binding(self, binding: SecretBinding) -> None:
-        self._write_row(
-            LaunchplaneSecretBindingRow(
-                binding_id=binding.binding_id,
-                secret_id=binding.secret_id,
-                integration=binding.integration,
-                binding_key=binding.binding_key,
-                context=binding.context,
-                instance=binding.instance,
-                status=binding.status,
-                updated_at=binding.updated_at,
-                payload=self._payload_dict(binding),
-            )
-        )
+        self._write_row(self._secret_binding_row(binding))
 
     def list_secret_bindings(
         self,
@@ -6837,19 +7603,17 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_audit_event(self, event: SecretAuditEvent) -> None:
-        self._write_row(
-            LaunchplaneSecretAuditEventRow(
-                event_id=event.event_id,
-                secret_id=event.secret_id,
-                event_type=event.event_type,
-                recorded_at=event.recorded_at,
-                payload=self._payload_dict(event),
-            )
-        )
+        self._write_row(self._secret_audit_event_row(event))
 
-    def write_secret_rotations(self, rotations: tuple[SecretRotationWrite, ...]) -> None:
+    def write_secret_rotations(
+        self,
+        rotations: tuple[SecretRotationWrite, ...],
+        *,
+        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
+    ) -> None:
         ordered_rotations = tuple(sorted(rotations, key=lambda item: item.record.secret_id))
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
             for rotation in ordered_rotations:
                 statement = (
                     select(LaunchplaneSecretRow)
@@ -6867,37 +7631,15 @@ class PostgresRecordStore(HumanSessionStore):
                 version = rotation.version
                 record = rotation.record
                 event = rotation.audit_event
-                session.merge(
-                    LaunchplaneSecretVersionRow(
-                        version_id=version.version_id,
-                        secret_id=version.secret_id,
-                        created_at=version.created_at,
-                        payload=self._payload_dict(version),
-                    )
-                )
-                session.merge(
-                    LaunchplaneSecretRow(
-                        secret_id=record.secret_id,
-                        scope=record.scope,
-                        integration=record.integration,
-                        name=record.name,
-                        context=record.context,
-                        instance=record.instance,
-                        status=record.status,
-                        current_version_id=record.current_version_id,
-                        updated_at=record.updated_at,
-                        payload=self._payload_dict(record),
-                    )
-                )
-                session.merge(
-                    LaunchplaneSecretAuditEventRow(
-                        event_id=event.event_id,
-                        secret_id=event.secret_id,
-                        event_type=event.event_type,
-                        recorded_at=event.recorded_at,
-                        payload=self._payload_dict(event),
-                    )
-                )
+                session.merge(self._secret_version_row(version))
+                self._after_product_authority_bundle_step("write_secret_rotation_version")
+                session.merge(self._secret_row(record))
+                self._after_product_authority_bundle_step("write_secret_rotation_record")
+                session.merge(self._secret_audit_event_row(event))
+                self._after_product_authority_bundle_step("write_secret_rotation_audit")
+            if idempotency_record is not None:
+                session.merge(self._idempotency_row(idempotency_record))
+                self._after_product_authority_bundle_step("write_idempotency")
             session.commit()
 
     def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]:

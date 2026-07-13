@@ -518,7 +518,7 @@ export type GenericWebPromotionWorkflowResponse = {
 export type GenericWebPromotionWorkflowResponseResult = {
     bump: 'patch' | 'minor' | 'major';
     context: string;
-    dispatch_status: 'dispatched';
+    dispatch_status: 'pending' | 'dispatched';
     dry_run: boolean;
     product: string;
     ref: string;

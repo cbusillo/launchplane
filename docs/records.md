@@ -142,10 +142,82 @@ boundary. Filesystem storage retains typed route-binding read/write parity for
 local rehearsal, but the service does not emulate the PostgreSQL transaction by
 performing a split filesystem apply.
 
+Product authority bundle writes are the same atomicity boundary for product
+runtime/config ownership. PostgreSQL storage exposes a single
+`write_product_authority_bundle` repository method for the authority graph that
+can include product profiles, provider targets, legacy Dokploy target records,
+runtime-environment rows and delete events, managed-secret versions/current
+pointers/bindings/audit events, environment inventory, release tuples, and the
+completed idempotency response. Product config, onboarding, context cutover,
+and legacy cleanup plan their whole graph first and then commit through this
+method once. A current managed-secret pointer must not advance unless the new
+version, binding, audit evidence, required runtime-environment changes, and
+applicable idempotency completion are in the same transaction. Cleanup deletes
+compare the current row payload with the planned expected record under the
+storage boundary and fail closed on missing or drifted authority instead of
+publishing a partial graph. Provider-target writes likewise carry an
+expected-current or expected-absent precondition so a concurrent route owner
+cannot be overwritten after planning. Lane-summary reads hold a shared bundle
+guard while assembling their multi-record view, so a bundle commit cannot split
+one response across the old and new authority graphs.
+
+Filesystem storage remains local rehearsal state, not shared runtime authority.
+Its product authority bundle path stages every replacement under
+`.product_authority_bundle_stages/` before touching live record files. A stage
+left in `ready` state is discarded on the next store access because no live file
+has been published yet. A stage left in `publishing` state is explicitly
+resumable: the next store access completes remaining `os.replace` writes and
+expected-payload deletes from the manifest, then removes the stage. If live data
+changed from the manifest while recovery was pending, recovery fails closed and
+leaves the stage for operator inspection rather than guessing at authority.
+Ordinary filesystem reads, writes, creates, deletes, and composite promotion
+evidence rollback hold the same bundle lock through their live-file access.
+
 Provider-backed routes must durably reserve first, bind their stable provider
 operation or reconciliation key before invoking the provider, and complete only
 after durable local evidence is ready. A crash or timeout after key binding is
 an unknown outcome, not permission to retry the provider mutation.
+
+## Transactional Outbox
+
+External deliveries that are not safe to perform inside the request transaction
+use `launchplane_outbox_deliveries`. Business state and the pending outbox row
+must commit in the same PostgreSQL transaction, so a crash before a worker runs
+leaves durable intent instead of a lost notification or workflow dispatch. The
+first migrated paths are generic-web promotion workflow dispatches and GitHub
+public-ingress incident notifications.
+
+Outbox rows are intentionally provider-neutral and secret-free. Payloads may
+carry stable routing facts, bounded provider inputs, prior observation IDs,
+hidden reconciliation markers, and safe credential context names, but they must
+not carry bearer tokens, webhook URLs, encrypted secret blobs, cookies,
+passwords, raw provider error bodies, or other secret-bearing fields. Validation
+rejects sensitive payload key names so delivery records remain durable evidence,
+not a secret store.
+
+Workers claim due rows with bounded leases. PostgreSQL claims use `FOR UPDATE
+SKIP LOCKED` over pending or expired work so multiple service instances can
+claim independently without blocking on the same row. Completion remains
+lease-owner fenced; stale owners cannot record terminal state after another
+worker reclaims the delivery. Attempts are bounded by `max_attempts`.
+
+Provider calls record a stable `provider_operation_key` and `provider_id` before
+the external send. If a worker crashes after recording that marker, a later
+worker reclaims the row and reconciles before resending. GitHub workflow
+dispatch reconciliation checks for a new workflow run not present before the
+original dispatch; public-ingress GitHub notifications include a hidden marker
+in issue/comment bodies and search for that marker before posting again. Unknown
+provider failures are stored only as bounded `error_code` values such as
+`github_provider_error` or `invalid_outbox_payload`.
+Retryable provider errors return to `pending` with bounded database-clock
+backoff; provider markers remain attached so post-send uncertainty reconciles
+before another effect. Dedupe keys identify one business transition rather than
+the workflow parameters forever, allowing a later legitimate dispatch with the
+same inputs to enqueue a distinct delivery.
+Workflow dispatches only adopt an observed run when reclaiming an existing
+provider marker; a first attempt records its marker and sends rather than
+claiming an unrelated concurrent run. Resolved public-ingress notifications
+also ensure the GitHub issue is closed after marker reconciliation.
 
 ## ORM Query Boundary
 

@@ -31,6 +31,7 @@ from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.secret_record import SecretVersion
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -256,6 +257,18 @@ class _FakeProductConfigStore:
             if not status or record.status == status
         )
         return records[:limit] if limit is not None else records
+
+    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
+        for runtime_record in bundle.runtime_environments:
+            self.write_runtime_environment_record(runtime_record)
+        for version in bundle.secret_versions:
+            self.write_secret_version(version)
+        for secret_record in bundle.secret_records:
+            self.write_secret_record(secret_record)
+        for binding in bundle.secret_bindings:
+            self.write_secret_binding(binding)
+        for event in bundle.secret_audit_events:
+            self.write_secret_audit_event(event)
 
 
 class _FakeRuntimeEnvironmentStore:

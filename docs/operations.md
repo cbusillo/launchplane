@@ -31,6 +31,9 @@ checkout.
 - `release-tuples`: inspect state-backed tuple records and explicitly export a
   TOML catalog from minted state.
 - `service`: run the first local Launchplane HTTP ingress slice.
+  `service outbox-workers run-once` and `service outbox-workers run` operate
+  PostgreSQL transactional outbox deliveries for external workflow dispatch and
+  notification effects.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 - `storage provider-target-audit`: run the read-only provider-target parity
   preflight before backfill or provider-target authority cutover.
@@ -151,6 +154,53 @@ still produces replay evidence. Before planning, the route uses the database
 clock to reject active claims, replay completed claims, transition bound expired
 claims to reconciliation, and release only expired unbound orphan claims that
 cannot have committed the atomic profile write.
+
+## Transactional Outbox Workers
+
+External deliveries now use PostgreSQL outbox rows instead of request-thread
+provider calls when the business transition must commit before the effect. Run
+outbox workers only against Launchplane shared storage:
+
+```bash
+uv run launchplane service outbox-workers run \
+  --database-url "$LAUNCHPLANE_DATABASE_URL"
+```
+
+For a bounded operational probe or smoke check, run one claim/delivery step:
+
+```bash
+uv run launchplane service outbox-workers run-once \
+  --database-url "$LAUNCHPLANE_DATABASE_URL"
+```
+
+Outbox workers claim due rows with leases and PostgreSQL row locks. Multiple
+workers may run concurrently; the claim query uses `FOR UPDATE SKIP LOCKED` so
+one locked row does not block unrelated pending deliveries. A worker records a
+provider operation marker before the external call. If it crashes after the
+marker is recorded, the next worker reconciles provider state before resending.
+Transient provider failures return the row to `pending` with database-clock
+exponential backoff and retain any provider marker so the next attempt
+reconciles before resending. Attempts are bounded by the row's `max_attempts`;
+invalid payloads and exhausted retries become terminal failures. Do not update
+outbox rows manually or clear provider markers to force a retry.
+
+Generic-web promotion workflow dispatches are queued by
+`POST /v1/drivers/generic-web/prod-promotion-workflow`; the HTTP response shows
+`dispatch_status=pending` and includes `records.outbox_delivery_id`. The worker
+resolves the managed GitHub token from Launchplane runtime records, sends the
+dispatch, then marks the outbox delivery delivered when the corresponding run is
+observed. The delivery dedupe key includes a hashed transition identity: replay
+of one request reuses its row, while a later dispatch with the same workflow
+inputs creates a new row instead of being suppressed forever.
+
+Public-ingress monitor GitHub issue notifications are also queued when the
+record store supports the transactional outbox. Observation, incident, and
+pending notification rows commit atomically. Mixed policies queue only the
+GitHub destinations while continuing to deliver and record email and Discord
+attempts directly. Resolved-incident reconciliation verifies the issue is
+actually closed after finding the marker, covering a crash between the marker
+comment and the close request. Email and Discord notification paths remain
+direct-delivery until they are explicitly migrated.
 
 ## Target Launchplane Ingress
 
@@ -835,22 +885,26 @@ Current derived-state behavior:
   response is redacted and the route rejects nested runtime or secret targets
   that differ from the authorized top-level context/instance. It fails closed
   when secret writes are requested without valid Launchplane secret-key
-  configuration in the service runtime or when no active runtime key-safety policy allows the
-  requested binding. When apply changes runtime-environment keys for a tracked
-  Dokploy target, the response includes a required `live_target_runtime_apply`
-  `next_actions` item. Treat product-config apply as a record mutation only
-  until that next action has been dry-run and applied through
-  `/v1/live-target-runtime/apply`; redeploying the same app image does not sync
-  the live Dokploy target environment.
+  configuration in the service runtime or when no active runtime key-safety
+  policy allows the requested binding. Apply commits through a product
+  authority bundle, so runtime-environment records, managed-secret versions,
+  current secret pointers, bindings, audit events, and idempotency completion
+  publish together or roll back together. When apply changes
+  runtime-environment keys for a tracked Dokploy target, the response includes a
+  required `live_target_runtime_apply` `next_actions` item. Treat
+  product-config apply as a record mutation only until that next action has
+  been dry-run and applied through `/v1/live-target-runtime/apply`; redeploying
+  the same app image does not sync the live Dokploy target environment.
 - `POST /v1/secrets/reencrypt` is the normal shared/production root-rotation
   path. Run `mode: "dry-run"` with `secret.reencrypt.dry-run`, then submit
   `mode: "apply"` with the returned plan digest, a reason, an
   `Idempotency-Key`, and `secret.reencrypt.apply`. Launchplane atomically writes
-  the new versions, current-version pointers, and audit events. If the mutation
-  commits before idempotency evidence is persisted, a retry with the same
-  request recovers from the rotation audit token instead of rotating again.
-  Direct `launchplane secrets reencrypt --apply` remains bootstrap/recovery-only
-  and requires explicit direct-DB acknowledgement.
+  the new versions, current-version pointers, audit events, and idempotency
+  completion evidence in one storage transaction. A failure before commit leaves
+  current pointers and replay evidence unchanged; a committed apply is replayable
+  by the same idempotency key. Direct `launchplane secrets reencrypt --apply`
+  remains bootstrap/recovery-only and requires explicit direct-DB
+  acknowledgement.
 - The operator UI uses the same service route. It requires a successful dry-run
   result before enabling apply, clears rendered secret input values after each
   submit, and shows only key/action/count metadata from Launchplane responses.
