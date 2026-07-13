@@ -66,7 +66,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("Build policy apply payload", workflow_text)
         self.assertIn("Apply policy import", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main",
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("route-path: /v1/merge-train/policies/import", workflow_text)
@@ -119,7 +119,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("Post manual phase PR feedback", workflow_text)
         self.assertIn("Send manual phase PR feedback", workflow_text)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@main", workflow_text
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@", workflow_text
         )
         self.assertIn(
             "audience: ${{ steps.scheduled_target_request.outputs.service_audience }}",

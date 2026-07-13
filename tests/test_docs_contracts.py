@@ -152,7 +152,7 @@ class DocsContractsTests(TestCase):
 
         self.assertIn("Capture v2 deployed smoke evidence", deploy_workflow)
         self.assertIn("launchplane-v2-deployed-smoke.json", deploy_workflow)
-        self.assertIn("actions/upload-artifact@v7", deploy_workflow)
+        self.assertIn("actions/upload-artifact@", deploy_workflow)
         self.assertIn("/v1/health", deploy_workflow)
         self.assertIn("/v1/service/runtime", deploy_workflow)
         self.assertIn("/openapi.json", deploy_workflow)
@@ -436,7 +436,7 @@ class DocsContractsTests(TestCase):
         self.assertIn("workflow_call:", preview_feedback_status_workflow)
         self.assertIn("mode:", preview_feedback_status_workflow)
         self.assertIn(
-            "uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main",
+            "uses: ./.github/workflows/reusable-preview-pr-feedback.yml",
             preview_feedback_status_workflow,
         )
         self.assertIn(

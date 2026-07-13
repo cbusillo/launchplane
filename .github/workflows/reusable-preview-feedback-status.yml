@@ -241,7 +241,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main
+    uses: ./.github/workflows/reusable-preview-pr-feedback.yml
     with:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}
