@@ -47,6 +47,7 @@ from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_RE
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
+    _browser_mutation_headers,
     _driver_read_policy,
     _EmptyStore,
     _github_actions_launchplane_service_reconcile_policy,
@@ -618,6 +619,8 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["status"], "ok")
         self.assertTrue(str(payload["trace_id"]).startswith("launchplane_req_"))
+        self.assertEqual(payload["csrf_token"], session_manager.csrf_token(human_session))
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
         self.assertEqual(
             payload["identity"],
             {
@@ -686,7 +689,7 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
             app,
             "POST",
             "/auth/logout",
-            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            headers=_browser_mutation_headers(session_manager, human_session),
         )
 
         self.assertEqual(response.status_code, 200)

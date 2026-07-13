@@ -262,6 +262,13 @@ stores audit metadata, and reloads the current service worker's active policy.
 Launchplane self-deploy authority is separate and does not authorize authz
 policy grant maintenance.
 
+When the CLI uses `--session-cookie`, it first reads `GET /v1/auth/session` and
+then sends the returned single-use CSRF token with strict same-origin fetch
+metadata. Use the configured public Launchplane URL so its origin matches
+`LAUNCHPLANE_PUBLIC_URL`. Reusing a captured CSRF token, omitting `Origin`, or
+calling through a different origin fails closed. Bearer-token and GitHub Actions
+OIDC callers do not use this browser preflight.
+
 The Launchplane deploy workflow also reconciles configured signed-in operator
 grants for product-config writes. Set
 `LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS`,

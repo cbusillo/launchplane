@@ -2420,6 +2420,10 @@
       "AuthSessionResponse": {
         "additionalProperties": false,
         "properties": {
+          "csrf_token": {
+            "title": "Csrf Token",
+            "type": "string"
+          },
           "identity": {
             "$ref": "#/components/schemas/GitHubHumanIdentityResponse"
           },
@@ -2435,6 +2439,7 @@
           }
         },
         "required": [
+          "csrf_token",
           "identity",
           "status",
           "trace_id"

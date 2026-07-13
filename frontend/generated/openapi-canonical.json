@@ -714,6 +714,10 @@
       "AuthSessionResponse": {
         "additionalProperties": false,
         "properties": {
+          "csrf_token": {
+            "title": "Csrf Token",
+            "type": "string"
+          },
           "identity": {
             "$ref": "#/components/schemas/GitHubHumanIdentityResponse"
           },
@@ -730,7 +734,8 @@
         },
         "required": [
           "trace_id",
-          "identity"
+          "identity",
+          "csrf_token"
         ],
         "title": "AuthSessionResponse",
         "type": "object"
@@ -38245,16 +38250,6 @@
             "schema": {
               "default": "",
               "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
               "type": "string"
             }
           }
