@@ -35,26 +35,30 @@ from control_plane.dokploy_target_setup_http import (
 )
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service as control_plane_product_config_service
-from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_preview_tls as control_plane_product_preview_tls
-from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import route_binding_backfill as control_plane_route_binding_backfill
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
 from control_plane import tracked_target_logs as control_plane_tracked_target_logs
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane.http_routes import (
+    ProductReadRouteDependencies,
     ReadRouteDependencies,
+    product_profile_context_cutover_contexts_allowed,
+    register_agent_context_read_routes,
+    register_deployment_promotion_read_routes,
     register_ingress_read_routes,
+    register_inventory_operation_read_routes,
+    register_managed_secret_read_routes,
+    register_product_config_status_read_routes,
+    register_product_context_audit_read_routes,
+    register_product_environment_read_routes,
+    register_product_profile_read_routes,
+    register_protected_artifact_read_routes,
     register_topology_read_routes,
-)
-from control_plane.agent_context_service import (
-    AgentContextPayload,
-    agent_context_action_allowed,
-    agent_context_allowed,
-    build_agent_context_service_payload,
+    require_product_profile_read_store,
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -75,7 +79,6 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
-from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import (
     EveryCodePrFeedbackRecord,
@@ -112,7 +115,6 @@ from control_plane.provider_operations import (
     provider_operation_title,
     run_durable_provider_operation,
 )
-from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
@@ -491,12 +493,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 )
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
-    ProductActivityReadModel,
-    ProductEnvironmentConfigStatus,
-    ProductEnvironmentDetail,
-    ProductEnvironmentSummary,
     ProductReadModelStore,
-    ProductSiteOverview,
 )
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
@@ -506,7 +503,6 @@ from control_plane.contracts.product_profile_record import (
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
 )
-from control_plane.contracts.repo_product_mapping_read_model import RepoProductMapping
 from control_plane.contracts.preview_evidence import (
     PreviewDestroyedEvidenceEnvelope,
     PreviewGenerationEvidenceEnvelope,
@@ -533,11 +529,6 @@ from control_plane.contracts.preview_readiness_read_model import (
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.work_graph_read_model import WorkGraphSnapshot
-from control_plane.contracts.protected_artifacts import (
-    ProtectedArtifactStore,
-    ProtectedArtifactSet,
-    build_protected_artifact_set,
-)
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
@@ -553,7 +544,6 @@ from control_plane.contracts.runner_lane_registration_evidence import (
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
-from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
 from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
@@ -707,7 +697,6 @@ from control_plane.work_graph_service import (
     WorkGraphRankResponse,
     WorkGraphRankResult,
     WorkGraphWorkRequestStore,
-    build_repo_product_mapping_service_payload,
     build_work_graph_rank_result,
     build_work_graph_snapshot_service_payload,
 )
@@ -833,45 +822,6 @@ AuthzPolicyRouteEnvelope = (
     | control_plane_authz_grant_service.AuthzPolicyLocalOperatorGrantEnvelope
     | control_plane_authz_grant_service.AuthzPolicyLocalAdminGrantEnvelope
 )
-
-
-class RepoProductMappingReadStore(Protocol):
-    def list_product_profile_records(
-        self,
-        *,
-        driver_id: str = "",
-    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
-
-    def list_every_code_work_request_records(
-        self,
-        *,
-        state: str = "",
-        repository: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
-
-
-class AgentContextReadStore(ProductReadModelStore, Protocol):
-    def list_every_code_work_request_records(
-        self,
-        *,
-        state: str = "",
-        repository: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
-
-    def list_every_code_preview_gate_records(
-        self,
-        *,
-        request_id: str = "",
-        repository: str = "",
-        pr_number: int | None = None,
-        status: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
 
 
 class ProductProfileWriteStore(Protocol):
@@ -1361,78 +1311,6 @@ class OdooStableTargetReplacementOperationStatusResponse(BaseModel):
     result: dict[str, object] | None = None
 
 
-class ProductEnvironmentConfigStatusResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: str = "ok"
-    trace_id: str
-    config_status: ProductEnvironmentConfigStatus
-
-
-class ProductEnvironmentListResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    products: tuple[ProductSiteOverview, ...]
-
-
-class ProductOverviewResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    product: ProductSiteOverview
-
-
-class ProductActivityResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    activity: ProductActivityReadModel
-
-
-class ProductEnvironmentsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    product: str
-    display_name: str
-    repository: str
-    driver_id: str
-    base_driver_id: str = ""
-    environments: tuple[ProductEnvironmentSummary, ...]
-    trust_state: FreshnessStatus
-    provenance: DataProvenance
-
-
-class ProductEnvironmentResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    environment: ProductEnvironmentDetail
-
-
-class RepoProductMappingResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    mapping: RepoProductMapping
-    source: dict[str, object]
-
-
-class AgentContextResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    context: AgentContextPayload
-
-
 class WorkGraphSnapshotResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1765,22 +1643,6 @@ class PreviewPrFeedbackNotificationAttemptRecordsResponse(BaseModel):
     attempts: tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]
 
 
-class DeploymentRecordResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    record: DeploymentRecord
-
-
-class PromotionRecordResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    record: PromotionRecord
-
-
 class PreviewRecordResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1796,144 +1658,6 @@ class PreviewHistoryResponse(BaseModel):
     trace_id: str
     preview: PreviewRecord
     generations: tuple[PreviewGenerationRecord, ...]
-
-
-class EnvironmentInventoryResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    record: EnvironmentInventory
-
-
-class RecentOperationsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    context: str
-    storage_backend: str
-    inventory: tuple[EnvironmentInventory, ...]
-    recent_deployments: tuple[DeploymentRecord, ...]
-    recent_promotions: tuple[PromotionRecord, ...]
-    recent_previews: tuple[PreviewRecord, ...]
-
-
-class ProductProfileListResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    driver_id: str
-    profiles: tuple[LaunchplaneProductProfileRecord, ...]
-
-
-class ProductProfileResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    profile: LaunchplaneProductProfileRecord
-
-
-class SecretStatusBinding(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    binding_id: str
-    binding_type: str
-    binding_key: str
-    status: str
-    context: str
-    instance: str
-    updated_at: str
-
-
-class SecretStatusAuditEvent(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    event_id: str
-    event_type: str
-    recorded_at: str
-    actor: str
-    detail: str
-    metadata: dict[str, str]
-
-
-class SecretStatusReadModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    secret_id: str
-    scope: SecretScope
-    integration: str
-    name: str
-    context: str
-    instance: str
-    policy: str
-    status: str
-    description: str
-    created_at: str
-    updated_at: str
-    updated_by: str
-    last_validated_at: str
-    current_version_id: str
-    version_count: int
-    current_version_created_at: str
-    binding: SecretStatusBinding | None = None
-    recent_audit_events: tuple[SecretStatusAuditEvent, ...]
-
-
-class SecretStatusResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    secret: SecretStatusReadModel
-
-
-class SecretStatusListResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    context: str
-    instance: str
-    secrets: tuple[SecretStatusReadModel, ...]
-
-
-class ProductContextCutoverAuditResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    audit: dict[str, object]
-
-
-class ProtectedArtifactsResponse(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        json_schema_extra={
-            "examples": [
-                {
-                    "status": "ok",
-                    "trace_id": "launchplane_req_00000000000000000000000000000000",
-                    "protected_artifacts": {
-                        "schema_version": 1,
-                        "product": "example-product",
-                        "context": "",
-                        "entries": [],
-                        "artifact_ids": ["artifact-example-prod"],
-                        "image_references": ["ghcr.io/example-org/example-app@sha256:abc123"],
-                        "image_digests": ["sha256:abc123"],
-                        "warnings": [],
-                    },
-                }
-            ]
-        },
-    )
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    protected_artifacts: ProtectedArtifactSet
 
 
 class DeploymentEvidenceRequest(BaseModel):
@@ -2937,14 +2661,6 @@ class PublicIngressMonitorRunOnceRequest(BaseModel):
         return self
 
 
-class _DeploymentReadStore(Protocol):
-    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
-
-
-class _PromotionReadStore(Protocol):
-    def read_promotion_record(self, record_id: str) -> PromotionRecord: ...
-
-
 class _PreviewReadStore(Protocol):
     def read_preview_record(self, preview_id: str) -> PreviewRecord: ...
 
@@ -2958,45 +2674,6 @@ class _PreviewHistoryReadStore(Protocol):
         preview_id: str = "",
         limit: int | None = None,
     ) -> tuple[PreviewGenerationRecord, ...]: ...
-
-
-class _EnvironmentInventoryReadStore(Protocol):
-    def read_environment_inventory(
-        self,
-        *,
-        context_name: str,
-        instance_name: str,
-    ) -> EnvironmentInventory: ...
-
-
-class _RecentOperationsReadStore(Protocol):
-    def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]: ...
-
-    def list_deployment_records(
-        self,
-        *,
-        context_name: str = "",
-        instance_name: str = "",
-        limit: int | None = None,
-    ) -> tuple[DeploymentRecord, ...]: ...
-
-    def list_promotion_records(
-        self,
-        *,
-        context_name: str = "",
-        from_instance_name: str = "",
-        to_instance_name: str = "",
-        limit: int | None = None,
-    ) -> tuple[PromotionRecord, ...]: ...
-
-    def list_preview_records(
-        self,
-        *,
-        context_name: str = "",
-        anchor_repo: str = "",
-        anchor_pr_number: int | None = None,
-        limit: int | None = None,
-    ) -> tuple[PreviewRecord, ...]: ...
 
 
 class _EveryCodeWorkRequestListStore(Protocol):
@@ -3169,30 +2846,6 @@ class _PreviewPrFeedbackNotificationAttemptReadStore(Protocol):
     ) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]: ...
 
 
-def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
-    required_methods = (
-        "list_artifact_manifests",
-        "list_environment_inventory",
-        "list_product_profile_records",
-        "list_release_tuple_records",
-        "list_preview_records",
-        "list_preview_generation_records",
-        "list_preview_pr_feedback_records",
-    )
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            "Launchplane record store does not support protected artifact inventory "
-            f"reads: {missing_summary}"
-        )
-    return cast(ProtectedArtifactStore, record_store)
-
-
 def require_deployment_evidence_store(record_store: object) -> EvidenceIngestionStore:
     required_methods = (
         "write_deployment_record",
@@ -3329,26 +2982,6 @@ def require_runner_lane_registration_audit_evidence_store(
     return cast(_RunnerLaneRegistrationAuditEvidenceStore, record_store)
 
 
-def require_deployment_read_store(record_store: object) -> _DeploymentReadStore:
-    read_record = getattr(record_store, "read_deployment_record", None)
-    if not callable(read_record):
-        raise TypeError(
-            "Launchplane record store does not support deployment record reads: "
-            "read_deployment_record"
-        )
-    return cast(_DeploymentReadStore, record_store)
-
-
-def require_promotion_read_store(record_store: object) -> _PromotionReadStore:
-    read_record = getattr(record_store, "read_promotion_record", None)
-    if not callable(read_record):
-        raise TypeError(
-            "Launchplane record store does not support promotion record reads: "
-            "read_promotion_record"
-        )
-    return cast(_PromotionReadStore, record_store)
-
-
 def require_preview_read_store(record_store: object) -> _PreviewReadStore:
     read_record = getattr(record_store, "read_preview_record", None)
     if not callable(read_record):
@@ -3371,38 +3004,6 @@ def require_preview_history_read_store(record_store: object) -> _PreviewHistoryR
             f"Launchplane record store does not support preview history reads: {missing_summary}"
         )
     return cast(_PreviewHistoryReadStore, record_store)
-
-
-def require_environment_inventory_read_store(
-    record_store: object,
-) -> _EnvironmentInventoryReadStore:
-    read_record = getattr(record_store, "read_environment_inventory", None)
-    if not callable(read_record):
-        raise TypeError(
-            "Launchplane record store does not support environment inventory reads: "
-            "read_environment_inventory"
-        )
-    return cast(_EnvironmentInventoryReadStore, record_store)
-
-
-def require_recent_operations_read_store(record_store: object) -> _RecentOperationsReadStore:
-    required_methods = (
-        "list_environment_inventory",
-        "list_deployment_records",
-        "list_promotion_records",
-        "list_preview_records",
-    )
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            f"Launchplane record store does not support recent operation reads: {missing_summary}"
-        )
-    return cast(_RecentOperationsReadStore, record_store)
 
 
 def require_odoo_stable_bootstrap_operation_read_store(
@@ -3453,26 +3054,6 @@ def odoo_stable_target_replacement_operation_status_payload(
     return payload
 
 
-def require_product_profile_list_store(record_store: object) -> ProductReadModelStore:
-    list_records = getattr(record_store, "list_product_profile_records", None)
-    if not callable(list_records):
-        raise TypeError(
-            "Launchplane record store does not support product profile list reads: "
-            "list_product_profile_records"
-        )
-    return cast(ProductReadModelStore, record_store)
-
-
-def require_product_profile_read_store(record_store: object) -> ProductReadModelStore:
-    read_record = getattr(record_store, "read_product_profile_record", None)
-    if not callable(read_record):
-        raise TypeError(
-            "Launchplane record store does not support product profile reads: "
-            "read_product_profile_record"
-        )
-    return cast(ProductReadModelStore, record_store)
-
-
 def require_product_profile_write_store(record_store: object) -> ProductProfileWriteStore:
     write_record = getattr(record_store, "write_product_profile_record", None)
     if not callable(write_record):
@@ -3481,28 +3062,6 @@ def require_product_profile_write_store(record_store: object) -> ProductProfileW
             "write_product_profile_record"
         )
     return cast(ProductProfileWriteStore, record_store)
-
-
-def require_secret_status_read_store(record_store: object) -> control_plane_secrets.SecretReadStore:
-    required_methods = (
-        "read_secret_record",
-        "list_secret_records",
-        "read_secret_version",
-        "list_secret_versions",
-        "list_secret_bindings",
-        "list_secret_audit_events",
-    )
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            f"Launchplane record store does not support secret status reads: {missing_summary}"
-        )
-    return cast(control_plane_secrets.SecretReadStore, record_store)
 
 
 def require_public_ingress_monitor_store(
@@ -3536,36 +3095,6 @@ def require_public_ingress_monitor_store(
             f"{missing_summary}"
         )
     return cast(PublicIngressMonitorStore, record_store)
-
-
-def require_product_context_audit_store(
-    record_store: object,
-) -> control_plane_product_context_audit.ProductContextAuditStore:
-    required_methods = (
-        "read_product_profile_record",
-        "list_runtime_environment_records",
-        "list_secret_records",
-        "list_secret_bindings",
-        "list_dokploy_target_records",
-        "list_dokploy_target_id_records",
-        "list_environment_inventory",
-        "list_release_tuple_records",
-        "list_backup_gate_records",
-        "list_deployment_records",
-        "list_promotion_records",
-    )
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods or not isinstance(record_store, PostgresRecordStore):
-        missing_summary = ", ".join(missing_methods) or "postgres_storage"
-        raise TypeError(
-            "Launchplane record store does not support context cutover audit reads: "
-            f"{missing_summary}"
-        )
-    return cast(control_plane_product_context_audit.ProductContextAuditStore, record_store)
 
 
 def require_tracked_target_logs_store(
@@ -3888,31 +3417,6 @@ def require_ingress_edge_endpoint_read_store(record_store: object) -> _IngressEd
             f"Launchplane record store does not support ingress edge endpoint reads: {missing_summary}"
         )
     return cast(_IngressEdgeEndpointReadStore, record_store)
-
-
-def product_profile_context_cutover_allowed_contexts(
-    profile: LaunchplaneProductProfileRecord,
-) -> frozenset[str]:
-    contexts = {profile.product.strip()}
-    contexts.update(lane.context.strip() for lane in profile.lanes if lane.context.strip())
-    if profile.preview.enabled and profile.preview.context.strip():
-        contexts.add(profile.preview.context.strip())
-    return frozenset(context for context in contexts if context)
-
-
-def product_profile_context_cutover_contexts_allowed(
-    *,
-    profile: LaunchplaneProductProfileRecord,
-    source_context: str,
-    target_context: str,
-    preview_context: str,
-) -> bool:
-    allowed_contexts = product_profile_context_cutover_allowed_contexts(profile)
-    requested_contexts = {source_context.strip(), target_context.strip()}
-    if preview_context.strip():
-        requested_contexts.add(preview_context.strip())
-    requested_contexts.discard("")
-    return requested_contexts.issubset(allowed_contexts)
 
 
 def idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -5209,181 +4713,6 @@ def create_launchplane_fastapi_app(
             result=result,
         )
 
-    def read_product_environment_config_status(
-        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> ProductEnvironmentConfigStatusResponse:
-        trace_id = next_trace_id()
-
-        def product_action_allowed(
-            requested_action: str, requested_product: str, requested_context: str
-        ) -> bool:
-            return resolved_authz_policy_runtime.policy.allows(
-                identity=identity,
-                action=requested_action,
-                product=requested_product,
-                context=requested_context,
-            )
-
-        try:
-            product_read_store = (
-                control_plane_product_read_service.require_product_environment_read_model_store(
-                    record_store
-                )
-            )
-            product_read_result = (
-                control_plane_product_read_service.build_product_environment_read_service_result(
-                    record_store=product_read_store,
-                    params={
-                        "product": product,
-                        "environment": environment,
-                        "config_status": "true",
-                    },
-                    action_allowed=product_action_allowed,
-                )
-            )
-        except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error),
-            ) from error
-
-        if not product_action_allowed(
-            "product_environment.read",
-            product_read_result.authorization_product,
-            product_read_result.authorization_context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=product_read_result.denial_message,
-            )
-
-        config_status = ProductEnvironmentConfigStatus.model_validate(
-            product_read_result.payload["config_status"]
-        )
-        return ProductEnvironmentConfigStatusResponse(
-            trace_id=trace_id,
-            config_status=config_status,
-        )
-
-    def product_environment_action_allowed(
-        identity: LaunchplaneIdentity,
-        requested_action: str,
-        requested_product: str,
-        requested_context: str,
-    ) -> bool:
-        return resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=requested_action,
-            product=requested_product,
-            context=requested_context,
-        )
-
-    def build_product_environment_read_result(
-        *,
-        identity: LaunchplaneIdentity,
-        record_store: object,
-        trace_id: str,
-        params: dict[str, str],
-    ) -> control_plane_product_read_service.ProductEnvironmentReadServiceResult:
-        def action_allowed(
-            requested_action: str, requested_product: str, requested_context: str
-        ) -> bool:
-            return product_environment_action_allowed(
-                identity,
-                requested_action,
-                requested_product,
-                requested_context,
-            )
-
-        try:
-            product_read_store = (
-                control_plane_product_read_service.require_product_environment_read_model_store(
-                    record_store
-                )
-            )
-            return control_plane_product_read_service.build_product_environment_read_service_result(
-                record_store=product_read_store,
-                params=params,
-                action_allowed=action_allowed,
-            )
-        except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error),
-            ) from error
-
-    def require_product_environment_result_authorization(
-        *,
-        identity: LaunchplaneIdentity,
-        trace_id: str,
-        result: control_plane_product_read_service.ProductEnvironmentReadServiceResult,
-    ) -> None:
-        if product_environment_action_allowed(
-            identity,
-            "product_environment.read",
-            result.authorization_product,
-            result.authorization_context,
-        ):
-            return
-        raise _launchplane_http_error(
-            status_code=403,
-            trace_id=trace_id,
-            code="authorization_denied",
-            message=result.denial_message,
-        )
-
-    def require_agent_context_read_authorization(
-        *, identity: LaunchplaneIdentity, trace_id: str, message: str
-    ) -> None:
-        if agent_context_allowed(
-            authz_policy=resolved_authz_policy_runtime.policy,
-            identity=identity,
-        ):
-            return
-        raise _launchplane_http_error(
-            status_code=403,
-            trace_id=trace_id,
-            code="authorization_denied",
-            message=message,
-        )
-
     def require_work_graph_rank_authorization(
         *, identity: LaunchplaneIdentity, trace_id: str, message: str
     ) -> None:
@@ -5441,36 +4770,6 @@ def create_launchplane_fastapi_app(
             code="database_storage_required",
             message=f"{message} Missing store method(s): {missing_method_list}.",
         )
-
-    def require_repo_product_mapping_read_store(
-        record_store: object, *, trace_id: str
-    ) -> RepoProductMappingReadStore:
-        require_read_store_methods(
-            record_store,
-            trace_id=trace_id,
-            method_names=(
-                "list_product_profile_records",
-                "list_every_code_work_request_records",
-            ),
-            message="Repo product mapping reads require a database-backed record store.",
-        )
-        return cast(RepoProductMappingReadStore, record_store)
-
-    def require_agent_context_read_store(
-        record_store: object, *, trace_id: str
-    ) -> AgentContextReadStore:
-        require_read_store_methods(
-            record_store,
-            trace_id=trace_id,
-            method_names=(
-                "list_product_profile_records",
-                "read_product_profile_record",
-                "list_every_code_work_request_records",
-                "list_every_code_preview_gate_records",
-            ),
-            message="Agent context reads require a database-backed record store.",
-        )
-        return cast(AgentContextReadStore, record_store)
 
     def require_work_graph_snapshot_read_store(
         record_store: object, *, trace_id: str
@@ -5937,57 +5236,6 @@ def create_launchplane_fastapi_app(
             code="invalid_payload",
             message=str(error),
         )
-
-    def read_repo_product_mapping(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> RepoProductMappingResponse:
-        trace_id = next_trace_id()
-        require_agent_context_read_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            message="Workflow cannot read the Launchplane repo product mapping.",
-        )
-        mapping_store = require_repo_product_mapping_read_store(
-            record_store,
-            trace_id=trace_id,
-        )
-        payload = build_repo_product_mapping_service_payload(
-            generated_at=utc_now_timestamp(),
-            product_store=mapping_store,
-            work_request_store=mapping_store,
-        )
-        return RepoProductMappingResponse(
-            trace_id=trace_id,
-            mapping=RepoProductMapping.model_validate(payload["mapping"]),
-            source=cast(dict[str, object], payload["source"]),
-        )
-
-    def read_agent_context(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        repository: Annotated[str, Query()] = "",
-    ) -> AgentContextResponse:
-        trace_id = next_trace_id()
-        require_agent_context_read_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            message="Workflow cannot read Launchplane agent context.",
-        )
-        context_store = require_agent_context_read_store(record_store, trace_id=trace_id)
-        context = build_agent_context_service_payload(
-            generated_at=utc_now_timestamp(),
-            repository=repository,
-            product_store=context_store,
-            work_request_store=context_store,
-            preview_readiness_store=context_store,
-            action_allowed=agent_context_action_allowed(
-                authz_policy=resolved_authz_policy_runtime.policy,
-                identity=identity,
-            ),
-            planning_facts_provider=work_graph_planning_facts_provider,
-        )
-        return AgentContextResponse(trace_id=trace_id, context=context)
 
     def work_graph_product_action_allowed(*, identity: LaunchplaneIdentity) -> ActionAllowed:
         def action_allowed(
@@ -11043,206 +10291,6 @@ def create_launchplane_fastapi_app(
             attempts=records,
         )
 
-    def list_product_environment_overviews(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> ProductEnvironmentListResponse:
-        trace_id = next_trace_id()
-
-        def action_allowed(
-            requested_action: str, requested_product: str, requested_context: str
-        ) -> bool:
-            return product_environment_action_allowed(
-                identity,
-                requested_action,
-                requested_product,
-                requested_context,
-            )
-
-        if not product_environment_action_allowed(
-            identity,
-            "product_environment.read",
-            "launchplane",
-            _LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot list product overviews.",
-            )
-        try:
-            product_read_store = (
-                control_plane_product_read_service.require_product_environment_read_model_store(
-                    record_store
-                )
-            )
-            payload = (
-                control_plane_product_read_service.build_product_environment_list_service_payload(
-                    record_store=product_read_store,
-                    action_allowed=action_allowed,
-                )
-            )
-        except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        products = tuple(
-            ProductSiteOverview.model_validate(product)
-            for product in cast(list[object], payload["products"])
-        )
-        return ProductEnvironmentListResponse(trace_id=trace_id, products=products)
-
-    def read_product_overview(
-        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> ProductOverviewResponse:
-        trace_id = next_trace_id()
-        result = build_product_environment_read_result(
-            identity=identity,
-            record_store=record_store,
-            trace_id=trace_id,
-            params={"product": product},
-        )
-        require_product_environment_result_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            result=result,
-        )
-        overview = ProductSiteOverview.model_validate(result.payload["product"])
-        return ProductOverviewResponse(trace_id=trace_id, product=overview)
-
-    def read_product_activity(
-        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> ProductActivityResponse:
-        trace_id = next_trace_id()
-        result = build_product_environment_read_result(
-            identity=identity,
-            record_store=record_store,
-            trace_id=trace_id,
-            params={"product": product, "activity": "true"},
-        )
-        require_product_environment_result_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            result=result,
-        )
-        activity = ProductActivityReadModel.model_validate(result.payload["activity"])
-        return ProductActivityResponse(trace_id=trace_id, activity=activity)
-
-    def list_product_environments(
-        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> ProductEnvironmentsResponse:
-        trace_id = next_trace_id()
-        result = build_product_environment_read_result(
-            identity=identity,
-            record_store=record_store,
-            trace_id=trace_id,
-            params={"product": product, "environments": "true"},
-        )
-        require_product_environment_result_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            result=result,
-        )
-        payload = result.payload
-        environments = tuple(
-            ProductEnvironmentSummary.model_validate(environment)
-            for environment in cast(list[object], payload["environments"])
-        )
-        provenance = DataProvenance.model_validate(payload["provenance"])
-        return ProductEnvironmentsResponse(
-            trace_id=trace_id,
-            product=str(payload["product"]),
-            display_name=str(payload["display_name"]),
-            repository=str(payload["repository"]),
-            driver_id=str(payload["driver_id"]),
-            base_driver_id=str(payload.get("base_driver_id", "")),
-            environments=environments,
-            trust_state=cast(FreshnessStatus, payload["trust_state"]),
-            provenance=provenance,
-        )
-
-    def read_product_environment(
-        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> ProductEnvironmentResponse:
-        trace_id = next_trace_id()
-        result = build_product_environment_read_result(
-            identity=identity,
-            record_store=record_store,
-            trace_id=trace_id,
-            params={"product": product, "environment": environment},
-        )
-        require_product_environment_result_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            result=result,
-        )
-        environment_detail = ProductEnvironmentDetail.model_validate(result.payload["environment"])
-        return ProductEnvironmentResponse(
-            trace_id=trace_id,
-            environment=environment_detail,
-        )
-
-    def read_protected_artifacts(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        product: Annotated[str, Query()] = "",
-        context: Annotated[str, Query()] = "",
-    ) -> ProtectedArtifactsResponse:
-        trace_id = next_trace_id()
-        requested_product = product.strip()
-        requested_context = context.strip()
-        if not requested_product:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_query",
-                message="Protected artifact inventory requires a product query parameter.",
-            )
-        authz_context = requested_context or "*"
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="artifact_protection.read",
-            product=requested_product,
-            context=authz_context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read protected artifact inventory.",
-            )
-        try:
-            protected_artifact_store = require_protected_artifact_store(record_store)
-            protected_artifacts = build_protected_artifact_set(
-                protected_artifact_store,
-                product=requested_product,
-                context_name=requested_context,
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        return ProtectedArtifactsResponse(
-            trace_id=trace_id,
-            protected_artifacts=protected_artifacts,
-        )
-
     def ensure_driver_read_allowed(
         *,
         identity: LaunchplaneIdentity,
@@ -11508,80 +10556,6 @@ def create_launchplane_fastapi_app(
                 message=message,
             )
 
-    def read_deployment_record(
-        record_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> DeploymentRecordResponse:
-        trace_id = next_trace_id()
-        try:
-            deployment_store = require_deployment_read_store(record_store)
-            deployment = deployment_store.read_deployment_record(record_id)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="deployment.read",
-            product="launchplane",
-            context=deployment.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read deployment records for the requested context.",
-            )
-        return DeploymentRecordResponse(trace_id=trace_id, record=deployment)
-
-    def read_promotion_record(
-        record_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> PromotionRecordResponse:
-        trace_id = next_trace_id()
-        try:
-            promotion_store = require_promotion_read_store(record_store)
-            promotion = promotion_store.read_promotion_record(record_id)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="promotion.read",
-            product="launchplane",
-            context=promotion.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read promotion records for the requested context.",
-            )
-        return PromotionRecordResponse(trace_id=trace_id, record=promotion)
-
     def read_preview_record(
         preview_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
@@ -11677,196 +10651,6 @@ def create_launchplane_fastapi_app(
             preview=preview,
             generations=generations,
         )
-
-    def read_environment_inventory(
-        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> EnvironmentInventoryResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="inventory.read",
-            product="launchplane",
-            context=context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read inventory for the requested context.",
-            )
-        try:
-            inventory_store = require_environment_inventory_read_store(record_store)
-            inventory = inventory_store.read_environment_inventory(
-                context_name=context,
-                instance_name=instance,
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="inventory.read",
-            product="launchplane",
-            context=inventory.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read inventory for the requested context.",
-            )
-        return EnvironmentInventoryResponse(trace_id=trace_id, record=inventory)
-
-    def read_recent_operations(
-        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> RecentOperationsResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="operations.read",
-            product="launchplane",
-            context=context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read recent operations for the requested context.",
-            )
-        try:
-            operations_store = require_recent_operations_read_store(record_store)
-            inventory = tuple(
-                record
-                for record in operations_store.list_environment_inventory()
-                if record.context == context
-            )
-            recent_deployments = operations_store.list_deployment_records(
-                context_name=context,
-                limit=10,
-            )
-            recent_promotions = operations_store.list_promotion_records(
-                context_name=context,
-                limit=10,
-            )
-            recent_previews = operations_store.list_preview_records(
-                context_name=context,
-                limit=10,
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        return RecentOperationsResponse(
-            trace_id=trace_id,
-            context=context,
-            storage_backend=storage_backend_name(record_store),
-            inventory=inventory,
-            recent_deployments=recent_deployments,
-            recent_promotions=recent_promotions,
-            recent_previews=recent_previews,
-        )
-
-    def list_product_profiles(
-        identity: Annotated[
-            LaunchplaneIdentity | None, Depends(read_product_profile_list_identity)
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        driver_id: Annotated[str, Query()] = "",
-    ) -> ProductProfileListResponse:
-        trace_id = next_trace_id()
-        if identity is not None and not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="product_profile.read",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot list Launchplane product profiles.",
-            )
-        normalized_driver_id = driver_id.strip()
-        try:
-            profile_store = require_product_profile_list_store(record_store)
-            product_profile_payload = (
-                control_plane_product_read_service.build_product_profile_list_service_payload(
-                    record_store=profile_store,
-                    driver_id=normalized_driver_id,
-                )
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        payload_profiles = cast(list[object], product_profile_payload["profiles"])
-        profiles = tuple(
-            LaunchplaneProductProfileRecord.model_validate(profile) for profile in payload_profiles
-        )
-        return ProductProfileListResponse(
-            trace_id=trace_id,
-            driver_id=str(product_profile_payload["driver_id"]),
-            profiles=profiles,
-        )
-
-    def read_product_profile(
-        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> ProductProfileResponse:
-        trace_id = next_trace_id()
-        try:
-            profile_store = require_product_profile_read_store(record_store)
-            profile = profile_store.read_product_profile_record(product)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="product_profile.read",
-            product=profile.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read the requested product profile.",
-            )
-        return ProductProfileResponse(trace_id=trace_id, profile=profile)
 
     async def write_product_profile(
         request: Request,
@@ -12346,194 +11130,6 @@ def create_launchplane_fastapi_app(
             result=result_plan.model_dump(mode="json"),
         )
         return response
-
-    def read_product_context_cutover_audit(
-        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        source_context: Annotated[str, Query()] = "",
-        target_context: Annotated[str, Query()] = "",
-        preview_context: Annotated[str, Query()] = "",
-    ) -> ProductContextCutoverAuditResponse:
-        trace_id = next_trace_id()
-        try:
-            audit_store = require_product_context_audit_store(record_store)
-            profile = audit_store.read_product_profile_record(product)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="product_profile.read",
-            product=profile.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read the requested product profile.",
-            )
-        normalized_source_context = source_context.strip()
-        normalized_target_context = target_context.strip()
-        normalized_preview_context = preview_context.strip()
-        if not product_profile_context_cutover_contexts_allowed(
-            profile=profile,
-            source_context=normalized_source_context,
-            target_context=normalized_target_context,
-            preview_context=normalized_preview_context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="context_not_in_product_boundary",
-                message="Requested audit contexts are not owned by the product profile.",
-            )
-        try:
-            audit_payload = control_plane_product_context_audit.build_product_context_cutover_audit(
-                record_store=audit_store,
-                product=profile.product,
-                source_context=normalized_source_context,
-                target_context=normalized_target_context,
-                preview_context=normalized_preview_context,
-            )
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_context_cutover_audit_request",
-                message="Context cutover audit request is invalid.",
-            ) from error
-        return ProductContextCutoverAuditResponse(trace_id=trace_id, audit=audit_payload)
-
-    def read_secret_status(
-        secret_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> SecretStatusResponse:
-        trace_id = next_trace_id()
-        try:
-            secret_store = require_secret_status_read_store(record_store)
-            secret_status = SecretStatusReadModel.model_validate(
-                control_plane_secrets.build_secret_status(
-                    secret_store,
-                    secret_id=secret_id,
-                )
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="secret.read",
-            product="launchplane",
-            context=secret_status.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read Launchplane managed secret status for the requested context.",
-            )
-        return SecretStatusResponse(trace_id=trace_id, secret=secret_status)
-
-    def list_context_secret_statuses(
-        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> SecretStatusListResponse:
-        return list_secret_statuses_for_context(
-            context=context,
-            instance="",
-            identity=identity,
-            record_store=record_store,
-        )
-
-    def list_instance_secret_statuses(
-        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> SecretStatusListResponse:
-        return list_secret_statuses_for_context(
-            context=context,
-            instance=instance,
-            identity=identity,
-            record_store=record_store,
-        )
-
-    def list_secret_statuses_for_context(
-        *,
-        context: str,
-        instance: str,
-        identity: LaunchplaneIdentity,
-        record_store: object,
-    ) -> SecretStatusListResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="secret.list",
-            product="launchplane",
-            context=context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot list Launchplane managed secret status for the requested context.",
-            )
-        try:
-            secret_store = require_secret_status_read_store(record_store)
-            statuses = tuple(
-                SecretStatusReadModel.model_validate(status)
-                for status in control_plane_secrets.list_secret_statuses(
-                    secret_store,
-                    context_name=context,
-                    instance_name=instance,
-                )
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        return SecretStatusListResponse(
-            trace_id=trace_id,
-            context=context,
-            instance=instance,
-            secrets=statuses,
-        )
 
     def accepted_evidence_response(
         *,
@@ -20103,19 +18699,36 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/artifacts/protected",
-        read_protected_artifacts,
-        methods=["GET"],
-        response_model=ProtectedArtifactsResponse,
-        operation_id="read_protected_artifacts",
-        summary="Read protected artifact inventory",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+    def read_route_authorization_allows(
+        *,
+        identity: LaunchplaneIdentity,
+        action: str,
+        product: str,
+        context: str,
+    ) -> bool:
+        return resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+        )
+
+    read_route_dependencies = ReadRouteDependencies(
+        read_identity=read_identity,
+        get_record_store=get_record_store,
+        next_trace_id=next_trace_id,
+        authorization_allows=read_route_authorization_allows,
+        http_error=_launchplane_http_error,
+        error_response_model=LaunchplaneErrorResponse,
+    )
+    product_read_route_dependencies = ProductReadRouteDependencies(
+        common=read_route_dependencies,
+        read_product_profile_list_identity=read_product_profile_list_identity,
+        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
+    )
+    register_protected_artifact_read_routes(
+        app,
+        dependencies=product_read_route_dependencies,
     )
 
     app.add_api_route(
@@ -20781,62 +19394,9 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    def read_route_authorization_allows(
-        *,
-        identity: LaunchplaneIdentity,
-        action: str,
-        product: str,
-        context: str,
-    ) -> bool:
-        return resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=action,
-            product=product,
-            context=context,
-        )
-
-    read_route_dependencies = ReadRouteDependencies(
-        read_identity=read_identity,
-        get_record_store=get_record_store,
-        next_trace_id=next_trace_id,
-        authorization_allows=read_route_authorization_allows,
-        http_error=_launchplane_http_error,
-        error_response_model=LaunchplaneErrorResponse,
-    )
     register_topology_read_routes(app, dependencies=read_route_dependencies)
     register_ingress_read_routes(app, dependencies=read_route_dependencies)
-
-    app.add_api_route(
-        "/v1/deployments/{record_id}",
-        read_deployment_record,
-        methods=["GET"],
-        response_model=DeploymentRecordResponse,
-        operation_id="read_deployment_record",
-        summary="Read one deployment record",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        "/v1/promotions/{record_id}",
-        read_promotion_record,
-        methods=["GET"],
-        response_model=PromotionRecordResponse,
-        operation_id="read_promotion_record",
-        summary="Read one promotion record",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
+    register_deployment_promotion_read_routes(app, dependencies=read_route_dependencies)
 
     every_code_read_error_responses: dict[int | str, dict[str, object]] = {
         400: {"model": LaunchplaneErrorResponse},
@@ -20933,69 +19493,17 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/inventory/{context}/{instance}",
-        read_environment_inventory,
-        methods=["GET"],
-        response_model=EnvironmentInventoryResponse,
-        operation_id="read_environment_inventory",
-        summary="Read one environment inventory record",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
+    register_inventory_operation_read_routes(app, dependencies=read_route_dependencies)
 
-    app.add_api_route(
-        "/v1/contexts/{context}/operations/recent",
-        read_recent_operations,
-        methods=["GET"],
-        response_model=RecentOperationsResponse,
-        operation_id="read_recent_operations",
-        summary="Read recent Launchplane operations for a context",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    product_environment_error_responses: dict[int | str, dict[str, object]] = {
-        400: {"model": LaunchplaneErrorResponse},
-        401: {"model": LaunchplaneErrorResponse},
-        403: {"model": LaunchplaneErrorResponse},
-        404: {"model": LaunchplaneErrorResponse},
-        503: {"model": LaunchplaneErrorResponse},
-    }
-
-    agent_context_error_responses: dict[int | str, dict[str, object]] = {
+    work_graph_error_responses: dict[int | str, dict[str, object]] = {
         401: {"model": LaunchplaneErrorResponse},
         403: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
 
-    app.add_api_route(
-        "/v1/repo-product-mapping",
-        read_repo_product_mapping,
-        methods=["GET"],
-        response_model=RepoProductMappingResponse,
-        operation_id="read_repo_product_mapping",
-        summary="Read repository product mapping",
-        responses=agent_context_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/agent/context",
-        read_agent_context,
-        methods=["GET"],
-        response_model=AgentContextResponse,
-        operation_id="read_agent_context",
-        summary="Read Launchplane agent context",
-        responses=agent_context_error_responses,
+    register_agent_context_read_routes(
+        app,
+        dependencies=product_read_route_dependencies,
     )
 
     app.add_api_route(
@@ -21005,7 +19513,7 @@ def create_launchplane_fastapi_app(
         response_model=WorkGraphSnapshotResponse,
         operation_id="read_work_graph_snapshot",
         summary="Read Launchplane work graph snapshot",
-        responses=agent_context_error_responses,
+        responses=work_graph_error_responses,
     )
 
     app.add_api_route(
@@ -21030,7 +19538,7 @@ def create_launchplane_fastapi_app(
         response_model=WorkGraphIssueInboxResponse,
         operation_id="read_work_graph_issue_inbox",
         summary="Read Launchplane GitHub issue inbox",
-        responses=agent_context_error_responses,
+        responses=work_graph_error_responses,
     )
 
     app.add_api_route(
@@ -21490,68 +19998,9 @@ def create_launchplane_fastapi_app(
         responses=every_code_read_error_responses,
     )
 
-    app.add_api_route(
-        "/v1/products",
-        list_product_environment_overviews,
-        methods=["GET"],
-        response_model=ProductEnvironmentListResponse,
-        operation_id="list_products",
-        summary="List product environment overviews",
-        responses=product_environment_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/products/{product}",
-        read_product_overview,
-        methods=["GET"],
-        response_model=ProductOverviewResponse,
-        operation_id="read_product",
-        summary="Read a product environment overview",
-        responses=product_environment_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/products/{product}/activity",
-        read_product_activity,
-        methods=["GET"],
-        response_model=ProductActivityResponse,
-        operation_id="read_product_activity",
-        summary="Read product activity",
-        responses=product_environment_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/products/{product}/environments",
-        list_product_environments,
-        methods=["GET"],
-        response_model=ProductEnvironmentsResponse,
-        operation_id="list_product_environments",
-        summary="List product environments",
-        responses=product_environment_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/products/{product}/environments/{environment}",
-        read_product_environment,
-        methods=["GET"],
-        response_model=ProductEnvironmentResponse,
-        operation_id="read_product_environment",
-        summary="Read one product environment",
-        responses=product_environment_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/product-profiles",
-        list_product_profiles,
-        methods=["GET"],
-        response_model=ProductProfileListResponse,
-        operation_id="list_product_profiles",
-        summary="List Launchplane product profiles",
-        responses={
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+    register_product_environment_read_routes(
+        app,
+        dependencies=product_read_route_dependencies,
     )
 
     app.add_api_route(
@@ -21642,19 +20091,9 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/product-profiles/{product}",
-        read_product_profile,
-        methods=["GET"],
-        response_model=ProductProfileResponse,
-        operation_id="read_product_profile",
-        summary="Read a Launchplane product profile",
-        responses={
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+    register_product_profile_read_routes(
+        app,
+        dependencies=product_read_route_dependencies,
     )
 
     app.add_api_route(
@@ -22039,69 +20478,11 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/product-profiles/{product}/context-cutover-audit",
-        read_product_context_cutover_audit,
-        methods=["GET"],
-        response_model=ProductContextCutoverAuditResponse,
-        operation_id="read_product_context_cutover_audit",
-        summary="Read a product context cutover audit",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+    register_product_context_audit_read_routes(
+        app,
+        dependencies=product_read_route_dependencies,
     )
-
-    app.add_api_route(
-        "/v1/contexts/{context}/secrets",
-        list_context_secret_statuses,
-        methods=["GET"],
-        response_model=SecretStatusListResponse,
-        operation_id="list_context_secret_statuses",
-        summary="List Launchplane managed secret status for a context",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        "/v1/contexts/{context}/instances/{instance}/secrets",
-        list_instance_secret_statuses,
-        methods=["GET"],
-        response_model=SecretStatusListResponse,
-        operation_id="list_instance_secret_statuses",
-        summary="List Launchplane managed secret status for an instance",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        "/v1/secrets/{secret_id}",
-        read_secret_status,
-        methods=["GET"],
-        response_model=SecretStatusResponse,
-        operation_id="read_secret_status",
-        summary="Read Launchplane managed secret status",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
+    register_managed_secret_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(
         _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE,
@@ -22358,19 +20739,9 @@ def create_launchplane_fastapi_app(
         preserve_renewed_session_cookie(request, response)
         return response
 
-    app.add_api_route(
-        "/v1/products/{product}/environments/{environment}/config-status",
-        read_product_environment_config_status,
-        methods=["GET"],
-        operation_id="read_product_environment_config_status",
-        response_model=ProductEnvironmentConfigStatusResponse,
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+    register_product_config_status_read_routes(
+        app,
+        dependencies=product_read_route_dependencies,
     )
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(

@@ -39,7 +39,6 @@ from tests.http_app_test_support import (
     _browser_mutation_headers,
     _ConcurrentProductConfigDryRunMarkerStore,
     _every_code_notification_policy_record,
-    _get_context_cutover_audit,
     _github_human_identity,
     _github_human_product_config_policy,
     _github_human_runtime_key_safety_policy_apply_policy,
@@ -72,6 +71,7 @@ from tests.support.product_config import (
     _product_config_payload,
     _product_config_secrets,
 )
+from tests.support.product_reads import _get_context_cutover_audit
 from tests.support.profiles import _product_profile_payload_with_prod
 from tests.support.stores import (
     _seed_tracked_target_records,

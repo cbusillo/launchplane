@@ -6,10 +6,12 @@ from pydantic import BaseModel, ConfigDict
 from control_plane import service_status as control_plane_service_status
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
-from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.http_routes.support import (
+    LAUNCHPLANE_SERVICE_CONTEXT,
+    ApiRouteRegistrar,
+    ReadRouteDependencies,
+)
 from control_plane.service_auth import LaunchplaneIdentity
-
-_LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
 class IngressCanaryRouteRecordResponse(BaseModel):
@@ -156,7 +158,7 @@ def _ensure_ingress_canary_route_read_allowed(
         identity=identity,
         action="ingress_canary_route.read",
         product="launchplane",
-        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        context=LAUNCHPLANE_SERVICE_CONTEXT,
     ):
         raise dependencies.http_error(
             status_code=403,

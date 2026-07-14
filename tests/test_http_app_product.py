@@ -42,17 +42,6 @@ from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
     _browser_mutation_headers,
-    _get_agent_context,
-    _get_config_status,
-    _get_product,
-    _get_product_activity,
-    _get_product_environment,
-    _get_product_environments,
-    _get_product_profile,
-    _get_product_profiles,
-    _get_products,
-    _get_protected_artifacts,
-    _get_repo_product_mapping,
     _get_work_graph_issue_inbox,
     _get_work_graph_snapshot,
     _github_human_artifact_protection_policy,
@@ -87,6 +76,19 @@ from tests.http_app_test_support import (
 )
 from tests.support.protected_artifacts import seed_protected_artifact_store
 from tests.support.auth import _identity, _StubVerifier
+from tests.support.product_reads import (
+    _get_agent_context,
+    _get_config_status,
+    _get_product,
+    _get_product_activity,
+    _get_product_environment,
+    _get_product_environments,
+    _get_product_profile,
+    _get_product_profiles,
+    _get_products,
+    _get_protected_artifacts,
+    _get_repo_product_mapping,
+)
 from tests.support.profiles import (
     _generic_site_profile_payload,
     _product_profile_payload,
