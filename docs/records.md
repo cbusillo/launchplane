@@ -697,6 +697,43 @@ resolved destination is non-public records a failing `private_url` observation.
 The `skipped` status remains readable for historical records, but current public
 checks do not treat a private destination as unsupported or silently healthy.
 
+## Product Environment Topology Projection
+
+Product environment detail and summary reads expose one provider-neutral
+`topology` projection for every driver. The projection keeps three evidence
+states separate:
+
+- `desired` is product-profile URL and public-domain intent.
+- `provider_recorded` is the current environment route-binding authority for
+  placement, bound domains, ingress provider/path/termination, and TLS owner and
+  terminator.
+- `observed` is runtime identity, public-ingress, and per-domain active TLS
+  evidence, including certificate status, issuer and validity window,
+  public-name matching, bounded presented-name evidence, incident linkage, and
+  a provider-neutral likely failure cause.
+
+Every state or observed fact carries trust/freshness and provenance. A missing
+route binding remains `missing` even when provider-specific target records
+exist; product reads never synthesize reassuring placement or route authority
+from Dokploy records, provider target ids, or other provider payloads. Fresh
+failing probes remain verified observations with a failing status, while stale
+route-binding or TLS evidence is called out separately.
+
+Typed topology warnings identify missing or disabled authority, desired versus
+recorded domain divergence, placement disagreement, ingress or TLS ownership
+divergence, stale evidence, missing TLS observations, certificate mismatch,
+expiry, trust-chain failure, unreachability, and unsupported TLS. This lets an
+operator diagnose a wrong-certificate incident from the product read itself:
+the requested domain, recorded ingress/TLS owner and terminator, observed
+certificate names, failure code, incident, and likely cause remain visible
+without direct provider database access.
+
+The projection omits provider evidence maps, host ids, target ids, certificate
+ids, edge addresses, private resolver details, and raw provider payloads. The
+legacy `target` summary is backed by the same neutral route authority and
+reports only whether a physical provider-target record exists; it no longer
+returns the provider target id.
+
 ## Public Ingress Incident Records
 
 Public ingress incidents are Launchplane-owned lifecycle records under

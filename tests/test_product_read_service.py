@@ -15,6 +15,7 @@ from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.product_read_service import (
     ProductReadModelStoreCapabilityError,
@@ -82,6 +83,12 @@ class _ProductReadStore:
     def read_lane_summary(self, *, context_name: str, instance_name: str) -> LaunchplaneLaneSummary:
         _ = self
         return LaunchplaneLaneSummary(context=context_name, instance=instance_name)
+
+    def read_route_binding_record(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> EnvironmentRouteBindingRecord:
+        _ = (self, product, context_name, instance_name)
+        raise FileNotFoundError(f"{product}/{context_name}/{instance_name}")
 
     def list_preview_summaries(
         self,
@@ -225,7 +232,7 @@ class ProductReadServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ProductReadModelStoreCapabilityError,
-            "read_lane_summary, list_deployment_records, list_promotion_records",
+            "read_lane_summary, read_route_binding_record, list_deployment_records",
         ):
             require_product_environment_read_model_store(PartialStore())
 

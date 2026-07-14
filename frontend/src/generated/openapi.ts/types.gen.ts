@@ -1179,6 +1179,14 @@ export type ProductConfigSecretResult = {
     secret_id: string;
 };
 
+export type ProductDesiredTopology = {
+    base_url: string;
+    domains: Array<ProductTopologyDomain>;
+    health_url: string;
+    provenance: DataProvenance;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
 export type ProductEnvironmentConfigStatus = {
     base_driver_id: string;
     context: string;
@@ -1227,6 +1235,7 @@ export type ProductEnvironmentDetail = {
     runtime_settings: Array<ProductRuntimeSettingSummary>;
     schema_version: number;
     target: ProductTargetSummary;
+    topology: ProductEnvironmentTopology;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
     warnings: Array<string>;
 };
@@ -1260,8 +1269,17 @@ export type ProductEnvironmentSummary = {
     prelaunch_rebuild_data_source_mode: string;
     provenance: DataProvenance;
     public_ingress: ProductPublicIngressSummary;
+    topology: ProductEnvironmentTopology;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
     warnings: Array<string>;
+};
+
+export type ProductEnvironmentTopology = {
+    desired: ProductDesiredTopology;
+    observed: ProductObservedTopology;
+    provider_recorded: ProductProviderRecordedTopology;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+    warnings: Array<ProductTopologyWarning>;
 };
 
 export type ProductEnvironmentsResponse = {
@@ -1320,6 +1338,60 @@ export type ProductManagedSecretConfigStatusItem = {
     status: 'configured' | 'missing' | 'disabled' | 'unvalidated' | 'stale' | 'unsupported';
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported' | 'disabled' | 'unsupported';
     updated_at: string;
+};
+
+export type ProductObservedIngress = {
+    failure_code: string;
+    incident_id: string;
+    incident_status: string;
+    observed_at: string;
+    provenance: DataProvenance;
+    record_id: string;
+    status: string;
+    summary: string;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductObservedPlacement = {
+    expected_runtime_identity: RuntimeIdentity | null;
+    observed_runtime_identity: RuntimeIdentity | null;
+    provenance: DataProvenance;
+    runtime_identity_detail: string;
+    runtime_identity_status: 'unchecked' | 'match' | 'mismatch' | 'missing' | 'malformed' | 'unverifiable';
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductObservedTlsDomain = {
+    days_remaining: number | null;
+    domain_name: string;
+    failure_code: string;
+    incident_id: string;
+    incident_status: string;
+    issuer: string;
+    likely_failure_cause: string;
+    not_after: string;
+    not_before: string;
+    observed_at: string;
+    presented_name_evidence: Array<string>;
+    presented_san_count: number;
+    provenance: DataProvenance;
+    public_name_match: boolean;
+    public_name_match_source: string;
+    record_id: string;
+    role: 'primary' | 'alias';
+    stale_after: string;
+    status: 'valid' | 'expiring' | 'expired' | 'hostname_mismatch' | 'untrusted' | 'self_signed' | 'unreachable' | 'unknown' | 'unsupported' | 'missing';
+    subject: string;
+    summary: string;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+    validated_address_count: number;
+};
+
+export type ProductObservedTopology = {
+    ingress: ProductObservedIngress;
+    placement: ProductObservedPlacement;
+    tls_domains: Array<ProductObservedTlsDomain>;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
 export type ProductOdooLaneDataPolicy = {
@@ -1403,6 +1475,16 @@ export type ProductPromotionWorkflowProfile = {
     dry_run_input: string;
     ref: string;
     workflow_id: string;
+};
+
+export type ProductProviderRecordedTopology = {
+    authority_status: 'active' | 'disabled' | 'missing';
+    domains: Array<ProductTopologyDomain>;
+    ingress: ProductTopologyIngress;
+    placement: ProductTopologyPlacement;
+    provenance: DataProvenance;
+    tls: ProductTopologyTlsOwnership;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
 export type ProductPublicIngressSummary = {
@@ -1489,11 +1571,51 @@ export type ProductTargetSummary = {
     provider_target_type: string;
     runtime_identity_detail: string;
     runtime_identity_status: 'unchecked' | 'match' | 'mismatch' | 'missing' | 'malformed' | 'unverifiable';
-    target_id: string;
     target_id_recorded: boolean;
     target_name: string;
     target_type: string;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductTopologyDomain = {
+    domain_name: string;
+    role: 'primary' | 'alias';
+    tls_expected: boolean;
+};
+
+export type ProductTopologyIngress = {
+    endpoint_key: string;
+    path: 'edge_to_provider' | 'direct_to_provider' | 'none' | 'unknown';
+    provenance: DataProvenance;
+    provider: string;
+    termination_kind: 'edge' | 'direct' | 'none' | 'unknown';
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductTopologyPlacement = {
+    provenance: DataProvenance;
+    provider: string;
+    provider_target_record_present: boolean;
+    provider_target_type: string;
+    target_name: string;
+    target_type: string;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductTopologyTlsOwnership = {
+    owner: 'launchplane' | 'provider' | 'external' | 'none' | 'unknown';
+    provenance: DataProvenance;
+    provider: string;
+    terminator: 'edge' | 'provider' | 'external' | 'none' | 'unknown';
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductTopologyWarning = {
+    code: 'missing_route_authority' | 'route_authority_disabled' | 'stale_route_authority' | 'desired_domain_unknown' | 'domain_divergence' | 'provider_placement_missing' | 'placement_divergence' | 'ingress_ownership_unknown' | 'ingress_divergence' | 'tls_ownership_unknown' | 'tls_ownership_divergence' | 'tls_observation_missing' | 'stale_tls_observation' | 'tls_mismatch' | 'tls_expiring' | 'tls_expired' | 'tls_untrusted' | 'tls_unavailable' | 'tls_unsupported' | 'public_ingress_failure';
+    detail: string;
+    domain_name: string;
+    scope: 'authority' | 'placement' | 'domains' | 'ingress' | 'tls' | 'observation';
+    severity: 'warning' | 'error';
 };
 
 export type PromotionRecordOutput = {

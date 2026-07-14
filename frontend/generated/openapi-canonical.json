@@ -11038,6 +11038,46 @@
         "title": "ProductContextCutoverAuditResponse",
         "type": "object"
       },
+      "ProductDesiredTopology": {
+        "additionalProperties": false,
+        "properties": {
+          "base_url": {
+            "default": "",
+            "title": "Base Url",
+            "type": "string"
+          },
+          "domains": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductTopologyDomain"
+            },
+            "title": "Domains",
+            "type": "array"
+          },
+          "health_url": {
+            "default": "",
+            "title": "Health Url",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "title": "ProductDesiredTopology",
+        "type": "object"
+      },
       "ProductEnvironmentConfigStatus": {
         "additionalProperties": false,
         "properties": {
@@ -11280,6 +11320,9 @@
           "target": {
             "$ref": "#/components/schemas/ProductTargetSummary"
           },
+          "topology": {
+            "$ref": "#/components/schemas/ProductEnvironmentTopology"
+          },
           "trust_state": {
             "enum": [
               "verified",
@@ -11449,6 +11492,9 @@
           "public_ingress": {
             "$ref": "#/components/schemas/ProductPublicIngressSummary"
           },
+          "topology": {
+            "$ref": "#/components/schemas/ProductEnvironmentTopology"
+          },
           "trust_state": {
             "enum": [
               "verified",
@@ -11476,6 +11522,42 @@
           "provenance"
         ],
         "title": "ProductEnvironmentSummary",
+        "type": "object"
+      },
+      "ProductEnvironmentTopology": {
+        "additionalProperties": false,
+        "properties": {
+          "desired": {
+            "$ref": "#/components/schemas/ProductDesiredTopology"
+          },
+          "observed": {
+            "$ref": "#/components/schemas/ProductObservedTopology"
+          },
+          "provider_recorded": {
+            "$ref": "#/components/schemas/ProductProviderRecordedTopology"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductTopologyWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "title": "ProductEnvironmentTopology",
         "type": "object"
       },
       "ProductEnvironmentsResponse": {
@@ -11761,6 +11843,319 @@
           "integration"
         ],
         "title": "ProductManagedSecretConfigStatusItem",
+        "type": "object"
+      },
+      "ProductObservedIngress": {
+        "additionalProperties": false,
+        "properties": {
+          "failure_code": {
+            "default": "",
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "incident_id": {
+            "default": "",
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "incident_status": {
+            "default": "",
+            "title": "Incident Status",
+            "type": "string"
+          },
+          "observed_at": {
+            "default": "",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "status": {
+            "default": "missing",
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "title": "ProductObservedIngress",
+        "type": "object"
+      },
+      "ProductObservedPlacement": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "runtime_identity_detail": {
+            "default": "",
+            "title": "Runtime Identity Detail",
+            "type": "string"
+          },
+          "runtime_identity_status": {
+            "default": "unchecked",
+            "enum": [
+              "unchecked",
+              "match",
+              "mismatch",
+              "missing",
+              "malformed",
+              "unverifiable"
+            ],
+            "title": "Runtime Identity Status",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "title": "ProductObservedPlacement",
+        "type": "object"
+      },
+      "ProductObservedTlsDomain": {
+        "additionalProperties": false,
+        "properties": {
+          "days_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days Remaining"
+          },
+          "domain_name": {
+            "title": "Domain Name",
+            "type": "string"
+          },
+          "failure_code": {
+            "default": "",
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "incident_id": {
+            "default": "",
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "incident_status": {
+            "default": "",
+            "title": "Incident Status",
+            "type": "string"
+          },
+          "issuer": {
+            "default": "",
+            "title": "Issuer",
+            "type": "string"
+          },
+          "likely_failure_cause": {
+            "default": "",
+            "title": "Likely Failure Cause",
+            "type": "string"
+          },
+          "not_after": {
+            "default": "",
+            "title": "Not After",
+            "type": "string"
+          },
+          "not_before": {
+            "default": "",
+            "title": "Not Before",
+            "type": "string"
+          },
+          "observed_at": {
+            "default": "",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "presented_name_evidence": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Presented Name Evidence",
+            "type": "array"
+          },
+          "presented_san_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Presented San Count",
+            "type": "integer"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "public_name_match": {
+            "default": false,
+            "title": "Public Name Match",
+            "type": "boolean"
+          },
+          "public_name_match_source": {
+            "default": "none",
+            "title": "Public Name Match Source",
+            "type": "string"
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "role": {
+            "default": "primary",
+            "enum": [
+              "primary",
+              "alias"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "stale_after": {
+            "default": "",
+            "title": "Stale After",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "valid",
+                  "expiring",
+                  "expired",
+                  "hostname_mismatch",
+                  "untrusted",
+                  "self_signed",
+                  "unreachable",
+                  "unknown",
+                  "unsupported"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "missing",
+                "type": "string"
+              }
+            ],
+            "default": "missing",
+            "title": "Status"
+          },
+          "subject": {
+            "default": "",
+            "title": "Subject",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          },
+          "validated_address_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Validated Address Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "domain_name"
+        ],
+        "title": "ProductObservedTlsDomain",
+        "type": "object"
+      },
+      "ProductObservedTopology": {
+        "additionalProperties": false,
+        "properties": {
+          "ingress": {
+            "$ref": "#/components/schemas/ProductObservedIngress"
+          },
+          "placement": {
+            "$ref": "#/components/schemas/ProductObservedPlacement"
+          },
+          "tls_domains": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductObservedTlsDomain"
+            },
+            "title": "Tls Domains",
+            "type": "array"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "title": "ProductObservedTopology",
         "type": "object"
       },
       "ProductOdooLaneDataPolicy": {
@@ -12208,6 +12603,55 @@
         "title": "ProductPromotionWorkflowProfile",
         "type": "object"
       },
+      "ProductProviderRecordedTopology": {
+        "additionalProperties": false,
+        "properties": {
+          "authority_status": {
+            "default": "missing",
+            "enum": [
+              "active",
+              "disabled",
+              "missing"
+            ],
+            "title": "Authority Status",
+            "type": "string"
+          },
+          "domains": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductTopologyDomain"
+            },
+            "title": "Domains",
+            "type": "array"
+          },
+          "ingress": {
+            "$ref": "#/components/schemas/ProductTopologyIngress"
+          },
+          "placement": {
+            "$ref": "#/components/schemas/ProductTopologyPlacement"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "tls": {
+            "$ref": "#/components/schemas/ProductTopologyTlsOwnership"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "title": "ProductProviderRecordedTopology",
+        "type": "object"
+      },
       "ProductPublicIngressSummary": {
         "additionalProperties": false,
         "properties": {
@@ -12648,7 +13092,7 @@
             ]
           },
           "provider": {
-            "default": "dokploy",
+            "default": "",
             "title": "Provider",
             "type": "string"
           },
@@ -12673,11 +13117,6 @@
               "unverifiable"
             ],
             "title": "Runtime Identity Status",
-            "type": "string"
-          },
-          "target_id": {
-            "default": "",
-            "title": "Target Id",
             "type": "string"
           },
           "target_id_recorded": {
@@ -12709,6 +13148,268 @@
           }
         },
         "title": "ProductTargetSummary",
+        "type": "object"
+      },
+      "ProductTopologyDomain": {
+        "additionalProperties": false,
+        "properties": {
+          "domain_name": {
+            "title": "Domain Name",
+            "type": "string"
+          },
+          "role": {
+            "default": "primary",
+            "enum": [
+              "primary",
+              "alias"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "tls_expected": {
+            "default": false,
+            "title": "Tls Expected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "domain_name"
+        ],
+        "title": "ProductTopologyDomain",
+        "type": "object"
+      },
+      "ProductTopologyIngress": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint_key": {
+            "default": "",
+            "title": "Endpoint Key",
+            "type": "string"
+          },
+          "path": {
+            "default": "unknown",
+            "enum": [
+              "edge_to_provider",
+              "direct_to_provider",
+              "none",
+              "unknown"
+            ],
+            "title": "Path",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "provider": {
+            "default": "",
+            "title": "Provider",
+            "type": "string"
+          },
+          "termination_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "edge",
+                  "direct",
+                  "none"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ],
+            "default": "unknown",
+            "title": "Termination Kind"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "title": "ProductTopologyIngress",
+        "type": "object"
+      },
+      "ProductTopologyPlacement": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "provider": {
+            "default": "",
+            "title": "Provider",
+            "type": "string"
+          },
+          "provider_target_record_present": {
+            "default": false,
+            "title": "Provider Target Record Present",
+            "type": "boolean"
+          },
+          "provider_target_type": {
+            "default": "",
+            "title": "Provider Target Type",
+            "type": "string"
+          },
+          "target_name": {
+            "default": "",
+            "title": "Target Name",
+            "type": "string"
+          },
+          "target_type": {
+            "default": "",
+            "title": "Target Type",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "title": "ProductTopologyPlacement",
+        "type": "object"
+      },
+      "ProductTopologyTlsOwnership": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "anyOf": [
+              {
+                "enum": [
+                  "launchplane",
+                  "provider",
+                  "external",
+                  "none"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ],
+            "default": "unknown",
+            "title": "Owner"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "provider": {
+            "default": "",
+            "title": "Provider",
+            "type": "string"
+          },
+          "terminator": {
+            "default": "unknown",
+            "enum": [
+              "edge",
+              "provider",
+              "external",
+              "none",
+              "unknown"
+            ],
+            "title": "Terminator",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "title": "ProductTopologyTlsOwnership",
+        "type": "object"
+      },
+      "ProductTopologyWarning": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": [
+              "missing_route_authority",
+              "route_authority_disabled",
+              "stale_route_authority",
+              "desired_domain_unknown",
+              "domain_divergence",
+              "provider_placement_missing",
+              "placement_divergence",
+              "ingress_ownership_unknown",
+              "ingress_divergence",
+              "tls_ownership_unknown",
+              "tls_ownership_divergence",
+              "tls_observation_missing",
+              "stale_tls_observation",
+              "tls_mismatch",
+              "tls_expiring",
+              "tls_expired",
+              "tls_untrusted",
+              "tls_unavailable",
+              "tls_unsupported",
+              "public_ingress_failure"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "domain_name": {
+            "default": "",
+            "title": "Domain Name",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "authority",
+              "placement",
+              "domains",
+              "ingress",
+              "tls",
+              "observation"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "warning",
+              "error"
+            ],
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "scope",
+          "severity",
+          "detail"
+        ],
+        "title": "ProductTopologyWarning",
         "type": "object"
       },
       "PromotionEvidenceRequest": {

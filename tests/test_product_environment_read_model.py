@@ -33,6 +33,14 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+    RouteBindingIngress,
+    RouteBindingProviderTarget,
+    RouteBindingSource,
+    RouteBindingTls,
+)
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
@@ -1240,6 +1248,38 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     source_label="test",
                 )
             )
+            store.write_route_binding_record(
+                EnvironmentRouteBindingRecord(
+                    product=profile.product,
+                    context="example-site-prod",
+                    instance="prod",
+                    provider_target=RouteBindingProviderTarget(
+                        provider_id="dokploy",
+                        target_category="application",
+                        provider_target_type="application",
+                        target_name="example-site-prod",
+                        provider_evidence={"host_id": "provider-host-private"},
+                    ),
+                    ingress=RouteBindingIngress(
+                        provider="dokploy",
+                        termination_kind="direct",
+                    ),
+                    domains=(
+                        RouteBindingDomain(
+                            domain_name="example-site.example",
+                            role="primary",
+                        ),
+                    ),
+                    tls=RouteBindingTls(owner="provider"),
+                    source=RouteBindingSource(
+                        source_kind="service",
+                        source_label="test",
+                        refreshed_at="2026-05-02T22:32:00Z",
+                        freshness_status="recorded",
+                    ),
+                    updated_at="2026-05-02T22:32:00Z",
+                )
+            )
 
             detail = build_product_environment_detail(
                 record_store=store,
@@ -1252,10 +1292,11 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertEqual(detail.target.provider, "dokploy")
         self.assertEqual(detail.target.target_type, "application")
         self.assertEqual(detail.target.target_name, "example-site-prod")
-        self.assertEqual(detail.target.target_id, "app-example-prod")
         self.assertEqual(detail.target.provider_target_type, "application")
         self.assertTrue(detail.target.target_id_recorded)
         self.assertEqual(detail.target.trust_state, "recorded")
+        self.assertNotIn("app-example-prod", detail.model_dump_json())
+        self.assertNotIn("provider-host-private", detail.model_dump_json())
 
     def test_product_environment_detail_does_not_project_provider_target_from_dokploy_pair(
         self,
@@ -1298,10 +1339,9 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             )
             store.close()
 
-        self.assertEqual(detail.target.provider, "dokploy")
+        self.assertEqual(detail.target.provider, "")
         self.assertEqual(detail.target.target_type, "")
         self.assertEqual(detail.target.target_name, "")
-        self.assertEqual(detail.target.target_id, "")
         self.assertEqual(detail.target.provider_target_type, "")
         self.assertFalse(detail.target.target_id_recorded)
         self.assertEqual(detail.target.trust_state, "missing")
