@@ -89,7 +89,7 @@ from control_plane.generic_web_promotion_http import (
     GenericWebProdPromotionResponse,
     GenericWebPromotionWorkflowResponse,
 )
-from control_plane.drivers import generic_web_preview_dispatch
+from control_plane.drivers import generic_web_preview_dispatch, native_routes
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubActionsIdentity,
@@ -4860,14 +4860,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
     def test_unregistered_descriptor_driver_route_fails_closed(self) -> None:
         with patch(
-            "control_plane.service.list_driver_descriptors",
+            "control_plane.drivers.native_routes.list_driver_descriptors",
             return_value=(_fake_descriptor_dispatch_descriptor(),),
         ):
             with self.assertRaisesRegex(
                 ValueError,
                 "POST driver descriptor routes must be implemented as native FastAPI routes",
             ):
-                control_plane_service._validate_native_descriptor_driver_routes()
+                native_routes._validate_native_descriptor_driver_routes()
 
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

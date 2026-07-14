@@ -20,7 +20,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
-from control_plane.drivers import registry
+from control_plane.drivers import native_routes, registry
 from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewDesiredStateEnvelope,
 )
@@ -344,7 +344,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
 
     def test_driver_actions_declare_route_authorization_metadata(self) -> None:
-        route_actions = control_plane_service._driver_route_metadata_from_descriptors()
+        route_actions = native_routes._driver_route_metadata_from_descriptors()
 
         self.assertTrue(
             all(route_metadata.authz_action for route_metadata in route_actions.values())
@@ -387,27 +387,27 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             for action in descriptor.actions
             if action.method == "POST" and action.route_path.startswith("/v1/drivers/")
         }
-        service_route_metadata = control_plane_service._driver_route_metadata_from_descriptors()
+        native_route_metadata = native_routes._driver_route_metadata_from_descriptors()
 
         self.assertTrue(descriptor_post_route_metadata)
         self.assertLessEqual(
             set(descriptor_post_route_metadata),
-            control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
+            native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
         )
-        control_plane_service._validate_native_descriptor_driver_routes()
+        native_routes._validate_native_descriptor_driver_routes()
         for route_path, (
             driver_id,
             action_id,
             authz_action,
         ) in descriptor_post_route_metadata.items():
-            self.assertEqual(service_route_metadata[route_path].driver_id, driver_id)
-            self.assertEqual(service_route_metadata[route_path].action_id, action_id)
+            self.assertEqual(native_route_metadata[route_path].driver_id, driver_id)
+            self.assertEqual(native_route_metadata[route_path].action_id, action_id)
             self.assertEqual(
-                control_plane_service._descriptor_driver_authz_action(route_path), authz_action
+                native_routes._descriptor_driver_authz_action(route_path), authz_action
             )
         self.assertNotIn(
             "/v1/drivers/launchplane/self-deploy",
-            control_plane_service._driver_route_metadata_from_descriptors(),
+            native_routes._driver_route_metadata_from_descriptors(),
         )
 
     def test_post_descriptor_route_requires_native_fastapi_route(self) -> None:
@@ -431,21 +431,27 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             ),
         )
 
-        with patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)):
+        with patch(
+            "control_plane.drivers.native_routes.list_driver_descriptors",
+            return_value=(descriptor,),
+        ):
             with self.assertRaisesRegex(
                 ValueError,
                 "POST driver descriptor routes must be implemented as native FastAPI routes",
             ):
-                control_plane_service._validate_native_descriptor_driver_routes()
+                native_routes._validate_native_descriptor_driver_routes()
 
         with (
-            patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)),
             patch(
-                "control_plane.service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS",
+                "control_plane.drivers.native_routes.list_driver_descriptors",
+                return_value=(descriptor,),
+            ),
+            patch(
+                "control_plane.drivers.native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS",
                 frozenset({"/v1/drivers/fake-native/ping"}),
             ),
         ):
-            control_plane_service._validate_native_descriptor_driver_routes()
+            native_routes._validate_native_descriptor_driver_routes()
 
     def test_native_fastapi_driver_routes_are_registered(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -458,12 +464,12 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 state_dir=root / "state",
             )
 
-        native_post_routes = control_plane_service._fastapi_route_paths_by_method(app, "POST")
+        native_post_routes = native_routes._fastapi_route_paths_by_method(app, "POST")
         self.assertLessEqual(
-            control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
+            native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
             native_post_routes,
         )
-        control_plane_service._validate_native_fastapi_driver_route_paths(app)
+        native_routes._validate_native_fastapi_driver_route_paths(app)
 
     def test_native_fastapi_driver_route_validation_fails_closed(self) -> None:
         class _Route:
@@ -480,11 +486,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             def __init__(self, routes: tuple[_Route, ...]) -> None:
                 self.routes = routes
 
-        missing_route_path = sorted(control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS)[0]
+        missing_route_path = sorted(native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS)[0]
         app = _App(
             tuple(
                 _Route(route_path)
-                for route_path in control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS
+                for route_path in native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS
                 if route_path != missing_route_path
             )
         )
@@ -493,7 +499,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             ValueError,
             "Native FastAPI driver routes must be registered by the FastAPI app",
         ):
-            control_plane_service._validate_native_fastapi_driver_route_paths(app)
+            native_routes._validate_native_fastapi_driver_route_paths(app)
 
     def test_generic_web_execution_metadata_matches_descriptors(self) -> None:
         self.assert_route_metadata_matches_descriptor(
@@ -638,35 +644,35 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_odoo_preview_execution_metadata_matches_descriptors(self) -> None:
         self.assertNotIn(
             "/v1/drivers/odoo/preview-refresh",
-            control_plane_service._driver_route_metadata_from_descriptors(),
+            native_routes._driver_route_metadata_from_descriptors(),
         )
         self.assertNotIn(
             "/v1/drivers/odoo/preview-destroy",
-            control_plane_service._driver_route_metadata_from_descriptors(),
+            native_routes._driver_route_metadata_from_descriptors(),
         )
         self.assertNotIn(
             "/v1/drivers/odoo/preview-desired-state",
-            control_plane_service._driver_route_metadata_from_descriptors(),
+            native_routes._driver_route_metadata_from_descriptors(),
         )
         self.assertNotIn(
             "/v1/drivers/odoo/preview-inventory",
-            control_plane_service._driver_route_metadata_from_descriptors(),
+            native_routes._driver_route_metadata_from_descriptors(),
         )
         self.assertNotIn(
             "/v1/drivers/odoo/preview-readiness",
-            control_plane_service._driver_route_metadata_from_descriptors(),
+            native_routes._driver_route_metadata_from_descriptors(),
         )
         self.assertNotIn(
             "/v1/drivers/odoo/preview-verification",
-            control_plane_service._driver_route_metadata_from_descriptors(),
+            native_routes._driver_route_metadata_from_descriptors(),
         )
         self.assertNotIn(
             "/v1/drivers/odoo/prod-rollback-plan",
-            control_plane_service._driver_route_metadata_from_descriptors(),
+            native_routes._driver_route_metadata_from_descriptors(),
         )
         self.assertNotIn(
             "/v1/drivers/odoo/prod-rollback-plan",
-            control_plane_service._driver_route_metadata_from_descriptors(),
+            native_routes._driver_route_metadata_from_descriptors(),
         )
         self.assert_route_metadata_matches_descriptor(
             driver_id="odoo",
@@ -773,11 +779,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_route_policy_sets_use_execution_metadata(self) -> None:
         self.assertIn(
             "/v1/drivers/generic-web/prod-promotion",
-            control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
+            native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
         )
         self.assertIn(
             "/v1/drivers/generic-web/prod-promotion-workflow",
-            control_plane_service._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
+            native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
         )
         self.assertIn(
             control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
