@@ -11,7 +11,9 @@ from control_plane.contracts.secret_record import SecretStatus
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
     evaluate_runtime_key_safety_from_store,
+    is_secret_shaped_runtime_key,
     latest_active_runtime_key_safety_policy,
+    runtime_key_safety_environment_class,
 )
 
 
@@ -76,6 +78,45 @@ def _binding(
         created_at="2026-05-05T20:00:00Z",
         updated_at="2026-05-05T20:00:00Z",
     )
+
+
+class RuntimeKeySafetyAuthorityTests(unittest.TestCase):
+    def test_runtime_environment_classification_preserves_all_aliases_and_boundaries(self) -> None:
+        cases = {
+            "prod": "prod",
+            " Production ": "prod",
+            "testing": "testing",
+            "STAGE": "testing",
+            "preview": "preview",
+            "pr": "preview",
+            " PR-1727 ": "preview",
+            "dev": "dev",
+            "development": "dev",
+            "previewer": "unknown",
+            "prerender": "unknown",
+            "": "unknown",
+        }
+
+        for instance_name, expected_class in cases.items():
+            with self.subTest(instance_name=instance_name):
+                self.assertEqual(
+                    runtime_key_safety_environment_class(instance_name), expected_class
+                )
+
+    def test_secret_shaped_key_detection_matches_whole_key_parts(self) -> None:
+        cases = {
+            "API_TOKEN": True,
+            "PASSWORD": True,
+            "service_secret": True,
+            "DATABASE_URL": False,
+            "TOKENIZED": False,
+            "KEYBOARD": False,
+            "PRIVATEKEY": False,
+        }
+
+        for key_name, expected in cases.items():
+            with self.subTest(key_name=key_name):
+                self.assertEqual(is_secret_shaped_runtime_key(key_name), expected)
 
 
 class RuntimeKeySafetyTests(unittest.TestCase):

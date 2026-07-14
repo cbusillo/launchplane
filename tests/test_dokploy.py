@@ -31,14 +31,11 @@ from control_plane.contracts.product_profile_record import (
     ProductPreviewProfile,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.support.cli import _allow_direct_db_mutation_argument
 
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
-
-
-def _allow_direct_db_mutation_argument() -> list[str]:
-    return ["--allow-direct-db-mutation"]
 
 
 def _assert_direct_db_mutation_rejected(test_case: unittest.TestCase, result: Result) -> None:

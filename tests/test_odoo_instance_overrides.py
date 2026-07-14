@@ -35,6 +35,7 @@ from control_plane.contracts.odoo_instance_override_record import (
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.support.cli import _allow_direct_db_mutation_argument
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -54,10 +55,6 @@ def _ship_request() -> ShipRequest:
         provider_target_type="compose",
         deploy_mode="dokploy-compose-api",
     )
-
-
-def _allow_direct_db_mutation_argument() -> list[str]:
-    return ["--allow-direct-db-mutation"]
 
 
 def _assert_direct_db_mutation_rejected(test_case: unittest.TestCase, result: Result) -> None:

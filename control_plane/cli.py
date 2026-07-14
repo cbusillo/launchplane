@@ -49,6 +49,7 @@ from control_plane.cli_dokploy_targets import (
     target_id_map,
 )
 from control_plane.cli_ci import register_ci_commands
+from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
 from control_plane.cli_every_code import register_every_code_commands
 from control_plane.cli_ingress import IngressCliCallbacks, register_ingress_commands
 from control_plane.cli_runner_lanes import register_runner_lane_commands
@@ -144,14 +145,12 @@ _RUNTIME_CONTRACT_ENV_KEYS = (
     "ODOO_ADDON_REPOSITORIES",
     "OPENUPGRADE_ADDON_REPOSITORY",
 )
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 _MASTER_ENCRYPTION_KEY_ENV_KEYS = ("LAUNCHPLANE_MASTER_ENCRYPTION_KEY",)
 _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
     "LAUNCHPLANE_POLICY_TOML",
     "LAUNCHPLANE_POLICY_B64",
     "LAUNCHPLANE_POLICY_FILE",
 )
-_SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 _SUCCESSFUL_DOKPLOY_STATUSES = {"success", "succeeded", "done", "completed", "healthy", "finished"}
 
 
