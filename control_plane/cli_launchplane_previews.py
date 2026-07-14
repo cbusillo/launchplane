@@ -8,6 +8,11 @@ from pathlib import Path
 import click
 from pydantic import ValidationError
 
+from control_plane.cli_shared import (
+    DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
+    direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
+    require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
+)
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
@@ -48,12 +53,6 @@ from control_plane.workflows.launchplane import (
 )
 
 
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
-_DIRECT_DB_MUTATION_MESSAGE = (
-    "Direct local DB mutation is restricted after the Launchplane service boundary. "
-    "Use the deployed service route or operator workflow for shared/production changes, "
-    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
-)
 LaunchplanePreviewRecordStore = FilesystemRecordStore | PostgresRecordStore
 
 
@@ -116,18 +115,8 @@ def _resolve_preview_mutation_database_url(
             f"{command_label} requires --database-url or LAUNCHPLANE_DATABASE_URL. "
             "Use --local-rehearsal for explicit local filesystem rehearsal."
         )
-    if not allow_direct_db_mutation:
-        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     return normalized_database_url
-
-
-def _direct_db_mutation_acknowledgement_option(function: Callable[..., object]) -> Callable[..., object]:
-    return click.option(
-        "--allow-direct-db-mutation",
-        is_flag=True,
-        default=False,
-        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-    )(function)
 
 
 def _control_plane_root() -> Path:

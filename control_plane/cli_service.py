@@ -11,6 +11,7 @@ import uuid
 import click
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
 from control_plane.outbox_worker import (
     DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS,
     DEFAULT_OUTBOX_WORKER_LEASE_SECONDS,
@@ -53,7 +54,6 @@ from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
 from control_plane.workflows.public_ingress_monitor import public_ingress_notification_drivers
 
 
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 _SERVICE_TARGET_TYPE_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_TYPE",)
 _SERVICE_TARGET_ID_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_ID",)
 

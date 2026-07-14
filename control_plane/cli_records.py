@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from control_plane import release_tuples as control_plane_release_tuples
+from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -18,7 +19,6 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 
 
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 _LOCAL_REHEARSAL_ONLY_MESSAGE = (
     "Core-record write commands are local-rehearsal only after the Launchplane "
     "service boundary. Use the deployed service route or operator workflow for "

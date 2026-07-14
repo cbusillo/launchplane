@@ -10,6 +10,11 @@ import click
 from pydantic import ValidationError
 
 from control_plane import product_context_audit as control_plane_product_context_audit
+from control_plane.cli_shared import (
+    DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
+    direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
+    require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
+)
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -42,14 +47,6 @@ from control_plane.service_auth import load_authz_policy
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.launchplane import LAUNCHPLANE_PREVIEW_ENABLE_LABEL
 from control_plane.workflows.ship import utc_now_timestamp
-
-
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
-_DIRECT_DB_MUTATION_MESSAGE = (
-    "Direct local DB mutation is restricted after the Launchplane service boundary. "
-    "Use the deployed service route or operator workflow for shared/production changes, "
-    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
-)
 
 
 @dataclass(frozen=True)
@@ -94,22 +91,6 @@ def _launchplane_action_slug(value: str) -> str:
 
 def _post_launchplane_service_json(**kwargs: object) -> dict[str, object]:
     return _policy_profile_callbacks().post_launchplane_service_json(**kwargs)
-
-
-def _direct_db_mutation_acknowledgement_option(
-    function: Callable[..., object],
-) -> Callable[..., object]:
-    return click.option(
-        "--allow-direct-db-mutation",
-        is_flag=True,
-        default=False,
-        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-    )(function)
-
-
-def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
-    if not allow_direct_db_mutation:
-        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
 
 
 def _build_authz_policy_record(

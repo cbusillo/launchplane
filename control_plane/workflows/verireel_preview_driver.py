@@ -24,6 +24,7 @@ from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety,
+    is_secret_shaped_runtime_key,
     latest_active_runtime_key_safety_policy,
 )
 from control_plane.workflows.preview_resource_destroy import (
@@ -36,7 +37,6 @@ DEFAULT_PREVIEW_TIMEOUT_SECONDS = 300
 PREVIEW_APP_PREFIX = "ver-preview"
 PREVIEW_DATABASE_PREFIX = "verireel_preview_"
 PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
-_SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 _PREVIEW_REFRESH_GENERATED_ENV_KEYS = frozenset(
     {
         "BETTER_AUTH_SECRET",
@@ -337,13 +337,6 @@ def _parse_database_url(database_url: str) -> _DatabaseParts:
     )
 
 
-def _runtime_environment_key_requires_secret_store(key_name: str) -> bool:
-    return any(
-        key_part in _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS
-        for key_part in key_name.strip().upper().split("_")
-    )
-
-
 def _verireel_template_runtime_secret_keys(
     template_env_map: dict[str, str],
 ) -> tuple[str, ...]:
@@ -354,7 +347,7 @@ def _verireel_template_runtime_secret_keys(
             continue
         if normalized_key in _PREVIEW_REFRESH_GENERATED_ENV_KEYS:
             continue
-        if _runtime_environment_key_requires_secret_store(normalized_key):
+        if is_secret_shaped_runtime_key(normalized_key):
             required_keys.append(normalized_key)
     return tuple(dict.fromkeys(required_keys))
 

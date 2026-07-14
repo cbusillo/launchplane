@@ -32,6 +32,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
+    is_secret_shaped_runtime_key,
     latest_active_runtime_key_safety_policy,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
@@ -45,7 +46,6 @@ from control_plane.workflows.preview_resource_destroy import (
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 
 
-_SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
 
 
@@ -878,13 +878,6 @@ def _render_preview_env_text(
     )
 
 
-def _runtime_environment_key_requires_secret_store(key_name: str) -> bool:
-    return any(
-        key_part in _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS
-        for key_part in key_name.strip().upper().split("_")
-    )
-
-
 def _copied_secret_shaped_runtime_keys(
     *, profile: LaunchplaneProductProfileRecord, template_application: JsonObject
 ) -> tuple[str, ...]:
@@ -894,7 +887,7 @@ def _copied_secret_shaped_runtime_keys(
     copied_keys: list[str] = []
     for key in profile.preview.copied_env_keys:
         value = template_env.get(key, "")
-        if value and _runtime_environment_key_requires_secret_store(key):
+        if value and is_secret_shaped_runtime_key(key.strip()):
             copied_keys.append(key)
     return tuple(dict.fromkeys(copied_keys))
 
@@ -1055,11 +1048,7 @@ def _runtime_identity_mismatch_fields(detail: str) -> tuple[str, ...]:
     prefix = "Runtime identity mismatched fields: "
     if not detail.startswith(prefix):
         return ()
-    return tuple(
-        field.strip()
-        for field in detail.removeprefix(prefix).split(",")
-        if field.strip()
-    )
+    return tuple(field.strip() for field in detail.removeprefix(prefix).split(",") if field.strip())
 
 
 def _preview_runtime_identity_mismatch_is_converging(detail: str) -> bool:

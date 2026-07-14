@@ -8,6 +8,11 @@ from typing import Literal
 
 import click
 
+from control_plane.cli_shared import (
+    DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
+    direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
+    require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
+)
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import PromotionRequest
 from control_plane.contracts.ship_request import ShipRequest
@@ -17,14 +22,6 @@ from control_plane.workflows.promote import (
     build_executed_promotion_record,
     build_promotion_record,
     generate_promotion_record_id,
-)
-
-
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
-_DIRECT_DB_MUTATION_MESSAGE = (
-    "Direct local DB mutation is restricted after the Launchplane service boundary. "
-    "Use the deployed service route or operator workflow for shared/production changes, "
-    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
 )
 
 
@@ -87,18 +84,8 @@ def _resolve_execution_database_url(
             "LAUNCHPLANE_DATABASE_URL. Use --local-rehearsal for explicit "
             "local filesystem rehearsal."
         )
-    if not allow_direct_db_mutation:
-        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     return normalized_database_url
-
-
-def _direct_db_mutation_acknowledgement_option(function: Callable[..., object]) -> Callable[..., object]:
-    return click.option(
-        "--allow-direct-db-mutation",
-        is_flag=True,
-        default=False,
-        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-    )(function)
 
 
 def _load_json_file(input_file: Path) -> dict[str, object]:

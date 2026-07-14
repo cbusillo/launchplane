@@ -9,6 +9,11 @@ import click
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane.cli_shared import (
+    DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
+    direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
+    require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
+)
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
@@ -18,16 +23,10 @@ from control_plane.contracts.runtime_environment_record import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.tracked_target_logs import build_tracked_target_logs_payload
+from control_plane.runtime_key_safety import is_secret_shaped_runtime_key
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
-_DIRECT_DB_MUTATION_MESSAGE = (
-    "Direct local DB mutation is restricted after the Launchplane service boundary. "
-    "Use the deployed service route or operator workflow for shared/production changes, "
-    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
-)
-_SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 _REDACTED_RUNTIME_ENVIRONMENT_VALUE = "<redacted>"
 
 
@@ -48,22 +47,6 @@ def register_runtime_environment_commands(
 @click.group()
 def environments() -> None:
     """Runtime environment contract commands."""
-
-
-def _direct_db_mutation_acknowledgement_option(
-    function: Callable[..., object],
-) -> Callable[..., object]:
-    return click.option(
-        "--allow-direct-db-mutation",
-        is_flag=True,
-        default=False,
-        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-    )(function)
-
-
-def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
-    if not allow_direct_db_mutation:
-        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
 
 
 @environments.command("put")
@@ -485,7 +468,7 @@ def _parse_runtime_environment_assignment(raw_assignment: str) -> tuple[str, str
     normalized_key = key_name.strip()
     if not separator or not normalized_key:
         raise click.ClickException("Runtime environment values must be provided as KEY=VALUE.")
-    if _runtime_environment_key_requires_secret_store(normalized_key):
+    if is_secret_shaped_runtime_key(normalized_key):
         raise click.ClickException(
             f"Runtime environment key {normalized_key!r} must be written through "
             "product-config apply for routine changes, or with "
@@ -495,18 +478,11 @@ def _parse_runtime_environment_assignment(raw_assignment: str) -> tuple[str, str
     return normalized_key, value
 
 
-def _runtime_environment_key_requires_secret_store(key_name: str) -> bool:
-    return any(
-        key_part in _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS
-        for key_part in key_name.strip().upper().split("_")
-    )
-
-
 def _redact_runtime_environment_values(environment_values: dict[str, str]) -> dict[str, str]:
     return {
         key: (
             _REDACTED_RUNTIME_ENVIRONMENT_VALUE
-            if _runtime_environment_key_requires_secret_store(key)
+            if is_secret_shaped_runtime_key(key.strip())
             else value
         )
         for key, value in environment_values.items()

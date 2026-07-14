@@ -6,6 +6,11 @@ from typing import Literal
 import click
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.cli_shared import (
+    DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
+    direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
+    require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
+)
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -20,12 +25,6 @@ from control_plane.workflows.provider_target_dual_write import (
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
-_DIRECT_DB_MUTATION_MESSAGE = (
-    "Direct local DB mutation is restricted after the Launchplane service boundary. "
-    "Use the deployed service route or operator workflow for shared/production changes, "
-    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
-)
 DokployTargetType = Literal["compose", "application"]
 
 
@@ -34,7 +33,9 @@ def register_dokploy_target_commands(
     *,
     control_plane_root: Callable[[], Path],
     normalize_dokploy_target_type: Callable[[str], DokployTargetType],
-    mutate_dokploy_payload_for_target_creation: Callable[..., dict[str, control_plane_dokploy.JsonValue]],
+    mutate_dokploy_payload_for_target_creation: Callable[
+        ..., dict[str, control_plane_dokploy.JsonValue]
+    ],
 ) -> None:
     global _DOKPLOY_TARGET_CALLBACKS
     _DOKPLOY_TARGET_CALLBACKS = _DokployTargetCallbacks(
@@ -48,21 +49,6 @@ def register_dokploy_target_commands(
 @click.group("dokploy-targets")
 def dokploy_targets() -> None:
     """Tracked Dokploy target record commands."""
-
-
-def _direct_db_mutation_acknowledgement_option(
-    function: Callable[..., object],
-) -> Callable[..., object]:
-    return click.option(
-        "--allow-direct-db-mutation",
-        is_flag=True,
-        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-    )(function)
-
-
-def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
-    if not allow_direct_db_mutation:
-        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
 
 
 @dokploy_targets.command("list")
@@ -846,7 +832,9 @@ class _DokployTargetCallbacks:
         *,
         control_plane_root: Callable[[], Path],
         normalize_dokploy_target_type: Callable[[str], DokployTargetType],
-        mutate_dokploy_payload_for_target_creation: Callable[..., dict[str, control_plane_dokploy.JsonValue]],
+        mutate_dokploy_payload_for_target_creation: Callable[
+            ..., dict[str, control_plane_dokploy.JsonValue]
+        ],
     ) -> None:
         self.control_plane_root = control_plane_root
         self.normalize_dokploy_target_type = normalize_dokploy_target_type
