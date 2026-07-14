@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import click
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -43,6 +42,9 @@ from control_plane.workflows.ship import (
     generate_deployment_record_id,
     utc_now_timestamp,
 )
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
 
 ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS = 5
 
@@ -60,9 +62,7 @@ class OdooStableBootstrapStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord: ...
 
-    def write_odoo_instance_override_record(
-        self, record: OdooInstanceOverrideRecord
-    ) -> object: ...
+    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
@@ -119,9 +119,7 @@ def _assert_bootstrap_policy_allows_request(
             f"{policy.expected_target_name!r}, observed {target_record.target_name!r}."
         )
     if check_domains:
-        target_domains = {
-            _normalize_domain(domain) for domain in domain_hosts if domain.strip()
-        }
+        target_domains = {_normalize_domain(domain) for domain in domain_hosts if domain.strip()}
         missing_domains = tuple(
             domain for domain in policy.expected_domains if domain not in target_domains
         )
@@ -324,7 +322,7 @@ def execute_odoo_stable_bootstrap(
     record_store: OdooStableBootstrapStore,
     request: OdooStableBootstrapRequest,
     env_file: Path | None = None,
-    dokploy_request: DokployRequest = control_plane_dokploy.dokploy_request,
+    dokploy_request: DokployRequest = dokploy_api.dokploy_request,
 ) -> OdooStableBootstrapResult:
     profile = record_store.read_product_profile_record(request.product)
     lane = _read_lane(profile=profile, instance=request.instance)
@@ -365,7 +363,7 @@ def execute_odoo_stable_bootstrap(
             "Odoo stable bootstrap requires inventory source git ref evidence."
         )
 
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     domain_hosts = _domains_for_target(
         host=host,
         token=token,
@@ -391,7 +389,10 @@ def execute_odoo_stable_bootstrap(
         canonical_url=base_url,
         updated_at=started_at,
     )
-    if normalized_override_record is not None and normalized_override_record is not odoo_override_record:
+    if (
+        normalized_override_record is not None
+        and normalized_override_record is not odoo_override_record
+    ):
         record_store.write_odoo_instance_override_record(normalized_override_record)
         odoo_override_record = normalized_override_record
 
@@ -429,7 +430,7 @@ def execute_odoo_stable_bootstrap(
     )
 
     try:
-        target_definition = control_plane_dokploy.DokployTargetDefinition(
+        target_definition = dokploy_source.DokployTargetDefinition(
             context=request.context,
             instance=request.instance,
             target_type="compose",
@@ -444,7 +445,7 @@ def execute_odoo_stable_bootstrap(
         if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
             post_deploy_environment = control_plane_odoo_instance_overrides.build_post_deploy_environment(
                 odoo_override_record,
-                protected_shopify_store_keys=control_plane_dokploy.protected_shopify_store_keys_for_target_definition(
+                protected_shopify_store_keys=dokploy_source.protected_shopify_store_keys_for_target_definition(
                     target_definition
                 ),
             )
@@ -452,7 +453,7 @@ def execute_odoo_stable_bootstrap(
             required_workflow_environment_keys = (
                 post_deploy_environment.required_container_environment_keys
             )
-        control_plane_dokploy.run_compose_odoo_stable_bootstrap(
+        dokploy_post_deploy.run_compose_odoo_stable_bootstrap(
             host=host,
             token=token,
             target_definition=target_definition,
@@ -584,7 +585,7 @@ def execute_odoo_stable_bootstrap(
     health_timeout_seconds = (
         request.health_timeout_seconds
         or target_record.healthcheck_timeout_seconds
-        or control_plane_dokploy.DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS
+        or dokploy_source.DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS
     )
     verification = verify_odoo_stable_readiness(
         base_url=base_url,

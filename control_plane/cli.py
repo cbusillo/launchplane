@@ -12,7 +12,6 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 import click
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import release_tuples as control_plane_release_tuples
@@ -130,6 +129,10 @@ from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows import promotion_ship_execution
 from control_plane.workflows import promotion_ship_resolution
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy import compose as dokploy_compose
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
 
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 ENVIRONMENT_STATUS_HISTORY_LIMIT = 3
@@ -309,16 +312,16 @@ def _mutate_dokploy_payload_for_target_creation(
     host: str,
     token: str,
     path: str,
-    payload: dict[str, control_plane_dokploy.JsonValue],
-) -> dict[str, control_plane_dokploy.JsonValue]:
-    response = control_plane_dokploy.dokploy_request(
+    payload: dict[str, dokploy_api.JsonValue],
+) -> dict[str, dokploy_api.JsonValue]:
+    response = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path=path,
         method="POST",
         payload=payload,
     )
-    response_object = control_plane_dokploy.as_json_object(response)
+    response_object = dokploy_api.as_json_object(response)
     if response_object is None:
         raise click.ClickException(f"Dokploy API POST {path} returned an invalid response.")
     return response_object
@@ -336,28 +339,28 @@ def _sync_launchplane_bootstrap_policy(
         control_plane_root=control_plane_root,
         policy_file=policy_file,
     )
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+    target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=target_type,
         target_id=target_id,
     )
     raw_env_text = str(target_payload.get("env") or "")
-    env_map = control_plane_dokploy.parse_dokploy_env_text(raw_env_text)
+    env_map = dokploy_api.parse_dokploy_env_text(raw_env_text)
     current_policy_b64 = env_map.get("LAUNCHPLANE_POLICY_B64", "")
     changed = current_policy_b64 != str(policy_payload["policy_b64"])
     if apply_changes and changed:
         env_map["LAUNCHPLANE_POLICY_B64"] = str(policy_payload["policy_b64"])
         env_map.pop("LAUNCHPLANE_POLICY_TOML", None)
         env_map.pop("LAUNCHPLANE_POLICY_FILE", None)
-        control_plane_dokploy.update_dokploy_target_env(
+        dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
             target_type=target_type,
             target_id=target_id,
             target_payload=target_payload,
-            env_text=control_plane_dokploy.serialize_dokploy_env_text(env_map),
+            env_text=dokploy_api.serialize_dokploy_env_text(env_map),
         )
     current_policy_sha256 = ""
     if current_policy_b64:
@@ -2002,10 +2005,10 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
         control_plane_root / control_plane_runtime_environments.DEFAULT_RUNTIME_ENVIRONMENTS_FILE
     )
     repo_dokploy_source_file = (
-        control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE
+        control_plane_root / dokploy_source.DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE
     )
     repo_target_ids_file = (
-        control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE
+        control_plane_root / dokploy_source.DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE
     )
 
     runtime_environment_record_count = _int_from_json_value(
@@ -2344,7 +2347,7 @@ def _build_launchplane_service_target_preflight(
     target_id: str,
     target_payload: Mapping[str, object],
 ) -> dict[str, object]:
-    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
     source_type = str(target_payload.get("sourceType") or "").strip()
     custom_git_url = str(target_payload.get("customGitUrl") or "").strip()
     custom_git_branch = str(target_payload.get("customGitBranch") or "").strip()
@@ -2403,8 +2406,8 @@ def _inspect_launchplane_service_dokploy_target(
     token: str,
     target_type: str,
     target_id: str,
-) -> tuple[control_plane_dokploy.JsonObject, dict[str, object]]:
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+) -> tuple[dokploy_api.JsonObject, dict[str, object]]:
+    target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=target_type,
@@ -2433,10 +2436,10 @@ def _resolve_dokploy_target(
     request: ShipRequest,
 ) -> tuple[ResolvedTargetEvidence, int]:
     control_plane_root = _control_plane_root()
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=request.context,
         instance_name=request.instance,
@@ -2455,7 +2458,7 @@ def _resolve_dokploy_target(
         target_id=target_definition.target_id,
         target_name=target_definition.target_name.strip() or request.target_name,
     )
-    deploy_timeout_seconds = control_plane_dokploy.resolve_ship_timeout_seconds(
+    deploy_timeout_seconds = dokploy_source.resolve_ship_timeout_seconds(
         timeout_override_seconds=request.timeout_seconds,
         target_definition=target_definition,
     )
@@ -2484,11 +2487,11 @@ def _load_runtime_environment_values(*, context_name: str, instance_name: str) -
 
 def _require_dokploy_target_definition(
     *,
-    source_of_truth: control_plane_dokploy.DokploySourceOfTruth,
+    source_of_truth: dokploy_source.DokploySourceOfTruth,
     context_name: str,
     instance_name: str,
     operation_name: str,
-) -> control_plane_dokploy.DokployTargetDefinition:
+) -> dokploy_source.DokployTargetDefinition:
     return promotion_ship_resolution.require_dokploy_target_definition(
         source_of_truth=source_of_truth,
         context_name=context_name,
@@ -2592,7 +2595,7 @@ def _execute_dokploy_deploy(
     deploy_timeout_seconds: int,
 ) -> None:
     control_plane_root = _control_plane_root()
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     promotion_ship_execution.execute_dokploy_deploy(
         host=host,
         token=token,
@@ -2614,11 +2617,11 @@ def _run_compose_post_deploy_update(
             "Compose post-deploy update requires LAUNCHPLANE_DATABASE_URL for "
             "DB-backed Odoo override authority."
         )
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=request.context,
         instance_name=request.instance,
@@ -2640,7 +2643,7 @@ def _run_compose_post_deploy_update(
     workflow_environment_overrides: dict[str, str] = {}
     required_workflow_environment_keys: tuple[str, ...] = ()
     protected_shopify_store_keys = (
-        control_plane_dokploy.protected_shopify_store_keys_for_target_definition(target_definition)
+        dokploy_source.protected_shopify_store_keys_for_target_definition(target_definition)
     )
     if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
         try:
@@ -2663,7 +2666,7 @@ def _run_compose_post_deploy_update(
             )
             raise
     try:
-        control_plane_dokploy.run_compose_post_deploy_update(
+        dokploy_post_deploy.run_compose_post_deploy_update(
             host=host,
             token=token,
             target_definition=target_definition,
@@ -2999,7 +3002,7 @@ def _build_live_target_runtime_contract_payload(
     instance_name: str,
 ) -> dict[str, object]:
     control_plane_root = _control_plane_root()
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
     target_definition = _require_dokploy_target_definition(
@@ -3008,14 +3011,14 @@ def _build_live_target_runtime_contract_payload(
         instance_name=instance_name,
         operation_name="Live target inspection",
     )
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+    target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=target_definition.target_type,
         target_id=target_definition.target_id,
     )
-    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
     findings = _artifact_target_runtime_contract_findings(
         target_payload=target_payload,
         env_map=env_map,
@@ -3052,14 +3055,14 @@ def _sync_artifact_image_reference_for_target(
     resolved_target: ResolvedTargetEvidence,
 ) -> dict[str, str]:
     control_plane_root = Path(__file__).resolve().parent.parent
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+    target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=resolved_target.target_type,
         target_id=resolved_target.target_id,
     )
-    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
     runtime_environment_values = (
         control_plane_runtime_environments.resolve_runtime_environment_values(
             control_plane_root=control_plane_root,
@@ -3110,21 +3113,21 @@ def _sync_artifact_image_reference_for_target(
     runtime_source_evidence: dict[str, str] = {}
     if desired_image_reference and resolved_target.target_type == "compose":
         target_domains: tuple[str, ...] = ()
-        source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
             control_plane_root=control_plane_root,
         )
-        target_definition = control_plane_dokploy.find_dokploy_target_definition(
+        target_definition = dokploy_source.find_dokploy_target_definition(
             source_of_truth,
             context_name=context_name,
             instance_name=instance_name,
         )
         if target_definition is not None:
             target_domains = target_definition.domains
-        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+        compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=desired_image_reference,
             domain_hosts=target_domains,
         )
-        runtime_source_evidence = control_plane_dokploy.sync_dokploy_compose_raw_source(
+        runtime_source_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,
             token=token,
             compose_id=resolved_target.target_id,
@@ -3147,23 +3150,21 @@ def _sync_artifact_image_reference_for_target(
         runtime_key_safety.get("policy_sha256", "")
     )
     if desired_env_map != env_map:
-        control_plane_dokploy.update_dokploy_target_env(
+        dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
             target_payload=target_payload,
-            env_text=control_plane_dokploy.serialize_dokploy_env_text(desired_env_map),
+            env_text=dokploy_api.serialize_dokploy_env_text(desired_env_map),
         )
-        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        target_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
             token=token,
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
         )
-    refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
-        str(target_payload.get("env") or "")
-    )
+    refreshed_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
     missing_or_mismatched_keys = sorted(
         env_key
         for env_key, env_value in desired_env_map.items()
@@ -3596,7 +3597,7 @@ register_odoo_commands(
         control_plane_root=_control_plane_root,
         store_factory=_odoo_store_factory,
         normalize_odoo_apply_status=_normalize_odoo_apply_status,
-        read_dokploy_config=control_plane_dokploy.read_dokploy_config,
+        read_dokploy_config=dokploy_source.read_dokploy_config,
     ),
 )
 register_service_commands(

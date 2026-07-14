@@ -885,7 +885,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.odoo_preview_runtime."
-                    "control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    "dokploy_source.read_control_plane_dokploy_source_of_truth",
                     return_value=DokploySourceOfTruth(
                         schema_version=1,
                         targets=(
@@ -901,12 +901,11 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.odoo_preview_runtime."
-                    "control_plane_dokploy.read_dokploy_config",
+                    "dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example", "token"),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_preview_runtime."
-                    "control_plane_dokploy.dokploy_request",
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                     return_value=[{"environments": [{"composes": []}]}],
                 ),
             ):
@@ -1002,17 +1001,16 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.odoo_preview_runtime."
-                    "control_plane_dokploy.read_dokploy_config",
+                    "dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example", "token"),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_preview_runtime."
-                    "control_plane_dokploy.dokploy_request",
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                     side_effect=_fake_dokploy_request,
                 ),
                 patch(
                     "control_plane.workflows.odoo_preview_runtime."
-                    "control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    "dokploy_source.read_control_plane_dokploy_source_of_truth",
                     return_value=DokploySourceOfTruth(
                         schema_version=1,
                         targets=(

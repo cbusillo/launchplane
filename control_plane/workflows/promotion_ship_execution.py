@@ -7,7 +7,6 @@ from typing import Protocol
 
 import click
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -20,6 +19,7 @@ from control_plane.workflows.runtime_identity_health import wait_for_healthcheck
 from control_plane.workflows.ship import build_deployment_record
 from control_plane.workflows.ship import generate_deployment_record_id
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy import api as dokploy_api
 
 
 class ShipExecutionRecordStore(Protocol):
@@ -104,7 +104,7 @@ def execute_dokploy_deploy(
             no_cache=request.no_cache,
         )
         return
-    control_plane_dokploy.trigger_deployment(
+    dokploy_api.trigger_deployment(
         host=host,
         token=token,
         target_type=resolved_target.target_type,

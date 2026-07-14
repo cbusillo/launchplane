@@ -143,17 +143,17 @@ class DokployConfigTests(unittest.TestCase):
         }
         with (
             patch(
-                "control_plane.dokploy.deployment_for_target_by_title",
+                "control_plane.dokploy.api.deployment_for_target_by_title",
                 side_effect=(None, exact_deployment),
             ) as exact_lookup,
             patch(
-                "control_plane.dokploy.latest_deployment_for_target",
+                "control_plane.dokploy.api.latest_deployment_for_target",
                 return_value={
                     "deploymentId": "deployment-unrelated",
                     "status": "success",
                 },
             ) as latest_lookup,
-            patch("control_plane.dokploy.time.sleep"),
+            patch("control_plane.dokploy.api.time.sleep"),
         ):
             result = control_plane_dokploy.wait_for_target_deployment(
                 host="https://dokploy.example",
@@ -285,7 +285,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "one\ntwo\nTHREE_TOKEN=secret"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_application_logs(
@@ -315,7 +315,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "one\ntwo\nTHREE_TOKEN=secret"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_compose_logs(
@@ -360,7 +360,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "one\ntwo\nTHREE_TOKEN=secret"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_deployment_logs(
@@ -407,7 +407,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "web log"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_compose_logs(
@@ -438,7 +438,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "web log"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_compose_logs(
@@ -468,7 +468,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "web log"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_compose_logs(
@@ -502,7 +502,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "web log"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_compose_logs(
@@ -534,7 +534,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "web log"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_compose_logs(
@@ -562,7 +562,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "web log"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_compose_logs(
@@ -591,7 +591,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "web log"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_compose_logs(
@@ -623,7 +623,7 @@ class DokployConfigTests(unittest.TestCase):
             return {"logs": "web log"}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_compose_logs(
@@ -663,15 +663,15 @@ target_name = "syo-testing-app"
 
             with (
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "secret-token"),
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
                     return_value=("started", "SMTP_PASSWORD=[redacted]"),
                 ),
             ):
@@ -754,15 +754,15 @@ target_name = "opw-testing"
 
             with (
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "secret-token"),
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"appName": "opw-testing-iul0ql", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_compose_logs",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_compose_logs",
                     return_value=("started", "ODOO_DB_PASSWORD=[redacted]"),
                 ) as logs_mock,
             ):
@@ -811,7 +811,7 @@ target_name = "opw-testing"
             return {"ok": True}
 
         with patch(
-            "control_plane.dokploy.dokploy_request",
+            "control_plane.dokploy.api.dokploy_request",
             side_effect=capture_request,
         ):
             control_plane_dokploy.update_dokploy_target_env(
@@ -1370,15 +1370,15 @@ target_type = "compose"
 
         with (
             patch(
-                "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.dokploy.source.read_control_plane_dokploy_source_of_truth",
                 return_value=source_of_truth,
             ),
             patch(
-                "control_plane.dokploy.read_dokploy_config",
+                "control_plane.dokploy.source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "opw-testing",
                     "appName": "compose-opw-testing",
@@ -1930,11 +1930,11 @@ domains = ["cm-testing.shinycomputers.com"]
 
                 with (
                     patch(
-                        "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.dokploy_request",
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.dokploy_request",
                         side_effect=fake_dokploy_request,
                     ),
                     patch(
-                        "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                         return_value={
                             "name": "cm-testing",
                             "sourceType": "raw",
@@ -2172,45 +2172,45 @@ domains = ["cm-testing.shinycomputers.com"]
 
             with (
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     side_effect=fetch_target_payload,
                 ),
                 patch(
-                    "control_plane.dokploy.update_dokploy_target_env",
+                    "control_plane.dokploy.api.update_dokploy_target_env",
                     side_effect=lambda **kwargs: updated_env_payloads.append(
                         str(kwargs["env_text"])
                     ),
                 ),
                 patch(
-                    "control_plane.dokploy.latest_deployment_for_target",
+                    "control_plane.dokploy.api.latest_deployment_for_target",
                     return_value={"deploymentId": "deployment-before"},
                 ),
                 patch(
-                    "control_plane.dokploy.wait_for_target_deployment",
+                    "control_plane.dokploy.api.wait_for_target_deployment",
                     side_effect=lambda **_kwargs: None,
                 ) as wait_target_deployment,
                 patch(
-                    "control_plane.dokploy.find_matching_dokploy_schedule",
+                    "control_plane.dokploy.api.find_matching_dokploy_schedule",
                     return_value=None,
                 ),
                 patch(
-                    "control_plane.dokploy.upsert_dokploy_schedule",
+                    "control_plane.dokploy.api.upsert_dokploy_schedule",
                     side_effect=capture_schedule_payload,
                 ),
                 patch(
-                    "control_plane.dokploy.latest_deployment_for_schedule",
+                    "control_plane.dokploy.api.latest_deployment_for_schedule",
                     return_value={"deploymentId": "schedule-before"},
                 ),
                 patch(
-                    "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                    "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
                     return_value="deployment=schedule-after status=done",
                 ),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                    "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
                     return_value=(),
                 ),
                 patch(
-                    "control_plane.dokploy.dokploy_request",
+                    "control_plane.dokploy.api.dokploy_request",
                     side_effect=capture_request_path,
                 ),
             ):
@@ -2280,24 +2280,24 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
                     "appName": "opw-prod-app",
                     "serverId": "server-123",
                 },
             ),
-            patch("control_plane.dokploy.update_dokploy_target_env"),
+            patch("control_plane.dokploy.api.update_dokploy_target_env"),
             patch(
-                "control_plane.dokploy.latest_deployment_for_target",
+                "control_plane.dokploy.api.latest_deployment_for_target",
                 return_value={"deploymentId": "deployment-before"},
             ),
             patch(
-                "control_plane.dokploy.wait_for_target_deployment",
+                "control_plane.dokploy.api.wait_for_target_deployment",
                 side_effect=lambda **_kwargs: None,
             ),
-            patch("control_plane.dokploy.trigger_deployment"),
-            patch("control_plane.dokploy.upsert_dokploy_schedule") as upsert_schedule,
+            patch("control_plane.dokploy.api.trigger_deployment"),
+            patch("control_plane.dokploy.api.upsert_dokploy_schedule") as upsert_schedule,
         ):
             with self.assertRaises(click.ClickException) as raised_error:
                 control_plane_dokploy.run_compose_post_deploy_update(
@@ -2352,40 +2352,40 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 side_effect=fetch_target_payload,
             ),
             patch(
-                "control_plane.dokploy.update_dokploy_target_env",
+                "control_plane.dokploy.api.update_dokploy_target_env",
                 side_effect=lambda **kwargs: updated_env_payloads.append(str(kwargs["env_text"])),
             ),
             patch(
-                "control_plane.dokploy.latest_deployment_for_target",
+                "control_plane.dokploy.api.latest_deployment_for_target",
                 return_value={"deploymentId": "deployment-before"},
             ),
             patch(
-                "control_plane.dokploy.wait_for_target_deployment",
+                "control_plane.dokploy.api.wait_for_target_deployment",
                 side_effect=lambda **_kwargs: None,
             ),
             patch(
-                "control_plane.dokploy.find_matching_dokploy_schedule",
+                "control_plane.dokploy.api.find_matching_dokploy_schedule",
                 return_value=None,
             ),
             patch(
-                "control_plane.dokploy.upsert_dokploy_schedule",
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
                 side_effect=capture_schedule_payload,
             ),
             patch(
-                "control_plane.dokploy.latest_deployment_for_schedule",
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
                 return_value={"deploymentId": "schedule-before"},
             ),
             patch(
-                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
-            patch("control_plane.dokploy.fetch_dokploy_deployment_logs", return_value=()),
+            patch("control_plane.dokploy.api.fetch_dokploy_deployment_logs", return_value=()),
             patch(
-                "control_plane.dokploy.dokploy_request",
+                "control_plane.dokploy.api.dokploy_request",
                 side_effect=lambda **_kwargs: {"ok": True},
             ),
         ):
@@ -2414,32 +2414,32 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
                     "appName": "opw-prod-app",
                     "serverId": "server-123",
                 },
             ),
-            patch("control_plane.dokploy.update_dokploy_target_env"),
-            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch("control_plane.dokploy.api.update_dokploy_target_env"),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch(
-                "control_plane.dokploy.upsert_dokploy_schedule",
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
                 side_effect=capture_schedule_payload,
             ),
             patch(
-                "control_plane.dokploy.latest_deployment_for_schedule",
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
                     {"deploymentId": "schedule-before"},
                     {"id": "schedule-after", "status": "done"},
                 ),
             ),
             patch(
-                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
-                "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
                 return_value=(
                     "website_bootstrap_domain_matches_canonical=true",
                     "website_bootstrap_website_id=7",
@@ -2447,7 +2447,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 ),
             ) as fetch_logs_mock,
             patch(
-                "control_plane.dokploy.dokploy_request",
+                "control_plane.dokploy.api.dokploy_request",
                 side_effect=lambda **_kwargs: {"ok": True},
             ),
         ):
@@ -2485,21 +2485,21 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
                     "appName": "opw-prod-app",
                     "serverId": "server-123",
                 },
             ),
-            patch("control_plane.dokploy.update_dokploy_target_env"),
-            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch("control_plane.dokploy.api.update_dokploy_target_env"),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch(
-                "control_plane.dokploy.upsert_dokploy_schedule",
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
                 return_value={"scheduleId": "schedule-123"},
             ),
             patch(
-                "control_plane.dokploy.latest_deployment_for_schedule",
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
                     {"deploymentId": "schedule-before"},
                     {
@@ -2513,12 +2513,12 @@ domains = ["cm-testing.shinycomputers.com"]
                 ),
             ),
             patch(
-                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
-            patch("control_plane.dokploy.fetch_dokploy_deployment_logs") as fetch_logs_mock,
+            patch("control_plane.dokploy.api.fetch_dokploy_deployment_logs") as fetch_logs_mock,
             patch(
-                "control_plane.dokploy.dokploy_request",
+                "control_plane.dokploy.api.dokploy_request",
                 side_effect=lambda **_kwargs: {"ok": True},
             ),
         ):
@@ -2551,21 +2551,21 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
                     "appName": "opw-prod-app",
                     "serverId": "server-123",
                 },
             ),
-            patch("control_plane.dokploy.update_dokploy_target_env"),
-            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch("control_plane.dokploy.api.update_dokploy_target_env"),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch(
-                "control_plane.dokploy.upsert_dokploy_schedule",
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
                 return_value={"scheduleId": "schedule-123"},
             ),
             patch(
-                "control_plane.dokploy.latest_deployment_for_schedule",
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
                     {"deploymentId": "schedule-before"},
                     {
@@ -2576,18 +2576,18 @@ domains = ["cm-testing.shinycomputers.com"]
                 ),
             ),
             patch(
-                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after-waited status=done",
             ),
             patch(
-                "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
                 return_value=(
                     "website_bootstrap_domain_matches_canonical=true",
                     "website_bootstrap_website_id=7",
                 ),
             ) as fetch_logs_mock,
             patch(
-                "control_plane.dokploy.dokploy_request",
+                "control_plane.dokploy.api.dokploy_request",
                 side_effect=lambda **_kwargs: {"ok": True},
             ),
         ):
@@ -2625,36 +2625,36 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
                     "appName": "opw-prod-app",
                     "serverId": "server-123",
                 },
             ),
-            patch("control_plane.dokploy.update_dokploy_target_env"),
-            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch("control_plane.dokploy.api.update_dokploy_target_env"),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch(
-                "control_plane.dokploy.upsert_dokploy_schedule",
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
                 return_value={"scheduleId": "schedule-123"},
             ),
             patch(
-                "control_plane.dokploy.latest_deployment_for_schedule",
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
                     {"deploymentId": "schedule-before"},
                     {"deploymentId": "schedule-after", "status": "done"},
                 ),
             ),
             patch(
-                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
-                "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
                 side_effect=click.ClickException("not found"),
             ),
             patch(
-                "control_plane.dokploy.dokploy_request",
+                "control_plane.dokploy.api.dokploy_request",
                 side_effect=lambda **_kwargs: {"ok": True},
             ),
         ):
@@ -2684,36 +2684,36 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
                     "appName": "opw-prod-app",
                     "serverId": "server-123",
                 },
             ),
-            patch("control_plane.dokploy.update_dokploy_target_env"),
-            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch("control_plane.dokploy.api.update_dokploy_target_env"),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch(
-                "control_plane.dokploy.upsert_dokploy_schedule",
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
                 return_value={"scheduleId": "schedule-123"},
             ),
             patch(
-                "control_plane.dokploy.latest_deployment_for_schedule",
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
                     {"status": "done"},
                     {"status": "done"},
                 ),
             ),
             patch(
-                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
                 return_value="deployment=schedule-row-after status=done",
             ),
             patch(
-                "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
                 side_effect=click.ClickException("not found"),
             ) as fetch_logs_mock,
             patch(
-                "control_plane.dokploy.dokploy_request",
+                "control_plane.dokploy.api.dokploy_request",
                 side_effect=lambda **_kwargs: {"ok": True},
             ),
         ):
@@ -2755,7 +2755,7 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "env": (
                         "ODOO_DB_NAME=opw_testing\n"
@@ -2771,28 +2771,28 @@ domains = ["cm-testing.shinycomputers.com"]
                 },
             ),
             patch(
-                "control_plane.dokploy.update_dokploy_target_env",
+                "control_plane.dokploy.api.update_dokploy_target_env",
                 side_effect=lambda **kwargs: updated_env_payloads.append(str(kwargs["env_text"])),
             ),
-            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch(
-                "control_plane.dokploy.upsert_dokploy_schedule",
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
                 side_effect=capture_schedule_payload,
             ),
             patch(
-                "control_plane.dokploy.latest_deployment_for_schedule",
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
                 return_value={"deploymentId": "schedule-before"},
             ),
             patch(
-                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
-                "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
                 return_value=(),
             ),
             patch(
-                "control_plane.dokploy.dokploy_request",
+                "control_plane.dokploy.api.dokploy_request",
                 side_effect=lambda **_kwargs: {"ok": True},
             ),
         ):
@@ -2826,7 +2826,7 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "env": "ODOO_DB_NAME=opw_testing\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
                     "appName": "opw-testing-app",
@@ -2851,7 +2851,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
+            "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={
                 "env": "ODOO_FILESTORE_PATH=/volumes/data/filestore\n",
                 "appName": "opw-prod-app",
@@ -2887,23 +2887,23 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"appName": "cm-prod-app", "serverId": "server-123"},
             ),
             patch(
-                "control_plane.dokploy.upsert_dokploy_schedule",
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
                 side_effect=capture_schedule_payload,
             ),
             patch(
-                "control_plane.dokploy.latest_deployment_for_schedule",
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
                 return_value={"deploymentId": "schedule-before"},
             ),
             patch(
-                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
                 side_effect=lambda **_kwargs: None,
             ),
             patch(
-                "control_plane.dokploy.dokploy_request",
+                "control_plane.dokploy.api.dokploy_request",
                 side_effect=capture_request_path,
             ),
         ):
@@ -2956,7 +2956,7 @@ domains = ["cm-testing.shinycomputers.com"]
 
         with (
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "cm-testing",
                     "env": "ODOO_DB_NAME=cm_testing\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
@@ -2965,23 +2965,23 @@ domains = ["cm-testing.shinycomputers.com"]
                 },
             ),
             patch(
-                "control_plane.dokploy.find_matching_dokploy_schedule",
+                "control_plane.dokploy.api.find_matching_dokploy_schedule",
                 return_value=None,
             ),
             patch(
-                "control_plane.dokploy.upsert_dokploy_schedule",
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
                 side_effect=capture_schedule_payload,
             ),
             patch(
-                "control_plane.dokploy.latest_deployment_for_schedule",
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
                 return_value={"deploymentId": "schedule-before"},
             ),
             patch(
-                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
                 side_effect=lambda **_kwargs: None,
             ),
             patch(
-                "control_plane.dokploy.dokploy_request",
+                "control_plane.dokploy.api.dokploy_request",
                 side_effect=capture_request_path,
             ),
         ):
@@ -3012,7 +3012,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
+            "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={
                 "name": "cm-prod",
                 "env": "ODOO_DB_NAME=cm_testing\n",
@@ -3047,7 +3047,7 @@ domains = ["cm-testing.shinycomputers.com"]
             )
 
             with patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "env": "ODOO_DB_NAME=old_db\n",
                     "appName": "opw-prod-app",
@@ -3254,9 +3254,9 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
             return {"status": "ok"}
 
         with (
-            patch("control_plane.dokploy.dokploy_request", side_effect=fake_dokploy_request),
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=fake_dokploy_request),
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "cm-testing",
                     "environmentId": "env-123",
@@ -3309,7 +3309,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                 ]
             return {"domainId": "domain-cm-testing"}
 
-        with patch("control_plane.dokploy.dokploy_request", side_effect=fake_dokploy_request):
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=fake_dokploy_request):
             domain_id = control_plane_dokploy.ensure_compose_web_domain_route(
                 host="https://dokploy.example.com",
                 token="token-123",
@@ -3343,7 +3343,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                 return []
             return {"domainId": "domain-created"}
 
-        with patch("control_plane.dokploy.dokploy_request", side_effect=fake_dokploy_request):
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=fake_dokploy_request):
             domain_id = control_plane_dokploy.ensure_compose_web_domain_route(
                 host="https://dokploy.example.com",
                 token="token-123",
@@ -3374,7 +3374,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                 return []
             return {"domainId": "domain-created"}
 
-        with patch("control_plane.dokploy.dokploy_request", side_effect=fake_dokploy_request):
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=fake_dokploy_request):
             control_plane_dokploy.ensure_compose_web_domain_route(
                 host="https://dokploy.example.com",
                 token="token-123",
@@ -3455,11 +3455,11 @@ actions = ["launchplane_service_deploy.execute"]
 
             with (
                 patch(
-                    "control_plane.dokploy.read_dokploy_config",
+                    "control_plane.dokploy.source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     return_value=self._target_payload(
                         env_text=(
                             "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:old\n"
@@ -3470,7 +3470,7 @@ actions = ["launchplane_service_deploy.execute"]
                     ),
                 ),
                 patch(
-                    "control_plane.dokploy.update_dokploy_target_env",
+                    "control_plane.dokploy.api.update_dokploy_target_env",
                     side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
                 ),
             ):
@@ -3594,11 +3594,11 @@ actions = ["launchplane_service_deploy.execute"]
 
         with (
             patch(
-                "control_plane.dokploy.read_dokploy_config",
+                "control_plane.dokploy.source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value=self._target_payload(
                     env_text="DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:old\n",
                     custom_git_ssh_key_id="",

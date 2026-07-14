@@ -4,7 +4,7 @@ import json
 import os
 from typing import Any
 
-from control_plane import dokploy as control_plane_dokploy
+from control_plane.dokploy import api as control_plane_dokploy
 
 
 def _env(name: str) -> str:

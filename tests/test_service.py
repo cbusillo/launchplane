@@ -5475,7 +5475,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 database_url=database_url,
             )
             with patch(
-                "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.invalid", "token"),
             ):
                 status_code, payload = _invoke_dokploy_target_setup_app(
@@ -5662,7 +5662,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
@@ -5674,7 +5674,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     side_effect=_fetch_target,
                 ),
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.ensure_compose_web_domain_route",
+                    "control_plane.dokploy_target_setup_http.dokploy_compose.ensure_compose_web_domain_route",
                     side_effect=_ensure_domain,
                 ),
             ):
@@ -5788,7 +5788,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
@@ -5908,11 +5908,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.ensure_compose_web_domain_route",
+                    "control_plane.dokploy_target_setup_http.dokploy_compose.ensure_compose_web_domain_route",
                     side_effect=_ensure_domain,
                 ),
             ):
@@ -6030,11 +6030,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.ensure_compose_web_domain_route"
+                    "control_plane.dokploy_target_setup_http.dokploy_compose.ensure_compose_web_domain_route"
                 ) as ensure_domain,
             ):
                 status_code, payload = _invoke_dokploy_target_setup_app(
@@ -6115,7 +6115,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
@@ -6232,7 +6232,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
@@ -6355,7 +6355,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
@@ -6450,7 +6450,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.invalid", "token"),
             ):
                 status_code, payload = _invoke_dokploy_target_setup_app(
@@ -6520,7 +6520,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.invalid", "token"),
             ):
                 status_code, payload = _invoke_dokploy_target_setup_app(
@@ -6586,7 +6586,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
@@ -6689,7 +6689,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
@@ -13452,14 +13452,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     clear=True,
                 ),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     return_value={
                         "applicationId": "application-syo-prod",
                         "name": "syo-prod-app",
                         "env": "CONTACT_EMAIL_MODE=resend\n",
                     },
                 ),
-                patch("control_plane.dokploy.update_dokploy_target_env") as update_env,
+                patch("control_plane.dokploy.api.update_dokploy_target_env") as update_env,
             ):
                 status_code, payload = _invoke_app(
                     app,
@@ -13560,14 +13560,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     return_value={
                         "applicationId": "application-syo-prod",
                         "name": "syo-prod-app",
                         "env": "CONTACT_EMAIL_MODE=resend\n",
                     },
                 ),
-                patch("control_plane.dokploy.update_dokploy_target_env") as update_env,
+                patch("control_plane.dokploy.api.update_dokploy_target_env") as update_env,
             ):
                 status_code, payload = _invoke_app(
                     app,
@@ -13683,11 +13683,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     clear=True,
                 ),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     side_effect=fetch_target_payload,
                 ),
                 patch(
-                    "control_plane.dokploy.update_dokploy_target_env",
+                    "control_plane.dokploy.api.update_dokploy_target_env",
                     side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
                 ),
             ):
@@ -13798,21 +13798,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     clear=True,
                 ),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     return_value={
                         "applicationId": "application-syo-prod",
                         "name": "syo-prod-app",
                         "env": "GOOGLE_ANALYTICS_MEASUREMENT_ID=G-9KRMER45KG\n",
                     },
                 ),
-                patch("control_plane.dokploy.update_dokploy_target_env") as update_env,
+                patch("control_plane.dokploy.api.update_dokploy_target_env") as update_env,
                 patch(
-                    "control_plane.dokploy.latest_deployment_for_target",
+                    "control_plane.dokploy.api.latest_deployment_for_target",
                     return_value={"deploymentId": "before"},
                 ),
-                patch("control_plane.dokploy.trigger_deployment") as trigger_deployment,
+                patch("control_plane.dokploy.api.trigger_deployment") as trigger_deployment,
                 patch(
-                    "control_plane.dokploy.wait_for_target_deployment",
+                    "control_plane.dokploy.api.wait_for_target_deployment",
                     return_value="deployment=after status=done",
                 ) as wait_for_target_deployment,
             ):
@@ -13860,7 +13860,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     clear=True,
                 ),
                 patch(
-                    "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.dokploy.source.read_control_plane_dokploy_source_of_truth",
                     return_value=DokploySourceOfTruth(
                         schema_version=1,
                         targets=(
@@ -13879,18 +13879,18 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     return_value={"GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG"},
                 ),
                 patch(
-                    "control_plane.dokploy.read_dokploy_config",
+                    "control_plane.dokploy.source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "dokploy-token"),
                 ),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     return_value={
                         "applicationId": "application-syo-prod",
                         "name": "syo-prod-app",
                         "env": "CONTACT_EMAIL_MODE=resend\n",
                     },
                 ),
-                patch("control_plane.dokploy.update_dokploy_target_env") as update_env,
+                patch("control_plane.dokploy.api.update_dokploy_target_env") as update_env,
             ):
                 with self.assertRaisesRegex(
                     control_plane_live_target_runtime.LiveTargetRuntimeError,

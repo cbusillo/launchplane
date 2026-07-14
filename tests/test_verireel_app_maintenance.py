@@ -171,7 +171,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             with (
                 patch(
-                    "control_plane.workflows.verireel_app_maintenance.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.verireel_app_maintenance.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.test", "managed-token"),
                 ),
                 patch(
@@ -335,7 +335,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
             raise AssertionError(f"unexpected path {path!r}")
 
         with patch(
-            "control_plane.workflows.verireel_app_maintenance.control_plane_dokploy.dokploy_request",
+            "control_plane.workflows.verireel_app_maintenance.dokploy_api.dokploy_request",
             side_effect=fake_dokploy_request,
         ):
             result = _resolve_preview_smoke_maintenance_target(
@@ -360,7 +360,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             with (
                 patch(
-                    "control_plane.workflows.verireel_app_maintenance.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.verireel_app_maintenance.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.test", "managed-token"),
                 ),
                 patch(
@@ -399,7 +399,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             with (
                 patch(
-                    "control_plane.workflows.verireel_app_maintenance.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.verireel_app_maintenance.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.test", "managed-token"),
                 ),
                 patch(
@@ -432,7 +432,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             with (
                 patch(
-                    "control_plane.workflows.verireel_app_maintenance.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.verireel_app_maintenance.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.test", "managed-token"),
                 ),
                 patch(

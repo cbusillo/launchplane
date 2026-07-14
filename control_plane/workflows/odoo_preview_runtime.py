@@ -12,9 +12,7 @@ from urllib.request import Request, urlopen
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane.dokploy import JsonObject, JsonValue
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewProviderCapabilities,
@@ -41,6 +39,10 @@ from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
 from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy import compose as dokploy_compose
+from control_plane.dokploy.api import JsonObject, JsonValue
 
 
 OdooPreviewDokployDryRunStatus = OdooPreviewRuntimePlanStatus
@@ -646,16 +648,16 @@ def _preview_environment_id(
 
 def _preview_template_target_definition(
     *, control_plane_root: Path, context_name: str, instance_name: str
-) -> control_plane_dokploy.DokployTargetDefinition | None:
+) -> dokploy_source.DokployTargetDefinition | None:
     try:
-        source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
             control_plane_root=control_plane_root,
             allow_incomplete_target_ids=True,
             allowed_incomplete_target_routes=((context_name, instance_name),),
         )
     except click.ClickException:
         return None
-    return control_plane_dokploy.find_dokploy_target_definition(
+    return dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=context_name,
         instance_name=instance_name,
@@ -672,11 +674,11 @@ def _discover_odoo_preview_target(
     database_url: str | None,
 ) -> OdooPreviewRuntimeTargetEvidence | None:
     domain_host = _domain_host(preview_url)
-    host, token = control_plane_dokploy.read_dokploy_config(
+    host, token = dokploy_source.read_dokploy_config(
         control_plane_root=control_plane_root,
         database_url=database_url,
     )
-    raw_projects = control_plane_dokploy.dokploy_request(
+    raw_projects = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/project.all",
@@ -694,7 +696,7 @@ def _discover_odoo_preview_target(
             token=token,
         )
     if not matches:
-        raw_search_matches = control_plane_dokploy.dokploy_request(
+        raw_search_matches = dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/compose.search",
@@ -798,21 +800,21 @@ def _iter_dokploy_composes(raw_projects: object) -> tuple[JsonObject, ...]:
         )
     composes: list[JsonObject] = []
     for raw_project in raw_projects:
-        project = control_plane_dokploy.as_json_object(raw_project)
+        project = dokploy_api.as_json_object(raw_project)
         if project is None:
             continue
         raw_environments = project.get("environments")
         if not isinstance(raw_environments, list):
             continue
         for raw_environment in raw_environments:
-            environment = control_plane_dokploy.as_json_object(raw_environment)
+            environment = dokploy_api.as_json_object(raw_environment)
             if environment is None:
                 continue
             raw_composes = environment.get("composes")
             if not isinstance(raw_composes, list):
                 continue
             for raw_compose in raw_composes:
-                compose = control_plane_dokploy.as_json_object(raw_compose)
+                compose = dokploy_api.as_json_object(raw_compose)
                 if compose is not None:
                     composes.append(compose)
     return tuple(composes)
@@ -838,7 +840,7 @@ def _iter_dokploy_search_composes(raw_search_matches: object) -> tuple[JsonObjec
 
     composes: list[JsonObject] = []
     for raw_compose in search_items:
-        compose = control_plane_dokploy.as_json_object(raw_compose)
+        compose = dokploy_api.as_json_object(raw_compose)
         if compose is not None:
             composes.append(compose)
     return tuple(composes)
@@ -1205,7 +1207,7 @@ def execute_odoo_preview_dokploy_apply(
             + ", ".join(missing_env_keys),
         )
 
-    host, token = control_plane_dokploy.read_dokploy_config(
+    host, token = dokploy_source.read_dokploy_config(
         control_plane_root=control_plane_root,
         database_url=database_url,
     )
@@ -1237,7 +1239,7 @@ def observe_odoo_preview_dokploy_apply(
 ) -> OdooPreviewDokployObservation:
     plan = request.dry_run_plan
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
+        host, token = dokploy_source.read_dokploy_config(
             control_plane_root=control_plane_root,
             database_url=database_url,
         )
@@ -1271,14 +1273,14 @@ def observe_odoo_preview_dokploy_apply(
                 outcome=("absent" if provider_effect_phase in retry_safe_phases else "unknown"),
                 retry_safe=provider_effect_phase in retry_safe_phases,
             )
-        deployment = control_plane_dokploy.deployment_for_target_by_title(
+        deployment = dokploy_api.deployment_for_target_by_title(
             host=host,
             token=token,
             target_type="compose",
             target_id=target.target_id,
             title=provider_operation_title,
         )
-        status = control_plane_dokploy.deployment_status(deployment)
+        status = dokploy_api.deployment_status(deployment)
         if deployment is None:
             retry_safe_phases = {"", "compose_create", "compose_update", "domain_ensure"}
             return OdooPreviewDokployObservation(
@@ -1390,7 +1392,7 @@ def _execute_refresh(
         if creating_compose and not plan.template_compose_id:
             raise click.ClickException("Odoo preview compose create requires template_compose_id.")
         source_compose_id = plan.template_compose_id if creating_compose else plan.compose_ref
-        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        target_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
             token=token,
             target_type="compose",
@@ -1407,13 +1409,13 @@ def _execute_refresh(
         resolved_compose_id = compose_id
         created_compose_id = compose_id if created_compose else ""
         if creating_compose:
-            target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            target_payload = dokploy_api.fetch_dokploy_target_payload(
                 host=host,
                 token=token,
                 target_type="compose",
                 target_id=compose_id,
             )
-        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+        compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=request.image_reference,
             domain_hosts=(plan.domain_host,),
             runtime_port=plan.runtime_port,
@@ -1421,7 +1423,7 @@ def _execute_refresh(
             domain_certificate_type=plan.domain_certificate_type,
         )
         checkpoint_provider_effect("compose_update")
-        control_plane_dokploy.sync_dokploy_compose_raw_source(
+        dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,
             token=token,
             compose_id=compose_id,
@@ -1431,9 +1433,9 @@ def _execute_refresh(
         )
         steps.append(_step("compose_update_raw_source", compose_id))
 
-        env_text = control_plane_dokploy.serialize_dokploy_env_text(request.environment_values)
+        env_text = dokploy_api.serialize_dokploy_env_text(request.environment_values)
         checkpoint_provider_effect("compose_update")
-        control_plane_dokploy.update_dokploy_target_env(
+        dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
             target_type="compose",
@@ -1444,7 +1446,7 @@ def _execute_refresh(
         steps.append(_step("compose_update_env", compose_id))
 
         checkpoint_provider_effect("domain_ensure")
-        domain_id = control_plane_dokploy.ensure_compose_web_domain_route(
+        domain_id = dokploy_compose.ensure_compose_web_domain_route(
             host=host,
             token=token,
             compose_id=compose_id,
@@ -1454,7 +1456,7 @@ def _execute_refresh(
         )
         steps.append(_step("domain_create_or_update", plan.domain_host))
 
-        latest_before = control_plane_dokploy.latest_deployment_for_target(
+        latest_before = dokploy_api.latest_deployment_for_target(
             host=host,
             token=token,
             target_type="compose",
@@ -1463,7 +1465,7 @@ def _execute_refresh(
         checkpoint_provider_effect("deploy_trigger")
         deploy_triggered = True
         if provider_operation_title:
-            control_plane_dokploy.trigger_deployment(
+            dokploy_api.trigger_deployment(
                 host=host,
                 token=token,
                 target_type="compose",
@@ -1472,7 +1474,7 @@ def _execute_refresh(
                 title=provider_operation_title,
             )
         else:
-            control_plane_dokploy.trigger_deployment(
+            dokploy_api.trigger_deployment(
                 host=host,
                 token=token,
                 target_type="compose",
@@ -1482,22 +1484,22 @@ def _execute_refresh(
         steps.append(_step("compose_deploy", compose_id))
         if request.wait_for_deploy:
             if provider_operation_title:
-                control_plane_dokploy.wait_for_target_deployment(
+                dokploy_api.wait_for_target_deployment(
                     host=host,
                     token=token,
                     target_type="compose",
                     target_id=compose_id,
-                    before_key=control_plane_dokploy.deployment_key(latest_before),
+                    before_key=dokploy_api.deployment_key(latest_before),
                     timeout_seconds=request.timeout_seconds,
                     deployment_title=provider_operation_title,
                 )
             else:
-                control_plane_dokploy.wait_for_target_deployment(
+                dokploy_api.wait_for_target_deployment(
                     host=host,
                     token=token,
                     target_type="compose",
                     target_id=compose_id,
-                    before_key=control_plane_dokploy.deployment_key(latest_before),
+                    before_key=dokploy_api.deployment_key(latest_before),
                     timeout_seconds=request.timeout_seconds,
                 )
         if request.smoke_check:
@@ -1622,7 +1624,7 @@ def _resolve_or_create_compose(
             "Odoo preview compose create requires the template compose serverId."
         )
     provider_effect_checkpoint("compose_create")
-    created = control_plane_dokploy.dokploy_request(
+    created = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/compose.create",
@@ -1636,7 +1638,7 @@ def _resolve_or_create_compose(
             "composeType": "docker-compose",
         },
     )
-    created_compose = control_plane_dokploy.as_json_object(created)
+    created_compose = dokploy_api.as_json_object(created)
     compose_id = str((created_compose or {}).get("composeId") or "").strip()
     if not compose_id:
         raise click.ClickException(
@@ -1653,7 +1655,7 @@ def _find_compose_id_by_environment_and_name(
     environment_id: str,
     compose_name: str,
 ) -> str:
-    raw_projects = control_plane_dokploy.dokploy_request(
+    raw_projects = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/project.all",
@@ -1664,14 +1666,14 @@ def _find_compose_id_by_environment_and_name(
         )
     matches: list[str] = []
     for raw_project in raw_projects:
-        project = control_plane_dokploy.as_json_object(raw_project)
+        project = dokploy_api.as_json_object(raw_project)
         if project is None:
             continue
         raw_environments = project.get("environments")
         if not isinstance(raw_environments, list):
             continue
         for raw_environment in raw_environments:
-            environment = control_plane_dokploy.as_json_object(raw_environment)
+            environment = dokploy_api.as_json_object(raw_environment)
             if environment is None:
                 continue
             observed_environment_id = str(
@@ -1683,14 +1685,14 @@ def _find_compose_id_by_environment_and_name(
             if not isinstance(raw_composes, list):
                 continue
             for raw_compose in raw_composes:
-                compose = control_plane_dokploy.as_json_object(raw_compose)
+                compose = dokploy_api.as_json_object(raw_compose)
                 if compose is None or str(compose.get("name") or "").strip() != compose_name:
                     continue
                 compose_id = str(compose.get("composeId") or compose.get("id") or "").strip()
                 if compose_id and compose_id not in matches:
                     matches.append(compose_id)
     if not matches:
-        raw_search_matches = control_plane_dokploy.dokploy_request(
+        raw_search_matches = dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/compose.search",
@@ -1704,7 +1706,7 @@ def _find_compose_id_by_environment_and_name(
                 continue
             observed_environment_id = _compose_environment_id(compose)
             if not observed_environment_id:
-                compose_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+                compose_payload = dokploy_api.fetch_dokploy_target_payload(
                     host=host,
                     token=token,
                     target_type="compose",
@@ -1721,7 +1723,7 @@ def _find_compose_id_by_environment_and_name(
 
 
 def _compose_environment_id(compose: JsonObject) -> str:
-    environment = control_plane_dokploy.as_json_object(compose.get("environment"))
+    environment = dokploy_api.as_json_object(compose.get("environment"))
     return str(
         compose.get("environmentId")
         or (environment or {}).get("environmentId")
@@ -1732,7 +1734,7 @@ def _compose_environment_id(compose: JsonObject) -> str:
 
 def _compose_exists_by_id(*, host: str, token: str, compose_id: str) -> bool:
     try:
-        payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
             token=token,
             target_type="compose",
@@ -1749,7 +1751,7 @@ def _compose_exists_by_id(*, host: str, token: str, compose_id: str) -> bool:
 
 
 def _compose_domains(*, host: str, token: str, compose_id: str) -> tuple[JsonObject, ...]:
-    raw_domains = control_plane_dokploy.dokploy_request(
+    raw_domains = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.byComposeId",
@@ -1759,14 +1761,14 @@ def _compose_domains(*, host: str, token: str, compose_id: str) -> tuple[JsonObj
         return ()
     domains: list[JsonObject] = []
     for raw_domain in raw_domains:
-        domain = control_plane_dokploy.as_json_object(raw_domain)
+        domain = dokploy_api.as_json_object(raw_domain)
         if domain is not None:
             domains.append(domain)
     return tuple(domains)
 
 
 def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.delete",
@@ -1776,7 +1778,7 @@ def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
 
 
 def _delete_compose(*, host: str, token: str, compose_id: str, delete_volumes: bool) -> None:
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/compose.delete",

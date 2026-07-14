@@ -5,10 +5,10 @@ from urllib.parse import urlsplit
 
 import click
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.dokploy import api as dokploy_api
 
 
 def update_dokploy_target_artifact(
@@ -22,7 +22,7 @@ def update_dokploy_target_artifact(
     before_provider_mutation: Callable[[str], None] | None = None,
     effect_started: Callable[[], None] | None = None,
 ) -> None:
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+    target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=target_type,
@@ -36,7 +36,7 @@ def update_dokploy_target_artifact(
             target_payload=target_payload,
         )
         if runtime_identity is not None:
-            env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+            env_text = dokploy_api.render_dokploy_env_text_with_overrides(
                 str(target_payload.get("env") or ""),
                 updates=runtime_identity_env(runtime_identity),
             )
@@ -44,7 +44,7 @@ def update_dokploy_target_artifact(
                 before_provider_mutation("target_update")
             if effect_started is not None:
                 effect_started()
-            control_plane_dokploy.update_dokploy_target_env(
+            dokploy_api.update_dokploy_target_env(
                 host=host,
                 token=token,
                 target_type=target_type,
@@ -56,7 +56,7 @@ def update_dokploy_target_artifact(
             before_provider_mutation("target_update")
         if effect_started is not None:
             effect_started()
-        control_plane_dokploy.dokploy_request(
+        dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/application.saveDockerProvider",
@@ -72,7 +72,7 @@ def update_dokploy_target_artifact(
         return
 
     if target_type == "compose":
-        env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+        env_text = dokploy_api.render_dokploy_env_text_with_overrides(
             str(target_payload.get("env") or ""),
             updates={
                 "DOCKER_IMAGE_REFERENCE": artifact_id,
@@ -83,7 +83,7 @@ def update_dokploy_target_artifact(
             before_provider_mutation("target_update")
         if effect_started is not None:
             effect_started()
-        control_plane_dokploy.update_dokploy_target_env(
+        dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
             target_type=target_type,
@@ -101,7 +101,7 @@ def _prepare_saved_registry_login(
     host: str,
     token: str,
     artifact_id: str,
-    target_payload: control_plane_dokploy.JsonObject,
+    target_payload: dokploy_api.JsonObject,
 ) -> None:
     username = str(target_payload.get("username") or "").strip()
     password = str(target_payload.get("password") or "").strip()
@@ -112,8 +112,8 @@ def _prepare_saved_registry_login(
     if not registry_id:
         return
     try:
-        registry_payload = control_plane_dokploy.as_json_object(
-            control_plane_dokploy.dokploy_request(
+        registry_payload = dokploy_api.as_json_object(
+            dokploy_api.dokploy_request(
                 host=host,
                 token=token,
                 path="/api/registry.one",
@@ -141,11 +141,11 @@ def _prepare_saved_registry_login(
         login_server_ids.append(build_server_id)
 
     for server_id in login_server_ids:
-        login_payload: control_plane_dokploy.JsonObject = {"registryId": registry_id}
+        login_payload: dokploy_api.JsonObject = {"registryId": registry_id}
         if server_id is not None:
             login_payload["serverId"] = server_id
         try:
-            control_plane_dokploy.dokploy_request(
+            dokploy_api.dokploy_request(
                 host=host,
                 token=token,
                 path="/api/registry.testRegistryById",
@@ -192,7 +192,7 @@ def execute_dokploy_artifact_deploy(
     before_provider_mutation: Callable[[str], None] | None = None,
     effect_started: Callable[[], None] | None = None,
 ) -> None:
-    latest_before = control_plane_dokploy.latest_deployment_for_target(
+    latest_before = dokploy_api.latest_deployment_for_target(
         host=host,
         token=token,
         target_type=resolved_target.target_type,
@@ -212,7 +212,7 @@ def execute_dokploy_artifact_deploy(
         before_provider_mutation("deploy_trigger")
     if effect_started is not None:
         effect_started()
-    control_plane_dokploy.trigger_deployment(
+    dokploy_api.trigger_deployment(
         host=host,
         token=token,
         target_type=resolved_target.target_type,
@@ -221,21 +221,21 @@ def execute_dokploy_artifact_deploy(
         title=deployment_title,
     )
     if deployment_title:
-        control_plane_dokploy.wait_for_target_deployment(
+        dokploy_api.wait_for_target_deployment(
             host=host,
             token=token,
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
-            before_key=control_plane_dokploy.deployment_key(latest_before),
+            before_key=dokploy_api.deployment_key(latest_before),
             timeout_seconds=deploy_timeout_seconds,
             deployment_title=deployment_title,
         )
     else:
-        control_plane_dokploy.wait_for_target_deployment(
+        dokploy_api.wait_for_target_deployment(
             host=host,
             token=token,
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
-            before_key=control_plane_dokploy.deployment_key(latest_before),
+            before_key=dokploy_api.deployment_key(latest_before),
             timeout_seconds=deploy_timeout_seconds,
         )

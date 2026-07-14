@@ -6,7 +6,6 @@ from typing import Protocol
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -23,6 +22,8 @@ from control_plane.runtime_key_safety import (
 )
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
 
 
 class LiveTargetRuntimeError(Exception):
@@ -344,12 +345,12 @@ def _require_expected_runtime_secret_values(
 
 def require_dokploy_target_definition(
     *,
-    source_of_truth: control_plane_dokploy.DokploySourceOfTruth,
+    source_of_truth: dokploy_source.DokploySourceOfTruth,
     context_name: str,
     instance_name: str,
     operation_name: str,
-) -> control_plane_dokploy.DokployTargetDefinition:
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+) -> dokploy_source.DokployTargetDefinition:
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=context_name,
         instance_name=instance_name,
@@ -375,7 +376,7 @@ def apply_live_target_runtime_environment(
     deploy_timeout_seconds: int | None,
     deploy_trigger: DokployDeployTrigger,
 ) -> dict[str, object]:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
         database_url=database_url,
     )
@@ -439,11 +440,11 @@ def apply_live_target_runtime_environment(
             )
 
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
+        host, token = dokploy_source.read_dokploy_config(
             control_plane_root=control_plane_root,
             database_url=database_url,
         )
-        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        target_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
             token=token,
             target_type=target_definition.target_type,
@@ -451,9 +452,7 @@ def apply_live_target_runtime_environment(
         )
     except click.ClickException as error:
         raise LiveTargetRuntimeError(str(error), code="dokploy_target_read_failed") from error
-    live_env_map = control_plane_dokploy.parse_dokploy_env_text(
-        str(target_payload.get("env") or "")
-    )
+    live_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
     initial_delta = runtime_env_live_target_delta(
         desired_env_map=desired_env_map,
         live_env_map=live_env_map,
@@ -489,26 +488,26 @@ def apply_live_target_runtime_environment(
 
     if apply_changes and changed_key_count:
         try:
-            refreshed_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
                 host=host,
                 token=token,
                 target_type=target_definition.target_type,
                 target_id=target_definition.target_id,
             )
-            refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
+            refreshed_env_map = dokploy_api.parse_dokploy_env_text(
                 str(refreshed_payload.get("env") or "")
             )
             updated_env_map = dict(refreshed_env_map)
             updated_env_map.update(desired_env_map)
-            control_plane_dokploy.update_dokploy_target_env(
+            dokploy_api.update_dokploy_target_env(
                 host=host,
                 token=token,
                 target_type=target_definition.target_type,
                 target_id=target_definition.target_id,
                 target_payload=refreshed_payload,
-                env_text=control_plane_dokploy.serialize_dokploy_env_text(updated_env_map),
+                env_text=dokploy_api.serialize_dokploy_env_text(updated_env_map),
             )
-            persisted_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            persisted_payload = dokploy_api.fetch_dokploy_target_payload(
                 host=host,
                 token=token,
                 target_type=target_definition.target_type,
@@ -516,7 +515,7 @@ def apply_live_target_runtime_environment(
             )
         except click.ClickException as error:
             raise LiveTargetRuntimeError(str(error), code="dokploy_target_update_failed") from error
-        persisted_env_map = control_plane_dokploy.parse_dokploy_env_text(
+        persisted_env_map = dokploy_api.parse_dokploy_env_text(
             str(persisted_payload.get("env") or "")
         )
         verification_delta = runtime_env_live_target_delta(
@@ -543,7 +542,7 @@ def apply_live_target_runtime_environment(
                 token=token,
                 target_type=target_definition.target_type,
                 target_id=target_definition.target_id,
-                deploy_timeout_seconds=control_plane_dokploy.resolve_ship_timeout_seconds(
+                deploy_timeout_seconds=dokploy_source.resolve_ship_timeout_seconds(
                     timeout_override_seconds=deploy_timeout_seconds,
                     target_definition=target_definition,
                 ),
@@ -590,25 +589,25 @@ def trigger_and_wait_for_dokploy_target_deploy(
         raise click.ClickException(
             "Launchplane service deploy timeout must be greater than zero seconds."
         )
-    latest_before = control_plane_dokploy.latest_deployment_for_target(
+    latest_before = dokploy_api.latest_deployment_for_target(
         host=host,
         token=token,
         target_type=target_type,
         target_id=target_id,
     )
-    control_plane_dokploy.trigger_deployment(
+    dokploy_api.trigger_deployment(
         host=host,
         token=token,
         target_type=target_type,
         target_id=target_id,
         no_cache=no_cache,
     )
-    deployment_result = control_plane_dokploy.wait_for_target_deployment(
+    deployment_result = dokploy_api.wait_for_target_deployment(
         host=host,
         token=token,
         target_type=target_type,
         target_id=target_id,
-        before_key=control_plane_dokploy.deployment_key(latest_before),
+        before_key=dokploy_api.deployment_key(latest_before),
         timeout_seconds=deploy_timeout_seconds,
     )
     return {"deployment_result": deployment_result}

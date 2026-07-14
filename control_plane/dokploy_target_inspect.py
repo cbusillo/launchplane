@@ -5,10 +5,10 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.dokploy import api as dokploy_api
 
 DokployTargetType = Literal["application", "compose"]
 
@@ -16,7 +16,7 @@ DokployTargetType = Literal["application", "compose"]
 class FetchDokployTargetPayload(Protocol):
     def __call__(
         self, *, host: str, token: str, target_type: str, target_id: str
-    ) -> control_plane_dokploy.JsonObject: ...
+    ) -> dokploy_api.JsonObject: ...
 
 
 class DokployTargetInspectRequest(BaseModel):
@@ -106,7 +106,7 @@ def inspect_dokploy_target(
         target_type = target_record.target_type
         target_id = target_id_record.target_id
 
-    payload_fetcher = fetch_target_payload or control_plane_dokploy.fetch_dokploy_target_payload
+    payload_fetcher = fetch_target_payload or dokploy_api.fetch_dokploy_target_payload
     provider_payload = payload_fetcher(
         host=host,
         token=token,
