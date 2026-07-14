@@ -147,10 +147,17 @@ from control_plane.merge_train_batch_candidate import (
     execute_merge_train_batch_candidate_run_once,
     require_merge_train_batch_candidate_record_store,
 )
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerLeaseHeldError,
+    MergeTrainControllerLeaseLostError,
+    MergeTrainControllerReconciliationRequiredError,
+)
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRequestError,
     MergeTrainControllerRunOnceEnvelope,
+    MergeTrainControllerRunOnceResult,
     execute_merge_train_controller_run_once,
+    merge_train_controller_mutation_fence,
     require_merge_train_controller_state_record_store,
 )
 from control_plane.merge_train_github import MergeTrainGitHubError, MergeTrainGitHubStaleHeadError
@@ -6698,6 +6705,7 @@ def create_launchplane_fastapi_app(
             stack_collapse_store = require_merge_train_stack_collapse_plan_record_store(
                 record_store
             )
+            controller_state_store = require_merge_train_controller_state_record_store(record_store)
         except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -6706,20 +6714,64 @@ def create_launchplane_fastapi_app(
                 message="Merge train batch candidate storage requires database-backed records.",
             ) from error
         try:
-            batch_result = execute_merge_train_batch_candidate_run_once(
-                request=batch_request,
-                policy=policy_record.policy,
+            with merge_train_controller_mutation_fence(
+                record_store=controller_state_store,
+                repository=batch_request.repository,
+                base_branch=batch_request.base_branch,
+                policy_key=repository_policy.policy_key,
                 policy_sha256=policy_record.policy_sha256,
-                token=token,
                 trace_id=trace_id,
-                recorded_at=utc_now_timestamp(),
-                batch_store=batch_store,
-                stack_collapse_store=stack_collapse_store,
-            )
+                active_action="batch_candidate_run_once",
+                active_phase=batch_request.mode,
+                active_record_id=batch_request.candidate_record_id,
+            ) as lease:
+
+                def checkpoint_candidate_mutation(
+                    phase: str, pull_request_number: int | None
+                ) -> None:
+                    lease.checkpoint(
+                        active_action="batch_candidate_run_once",
+                        active_phase=phase.split(":", 1)[0],
+                        active_record_id=batch_request.candidate_record_id,
+                        active_pull_request_number=pull_request_number,
+                        step_payload={"mode": batch_request.mode},
+                    )
+
+                batch_result = execute_merge_train_batch_candidate_run_once(
+                    request=batch_request,
+                    policy=policy_record.policy,
+                    policy_sha256=policy_record.policy_sha256,
+                    token=token,
+                    trace_id=trace_id,
+                    recorded_at=lease.record.updated_at,
+                    batch_store=batch_store,
+                    stack_collapse_store=stack_collapse_store,
+                    mutation_checkpoint=checkpoint_candidate_mutation,
+                )
+                response = accepted_evidence_response(
+                    trace_id=trace_id,
+                    records=batch_result.records,
+                    result=batch_result.accepted_result,
+                )
+                store_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:
             return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except (
+            MergeTrainControllerLeaseHeldError,
+            MergeTrainControllerLeaseLostError,
+            MergeTrainControllerReconciliationRequiredError,
+        ) as error:
+            raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except MergeTrainBatchCandidateRecordNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -6727,20 +6779,6 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=batch_result.records,
-            result=batch_result.accepted_result,
-        )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
         return response
 
     async def write_merge_train_controller_run_once(
@@ -6847,9 +6885,7 @@ def create_launchplane_fastapi_app(
             stack_collapse_store = require_merge_train_stack_collapse_plan_record_store(
                 record_store
             )
-            controller_state_store = require_merge_train_controller_state_record_store(
-                record_store
-            )
+            controller_state_store = require_merge_train_controller_state_record_store(record_store)
         except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -6858,6 +6894,25 @@ def create_launchplane_fastapi_app(
                 message="Merge train controller storage requires database-backed records.",
             ) from error
         try:
+
+            def store_controller_idempotency_before_release(
+                result: MergeTrainControllerRunOnceResult,
+            ) -> None:
+                idempotent_response = accepted_evidence_response(
+                    trace_id=trace_id,
+                    records=result.records,
+                    result=result.accepted_result,
+                )
+                store_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=idempotent_response,
+                )
+
             controller_result = execute_merge_train_controller_run_once(
                 request=controller_request,
                 policy=policy_record.policy,
@@ -6870,11 +6925,18 @@ def create_launchplane_fastapi_app(
                 landing_store=landing_store,
                 stack_collapse_store=stack_collapse_store,
                 controller_state_store=controller_state_store,
+                before_release=store_controller_idempotency_before_release,
             )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:
             return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except (
+            MergeTrainControllerLeaseHeldError,
+            MergeTrainControllerLeaseLostError,
+            MergeTrainControllerReconciliationRequiredError,
+        ) as error:
+            raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except (MergeTrainControllerRequestError, ValueError, click.ClickException) as error:
             message = str(error).strip() or "Merge train controller request could not be completed."
             raise _launchplane_http_error(
@@ -6887,15 +6949,6 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             records=controller_result.records,
             result=controller_result.accepted_result,
-        )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
         )
         return response
 
@@ -9433,20 +9486,71 @@ def create_launchplane_fastapi_app(
                 message="Merge train stack collapse admission requires database-backed candidate records.",
             ) from error
         try:
-            stack_result = execute_merge_train_stack_collapse_run_once(
-                request=stack_request,
-                policy=policy_record.policy,
-                policy_sha256=policy_record.policy_sha256,
-                token=token,
+            controller_state_store = require_merge_train_controller_state_record_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
                 trace_id=trace_id,
-                recorded_at=utc_now_timestamp(),
-                stack_collapse_store=stack_collapse_store,
-                batch_candidate_store=batch_candidate_store,
-            )
+                code="database_storage_required",
+                message="Merge train controller storage requires database-backed records.",
+            ) from error
+        try:
+            with merge_train_controller_mutation_fence(
+                record_store=controller_state_store,
+                repository=stack_request.repository,
+                base_branch=stack_request.base_branch,
+                policy_key=repository_policy.policy_key,
+                policy_sha256=policy_record.policy_sha256,
+                trace_id=trace_id,
+                active_action="stack_collapse_run_once",
+                active_phase=stack_request.mode,
+                active_record_id=stack_request.stack_collapse_plan_record_id,
+            ) as lease:
+
+                def checkpoint_stack_mutation(phase: str, pull_request_number: int | None) -> None:
+                    lease.checkpoint(
+                        active_action="stack_collapse_run_once",
+                        active_phase=phase,
+                        active_record_id=stack_request.stack_collapse_plan_record_id,
+                        active_pull_request_number=pull_request_number,
+                        step_payload={"mode": stack_request.mode},
+                    )
+
+                stack_result = execute_merge_train_stack_collapse_run_once(
+                    request=stack_request,
+                    policy=policy_record.policy,
+                    policy_sha256=policy_record.policy_sha256,
+                    token=token,
+                    trace_id=trace_id,
+                    recorded_at=lease.record.updated_at,
+                    stack_collapse_store=stack_collapse_store,
+                    batch_candidate_store=batch_candidate_store,
+                    mutation_checkpoint=checkpoint_stack_mutation,
+                )
+                response = accepted_evidence_response(
+                    trace_id=trace_id,
+                    records=stack_result.records,
+                    result=stack_result.accepted_result,
+                )
+                store_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:
             return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except (
+            MergeTrainControllerLeaseHeldError,
+            MergeTrainControllerLeaseLostError,
+            MergeTrainControllerReconciliationRequiredError,
+        ) as error:
+            raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except MergeTrainStackCollapseBatchCandidateStoreMissingError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -9468,20 +9572,6 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=stack_result.records,
-            result=stack_result.accepted_result,
-        )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
         return response
 
     async def write_merge_train_batch_landing_run_once(
@@ -9581,6 +9671,7 @@ def create_launchplane_fastapi_app(
             stack_collapse_store = require_merge_train_stack_collapse_plan_record_store(
                 record_store
             )
+            controller_state_store = require_merge_train_controller_state_record_store(record_store)
         except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -9589,21 +9680,70 @@ def create_launchplane_fastapi_app(
                 message="Merge train batch landing storage requires database-backed records.",
             ) from error
         try:
-            landing_result = execute_merge_train_batch_landing_run_once(
-                request=landing_request,
-                repository_policy=repository_policy,
+            with merge_train_controller_mutation_fence(
+                record_store=controller_state_store,
+                repository=landing_request.repository,
+                base_branch=landing_request.base_branch,
+                policy_key=repository_policy.policy_key,
                 policy_sha256=policy_record.policy_sha256,
-                token=token,
                 trace_id=trace_id,
-                recorded_at=utc_now_timestamp(),
-                candidate_store=candidate_store,
-                landing_store=landing_store,
-                stack_collapse_store=stack_collapse_store,
-            )
+                active_action="batch_landing_run_once",
+                active_phase=landing_request.mode,
+                active_record_id=(
+                    landing_request.landing_plan_record_id or landing_request.candidate_record_id
+                ),
+            ) as lease:
+                active_record_id = (
+                    landing_request.landing_plan_record_id or landing_request.candidate_record_id
+                )
+
+                def checkpoint_landing_mutation(
+                    phase: str, pull_request_number: int | None
+                ) -> None:
+                    lease.checkpoint(
+                        active_action="batch_landing_run_once",
+                        active_phase=phase,
+                        active_record_id=active_record_id,
+                        active_pull_request_number=pull_request_number,
+                        step_payload={"mode": landing_request.mode},
+                    )
+
+                landing_result = execute_merge_train_batch_landing_run_once(
+                    request=landing_request,
+                    repository_policy=repository_policy,
+                    policy_sha256=policy_record.policy_sha256,
+                    token=token,
+                    trace_id=trace_id,
+                    recorded_at=lease.record.updated_at,
+                    candidate_store=candidate_store,
+                    landing_store=landing_store,
+                    stack_collapse_store=stack_collapse_store,
+                    mutation_checkpoint=checkpoint_landing_mutation,
+                )
+                response = accepted_evidence_response(
+                    trace_id=trace_id,
+                    records=landing_result.records,
+                    result=landing_result.accepted_result,
+                )
+                store_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:
             return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except (
+            MergeTrainControllerLeaseHeldError,
+            MergeTrainControllerLeaseLostError,
+            MergeTrainControllerReconciliationRequiredError,
+        ) as error:
+            raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except (
             MergeTrainBatchCandidateRecordNotFoundError,
             MergeTrainBatchLandingPlanRecordNotFoundError,
@@ -9622,20 +9762,6 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=landing_result.records,
-            result=landing_result.accepted_result,
-        )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
         return response
 
     async def write_merge_train_run_once(
@@ -9731,6 +9857,11 @@ def create_launchplane_fastapi_app(
             )
         try:
             run_record_store = require_merge_train_run_record_store(record_store)
+            controller_state_store = (
+                require_merge_train_controller_state_record_store(record_store)
+                if merge_train_request.mutate
+                else None
+            )
         except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -9739,33 +9870,86 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         try:
-            run_once_result = execute_merge_train_run_once(
-                request=merge_train_request,
-                policy=policy_record.policy,
-                policy_sha256=policy_record.policy_sha256,
-                token=token,
-                trace_id=trace_id,
-                recorded_at=utc_now_timestamp(),
-            )
+            if controller_state_store is None:
+                run_once_result = execute_merge_train_run_once(
+                    request=merge_train_request,
+                    policy=policy_record.policy,
+                    policy_sha256=policy_record.policy_sha256,
+                    token=token,
+                    trace_id=trace_id,
+                    recorded_at=utc_now_timestamp(),
+                )
+            else:
+                with merge_train_controller_mutation_fence(
+                    record_store=controller_state_store,
+                    repository=merge_train_request.repository,
+                    base_branch=merge_train_request.base_branch,
+                    policy_key=repository_policy.policy_key,
+                    policy_sha256=policy_record.policy_sha256,
+                    trace_id=trace_id,
+                    active_action="legacy_run_once",
+                    active_phase="worker_step",
+                ) as lease:
+
+                    def checkpoint_legacy_mutation() -> None:
+                        lease.checkpoint(
+                            active_action="legacy_run_once",
+                            active_phase="worker_step_mutation",
+                            active_record_id="",
+                            active_pull_request_number=None,
+                            step_payload={},
+                        )
+
+                    run_once_result = execute_merge_train_run_once(
+                        request=merge_train_request,
+                        policy=policy_record.policy,
+                        policy_sha256=policy_record.policy_sha256,
+                        token=token,
+                        trace_id=trace_id,
+                        recorded_at=lease.record.updated_at,
+                        mutation_checkpoint=checkpoint_legacy_mutation,
+                    )
+                    run_record_store.write_merge_train_run_record(run_once_result.run_record)
+                    response = accepted_evidence_response(
+                        trace_id=trace_id,
+                        records=run_once_result.records,
+                        result=run_once_result.accepted_result,
+                    )
+                    store_apply_idempotency(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=_MERGE_TRAIN_RUN_ONCE_ROUTE,
+                        idempotency_key=normalized_idempotency_key,
+                        request_fingerprint_value=payload_fingerprint,
+                        trace_id=trace_id,
+                        response=response,
+                    )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:
             return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
-        run_record_store.write_merge_train_run_record(run_once_result.run_record)
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=run_once_result.records,
-            result=run_once_result.accepted_result,
-        )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_MERGE_TRAIN_RUN_ONCE_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
+        except (
+            MergeTrainControllerLeaseHeldError,
+            MergeTrainControllerLeaseLostError,
+            MergeTrainControllerReconciliationRequiredError,
+        ) as error:
+            raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
+        if controller_state_store is None:
+            run_record_store.write_merge_train_run_record(run_once_result.run_record)
+            response = accepted_evidence_response(
+                trace_id=trace_id,
+                records=run_once_result.records,
+                result=run_once_result.accepted_result,
+            )
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_RUN_ONCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
         return response
 
     async def write_merge_train_pr_feedback(
@@ -23226,6 +23410,29 @@ def create_launchplane_fastapi_app(
     )
 
     return app
+
+
+def merge_train_controller_fence_http_error(
+    *,
+    trace_id: str,
+    error: (
+        MergeTrainControllerLeaseHeldError
+        | MergeTrainControllerLeaseLostError
+        | MergeTrainControllerReconciliationRequiredError
+    ),
+) -> HTTPException:
+    if isinstance(error, MergeTrainControllerLeaseHeldError):
+        code = "merge_train_controller_lease_held"
+    elif isinstance(error, MergeTrainControllerLeaseLostError):
+        code = "merge_train_controller_lease_lost"
+    else:
+        code = "merge_train_controller_reconciliation_required"
+    return _launchplane_http_error(
+        status_code=409,
+        trace_id=trace_id,
+        code=code,
+        message=str(error),
+    )
 
 
 def _launchplane_http_error(

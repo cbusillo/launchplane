@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -73,6 +74,22 @@ class MergeTrainLatestDryRunSummary(BaseModel):
     queue_entries: tuple[MergeTrainDryRunQueueEntrySummary, ...] = ()
 
 
+class MergeTrainControllerLeaseDiagnostics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    owner: str = ""
+    active_action: str = ""
+    active_phase: str = ""
+    active_record_id: str = ""
+    active_pull_request_number: int | None = None
+    lease_age_seconds: int | None = None
+    heartbeat_age_seconds: int | None = None
+    lease_expires_at: str = ""
+    reconciliation_status: str
+    reconciliation_detail: str = ""
+
+
 class MergeTrainControllerStatusReadModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -86,6 +103,7 @@ class MergeTrainControllerStatusReadModel(BaseModel):
     latest_run: MergeTrainRunRecord | None = None
     latest_dry_run: MergeTrainLatestDryRunSummary | None = None
     controller_state: MergeTrainControllerStateRecord | None = None
+    controller_diagnostics: MergeTrainControllerLeaseDiagnostics | None = None
     controller_records: tuple[MergeTrainControllerRecordSummary, ...]
 
 
@@ -209,6 +227,11 @@ def build_merge_train_controller_status_read_model(
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
     )
+    controller_state = _latest_controller_state(
+        store=store,
+        repository=repository,
+        base_branch=base_branch,
+    )
     return MergeTrainControllerStatusReadModel(
         repository=repository,
         base_branch=base_branch,
@@ -218,10 +241,10 @@ def build_merge_train_controller_status_read_model(
         admission=admission,
         latest_run=latest_run,
         latest_dry_run=_summarize_latest_dry_run(latest_run),
-        controller_state=_latest_controller_state(
-            store=store,
-            repository=repository,
-            base_branch=base_branch,
+        controller_state=controller_state,
+        controller_diagnostics=_controller_lease_diagnostics(
+            controller_state=controller_state,
+            generated_at=generated_at,
         ),
         controller_records=_summarize_controller_records(
             controller_records=controller_records,
@@ -265,6 +288,50 @@ def _latest_controller_state(
         limit=1,
     )
     return records[0] if records else None
+
+
+def _controller_lease_diagnostics(
+    *,
+    controller_state: MergeTrainControllerStateRecord | None,
+    generated_at: str,
+) -> MergeTrainControllerLeaseDiagnostics | None:
+    if controller_state is None:
+        return None
+    return MergeTrainControllerLeaseDiagnostics(
+        status=controller_state.status,
+        owner=controller_state.lease_owner or controller_state.last_owner,
+        active_action=controller_state.active_action,
+        active_phase=controller_state.active_phase,
+        active_record_id=controller_state.active_record_id,
+        active_pull_request_number=controller_state.active_pull_request_number,
+        lease_age_seconds=_timestamp_age_seconds(
+            generated_at=generated_at,
+            timestamp=controller_state.lease_acquired_at,
+        ),
+        heartbeat_age_seconds=_timestamp_age_seconds(
+            generated_at=generated_at,
+            timestamp=controller_state.heartbeat_at,
+        ),
+        lease_expires_at=controller_state.lease_expires_at,
+        reconciliation_status=controller_state.reconciliation_status,
+        reconciliation_detail=controller_state.reconciliation_detail,
+    )
+
+
+def _timestamp_age_seconds(*, generated_at: str, timestamp: str) -> int | None:
+    if not timestamp:
+        return None
+    generated = _parse_timestamp(generated_at)
+    observed = _parse_timestamp(timestamp)
+    return max(0, int((generated - observed).total_seconds()))
+
+
+def _parse_timestamp(value: str) -> datetime:
+    normalized = value.strip().replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _summarize_latest_dry_run(
@@ -533,7 +600,11 @@ def _latest_idle_run_supersedes_controller_records(
     latest_run: MergeTrainRunRecord | None,
     controller_records: MergeTrainControllerRecords,
 ) -> bool:
-    if latest_run is None or latest_run.status != "idle" or latest_run.intended_next_action != "idle":
+    if (
+        latest_run is None
+        or latest_run.status != "idle"
+        or latest_run.intended_next_action != "idle"
+    ):
         return False
     latest_record_update = _latest_controller_record_update(controller_records)
     if not latest_record_update:

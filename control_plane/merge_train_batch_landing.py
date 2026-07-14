@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import logging
-from typing import Literal, Protocol, cast
+from typing import Callable, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -116,6 +116,7 @@ def execute_merge_train_batch_landing_run_once(
     candidate_store: MergeTrainBatchCandidateRecordStore,
     landing_store: MergeTrainBatchLandingPlanRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    mutation_checkpoint: Callable[[str, int | None], None] | None = None,
 ) -> MergeTrainBatchLandingRunOnceResult:
     if request.mode == "plan":
         return _execute_plan_mode(
@@ -135,6 +136,7 @@ def execute_merge_train_batch_landing_run_once(
         recorded_at=recorded_at,
         landing_store=landing_store,
         stack_collapse_store=stack_collapse_store,
+        mutation_checkpoint=mutation_checkpoint,
     )
 
 
@@ -234,6 +236,7 @@ def _execute_land_mode(
     recorded_at: str,
     landing_store: MergeTrainBatchLandingPlanRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    mutation_checkpoint: Callable[[str, int | None], None] | None,
 ) -> MergeTrainBatchLandingRunOnceResult:
     landing_record = read_merge_train_batch_landing_plan_record(
         record_store=landing_store,
@@ -255,7 +258,19 @@ def _execute_land_mode(
         )
     )
     try:
-        landing_plan = github_client.land_batch_candidate(landing_plan=landing_record.landing_plan)
+        landing_plan = github_client.land_batch_candidate(
+            landing_plan=landing_record.landing_plan,
+            checkpoint=(
+                lambda progress_plan, entry, phase: (
+                    mutation_checkpoint(
+                        phase,
+                        entry.pull_request_number,
+                    )
+                    if mutation_checkpoint is not None
+                    else None
+                )
+            ),
+        )
     except MergeTrainGitHubStaleHeadError:
         stale_plan = _stale_merge_train_landing_plan(landing_record.landing_plan)
         stale_record = build_merge_train_batch_landing_plan_record(
@@ -271,6 +286,8 @@ def _execute_land_mode(
         updated_at=recorded_at,
     )
     landing_store.write_merge_train_batch_landing_plan_record(landing_record)
+    if mutation_checkpoint is not None:
+        mutation_checkpoint("cleanup_candidate_ref", None)
     candidate_ref_cleanup_result = _cleanup_merge_train_batch_candidate_ref(
         github_client=github_client,
         landing_plan=landing_plan,
@@ -290,12 +307,34 @@ def _execute_land_mode(
         )
         if root_entry is None or root_entry.status != "merged":
             raise ValueError("merge train stack child disposition requires merged root PR")
+        if mutation_checkpoint is not None:
+            mutation_checkpoint(
+                "reconcile_stack_children",
+                collapse_existing_record.plan.root_pull_request_number,
+            )
         reconciled_collapse_plan = reconcile_merge_train_stack_children_after_root_landing(
             plan=collapse_existing_record.plan,
             disposition_client=github_client,
             root_merge_commit_sha=root_entry.merge_commit_sha,
             label=repository_policy.stack_child_disposition_label,
             updated_at=recorded_at,
+            checkpoint=(
+                lambda progress_plan: (
+                    mutation_checkpoint(
+                        "reconcile_stack_children",
+                        next(
+                            (
+                                disposition.pull_request_number
+                                for disposition in progress_plan.child_dispositions
+                                if disposition.status != "closed"
+                            ),
+                            None,
+                        ),
+                    )
+                    if mutation_checkpoint is not None
+                    else None
+                )
+            ),
         )
         collapse_record = build_merge_train_stack_collapse_plan_record(
             plan=reconciled_collapse_plan,

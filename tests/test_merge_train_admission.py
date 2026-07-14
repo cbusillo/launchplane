@@ -562,10 +562,47 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(read_model.controller_state.active_phase, "cleanup_candidate_ref")
         self.assertEqual(read_model.controller_state.reconciliation_status, "required")
 
-    def test_controller_status_omits_latest_dry_run_summary_for_mutations(self) -> None:
-        store = _RunHistoryStore(
-            _run_record(recorded_at="2026-05-09T02:10:00Z", mutation="wait")
+    def test_controller_status_reports_lease_and_heartbeat_age(self) -> None:
+        controller_state = MergeTrainControllerStateRecord(
+            controller_key=build_merge_train_controller_key(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+            ),
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            policy_key="cbusillo/sellyouroutboard:main",
+            policy_sha256="policy-sha",
+            status="running",
+            updated_at="2026-05-09T02:11:00Z",
+            lease_owner="controller-a",
+            lease_acquired_at="2026-05-09T02:10:00Z",
+            lease_expires_at="2026-05-09T02:15:00Z",
+            heartbeat_at="2026-05-09T02:11:00Z",
+            active_action="land_batch",
+            active_phase="merge_pull_request",
+            active_pull_request_number=42,
         )
+        store = _RunHistoryStore(
+            _idle_run_record(recorded_at="2026-05-09T02:10:00Z"),
+            controller_state_records=(controller_state,),
+        )
+
+        read_model = build_merge_train_controller_status_read_model(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            generated_at="2026-05-09T02:12:00Z",
+        )
+
+        self.assertIsNotNone(read_model.controller_diagnostics)
+        assert read_model.controller_diagnostics is not None
+        self.assertEqual(read_model.controller_diagnostics.owner, "controller-a")
+        self.assertEqual(read_model.controller_diagnostics.active_phase, "merge_pull_request")
+        self.assertEqual(read_model.controller_diagnostics.lease_age_seconds, 120)
+        self.assertEqual(read_model.controller_diagnostics.heartbeat_age_seconds, 60)
+
+    def test_controller_status_omits_latest_dry_run_summary_for_mutations(self) -> None:
+        store = _RunHistoryStore(_run_record(recorded_at="2026-05-09T02:10:00Z", mutation="wait"))
 
         read_model = build_merge_train_controller_status_read_model(
             store=store,

@@ -201,7 +201,7 @@ class _CountingBatchCandidateMergeTrainSnapshotReader(_FakeMergeTrainSnapshotRea
 
 
 class _UnavailableBatchCandidateMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
-    def build_batch_candidate(self, *, candidate: Any) -> Any:
+    def build_batch_candidate(self, *, candidate: Any, checkpoint: Any = None) -> Any:
         raise MergeTrainGitHubError(
             "GitHub API request failed for /repos/example/repo/git/refs",
             status_code=503,

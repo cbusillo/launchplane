@@ -189,6 +189,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
                     "child_head_sha": "head-32",
                     "expected_parent_head_sha": "head-31",
                     "parent_head_ref": "feature/child",
+                    "protected_base_ref": "main",
                     "collapse_id": plan.collapse_id,
                     "child_pull_request_number": 32,
                     "parent_pull_request_number": 31,
@@ -198,12 +199,30 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
                     "child_head_sha": "merge-32-31",
                     "expected_parent_head_sha": "head-30",
                     "parent_head_ref": "feature/root",
+                    "protected_base_ref": "main",
                     "collapse_id": plan.collapse_id,
                     "child_pull_request_number": 31,
                     "parent_pull_request_number": 30,
                 },
             ],
         )
+
+    def test_execute_plan_rejects_mutation_of_configured_base_branch(self) -> None:
+        plan = _collapse_plan()
+        unsafe_mutation = plan.mutations[0].model_copy(update={"parent_head_ref": plan.base_branch})
+        unsafe_plan = plan.model_copy(update={"mutations": (unsafe_mutation,) + plan.mutations[1:]})
+        branch_client = _RecordingStackCollapseBranchClient(
+            merge_commit_shas=("merge-32-31", "merge-31-30")
+        )
+
+        with self.assertRaisesRegex(ValueError, "protected base branch"):
+            execute_merge_train_stack_collapse_plan(
+                plan=unsafe_plan,
+                branch_client=branch_client,
+                updated_at="2026-05-14T13:45:00Z",
+            )
+
+        self.assertEqual(branch_client.requests, [])
 
     def test_model_load_accepts_previous_root_to_leaf_mutation_order(self) -> None:
         plan_payload = _collapse_plan().model_dump(mode="json")
@@ -237,25 +256,46 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ["merge-32-31", "head-32"],
         )
 
-    def test_execute_plan_blocks_at_first_failed_mutation(self) -> None:
+    def test_execute_plan_preserves_progress_before_failed_mutation(self) -> None:
         plan = _collapse_plan()
         branch_client = _RecordingStackCollapseBranchClient(
             merge_commit_shas=("merge-31-30",),
             failure=RuntimeError("parent branch moved"),
         )
+        checkpoints: list[MergeTrainStackCollapsePlan] = []
+
+        with self.assertRaisesRegex(RuntimeError, "parent branch moved"):
+            execute_merge_train_stack_collapse_plan(
+                plan=plan,
+                branch_client=branch_client,
+                updated_at="2026-05-14T13:45:00Z",
+                checkpoint=checkpoints.append,
+            )
+
+        self.assertTrue(checkpoints)
+        self.assertEqual(
+            [mutation.status for mutation in checkpoints[-1].mutations],
+            ["mutated", "planned"],
+        )
+
+    def test_execute_plan_adopts_provider_merge_after_crash(self) -> None:
+        branch_client = _RecordingStackCollapseBranchClient(
+            observed_merge_commit_shas=("merge-32-31", ""),
+            merge_commit_shas=("merge-31-30",),
+        )
 
         executed_plan = execute_merge_train_stack_collapse_plan(
-            plan=plan,
+            plan=_collapse_plan(),
             branch_client=branch_client,
             updated_at="2026-05-14T13:45:00Z",
         )
 
-        self.assertEqual(executed_plan.status, "blocked")
+        self.assertEqual(executed_plan.status, "waiting_for_root_checks")
         self.assertEqual(
-            [mutation.status for mutation in executed_plan.mutations],
-            ["mutated", "blocked"],
+            [mutation.merge_commit_sha for mutation in executed_plan.mutations],
+            ["merge-32-31", "merge-31-30"],
         )
-        self.assertEqual(executed_plan.mutations[1].detail, "parent branch moved")
+        self.assertEqual(len(branch_client.requests), 1)
 
     def test_reconcile_children_after_root_landing_comments_labels_and_closes(self) -> None:
         plan = execute_merge_train_stack_collapse_plan(
@@ -294,7 +334,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         self.assertEqual(disposition_client.labels, [(31, "stack-landed"), (32, "stack-landed")])
         self.assertIn("root PR #30", disposition_client.comments[0][1])
 
-    def test_reconcile_children_blocks_at_first_failed_close(self) -> None:
+    def test_reconcile_children_leaves_plan_resumable_after_failed_close(self) -> None:
         plan = execute_merge_train_stack_collapse_plan(
             plan=_collapse_plan(),
             branch_client=_RecordingStackCollapseBranchClient(
@@ -306,20 +346,35 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             failure=RuntimeError("child head moved")
         )
 
+        checkpoints: list[MergeTrainStackCollapsePlan] = []
+
+        with self.assertRaisesRegex(RuntimeError, "child head moved"):
+            reconcile_merge_train_stack_children_after_root_landing(
+                plan=plan,
+                disposition_client=disposition_client,
+                root_merge_commit_sha="root-merge-sha",
+                label="stack-landed",
+                updated_at="2026-05-14T13:50:00Z",
+                checkpoint=checkpoints.append,
+            )
+
+        self.assertEqual(checkpoints, [])
+        self.assertEqual(len(disposition_client.comments), 1)
+        self.assertEqual(len(disposition_client.labels), 1)
+
+        disposition_client.failure = None
         reconciled_plan = reconcile_merge_train_stack_children_after_root_landing(
             plan=plan,
             disposition_client=disposition_client,
             root_merge_commit_sha="root-merge-sha",
             label="stack-landed",
-            updated_at="2026-05-14T13:50:00Z",
+            updated_at="2026-05-14T13:51:00Z",
         )
 
-        self.assertEqual(reconciled_plan.status, "blocked")
-        self.assertEqual(
-            [disposition.status for disposition in reconciled_plan.child_dispositions],
-            ["blocked", "planned"],
-        )
-        self.assertEqual(reconciled_plan.child_dispositions[0].detail, "child head moved")
+        self.assertEqual(reconciled_plan.status, "ready_for_train")
+        self.assertEqual(len(disposition_client.comments), 2)
+        self.assertEqual(len(disposition_client.labels), 2)
+        self.assertEqual(len(disposition_client.closed), 2)
 
 
 def _pull_request(
@@ -368,13 +423,18 @@ def _collapse_plan() -> MergeTrainStackCollapsePlan:
 
 class _RecordingStackCollapseBranchClient:
     def __init__(
-        self, *, merge_commit_shas: tuple[str, ...], failure: Exception | None = None
+        self,
+        *,
+        merge_commit_shas: tuple[str, ...],
+        observed_merge_commit_shas: tuple[str, ...] = (),
+        failure: Exception | None = None,
     ) -> None:
         self.merge_commit_shas = list(merge_commit_shas)
+        self.observed_merge_commit_shas = list(observed_merge_commit_shas)
         self.failure = failure
         self.requests: list[dict[str, object]] = []
 
-    def merge_stack_child_into_parent(
+    def find_stack_child_merge_commit(
         self,
         *,
         repository: str,
@@ -385,12 +445,29 @@ class _RecordingStackCollapseBranchClient:
         child_pull_request_number: int,
         parent_pull_request_number: int,
     ) -> str:
+        if self.observed_merge_commit_shas:
+            return self.observed_merge_commit_shas.pop(0)
+        return ""
+
+    def merge_stack_child_into_parent(
+        self,
+        *,
+        repository: str,
+        child_head_sha: str,
+        expected_parent_head_sha: str,
+        parent_head_ref: str,
+        protected_base_ref: str,
+        collapse_id: str,
+        child_pull_request_number: int,
+        parent_pull_request_number: int,
+    ) -> str:
         self.requests.append(
             {
                 "repository": repository,
                 "child_head_sha": child_head_sha,
                 "expected_parent_head_sha": expected_parent_head_sha,
                 "parent_head_ref": parent_head_ref,
+                "protected_base_ref": protected_base_ref,
                 "collapse_id": collapse_id,
                 "child_pull_request_number": child_pull_request_number,
                 "parent_pull_request_number": parent_pull_request_number,
@@ -409,18 +486,39 @@ class _RecordingStackChildDispositionClient:
         self.comments: list[tuple[int, str]] = []
         self.labels: list[tuple[int, str]] = []
         self.closed: list[tuple[int, str]] = []
+        self.comment_urls: dict[int, str] = {}
+        self.present_labels: set[tuple[int, str]] = set()
+        self.closed_pull_requests: set[tuple[int, str]] = set()
+
+    def find_pull_request_comment_url(
+        self, *, repository: str, pull_request_number: int, body_contains: str
+    ) -> str:
+        return self.comment_urls.get(pull_request_number, "")
+
+    def pull_request_has_label(
+        self, *, repository: str, pull_request_number: int, label: str
+    ) -> bool:
+        return (pull_request_number, label) in self.present_labels
+
+    def pull_request_is_closed(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> bool:
+        return (pull_request_number, expected_head_sha) in self.closed_pull_requests
 
     def comment_pull_request(self, *, repository: str, pull_request_number: int, body: str) -> str:
         self.comments.append((pull_request_number, body))
-        return (
+        comment_url = (
             f"https://github.com/{repository}/pull/{pull_request_number}"
             f"#issuecomment-{len(self.comments)}"
         )
+        self.comment_urls[pull_request_number] = comment_url
+        return comment_url
 
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
     ) -> None:
         self.labels.append((pull_request_number, label))
+        self.present_labels.add((pull_request_number, label))
 
     def close_pull_request(
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
@@ -428,6 +526,7 @@ class _RecordingStackChildDispositionClient:
         if self.failure is not None:
             raise self.failure
         self.closed.append((pull_request_number, expected_head_sha))
+        self.closed_pull_requests.add((pull_request_number, expected_head_sha))
 
 
 if __name__ == "__main__":

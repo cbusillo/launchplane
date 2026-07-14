@@ -1079,14 +1079,20 @@ def _merge_train_controller_state_record(
         policy_sha256="policy-digest",
         status=status,  # type: ignore[arg-type]
         updated_at=updated_at,
-        lease_owner="github-actions:example/merge-train-repo:run-1001",
-        lease_acquired_at="2026-05-14T00:59:00Z",
-        lease_expires_at="2026-05-14T01:05:00Z",
-        heartbeat_at=updated_at,
+        lease_owner=(
+            "github-actions:example/merge-train-repo:run-1001" if status == "running" else ""
+        ),
+        lease_acquired_at="2026-05-14T00:59:00Z" if status == "running" else "",
+        lease_expires_at="2026-05-14T01:05:00Z" if status == "running" else "",
+        heartbeat_at=updated_at if status == "running" else "",
         active_action="land_batch" if status == "running" else "",
         active_phase="cleanup_candidate_ref" if status == "running" else "",
         active_record_id="landing-record" if status == "running" else "",
-        step_payload={"candidate_ref": "refs/heads/launchplane/train/example/merge-train-repo/main/batch-1"},
+        step_payload=(
+            {"candidate_ref": "refs/heads/launchplane/train/example/merge-train-repo/main/batch-1"}
+            if status == "running"
+            else {}
+        ),
         last_owner="github-actions:example/merge-train-repo:run-1000",
         last_action="plan_landing",
         last_phase="planned",

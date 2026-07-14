@@ -40,22 +40,36 @@ the current lease is still valid. The lease record stores owner, expiry,
 active action/phase, and reconciliation detail under Launchplane storage, not
 in workflow inputs or checked-in config.
 
-Every GitHub effect that can cross a crash window must have a durable resume
-checkpoint before the controller is allowed to continue. The current guarded
-checkpoints cover candidate/landing progression plus post-landing
-candidate-ref cleanup and stack child disposition. When a controller restarts
-after a crash, it re-reads GitHub state and adopts already-completed effects
-when the stored phase evidence still matches the live repository/base policy
-and expected SHAs. If lease ownership, expected SHA guards, or reconciliation
-evidence no longer match, the controller must stop in `reconcile_required`
-state instead of continuing optimistically.
+Every GitHub effect that can cross a crash window has a durable pre-effect
+checkpoint. Candidate construction can safely reset and deterministically
+rebuild its temporary ref. Landing records each merged PR before advancing.
+Stack collapse records each child-to-parent merge, and child disposition
+re-observes its managed comment, label, and closed state before applying a
+missing effect. Candidate-ref cleanup remains an active durable phase until the
+ref is observed absent. When a controller restarts after a crash, it re-reads
+GitHub state and adopts already-completed effects when the stored phase evidence
+still matches the live repository/base policy and expected SHAs. If lease
+ownership, expected SHA guards, or reconciliation evidence no longer match, the
+controller stops in `reconcile_required` state instead of continuing
+optimistically.
 
-Lease expiry semantics are fail closed: once a lease token expires and another
-controller acquires the same repository/base fence, the stale owner must not
-continue mutating even if it shares the same logical workflow identity. The
-lease token therefore includes the acquisition timestamp, and every durable
-step update compares both owner and acquisition token before it can heartbeat,
-checkpoint, or release state.
+Reconciliation detail distinguishes retryable provider interruptions from
+operator-required conflicts. Retryable states retain the exact active phase and
+may be adopted by the next mutating controller pass. Deterministic policy,
+expected-SHA, or provider rejection states use an `operator_required:` detail
+so operators can repair the repository or provider condition before retrying
+through the service. The next mutating controller pass adopts that exact phase
+and re-observes provider state; no out-of-band record edit is required or
+supported. Read-only controller calls report either state without acquiring or
+mutating the lease record.
+
+Lease expiry semantics are fail closed. PostgreSQL observes acquisition,
+heartbeat, and expiry time inside the advisory-locked transaction rather than
+trusting a caller timestamp. Once a lease expires and another controller
+acquires the same repository/base fence, the stale owner cannot heartbeat,
+checkpoint, or release because every transition compares both owner and
+acquisition token under the same storage lock. Local filesystem rehearsal uses
+an atomic per-controller file lock with the same transition contract.
 
 ## Fields
 
@@ -135,7 +149,8 @@ After a batch candidate passes, Launchplane lands the original pull requests in
 queue order using GitHub's pull request merge API and the configured
 `merge_method`. Before each PR merge, Launchplane must verify that the PR still
 matches the candidate evidence it is about to rely on. At minimum, the PR head
-SHA, base branch, queue position, policy digest, and candidate batch identity
+SHA, exact target base ref and current base SHA, queue position, policy digest,
+and candidate batch identity
 must match the recorded landing plan. If GitHub state changes, Launchplane must
 stop, re-read, and rebuild or requeue rather than continuing from stale batch
 evidence.
@@ -488,8 +503,9 @@ Controller actions have these retry/stop semantics:
 
 - `plan_stack_collapse`: A same-repo linear stack was found and a collapse plan
   is next. Dry-run may report. Mutate once, then call again.
-- `execute_stack_collapse`: A stored collapse plan should be applied. Mutate
-  once, then call again. Stop if the resulting plan is `blocked` or `stale`.
+- `execute_stack_collapse`: A stored planned or partially `collapsing` plan
+  should be applied or resumed. Mutate once, then call again. Stop if the
+  resulting plan is `blocked` or `stale`.
 - `wait_for_root_checks`: The collapsed root PR needs fresh required checks.
   Stop and poll later; do not call phase endpoints.
 - `admit_collapsed_root`: The collapsed root PR is ready to enter the batch
@@ -508,8 +524,9 @@ Controller actions have these retry/stop semantics:
   become `plan_candidate` for a superseding candidate.
 - `plan_landing`: A passed candidate is ready for PR-native landing-plan
   creation. Mutate once, then call again.
-- `land_batch`: A landing plan is ready to merge original PRs in order. Mutate
-  once only after operator intent; call again to verify terminal state.
+- `land_batch`: A landing plan with planned or in-progress merge entries is
+  ready to merge or resume the original PRs in order. Mutate once only after
+  operator intent; call again to verify terminal state.
 - `batch_landed`: The batch already landed. Stop; the train phase is complete
   for that batch.
 - `block`: The selected PR is blocked by conflicts or failed checks. Stop and
@@ -545,29 +562,33 @@ landing phase. It accepts `mode: plan` with a passed candidate record id and
 writes a `launchplane_merge_train_batch_landing_plans` record, or `mode: land`
 with a landing-plan record id and merges the original pull requests in recorded
 queue order. Landing fails closed if the base branch head has moved from the
-candidate base SHA, and each PR merge uses the recorded head SHA guard so a
-changed PR head cannot be merged under stale validation. Retried landing is
+candidate base SHA. Immediately before each merge, the PR must still be open at
+the recorded head SHA and target the recorded base ref and rolling base SHA;
+the merge request also uses GitHub's head-SHA guard. Retried landing is
 idempotent across already-merged entries when GitHub shows the pull request was
-merged with the exact recorded head SHA. If the live base is already ahead of a
-persisted merged entry, Launchplane revalidates that entry's PR evidence and
+merged with the exact recorded head SHA into the recorded base ref and the
+target branch contains that merge commit. If the live base is already ahead of
+a persisted merged entry, Launchplane revalidates that entry's PR evidence and
 continues through later planned entries before deciding whether the landing plan
 is stale. Unrelated base movement or mismatched head evidence still stops the
 landing attempt. Stale landing evidence is reported as a merge-train stale-state
 conflict, while real GitHub transport/API failures include upstream status
 details for debugging. When every landing-plan entry is already merged with its
-recorded head SHA and the live base branch is at the recorded final merge
-commit, the retry writes terminal landing evidence instead of continuing to
+recorded head SHA and the live base branch equals or descends from the recorded
+final merge commit, the retry writes terminal landing evidence instead of continuing to
 advertise the stale `land_batch` action. If GitHub proves a pull request merged
 with a different head SHA than the landing plan recorded, Launchplane writes
 terminal stale landing evidence for the plan. That stale evidence does not count
 as a successful Launchplane landing, but it does retire the stale plan so a fresh
 controller pass can read current GitHub state and admit later eligible work.
-After Launchplane persists a landing plan at the recorded final base SHA, it
-attempts best-effort cleanup of the generated `launchplane/train/...` candidate
-branch ref. Missing candidate refs are treated as already-clean so landing
-retries remain idempotent. Cleanup failures are reported in the landing response
-without failing the persisted landing result, and stale or failed landing
-attempts leave the ref in place for investigation.
+After Launchplane persists a landing plan whose final merge commit remains in
+the target branch history, it
+enters a durable cleanup phase for the generated `launchplane/train/...`
+candidate branch ref. Missing candidate refs are treated as already-clean so
+landing retries remain idempotent. A cleanup failure does not roll back the
+persisted landing result, but the controller remains `reconcile_required` with
+the cleanup phase and candidate ref intact. The next owner resumes that exact
+phase before planning new train work.
 
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run
@@ -587,9 +608,10 @@ not read GitHub, and does not write run records.
 Operator views can read the broader stored controller state from the native
 FastAPI route
 `GET /v1/work-graph/merge-train/controller/status?repository=owner/name&base_branch=main`.
-That route returns the same admission decision plus the latest Level 1 run record
-and compact summaries for active batch candidates, landing plans, and stack
-collapse plans. When the latest run is dry-run evidence, the response also
+That route returns the same admission decision plus the latest Level 1 run record,
+controller owner, active action and phase, lease and heartbeat age, reconciliation
+state, and compact summaries for active batch candidates, landing plans, and
+stack collapse plans. When the latest run is dry-run evidence, the response also
 includes a compact queue summary with the intended next action, selected PR,
 eligible count, queued count, and visible ineligible reasons from the persisted
 dry-run payload. Stored controller records only influence the advertised

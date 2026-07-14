@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from typing import Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -173,7 +173,7 @@ class MergeTrainStackCollapsePlanRecord(BaseModel):
 
 
 class MergeTrainStackCollapseBranchClient(Protocol):
-    def merge_stack_child_into_parent(
+    def find_stack_child_merge_commit(
         self,
         *,
         repository: str,
@@ -185,8 +185,33 @@ class MergeTrainStackCollapseBranchClient(Protocol):
         parent_pull_request_number: int,
     ) -> str: ...
 
+    def merge_stack_child_into_parent(
+        self,
+        *,
+        repository: str,
+        child_head_sha: str,
+        expected_parent_head_sha: str,
+        parent_head_ref: str,
+        protected_base_ref: str,
+        collapse_id: str,
+        child_pull_request_number: int,
+        parent_pull_request_number: int,
+    ) -> str: ...
+
 
 class MergeTrainStackChildDispositionClient(Protocol):
+    def find_pull_request_comment_url(
+        self, *, repository: str, pull_request_number: int, body_contains: str
+    ) -> str: ...
+
+    def pull_request_has_label(
+        self, *, repository: str, pull_request_number: int, label: str
+    ) -> bool: ...
+
+    def pull_request_is_closed(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> bool: ...
+
     def comment_pull_request(
         self, *, repository: str, pull_request_number: int, body: str
     ) -> str: ...
@@ -205,36 +230,55 @@ def execute_merge_train_stack_collapse_plan(
     plan: MergeTrainStackCollapsePlan,
     branch_client: MergeTrainStackCollapseBranchClient,
     updated_at: str,
+    checkpoint: Callable[[MergeTrainStackCollapsePlan], None] | None = None,
 ) -> MergeTrainStackCollapsePlan:
     if plan.status not in {"planned", "collapsing"}:
         raise ValueError("merge train stack collapse plan is not executable")
     updated_mutations: list[MergeTrainStackCollapseMutation] = []
     current_head_shas = {entry.pull_request_number: entry.head_sha for entry in plan.entries}
-    current_status: MergeTrainStackCollapseStatus = "waiting_for_root_checks"
-    for mutation in plan.mutations:
+    current_status: MergeTrainStackCollapseStatus = "collapsing"
+    for mutation_index, mutation in enumerate(plan.mutations):
+        if mutation.status == "mutated":
+            merge_commit_sha = _normalize_required_value(
+                mutation.merge_commit_sha,
+                "mutated stack collapse entry requires merge_commit_sha",
+            )
+            updated_mutations.append(mutation)
+            current_head_shas[mutation.parent_pull_request_number] = merge_commit_sha
+            continue
         child_head_sha = current_head_shas[mutation.child_pull_request_number]
         expected_parent_head_sha = current_head_shas[mutation.parent_pull_request_number]
-        try:
+        in_progress_plan = _stack_collapse_plan_with_progress(
+            plan=plan,
+            mutations=tuple(updated_mutations) + plan.mutations[mutation_index:],
+            current_head_shas=current_head_shas,
+            status="collapsing",
+            updated_at=updated_at,
+        )
+        if checkpoint is not None:
+            checkpoint(in_progress_plan)
+        if mutation.parent_head_ref == plan.base_branch:
+            raise ValueError("stack collapse cannot mutate the protected base branch")
+        merge_commit_sha = branch_client.find_stack_child_merge_commit(
+            repository=plan.repository,
+            child_head_sha=child_head_sha,
+            expected_parent_head_sha=expected_parent_head_sha,
+            parent_head_ref=mutation.parent_head_ref,
+            collapse_id=plan.collapse_id,
+            child_pull_request_number=mutation.child_pull_request_number,
+            parent_pull_request_number=mutation.parent_pull_request_number,
+        )
+        if not merge_commit_sha:
             merge_commit_sha = branch_client.merge_stack_child_into_parent(
                 repository=plan.repository,
                 child_head_sha=child_head_sha,
                 expected_parent_head_sha=expected_parent_head_sha,
                 parent_head_ref=mutation.parent_head_ref,
+                protected_base_ref=plan.base_branch,
                 collapse_id=plan.collapse_id,
                 child_pull_request_number=mutation.child_pull_request_number,
                 parent_pull_request_number=mutation.parent_pull_request_number,
             )
-        except Exception as error:  # noqa: BLE001
-            updated_mutations.append(
-                mutation.model_copy(
-                    update={
-                        "status": "blocked",
-                        "detail": str(error),
-                    }
-                )
-            )
-            current_status = "blocked"
-            break
         updated_mutations.append(
             mutation.model_copy(
                 update={
@@ -247,21 +291,23 @@ def execute_merge_train_stack_collapse_plan(
             )
         )
         current_head_shas[mutation.parent_pull_request_number] = merge_commit_sha
-    if len(updated_mutations) < len(plan.mutations):
-        updated_mutations.extend(plan.mutations[len(updated_mutations) :])
-    updated_child_dispositions = tuple(
-        disposition.model_copy(
-            update={"expected_head_sha": current_head_shas[disposition.pull_request_number]}
-        )
-        for disposition in plan.child_dispositions
-    )
-    return plan.model_copy(
-        update={
-            "status": current_status,
-            "mutations": tuple(updated_mutations),
-            "child_dispositions": updated_child_dispositions,
-            "updated_at": updated_at,
-        }
+        if checkpoint is not None:
+            checkpoint(
+                _stack_collapse_plan_with_progress(
+                    plan=plan,
+                    mutations=tuple(updated_mutations) + plan.mutations[mutation_index + 1 :],
+                    current_head_shas=current_head_shas,
+                    status="collapsing",
+                    updated_at=updated_at,
+                )
+            )
+    current_status = "waiting_for_root_checks"
+    return _stack_collapse_plan_with_progress(
+        plan=plan,
+        mutations=tuple(updated_mutations),
+        current_head_shas=current_head_shas,
+        status=current_status,
+        updated_at=updated_at,
     )
 
 
@@ -272,6 +318,7 @@ def reconcile_merge_train_stack_children_after_root_landing(
     root_merge_commit_sha: str,
     label: str,
     updated_at: str,
+    checkpoint: Callable[[MergeTrainStackCollapsePlan], None] | None = None,
 ) -> MergeTrainStackCollapsePlan:
     if plan.status != "waiting_for_root_checks":
         raise ValueError("merge train stack collapse plan is not ready for child disposition")
@@ -283,33 +330,47 @@ def reconcile_merge_train_stack_children_after_root_landing(
         label, "merge train stack child disposition requires label"
     )
     updated_dispositions: list[MergeTrainStackChildDisposition] = []
-    current_status: MergeTrainStackCollapseStatus = "ready_for_train"
-    for disposition in plan.child_dispositions:
-        try:
+    current_status: MergeTrainStackCollapseStatus = "waiting_for_root_checks"
+    for disposition_index, disposition in enumerate(plan.child_dispositions):
+        if disposition.status == "closed":
+            updated_dispositions.append(disposition)
+            continue
+        pull_request_closed = disposition_client.pull_request_is_closed(
+            repository=plan.repository,
+            pull_request_number=disposition.pull_request_number,
+            expected_head_sha=disposition.expected_head_sha,
+        )
+        comment_body = _child_disposition_comment_body(
+            root_pull_request_number=plan.root_pull_request_number,
+            root_merge_commit_sha=normalized_root_merge_commit_sha,
+        )
+        comment_url = disposition_client.find_pull_request_comment_url(
+            repository=plan.repository,
+            pull_request_number=disposition.pull_request_number,
+            body_contains=comment_body,
+        )
+        if not comment_url:
             comment_url = disposition_client.comment_pull_request(
                 repository=plan.repository,
                 pull_request_number=disposition.pull_request_number,
-                body=_child_disposition_comment_body(
-                    root_pull_request_number=plan.root_pull_request_number,
-                    root_merge_commit_sha=normalized_root_merge_commit_sha,
-                ),
+                body=comment_body,
             )
+        if not disposition_client.pull_request_has_label(
+            repository=plan.repository,
+            pull_request_number=disposition.pull_request_number,
+            label=normalized_label,
+        ):
             disposition_client.add_pull_request_label(
                 repository=plan.repository,
                 pull_request_number=disposition.pull_request_number,
                 label=normalized_label,
             )
+        if not pull_request_closed:
             disposition_client.close_pull_request(
                 repository=plan.repository,
                 pull_request_number=disposition.pull_request_number,
                 expected_head_sha=disposition.expected_head_sha,
             )
-        except Exception as error:  # noqa: BLE001
-            updated_dispositions.append(
-                disposition.model_copy(update={"status": "blocked", "detail": str(error)})
-            )
-            current_status = "blocked"
-            break
         updated_dispositions.append(
             disposition.model_copy(
                 update={
@@ -319,12 +380,45 @@ def reconcile_merge_train_stack_children_after_root_landing(
                 }
             )
         )
-    if len(updated_dispositions) < len(plan.child_dispositions):
-        updated_dispositions.extend(plan.child_dispositions[len(updated_dispositions) :])
+        if checkpoint is not None:
+            checkpoint(
+                plan.model_copy(
+                    update={
+                        "status": "waiting_for_root_checks",
+                        "child_dispositions": tuple(updated_dispositions)
+                        + plan.child_dispositions[disposition_index + 1 :],
+                        "updated_at": updated_at,
+                    }
+                )
+            )
+    current_status = "ready_for_train"
     return plan.model_copy(
         update={
             "status": current_status,
             "child_dispositions": tuple(updated_dispositions),
+            "updated_at": updated_at,
+        }
+    )
+
+
+def _stack_collapse_plan_with_progress(
+    *,
+    plan: MergeTrainStackCollapsePlan,
+    mutations: tuple[MergeTrainStackCollapseMutation, ...],
+    current_head_shas: dict[int, str],
+    status: MergeTrainStackCollapseStatus,
+    updated_at: str,
+) -> MergeTrainStackCollapsePlan:
+    return plan.model_copy(
+        update={
+            "status": status,
+            "mutations": mutations,
+            "child_dispositions": tuple(
+                disposition.model_copy(
+                    update={"expected_head_sha": current_head_shas[disposition.pull_request_number]}
+                )
+                for disposition in plan.child_dispositions
+            ),
             "updated_at": updated_at,
         }
     )

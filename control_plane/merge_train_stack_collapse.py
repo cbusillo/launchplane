@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Callable, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -100,6 +100,7 @@ def execute_merge_train_stack_collapse_run_once(
     recorded_at: str,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     batch_candidate_store: MergeTrainBatchCandidateRecordStore | None = None,
+    mutation_checkpoint: Callable[[str, int | None], None] | None = None,
 ) -> MergeTrainStackCollapseRunOnceResult:
     existing_record = read_merge_train_stack_collapse_plan_record(
         record_store=stack_collapse_store,
@@ -116,6 +117,23 @@ def execute_merge_train_stack_collapse_run_once(
             plan=existing_record.plan,
             branch_client=GitHubMergeTrainClient(transport=transport),
             updated_at=recorded_at,
+            checkpoint=(
+                lambda progress_plan: (
+                    mutation_checkpoint(
+                        "merge_stack_branches",
+                        next(
+                            (
+                                mutation.child_pull_request_number
+                                for mutation in progress_plan.mutations
+                                if mutation.status != "mutated"
+                            ),
+                            None,
+                        ),
+                    )
+                    if mutation_checkpoint is not None
+                    else None
+                )
+            ),
         )
         collapse_record = build_merge_train_stack_collapse_plan_record(
             plan=executed_plan,

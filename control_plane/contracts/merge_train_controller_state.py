@@ -9,6 +9,18 @@ MergeTrainControllerStateStatus = Literal["idle", "running", "reconcile_required
 MergeTrainControllerReconciliationStatus = Literal["clean", "adopted", "required"]
 
 
+class MergeTrainControllerLeaseHeldError(RuntimeError):
+    pass
+
+
+class MergeTrainControllerLeaseLostError(RuntimeError):
+    pass
+
+
+class MergeTrainControllerReconciliationRequiredError(RuntimeError):
+    pass
+
+
 class MergeTrainControllerStateRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -80,18 +92,27 @@ class MergeTrainControllerStateRecord(BaseModel):
             if not self.lease_owner:
                 raise ValueError("running merge train controller state requires lease_owner")
             if not self.lease_acquired_at:
-                raise ValueError(
-                    "running merge train controller state requires lease_acquired_at"
-                )
+                raise ValueError("running merge train controller state requires lease_acquired_at")
             if not self.lease_expires_at:
-                raise ValueError(
-                    "running merge train controller state requires lease_expires_at"
-                )
+                raise ValueError("running merge train controller state requires lease_expires_at")
             if not self.heartbeat_at:
                 raise ValueError("running merge train controller state requires heartbeat_at")
-            if self.active_action and not self.active_phase:
+            if bool(self.active_action) != bool(self.active_phase):
                 raise ValueError(
-                    "running merge train controller state active_action requires active_phase"
+                    "running merge train controller state requires action and phase together"
+                )
+        elif (
+            self.lease_owner or self.lease_acquired_at or self.lease_expires_at or self.heartbeat_at
+        ):
+            raise ValueError("inactive merge train controller state cannot retain a lease")
+        if self.status == "reconcile_required":
+            if not self.active_action or not self.active_phase:
+                raise ValueError(
+                    "reconcile-required merge train controller state requires active phase"
+                )
+            if self.reconciliation_status != "required":
+                raise ValueError(
+                    "reconcile-required merge train controller state requires reconciliation status"
                 )
         return self
 
@@ -123,6 +144,17 @@ def build_merge_train_controller_state_record(
         policy_sha256=policy_sha256,
         updated_at=updated_at,
     )
+
+
+def build_merge_train_controller_resume_detail(
+    record: MergeTrainControllerStateRecord,
+) -> str:
+    if record.reconciliation_detail.startswith("resuming:"):
+        return record.reconciliation_detail
+    detail = f"resuming:{record.active_action}:{record.active_phase}"
+    if record.reconciliation_detail:
+        return f"{detail}; previous:{record.reconciliation_detail}"
+    return detail
 
 
 def _normalize_required(value: str, message: str) -> str:

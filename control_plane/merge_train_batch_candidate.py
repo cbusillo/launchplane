@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Callable, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -126,6 +126,7 @@ def execute_merge_train_batch_candidate_run_once(
     recorded_at: str,
     batch_store: MergeTrainBatchCandidateRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    mutation_checkpoint: Callable[[str, int | None], None] | None = None,
 ) -> MergeTrainBatchCandidateRunOnceResult:
     transport = UrllibMergeTrainGitHubTransport(
         token=token,
@@ -152,8 +153,22 @@ def execute_merge_train_batch_candidate_run_once(
     candidate = existing_record.candidate
     github_client = GitHubMergeTrainClient(transport=transport)
     if request.mode == "build":
-        candidate = github_client.build_batch_candidate(candidate=candidate)
+        candidate = github_client.build_batch_candidate(
+            candidate=candidate,
+            checkpoint=(
+                lambda progress_candidate, entry, phase: (
+                    mutation_checkpoint(
+                        phase,
+                        entry.pull_request_number if entry is not None else None,
+                    )
+                    if mutation_checkpoint is not None
+                    else None
+                )
+            ),
+        )
     else:
+        if mutation_checkpoint is not None:
+            mutation_checkpoint("observe_required_checks", None)
         candidate = github_client.observe_batch_candidate_checks(candidate=candidate)
     return _persist_candidate_result(
         candidate=candidate,

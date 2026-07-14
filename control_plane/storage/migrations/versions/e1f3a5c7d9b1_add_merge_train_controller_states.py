@@ -35,7 +35,9 @@ def upgrade() -> None:
         sa.Column("lease_expires_at", sa.String(), nullable=False),
         sa.Column("active_action", sa.String(), nullable=False),
         sa.Column("active_phase", sa.String(), nullable=False),
-        sa.Column("payload", sa.JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=False),
+        sa.Column(
+            "payload", sa.JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=False
+        ),
     )
     op.create_index(
         "launchplane_merge_train_controller_states_repository_base_idx",

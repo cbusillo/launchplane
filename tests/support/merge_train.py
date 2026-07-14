@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Callable, cast
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
+    MergeTrainBatchEntry,
+    MergeTrainBatchLandingEntry,
     MergeTrainBatchLandingPlan,
     build_merge_train_batch_candidate,
     build_merge_train_batch_candidate_record,
-)
-from control_plane.contracts.merge_train_controller_state import (
-    MergeTrainControllerStateRecord,
 )
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicy,
@@ -73,8 +72,23 @@ class _FakeMergeTrainGitHubClient:
         return f"merge-{pull_request_number}"
 
     def build_batch_candidate(
-        self, *, candidate: MergeTrainBatchCandidate
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        checkpoint: (
+            Callable[[MergeTrainBatchCandidate, MergeTrainBatchEntry | None, str], None] | None
+        ) = None,
     ) -> MergeTrainBatchCandidate:
+        if checkpoint is not None:
+            checkpoint(candidate, None, "reset_candidate_ref")
+            checkpoint(candidate, None, "candidate_ref_ready")
+            for entry_index, entry in enumerate(candidate.entries, start=1):
+                checkpoint(candidate, entry, "merge_candidate_entry")
+                checkpoint(
+                    candidate.model_copy(update={"candidate_sha": "candidate-built"}),
+                    entry,
+                    f"candidate_entry_merged:{entry_index}",
+                )
         return candidate.model_copy(
             update={"candidate_sha": "candidate-built", "status": "ready_for_checks"}
         )
@@ -85,22 +99,45 @@ class _FakeMergeTrainGitHubClient:
         return candidate.model_copy(update={"required_checks_status": "pass", "status": "passed"})
 
     def land_batch_candidate(
-        self, *, landing_plan: MergeTrainBatchLandingPlan
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        checkpoint: (
+            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
+        ) = None,
     ) -> MergeTrainBatchLandingPlan:
         type(self).land_batch_candidate_calls += 1
-        return landing_plan.model_copy(
-            update={
-                "entries": tuple(
-                    entry.model_copy(
+        merged_entries: list[MergeTrainBatchLandingEntry] = []
+        for entry_index, entry in enumerate(landing_plan.entries):
+            if checkpoint is not None:
+                checkpoint(
+                    landing_plan.model_copy(
                         update={
-                            "status": "merged",
-                            "merge_commit_sha": f"merge-{entry.pull_request_number}",
+                            "entries": tuple(merged_entries) + landing_plan.entries[entry_index:]
                         }
-                    )
-                    for entry in landing_plan.entries
+                    ),
+                    entry,
+                    "merge_entry",
                 )
-            }
-        )
+            merged_entry = entry.model_copy(
+                update={
+                    "status": "merged",
+                    "merge_commit_sha": f"merge-{entry.pull_request_number}",
+                }
+            )
+            merged_entries.append(merged_entry)
+            if checkpoint is not None:
+                checkpoint(
+                    landing_plan.model_copy(
+                        update={
+                            "entries": tuple(merged_entries)
+                            + landing_plan.entries[entry_index + 1 :]
+                        }
+                    ),
+                    merged_entry,
+                    "entry_merged",
+                )
+        return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
 
     def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
         type(self).cleanup_batch_candidate_ref_calls += 1
@@ -129,13 +166,24 @@ class _FakeMergeTrainGitHubClient:
     ) -> str:
         return f"merge-{pull_request_number}"
 
-    def branch_contains_commit(
-        self, *, repository: str, branch_ref: str, commit_sha: str
-    ) -> bool:
+    def branch_contains_commit(self, *, repository: str, branch_ref: str, commit_sha: str) -> bool:
         return True
 
     def branch_head_sha(self, *, repository: str, branch_ref: str) -> str:
         return f"branch-head:{branch_ref}"
+
+    def find_stack_child_merge_commit(
+        self,
+        *,
+        repository: str,
+        child_head_sha: str,
+        expected_parent_head_sha: str,
+        parent_head_ref: str,
+        collapse_id: str,
+        child_pull_request_number: int,
+        parent_pull_request_number: int,
+    ) -> str:
+        return ""
 
     def merge_stack_child_into_parent(
         self,
@@ -144,6 +192,7 @@ class _FakeMergeTrainGitHubClient:
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        protected_base_ref: str,
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -168,7 +217,12 @@ class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
 
 class _StaleLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     def land_batch_candidate(
-        self, *, landing_plan: MergeTrainBatchLandingPlan
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        checkpoint: (
+            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
+        ) = None,
     ) -> MergeTrainBatchLandingPlan:
         raise MergeTrainGitHubStaleHeadError(
             "Base branch moved outside the batch landing plan.", status_code=409
@@ -177,7 +231,12 @@ class _StaleLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
 
 class _UnavailableLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     def land_batch_candidate(
-        self, *, landing_plan: MergeTrainBatchLandingPlan
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        checkpoint: (
+            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
+        ) = None,
     ) -> MergeTrainBatchLandingPlan:
         raise MergeTrainGitHubError(
             "GitHub API request failed for /repos/example/repo", status_code=503
@@ -211,24 +270,9 @@ class _CleanupFailingWithoutStatusMergeTrainGitHubClient(_FakeMergeTrainGitHubCl
         raise MergeTrainGitHubError("candidate ref cleanup network unavailable")
 
 
-class _FailingChildDispositionMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
-    def add_pull_request_label(
-        self, *, repository: str, pull_request_number: int, label: str
-    ) -> None:
-        raise RuntimeError("label persistence unavailable")
-
-
 class _StackCollapseWriteFailingFilesystemRecordStore(FilesystemRecordStore):
     def write_merge_train_stack_collapse_plan_record(self, record: object) -> Path:
         raise RuntimeError("stack collapse persistence unavailable")
-
-
-class _ControllerStateWriteFailingFilesystemRecordStore(FilesystemRecordStore):
-    def write_merge_train_controller_state_record(self, record: object) -> Path:
-        controller_record = cast(MergeTrainControllerStateRecord, record)
-        if controller_record.active_phase == "cleanup_candidate_ref":
-            raise RuntimeError("controller state persistence unavailable")
-        return super().write_merge_train_controller_state_record(controller_record)
 
 
 class _CandidateReflowWriteFailingFilesystemRecordStore(FilesystemRecordStore):

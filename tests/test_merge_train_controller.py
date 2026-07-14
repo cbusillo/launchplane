@@ -66,6 +66,28 @@ class MergeTrainControllerDecisionTests(unittest.TestCase):
 
         self.assertEqual(decision.action, "observe_candidate")
 
+    def test_candidate_progress_outranks_future_skew_within_same_batch(self) -> None:
+        future_planned_record = _candidate_record(
+            status="planned",
+            record_id="candidate-planned-future-clock",
+            updated_at="2099-05-18T01:00:00Z",
+        )
+        ready_record = _candidate_record(
+            status="ready_for_checks",
+            record_id="candidate-ready-storage-clock",
+            updated_at="2026-05-18T01:01:00Z",
+            candidate_sha="candidate-sha",
+        )
+
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=(future_planned_record, ready_record),
+            landing_plan_records=(),
+            stack_collapse_plan_records=(),
+        )
+
+        self.assertEqual(decision.action, "observe_candidate")
+        self.assertEqual(decision.candidate_record_id, ready_record.record_id)
+
     def test_decision_handles_failed_and_terminal_candidates(self) -> None:
         failed_decision = decide_merge_train_controller_record_action(
             candidate_records=(_candidate_record(status="failed"),),
@@ -143,6 +165,22 @@ class MergeTrainControllerDecisionTests(unittest.TestCase):
         self.assertEqual(decision.action, "land_batch")
         self.assertEqual(decision.landing_plan_record_id, landing_record.record_id)
 
+    def test_decision_resumes_landing_entry_marked_merging(self) -> None:
+        passed_record = _candidate_record(status="passed", candidate_sha="candidate-sha")
+        landing_record = _landing_plan_record(
+            candidate=passed_record.candidate,
+            entry_status="merging",
+        )
+
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=(passed_record,),
+            landing_plan_records=(landing_record,),
+            stack_collapse_plan_records=(),
+        )
+
+        self.assertEqual(decision.action, "land_batch")
+        self.assertEqual(decision.landing_plan_record_id, landing_record.record_id)
+
     def test_decision_ignores_terminal_landed_batch(self) -> None:
         passed_record = _candidate_record(status="passed", candidate_sha="candidate-sha")
         merged_landing_record = _landing_plan_record(
@@ -202,6 +240,21 @@ class MergeTrainControllerDecisionTests(unittest.TestCase):
         self.assertEqual(planned_decision.stack_collapse_plan_record_id, planned_record.record_id)
         self.assertEqual(waiting_decision.action, "wait_for_root_checks")
         self.assertEqual(waiting_decision.stack_collapse_plan_record_id, "stack-waiting")
+
+    def test_decision_resumes_collapsing_stack_plan(self) -> None:
+        collapsing_record = _stack_collapse_record(status="collapsing")
+
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=(),
+            landing_plan_records=(),
+            stack_collapse_plan_records=(collapsing_record,),
+        )
+
+        self.assertEqual(decision.action, "execute_stack_collapse")
+        self.assertEqual(
+            decision.stack_collapse_plan_record_id,
+            collapsing_record.record_id,
+        )
 
 
 def _candidate_record(

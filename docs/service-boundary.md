@@ -684,7 +684,8 @@ landing plans, and stack-collapse plans. Only records that match the active
 repository policy key and digest can drive the advertised controller action;
 stale records stay visible with a stale reason. Operators can use this route to
 see the current controller action, durable record ids, PR numbers, candidate
-SHA/check state, and compact entry counts without invoking a worker mutation.
+SHA/check state, compact entry counts, lease owner, active phase, lease and
+heartbeat age, and reconciliation state without invoking a worker mutation.
 
 `POST /v1/work-graph/merge-train/controller/run-once` is the operator-facing
 one-action controller for the full batch train. Request payloads name
@@ -698,10 +699,24 @@ collapsed root PR, plan/build/observe a batch candidate, plan landing, or land
 the original PRs. Dry-run calls return the next controller action without
 writing records or mutating GitHub. Mutation calls reuse the same persisted
 candidate, stack-collapse, and landing-plan records as the phase-specific
-routes, and reject stale policy digests before advancing stored records. The
+routes, acquire one storage-clocked repository/base lease, checkpoint before
+every GitHub mutation, and reject stale policy digests before advancing stored
+records. Expired owners cannot checkpoint or release after a successor acquires
+the fence. Restarted owners adopt exact candidate-ref, stack-merge, PR-merge,
+cleanup, and stack-child disposition evidence or remain
+`reconcile_required`; active/expired lease conflicts return explicit HTTP 409
+errors rather than becoming generic worker failures. The
 response `result.controller_action` is the helper contract for retry/stop
 behavior; see [merge-train-policy.md](merge-train-policy.md) for the action
 matrix and public-safe reporting fields.
+
+Every retained write-capable merge-train route acquires that same
+repository/base fence for its full mutation window. Phase-specific and legacy
+mutation calls therefore return the same lease-held or reconciliation-required
+HTTP 409 errors rather than racing the controller. Long-running legacy phases
+renew the lease at provider-effect boundaries, and successful evidence plus
+idempotency completion is persisted before the lease is released. Read-only
+controller and legacy dry-run calls do not acquire or mutate the fence.
 
 `POST /v1/work-graph/merge-train/batch-candidate/run-once` executes one
 policy-backed batch-candidate phase for a requested repository/base branch. The
@@ -735,10 +750,14 @@ native FastAPI route accepts `mode: plan` with a passed batch-candidate record i
 or `mode: land` with a landing-plan record id. Plan mode writes a
 `launchplane_merge_train_batch_landing_plans` record with the original PR order,
 expected head SHAs, expected base SHA, and policy merge method. Land mode merges
-the original PRs in that order through GitHub's PR merge endpoint, rejects stale
-base-branch movement before merging, relies on GitHub's SHA guard for each PR
-head, and records stale landing evidence before returning the normal stale-state
-response. When landing a collapsed stack root, the route validates the linked
+the original PRs in that order through GitHub's PR merge endpoint. Before each
+merge it requires the PR to remain open at the recorded head SHA and target the
+recorded base ref and rolling base SHA, then also uses GitHub's head-SHA guard.
+Recovery adopts a merged PR only when the recorded target branch contains its
+reported merge commit. A later commit after the final merge is accepted only
+when the final merge commit remains in target-branch history; divergence and
+force-push removal stay stale conflicts. When landing a collapsed stack root,
+the route validates the linked
 stack-collapse record before the root merge and then writes stack-child
 disposition evidence after the landing record is persisted. Accepted calls
 support optional `Idempotency-Key` replay/conflict handling.

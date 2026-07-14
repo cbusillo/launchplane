@@ -213,8 +213,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 {"head": {"sha": "child-head"}},
-                {},
-                {"head": {"sha": "child-head"}},
+                {"state": "closed", "head": {"sha": "child-head"}},
             )
         )
 
@@ -229,7 +228,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [
                 ("GET", "/repos/example/merge-train-repo/pulls/11", None),
                 ("PATCH", "/repos/example/merge-train-repo/pulls/11", {"state": "closed"}),
-                ("GET", "/repos/example/merge-train-repo/pulls/11", None),
             ],
         )
 
@@ -237,8 +235,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 {"head": {"sha": "child-head"}},
-                {},
-                {"head": {"sha": "moved-child-head"}},
+                {"state": "closed", "head": {"sha": "moved-child-head"}},
             )
         )
 
@@ -249,9 +246,24 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 expected_head_sha="child-head",
             )
 
-        self.assertEqual(
-            [request.method for request in transport.requests], ["GET", "PATCH", "GET"]
+        self.assertEqual([request.method for request in transport.requests], ["GET", "PATCH"])
+
+    def test_close_pull_request_rejects_open_patch_response(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"head": {"sha": "child-head"}},
+                {"state": "open", "head": {"sha": "child-head"}},
+            )
         )
+
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "did not remain closed"):
+            GitHubMergeTrainClient(transport=transport).close_pull_request(
+                repository="example/merge-train-repo",
+                pull_request_number=11,
+                expected_head_sha="child-head",
+            )
+
+        self.assertEqual([request.method for request in transport.requests], ["GET", "PATCH"])
 
     def test_close_pull_request_rejects_moved_child_head(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
@@ -282,6 +294,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             child_head_sha="child-head",
             expected_parent_head_sha="parent-head",
             parent_head_ref="feature/root",
+            protected_base_ref="main",
             collapse_id="collapse-123",
             child_pull_request_number=11,
             parent_pull_request_number=10,
@@ -321,6 +334,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 child_head_sha="child-head",
                 expected_parent_head_sha="parent-head",
                 parent_head_ref="feature/root",
+                protected_base_ref="main",
                 collapse_id="collapse-123",
                 child_pull_request_number=11,
                 parent_pull_request_number=10,
@@ -332,7 +346,65 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             "/repos/example/merge-train-repo/branches/feature%2Froot",
         )
 
-    def test_merge_stack_child_into_parent_rejects_main_branch_mutation(self) -> None:
+    def test_find_stack_child_merge_commit_adopts_exact_provider_effect(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="parent-after-child"),
+                {
+                    "sha": "parent-after-child",
+                    "commit": {
+                        "message": (
+                            "Launchplane stack collapse collapse-123: merge PR #11 into PR #10"
+                        )
+                    },
+                    "parents": [{"sha": "parent-head"}, {"sha": "child-head"}],
+                },
+            )
+        )
+
+        merge_commit_sha = GitHubMergeTrainClient(
+            transport=transport
+        ).find_stack_child_merge_commit(
+            repository="example/merge-train-repo",
+            child_head_sha="child-head",
+            expected_parent_head_sha="parent-head",
+            parent_head_ref="feature/root",
+            collapse_id="collapse-123",
+            child_pull_request_number=11,
+            parent_pull_request_number=10,
+        )
+
+        self.assertEqual(merge_commit_sha, "parent-after-child")
+        self.assertEqual(transport.requests[-1].method, "GET")
+        self.assertEqual(
+            transport.requests[-1].path,
+            "/repos/example/merge-train-repo/commits/parent-after-child",
+        )
+
+    def test_find_stack_child_merge_commit_rejects_unrelated_branch_advance(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="unrelated-head"),
+                {
+                    "sha": "unrelated-head",
+                    "commit": {"message": "unrelated change"},
+                    "parents": [{"sha": "parent-head"}],
+                },
+            )
+        )
+
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            GitHubMergeTrainClient(transport=transport).find_stack_child_merge_commit(
+                repository="example/merge-train-repo",
+                child_head_sha="child-head",
+                expected_parent_head_sha="parent-head",
+                parent_head_ref="feature/root",
+                collapse_id="collapse-123",
+                child_pull_request_number=11,
+                parent_pull_request_number=10,
+            )
+
+    def test_merge_stack_child_into_parent_rejects_configured_protected_base(self) -> None:
         with self.assertRaisesRegex(MergeTrainGitHubError, "protected base branch"):
             GitHubMergeTrainClient(
                 transport=RecordingMergeTrainGitHubTransport()
@@ -340,11 +412,37 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 repository="example/merge-train-repo",
                 child_head_sha="child-head",
                 expected_parent_head_sha="parent-head",
-                parent_head_ref="main",
+                parent_head_ref="release/2026",
+                protected_base_ref="release/2026",
                 collapse_id="collapse-123",
                 child_pull_request_number=11,
                 parent_pull_request_number=10,
             )
+
+    def test_merge_stack_child_into_parent_allows_main_when_custom_base_is_protected(
+        self,
+    ) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="parent-head"),
+                {"sha": "parent-after-child"},
+            )
+        )
+
+        merge_commit_sha = GitHubMergeTrainClient(
+            transport=transport
+        ).merge_stack_child_into_parent(
+            repository="example/merge-train-repo",
+            child_head_sha="child-head",
+            expected_parent_head_sha="parent-head",
+            parent_head_ref="main",
+            protected_base_ref="release/2026",
+            collapse_id="collapse-123",
+            child_pull_request_number=11,
+            parent_pull_request_number=10,
+        )
+
+        self.assertEqual(merge_commit_sha, "parent-after-child")
 
     def test_build_batch_candidate_creates_ref_and_merges_heads_in_order(self) -> None:
         candidate = _batch_candidate()
@@ -476,18 +574,28 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
     def test_land_batch_candidate_merges_original_prs_in_order(self) -> None:
         landing_plan = _landing_plan()
+        checkpoints: list[tuple[str, int, int]] = []
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="base-main"),
+                _landing_pull_request(1, base_sha="base-main"),
                 {"sha": "merge-sha-1"},
                 _github_branch(sha="merge-sha-1"),
+                _landing_pull_request(2, base_sha="merge-sha-1"),
                 {"sha": "merge-sha-2"},
                 _github_branch(sha="merge-sha-2"),
             )
         )
 
         landed_plan = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
-            landing_plan=landing_plan
+            landing_plan=landing_plan,
+            checkpoint=lambda progress, entry, phase: checkpoints.append(
+                (
+                    phase,
+                    entry.pull_request_number,
+                    sum(item.status == "merged" for item in progress.entries),
+                )
+            ),
         )
 
         self.assertEqual([entry.status for entry in landed_plan.entries], ["merged", "merged"])
@@ -499,12 +607,14 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [(request.method, request.path, request.body) for request in transport.requests],
             [
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("GET", "/repos/example/merge-train-repo/pulls/1", None),
                 (
                     "PUT",
                     "/repos/example/merge-train-repo/pulls/1/merge",
                     {"sha": "head-1", "merge_method": "merge"},
                 ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("GET", "/repos/example/merge-train-repo/pulls/2", None),
                 (
                     "PUT",
                     "/repos/example/merge-train-repo/pulls/2/merge",
@@ -513,6 +623,96 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
             ],
         )
+        self.assertEqual(
+            checkpoints,
+            [
+                ("merge_entry", 1, 0),
+                ("entry_merged", 1, 1),
+                ("merge_entry", 2, 1),
+                ("entry_merged", 2, 2),
+            ],
+        )
+
+    def test_land_batch_candidate_rejects_retargeted_pull_request(self) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                _landing_pull_request(
+                    1,
+                    base_sha="base-main",
+                    base_ref="release/2026",
+                ),
+            )
+        )
+
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "different base branch"):
+            GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                landing_plan=landing_plan
+            )
+
+        self.assertEqual([request.method for request in transport.requests], ["GET", "GET"])
+
+    def test_land_batch_candidate_rejects_pull_request_base_sha_movement(self) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                _landing_pull_request(1, base_sha="unexpected-base"),
+            )
+        )
+
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "base moved"):
+            GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                landing_plan=landing_plan
+            )
+
+        self.assertEqual([request.method for request in transport.requests], ["GET", "GET"])
+
+    def test_land_batch_candidate_accepts_descendant_movement_after_final_merge(self) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                _landing_pull_request(1, base_sha="base-main"),
+                {"sha": "merge-sha-1"},
+                _github_branch(sha="merge-sha-1"),
+                _landing_pull_request(2, base_sha="merge-sha-1"),
+                {"sha": "merge-sha-2"},
+                _github_branch(sha="later-base-sha"),
+                {"status": "ahead"},
+            )
+        )
+
+        landed_plan = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+            landing_plan=landing_plan
+        )
+
+        self.assertEqual([entry.status for entry in landed_plan.entries], ["merged", "merged"])
+        self.assertEqual(
+            transport.requests[-1].path,
+            "/repos/example/merge-train-repo/compare/merge-sha-2...main",
+        )
+
+    def test_land_batch_candidate_rejects_divergence_after_final_merge(self) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                _landing_pull_request(1, base_sha="base-main"),
+                {"sha": "merge-sha-1"},
+                _github_branch(sha="merge-sha-1"),
+                _landing_pull_request(2, base_sha="merge-sha-1"),
+                {"sha": "merge-sha-2"},
+                _github_branch(sha="rewritten-base-sha"),
+                {"status": "diverged"},
+            )
+        )
+
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "outside"):
+            GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                landing_plan=landing_plan
+            )
 
     def test_cleanup_batch_candidate_ref_deletes_candidate_ref(self) -> None:
         landing_plan = _landing_plan()
@@ -573,9 +773,9 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             responses=(
                 _github_branch(sha="merge-sha-1"),
                 _github_branch(sha="merge-sha-1"),
+                _landing_pull_request(2, base_sha="merge-sha-1"),
                 {"sha": "merge-sha-2"},
                 _github_branch(sha="merge-sha-2"),
-                {},
             )
         )
 
@@ -592,6 +792,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("GET", "/repos/example/merge-train-repo/pulls/2", None),
                 (
                     "PUT",
                     "/repos/example/merge-train-repo/pulls/2/merge",
@@ -616,12 +817,14 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="merge-sha-2"),
-                _github_pull_request(
+                _landing_pull_request(
                     1,
+                    base_sha="base-main",
                     state="closed",
                     merged=True,
                     merge_commit_sha="merge-sha-1",
                 ),
+                {"status": "ahead"},
                 _github_branch(sha="merge-sha-2"),
                 _github_branch(sha="merge-sha-2"),
             )
@@ -640,6 +843,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/1", None),
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/compare/merge-sha-1...main",
+                    None,
+                ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
             ],
@@ -657,18 +865,18 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="unexpected-base"),
-                _github_pull_request(
+                _landing_pull_request(
                     1,
+                    base_sha="base-main",
                     state="closed",
                     merged=True,
                     merge_commit_sha="merge-sha-1",
                 ),
-                _github_branch(sha="unexpected-base"),
-                _github_pull_request(2, state="open", merged=False),
+                {"status": "behind"},
             )
         )
 
-        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "outside"):
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "not contained"):
             GitHubMergeTrainClient(transport=transport).land_batch_candidate(
                 landing_plan=landing_plan
             )
@@ -678,8 +886,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/1", None),
-                ("GET", "/repos/example/merge-train-repo/branches/main", None),
-                ("GET", "/repos/example/merge-train-repo/pulls/2", None),
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/compare/merge-sha-1...main",
+                    None,
+                ),
             ],
         )
 
@@ -697,19 +908,23 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="merge-sha-2"),
-                _github_pull_request(
+                _landing_pull_request(
                     1,
+                    base_sha="base-main",
                     state="closed",
                     merged=True,
                     merge_commit_sha="merge-sha-1",
                 ),
+                {"status": "ahead"},
                 _github_branch(sha="merge-sha-2"),
-                _github_pull_request(
+                _landing_pull_request(
                     2,
+                    base_sha="merge-sha-1",
                     state="closed",
                     merged=True,
                     merge_commit_sha="merge-sha-2",
                 ),
+                {"status": "identical"},
                 _github_branch(sha="merge-sha-2"),
             )
         )
@@ -728,8 +943,18 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/1", None),
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/compare/merge-sha-1...main",
+                    None,
+                ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/2", None),
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/compare/merge-sha-2...main",
+                    None,
+                ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
             ],
         )
@@ -741,13 +966,16 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="merge-sha-1"),
-                _github_pull_request(
+                _landing_pull_request(
                     1,
+                    base_sha="base-main",
                     state="closed",
                     merged=True,
                     merge_commit_sha="merge-sha-1",
                 ),
+                {"status": "identical"},
                 _github_branch(sha="merge-sha-1"),
+                _landing_pull_request(2, base_sha="merge-sha-1"),
                 {"sha": "merge-sha-2"},
                 _github_branch(sha="merge-sha-2"),
             )
@@ -767,7 +995,13 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/1", None),
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/compare/merge-sha-1...main",
+                    None,
+                ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("GET", "/repos/example/merge-train-repo/pulls/2", None),
                 (
                     "PUT",
                     "/repos/example/merge-train-repo/pulls/2/merge",
@@ -784,19 +1018,23 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="merge-sha-2"),
-                _github_pull_request(
+                _landing_pull_request(
                     1,
+                    base_sha="base-main",
                     state="closed",
                     merged=True,
                     merge_commit_sha="merge-sha-1",
                 ),
+                {"status": "ahead"},
                 _github_branch(sha="merge-sha-2"),
-                _github_pull_request(
+                _landing_pull_request(
                     2,
+                    base_sha="merge-sha-1",
                     state="closed",
                     merged=True,
                     merge_commit_sha="merge-sha-2",
                 ),
+                {"status": "identical"},
                 _github_branch(sha="merge-sha-2"),
             )
         )
@@ -815,8 +1053,18 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/1", None),
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/compare/merge-sha-1...main",
+                    None,
+                ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/2", None),
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/compare/merge-sha-2...main",
+                    None,
+                ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
             ],
         )
@@ -850,9 +1098,10 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="base-main"),
+                _landing_pull_request(1, base_sha="base-main"),
                 {"sha": "merge-sha-1"},
                 _github_branch(sha="unexpected-base"),
-                _github_pull_request(2),
+                _landing_pull_request(2, base_sha="unexpected-base"),
             )
         )
 
@@ -862,7 +1111,8 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            [request.method for request in transport.requests], ["GET", "PUT", "GET", "GET"]
+            [request.method for request in transport.requests],
+            ["GET", "GET", "PUT", "GET", "GET"],
         )
         self.assertNotIn("DELETE", [request.method for request in transport.requests])
 
@@ -1120,6 +1370,7 @@ def _github_pull_request(
     author_association: str = "COLLABORATOR",
     head_sha: str | None = None,
     head_ref: str | None = None,
+    base_sha: str | None = None,
     base_ref: str = "main",
     repository: str = "cbusillo/sellyouroutboard",
     head_repository: str = "",
@@ -1145,13 +1396,35 @@ def _github_pull_request(
             "repo": {"full_name": normalized_head_repository},
         },
         "base": {
-            "sha": f"base-{number}",
+            "sha": base_sha or f"base-{number}",
             "ref": base_ref,
             "repo": {"full_name": normalized_base_repository},
         },
         "mergeable": mergeable,
         "mergeable_state": mergeable_state,
     }
+
+
+def _landing_pull_request(
+    number: int,
+    *,
+    base_sha: str,
+    state: str = "open",
+    merged: bool = False,
+    merge_commit_sha: str | None = None,
+    head_sha: str | None = None,
+    base_ref: str = "main",
+) -> dict[str, object]:
+    return _github_pull_request(
+        number,
+        state=state,
+        merged=merged,
+        merge_commit_sha=merge_commit_sha,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        base_ref=base_ref,
+        repository="example/merge-train-repo",
+    )
 
 
 def _github_branch(*, sha: str = "base-main-current") -> dict[str, object]:

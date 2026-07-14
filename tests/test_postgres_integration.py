@@ -29,6 +29,8 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestStatusUpdate,
 )
 from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerLeaseHeldError,
+    MergeTrainControllerLeaseLostError,
     MergeTrainControllerStateRecord,
     build_merge_train_controller_key,
 )
@@ -1244,25 +1246,26 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     policy_key="cbusillo/sellyouroutboard:main",
                     policy_sha256="policy-sha",
                     lease_owner="controller-a",
-                    lease_acquired_at="2026-07-13T00:00:00Z",
-                    lease_expires_at="2026-07-13T00:05:00Z",
+                    lease_seconds=30,
                 )
-                with self.assertRaisesRegex(ValueError, "held by another owner"):
+                with self.assertRaisesRegex(
+                    MergeTrainControllerLeaseHeldError,
+                    "held by another owner",
+                ):
                     second_store.acquire_merge_train_controller_state_record(
                         repository="cbusillo/sellyouroutboard",
                         base_branch="main",
                         policy_key="cbusillo/sellyouroutboard:main",
                         policy_sha256="policy-sha",
                         lease_owner="controller-b",
-                        lease_acquired_at="2026-07-13T00:01:00Z",
-                        lease_expires_at="2026-07-13T00:06:00Z",
+                        lease_seconds=30,
                     )
             finally:
                 second_store.close()
 
         self.assertEqual(first.lease_owner, "controller-a")
 
-    def test_merge_train_controller_compare_and_set_rejects_stale_lease_token(self) -> None:
+    def test_merge_train_controller_takeover_fences_stale_owner(self) -> None:
         with _store_for_fresh_head_database() as store:
             second_store = PostgresRecordStore(database_url=store.database_url)
             try:
@@ -1272,34 +1275,156 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     policy_key="cbusillo/sellyouroutboard:main",
                     policy_sha256="policy-sha",
                     lease_owner="controller-a",
-                    lease_acquired_at="2026-07-13T00:00:00Z",
-                    lease_expires_at="2026-07-13T00:05:00Z",
+                    lease_seconds=1,
                 )
+                time.sleep(1.1)
                 renewed = second_store.acquire_merge_train_controller_state_record(
                     repository="cbusillo/sellyouroutboard",
                     base_branch="main",
                     policy_key="cbusillo/sellyouroutboard:main",
                     policy_sha256="policy-sha",
-                    lease_owner="controller-a",
-                    lease_acquired_at="2026-07-13T00:06:00Z",
-                    lease_expires_at="2026-07-13T00:11:00Z",
+                    lease_owner="controller-b",
+                    lease_seconds=30,
                 )
-                with self.assertRaisesRegex(ValueError, "lease token changed"):
+                with self.assertRaisesRegex(
+                    MergeTrainControllerLeaseLostError,
+                    "lease owner changed",
+                ):
                     store.compare_and_set_merge_train_controller_state_record(
                         record=first.model_copy(
                             update={
-                                "updated_at": "2026-07-13T00:06:30Z",
-                                "heartbeat_at": "2026-07-13T00:06:30Z",
-                                "lease_expires_at": "2026-07-13T00:11:30Z",
+                                "active_action": "land_batch",
+                                "active_phase": "merge_batch_entries",
                             }
                         ),
                         expected_lease_owner="controller-a",
                         expected_lease_acquired_at=first.lease_acquired_at,
+                        lease_seconds=30,
                     )
+                stored = second_store.read_merge_train_controller_state_record(
+                    renewed.controller_key
+                )
             finally:
                 second_store.close()
 
-        self.assertEqual(renewed.lease_acquired_at, "2026-07-13T00:06:00Z")
+        self.assertEqual(renewed.lease_owner, "controller-b")
+        self.assertEqual(stored.lease_owner, "controller-b")
+
+    def test_merge_train_controller_concurrent_acquire_has_one_owner(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            barrier = threading.Barrier(2)
+
+            def acquire(owner: str) -> MergeTrainControllerStateRecord | BaseException:
+                contender = PostgresRecordStore(database_url=store.database_url)
+                try:
+                    barrier.wait(timeout=5)
+                    return contender.acquire_merge_train_controller_state_record(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                        policy_key="cbusillo/sellyouroutboard:main",
+                        policy_sha256="policy-sha",
+                        lease_owner=owner,
+                        lease_seconds=30,
+                    )
+                except BaseException as error:  # noqa: BLE001
+                    return error
+                finally:
+                    contender.close()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = tuple(executor.map(acquire, ("controller-a", "controller-b")))
+            winners = tuple(
+                result for result in results if isinstance(result, MergeTrainControllerStateRecord)
+            )
+            conflicts = tuple(
+                result
+                for result in results
+                if isinstance(result, MergeTrainControllerLeaseHeldError)
+            )
+
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(conflicts), 1)
+
+    def test_merge_train_controller_expired_active_phase_is_adopted(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            first = store.acquire_merge_train_controller_state_record(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                policy_key="cbusillo/sellyouroutboard:main",
+                policy_sha256="policy-sha",
+                lease_owner="controller-a",
+                lease_seconds=1,
+            )
+            checkpointed = store.compare_and_set_merge_train_controller_state_record(
+                record=first.model_copy(
+                    update={
+                        "active_action": "land_batch",
+                        "active_phase": "cleanup_candidate_ref",
+                        "active_record_id": "landing-record",
+                        "step_payload": {"landing_plan_record_id": "landing-record"},
+                    }
+                ),
+                expected_lease_owner=first.lease_owner,
+                expected_lease_acquired_at=first.lease_acquired_at,
+                lease_seconds=1,
+            )
+            time.sleep(1.1)
+            adopted = store.acquire_merge_train_controller_state_record(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                policy_key="cbusillo/sellyouroutboard:main",
+                policy_sha256="policy-sha",
+                lease_owner="controller-b",
+                lease_seconds=30,
+            )
+
+        self.assertEqual(checkpointed.active_phase, "cleanup_candidate_ref")
+        self.assertEqual(adopted.lease_owner, "controller-b")
+        self.assertEqual(adopted.reconciliation_status, "adopted")
+        self.assertEqual(adopted.active_record_id, "landing-record")
+
+    def test_merge_train_controller_operator_required_state_is_retried_by_service(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            acquired = store.acquire_merge_train_controller_state_record(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                policy_key="cbusillo/sellyouroutboard:main",
+                policy_sha256="policy-sha",
+                lease_owner="controller-a",
+                lease_seconds=30,
+            )
+            store.compare_and_set_merge_train_controller_state_record(
+                record=acquired.model_copy(
+                    update={
+                        "status": "reconcile_required",
+                        "lease_owner": "",
+                        "lease_acquired_at": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                        "active_action": "execute_stack_collapse",
+                        "active_phase": "merge_stack_branches",
+                        "reconciliation_status": "required",
+                        "reconciliation_detail": ("operator_required:github_request_rejected"),
+                    }
+                ),
+                expected_lease_owner=acquired.lease_owner,
+                expected_lease_acquired_at=acquired.lease_acquired_at,
+                lease_seconds=30,
+            )
+
+            adopted = store.acquire_merge_train_controller_state_record(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                policy_key="cbusillo/sellyouroutboard:main",
+                policy_sha256="policy-sha",
+                lease_owner="controller-b",
+                lease_seconds=30,
+            )
+
+        self.assertEqual(adopted.lease_owner, "controller-b")
+        self.assertEqual(adopted.reconciliation_status, "adopted")
+        self.assertEqual(adopted.active_phase, "merge_stack_branches")
+        self.assertIn("operator_required:github_request_rejected", adopted.reconciliation_detail)
 
     def test_row_lock_blocks_stale_owner_completion_until_claim_commits(self) -> None:
         with _store_for_fresh_head_database() as store:

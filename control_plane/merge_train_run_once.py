@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Callable, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -68,6 +68,7 @@ def execute_merge_train_run_once(
     token: str,
     trace_id: str,
     recorded_at: str,
+    mutation_checkpoint: Callable[[], None] | None = None,
 ) -> MergeTrainRunOnceResult:
     transport = UrllibMergeTrainGitHubTransport(
         token=token,
@@ -86,6 +87,8 @@ def execute_merge_train_run_once(
     }
     worker_step_result = None
     if request.mutate:
+        if mutation_checkpoint is not None:
+            mutation_checkpoint()
         github_client = GitHubMergeTrainClient(transport=transport)
         worker_step_result = run_merge_train_worker_step(
             policy=policy,
