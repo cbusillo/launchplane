@@ -3510,6 +3510,7 @@ def require_public_ingress_monitor_store(
 ) -> PublicIngressMonitorStore:
     required_methods = [
         "list_product_profile_records",
+        "list_route_binding_records",
         "list_public_ingress_observation_records",
         "write_public_ingress_observation_record",
         "list_public_ingress_incident_records",

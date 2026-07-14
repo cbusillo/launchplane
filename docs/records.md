@@ -706,6 +706,18 @@ open incident records the first failing observation and the latest failing
 observation for that lane. A recovery observation resolves the incident by
 recording the resolving observation and resolved timestamp.
 
+TLS certificate observations do not introduce a parallel storage family. They
+reuse `launchplane_public_ingress_observations` with `check_kind = "tls"` and a
+distinct per-domain `check_name`, so aliases can open or resolve incidents
+independently without overwriting the legacy public HTTP lane observation. The
+per-domain check identity includes a stable domain digest so punctuation-equivalent
+aliases cannot collide in observation or incident primary keys.
+The payload carries typed TLS evidence only: bounded issuer and subject strings,
+public-name match evidence, validity window, days remaining, route-binding
+ownership/source metadata, active-probe freshness, and provider-safe incident
+linkage. Full certificate chains, private topology, local resolver artifacts,
+and secrets are intentionally excluded from the durable record.
+
 Incident records are the source of truth for whether Launchplane currently
 considers a lane to be in a public-ingress incident. Notification routing and
 delivery are separate record families: observations say what was measured,
