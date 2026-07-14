@@ -4,20 +4,26 @@ import type {
   ApplyProductConfigData as GeneratedApplyProductConfigData,
   ApplyProductConfigResponse as GeneratedApplyProductConfigResponse,
   AuthSessionResponse as GeneratedAuthSessionResponse,
+  DataProvenance as GeneratedDataProvenance,
   DispatchGenericWebProdPromotionWorkflowData as GeneratedDispatchGenericWebProdPromotionWorkflowData,
   DispatchGenericWebProdPromotionWorkflowResponse as GeneratedDispatchGenericWebProdPromotionWorkflowResponse,
   DriverContextViewResponse as GeneratedDriverContextViewResponse,
   DriverDescriptorsResponse as GeneratedDriverDescriptorsResponse,
   EveryCodeSummaryResponse as GeneratedEveryCodeSummaryResponse,
   EveryCodeWorkRequestRecordsResponse as GeneratedEveryCodeWorkRequestRecordsResponse,
+  GitHubHumanIdentityResponse as GeneratedGitHubHumanIdentityResponse,
   LaunchplaneErrorResponse as GeneratedLaunchplaneErrorResponse,
   MergeTrainControllerStatusResponse as GeneratedMergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse as GeneratedMergeTrainPolicyTargetsResponse,
   MergeTrainRunRecord as GeneratedMergeTrainRunRecord,
+  ProductActionAvailability as GeneratedProductActionAvailability,
   ProductEnvironmentConfigStatus as GeneratedProductEnvironmentConfigStatus,
   ProductEnvironmentConfigStatusResponse as GeneratedProductEnvironmentConfigStatusResponse,
   ProductEnvironmentListResponse as GeneratedProductEnvironmentListResponse,
+  ProductEnvironmentSummary as GeneratedProductEnvironmentSummary,
+  ProductPreviewSummary as GeneratedProductPreviewSummary,
   ProductProfileListResponse as GeneratedProductProfileListResponse,
+  ProductSiteOverview as GeneratedProductSiteOverview,
   ProductConfigRuntimeInput as GeneratedProductConfigRuntimeInput,
   PreviewReadinessResponse as GeneratedPreviewReadinessResponse,
   RankWorkGraphSnapshotResponse as GeneratedRankWorkGraphSnapshotResponse,
@@ -35,22 +41,9 @@ export type Status =
   | "skipped"
   | "unknown"
   | "blocked";
-export type FreshnessStatus =
-  | "verified"
-  | "recorded"
-  | "stale"
-  | "missing"
-  | "unsupported";
+export type FreshnessStatus = GeneratedDataProvenance["freshness_status"];
 
-export interface DataProvenance {
-  source_kind: "record" | "provider" | "descriptor" | "unsupported";
-  source_record_id: string;
-  recorded_at: string;
-  refreshed_at: string;
-  freshness_status: FreshnessStatus;
-  stale_after: string;
-  detail: string;
-}
+export type DataProvenance = GeneratedDataProvenance;
 
 export interface AgentContextEvidence {
   code: string;
@@ -296,16 +289,7 @@ export type DriverListPayload = GeneratedDriverDescriptorsResponse;
 
 export type DriverViewPayload = GeneratedDriverContextViewResponse;
 
-export interface AuthIdentity {
-  provider: "github";
-  login: string;
-  github_id: number;
-  name: string;
-  email: string;
-  organizations: string[];
-  teams: string[];
-  role: "read_only" | "admin";
-}
+export type AuthIdentity = GeneratedGitHubHumanIdentityResponse;
 
 export type AuthSessionPayload = GeneratedAuthSessionResponse;
 
@@ -361,55 +345,13 @@ export interface ProductProfileRecord {
 
 export type ProductProfileListPayload = GeneratedProductProfileListResponse;
 
-export interface ProductActionAvailability {
-  action_id: string;
-  label: string;
-  description: string;
-  safety: Safety | string;
-  scope: string;
-  method: string;
-  route_path: string;
-  authz_action: string;
-  enabled: boolean;
-  disabled_reasons: string[];
-  trust_state: FreshnessStatus;
-}
+export type ProductActionAvailability = GeneratedProductActionAvailability;
 
-export interface ProductEnvironmentSummary {
-  environment: string;
-  context: string;
-  base_url: string;
-  health_url: string;
-  trust_state: FreshnessStatus;
-  provenance: DataProvenance;
-  warnings: string[];
-  available_actions: ProductActionAvailability[];
-}
+export type ProductEnvironmentSummary = GeneratedProductEnvironmentSummary;
 
-export interface ProductPreviewOverview {
-  enabled: boolean;
-  context: string;
-  slug_template: string;
-  active_count: number;
-  latest_preview_id: string;
-  trust_state: FreshnessStatus;
-  provenance: DataProvenance;
-}
+export type ProductPreviewOverview = GeneratedProductPreviewSummary;
 
-export interface ProductSiteOverview {
-  schema_version: number;
-  product: string;
-  display_name: string;
-  repository: string;
-  driver_id: string;
-  base_driver_id: string;
-  environments: ProductEnvironmentSummary[];
-  preview: ProductPreviewOverview;
-  warnings: string[];
-  trust_state: FreshnessStatus;
-  provenance: DataProvenance;
-  available_actions: ProductActionAvailability[];
-}
+export type ProductSiteOverview = GeneratedProductSiteOverview;
 
 export type ProductConfigItemStatus =
   | "configured"

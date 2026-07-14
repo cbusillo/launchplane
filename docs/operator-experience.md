@@ -335,3 +335,24 @@ hidden or removed once the new settings flow covers its use cases.
 The handwritten frontend contract mirror is not reusable authority. Generated
 backend contracts should replace request/response types; handwritten frontend
 types remain only for UI state and view models.
+
+### Browser Route Contract
+
+The clean-slate shell uses URL-owned product selection under the service-owned
+`/ui` prefix:
+
+- `/ui/products` lists Launchplane-owned products by display name with compact
+  testing, production, preview, warning, trust, and safe-inspection summaries.
+- `/ui/products/{product}` is the canonical product workspace. The route key is
+  the stored product key, while the visible identity remains the product display
+  name.
+- `/ui/engineering` is a separate Engineering Ops boundary. Product routes do
+  not load work-graph, issue-reconciliation, Every Code, merge-train, or platform
+  maintenance data.
+
+Product list and product detail reads have independent loading, empty, denied,
+missing, and failure states. A failed read must not become an empty product list,
+and a direct product URL must use `GET /v1/products/{product}` rather than a
+driver/context fallback. Environment, settings, secrets, activity, promotion,
+maintenance, and Engineering Ops child routes are added only when their typed
+views and supported controls exist.
