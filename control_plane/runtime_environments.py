@@ -6,11 +6,11 @@ from typing import Protocol
 
 import click
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.dokploy import source as dokploy_source
 
 DEFAULT_RUNTIME_ENVIRONMENTS_FILE = "config/runtime-environments.toml"
 
@@ -163,7 +163,7 @@ def resolve_tracked_target_environment_values(
     database_url: str | None = None,
 ) -> dict[str, str]:
     try:
-        source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
             control_plane_root=control_plane_root,
             database_url=database_url,
         )
@@ -176,7 +176,7 @@ def resolve_tracked_target_environment_values(
         ):
             return {}
         raise
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=context_name,
         instance_name=instance_name,

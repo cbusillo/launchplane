@@ -12,10 +12,12 @@ from urllib.request import Request, urlopen
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane.dokploy import JsonObject
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
+from control_plane.dokploy.api import JsonObject
 
 
 VeriReelAppMaintenanceAction = Literal[
@@ -179,10 +181,10 @@ def _resolve_stable_testing_application(
     *,
     control_plane_root: Path,
 ) -> tuple[str, str]:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name="verireel",
         instance_name="testing",
@@ -198,7 +200,7 @@ def _resolve_stable_testing_application(
 
 
 def _find_application_by_name(*, host: str, token: str, application_name: str) -> JsonObject | None:
-    raw_projects = control_plane_dokploy.dokploy_request(
+    raw_projects = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/project.all",
@@ -206,21 +208,21 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
     if not isinstance(raw_projects, list):
         return None
     for raw_project in raw_projects:
-        project = control_plane_dokploy.as_json_object(raw_project)
+        project = dokploy_api.as_json_object(raw_project)
         if project is None:
             continue
         raw_environments = project.get("environments")
         if not isinstance(raw_environments, list):
             continue
         for raw_environment in raw_environments:
-            environment = control_plane_dokploy.as_json_object(raw_environment)
+            environment = dokploy_api.as_json_object(raw_environment)
             if environment is None:
                 continue
             raw_applications = environment.get("applications")
             if not isinstance(raw_applications, list):
                 continue
             for raw_application in raw_applications:
-                application = control_plane_dokploy.as_json_object(raw_application)
+                application = dokploy_api.as_json_object(raw_application)
                 if application is None:
                     continue
                 if str(application.get("name") or "").strip() == application_name:
@@ -250,7 +252,7 @@ def _first_application_base_url(application: JsonObject) -> str:
     raw_domains = application.get("domains")
     domains = raw_domains if isinstance(raw_domains, list) else []
     for raw_domain in domains:
-        domain = control_plane_dokploy.as_json_object(raw_domain)
+        domain = dokploy_api.as_json_object(raw_domain)
         if domain is None:
             continue
         raw_host = str(domain.get("host") or "").strip()
@@ -264,7 +266,7 @@ def _first_application_base_url(application: JsonObject) -> str:
 
 
 def _resolve_application_base_url(*, host: str, token: str, application_id: str) -> str:
-    raw_domains = control_plane_dokploy.dokploy_request(
+    raw_domains = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.byApplicationId",
@@ -275,7 +277,7 @@ def _resolve_application_base_url(*, host: str, token: str, application_id: str)
 
 
 def _fetch_application_by_id(*, host: str, token: str, application_id: str) -> JsonObject:
-    return control_plane_dokploy.fetch_dokploy_target_payload(
+    return dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type="application",
@@ -284,17 +286,17 @@ def _fetch_application_by_id(*, host: str, token: str, application_id: str) -> J
 
 
 def _resolve_stable_testing_base_url(*, control_plane_root: Path) -> str:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name="verireel",
         instance_name="testing",
     )
     if target_definition is None:
         raise click.ClickException("No Dokploy target definition found for verireel/testing.")
-    base_urls = control_plane_dokploy.resolve_healthcheck_base_urls(
+    base_urls = dokploy_source.resolve_healthcheck_base_urls(
         target_definition=target_definition,
         environment_values={},
     )
@@ -321,7 +323,7 @@ def _resolve_stable_testing_smoke_maintenance_secret(*, control_plane_root: Path
 
 
 def _preview_application_environment_map(application: JsonObject) -> dict[str, str]:
-    return control_plane_dokploy.parse_dokploy_env_text(str(application.get("env") or ""))
+    return dokploy_api.parse_dokploy_env_text(str(application.get("env") or ""))
 
 
 def _resolve_preview_smoke_maintenance_target(
@@ -402,7 +404,7 @@ def _request_internal_smoke_maintenance_api(
 def _find_application_schedule(
     *, host: str, token: str, application_id: str, schedule_name: str
 ) -> JsonObject | None:
-    for schedule in control_plane_dokploy.list_dokploy_schedules(
+    for schedule in dokploy_api.list_dokploy_schedules(
         host=host,
         token=token,
         target_id=application_id,
@@ -429,7 +431,7 @@ def _upsert_application_schedule(
     )
     payload: JsonObject = {
         "name": schedule_name,
-        "cronExpression": control_plane_dokploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+        "cronExpression": dokploy_post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
         "scheduleType": "application",
         "shellType": "sh",
         "command": command,
@@ -438,7 +440,7 @@ def _upsert_application_schedule(
         "timezone": "UTC",
     }
     if existing_schedule is None:
-        control_plane_dokploy.dokploy_request(
+        dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/schedule.create",
@@ -447,10 +449,10 @@ def _upsert_application_schedule(
         )
     else:
         update_payload: JsonObject = {
-            "scheduleId": control_plane_dokploy.schedule_key(existing_schedule),
+            "scheduleId": dokploy_api.schedule_key(existing_schedule),
             **payload,
         }
-        control_plane_dokploy.dokploy_request(
+        dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/schedule.update",
@@ -467,7 +469,7 @@ def _upsert_application_schedule(
         raise click.ClickException(
             f"Dokploy schedule {schedule_name!r} for application {application_id!r} could not be resolved."
         )
-    schedule_id = control_plane_dokploy.schedule_key(resolved_schedule)
+    schedule_id = dokploy_api.schedule_key(resolved_schedule)
     if not schedule_id:
         raise click.ClickException(
             f"Dokploy schedule {schedule_name!r} for application {application_id!r} did not expose a schedule id."
@@ -493,12 +495,12 @@ def _run_application_command_with_retries(
                 schedule_name=schedule_name,
                 command=command,
             )
-            latest_before = control_plane_dokploy.latest_deployment_for_schedule(
+            latest_before = dokploy_api.latest_deployment_for_schedule(
                 host=host,
                 token=token,
                 schedule_id=schedule_id,
             )
-            control_plane_dokploy.dokploy_request(
+            dokploy_api.dokploy_request(
                 host=host,
                 token=token,
                 path="/api/schedule.runManually",
@@ -506,11 +508,11 @@ def _run_application_command_with_retries(
                 payload={"scheduleId": schedule_id},
                 timeout_seconds=timeout_seconds,
             )
-            control_plane_dokploy.wait_for_dokploy_schedule_deployment(
+            dokploy_api.wait_for_dokploy_schedule_deployment(
                 host=host,
                 token=token,
                 schedule_id=schedule_id,
-                before_key=control_plane_dokploy.deployment_key(latest_before),
+                before_key=dokploy_api.deployment_key(latest_before),
                 timeout_seconds=timeout_seconds,
             )
             return
@@ -521,7 +523,7 @@ def _run_application_command_with_retries(
 
 
 def _trigger_application_deploy(*, host: str, token: str, application_id: str) -> None:
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.deploy",
@@ -553,7 +555,7 @@ def execute_verireel_app_maintenance(
                     control_plane_root=control_plane_root,
                 )
             else:
-                host, token = control_plane_dokploy.read_dokploy_config(
+                host, token = dokploy_source.read_dokploy_config(
                     control_plane_root=control_plane_root
                 )
                 application_name, application_id, base_url, secret = (
@@ -570,9 +572,7 @@ def execute_verireel_app_maintenance(
                 request=request,
             )
         else:
-            host, token = control_plane_dokploy.read_dokploy_config(
-                control_plane_root=control_plane_root
-            )
+            host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
             application_name, application_id = _resolve_stable_testing_application(
                 control_plane_root=control_plane_root,
             )

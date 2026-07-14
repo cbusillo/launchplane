@@ -7,7 +7,6 @@ from typing import Literal, Protocol, cast
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
@@ -18,6 +17,8 @@ from control_plane.contracts.odoo_instance_override_record import (
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
 
 
 class OdooPostDeployStore(Protocol):
@@ -134,11 +135,11 @@ def _resolve_compose_target_definition(
     *,
     control_plane_root: Path,
     request: OdooPostDeployRequest,
-) -> control_plane_dokploy.DokployTargetDefinition:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+) -> dokploy_source.DokployTargetDefinition:
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=request.context,
         instance_name=request.instance,
@@ -193,7 +194,7 @@ def execute_odoo_post_deploy(
         request=request,
     )
     protected_shopify_store_keys = (
-        control_plane_dokploy.protected_shopify_store_keys_for_target_definition(target_definition)
+        dokploy_source.protected_shopify_store_keys_for_target_definition(target_definition)
     )
 
     if odoo_override_record is not None and override_should_apply:
@@ -230,11 +231,9 @@ def execute_odoo_post_deploy(
             )
 
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         post_deploy_readback_markers = (
-            control_plane_dokploy.run_compose_post_deploy_update(
+            dokploy_post_deploy.run_compose_post_deploy_update(
                 host=host,
                 token=token,
                 target_definition=target_definition,

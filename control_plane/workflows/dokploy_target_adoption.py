@@ -6,11 +6,11 @@ from pydantic import BaseModel, ConfigDict
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetType
-from control_plane.dokploy import JsonObject
 from control_plane.workflows.provider_target_dual_write import (
     prepare_provider_target_from_dokploy_records,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy.api import JsonObject
 
 
 class DokployTargetAdoptionRecordStore(Protocol):

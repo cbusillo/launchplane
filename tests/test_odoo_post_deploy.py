@@ -70,15 +70,15 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
                     return_value=self._source_of_truth(),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.run_compose_post_deploy_update",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
                     side_effect=capture_post_deploy_run,
                 ),
                 patch(
@@ -142,15 +142,15 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
                     return_value=self._source_of_truth(),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.run_compose_post_deploy_update",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
                     side_effect=lambda **kwargs: captured_runs.append(kwargs),
                 ),
             ):
@@ -174,15 +174,15 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
                     return_value=self._source_of_truth(),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.run_compose_post_deploy_update",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
                     side_effect=lambda **kwargs: captured_runs.append(kwargs),
                 ),
             ):
@@ -235,15 +235,15 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
                     return_value=self._source_of_truth(),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.run_compose_post_deploy_update",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
                     side_effect=lambda **kwargs: captured_runs.append(kwargs),
                 ),
             ):
@@ -309,15 +309,15 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
                     return_value=self._source_of_truth(),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.run_compose_post_deploy_update",
+                    "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
                     side_effect=lambda **kwargs: captured_runs.append(kwargs),
                 ),
             ):

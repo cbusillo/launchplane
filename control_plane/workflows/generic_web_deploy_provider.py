@@ -9,7 +9,6 @@ from typing import Literal, Protocol, cast
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.deploy_target import (
@@ -30,6 +29,8 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
 
 
 class GenericWebResolvedDeployTarget(BaseModel):
@@ -311,7 +312,7 @@ class DokployGenericWebDeployProvider:
             instance_name=instance_name,
             target_environment=target_definition.env,
         )
-        configured_ship_mode = control_plane_dokploy.resolve_dokploy_ship_mode(
+        configured_ship_mode = dokploy_source.resolve_dokploy_ship_mode(
             context_name,
             instance_name,
             environment_values,
@@ -345,7 +346,7 @@ class DokployGenericWebDeployProvider:
             target_name=target_name,
         )
         deployed_target = provider_target.to_deployed_target_reference()
-        deploy_timeout_seconds = control_plane_dokploy.resolve_ship_timeout_seconds(
+        deploy_timeout_seconds = dokploy_source.resolve_ship_timeout_seconds(
             timeout_override_seconds=request_timeout_seconds,
             target_definition=target_definition,
         )
@@ -366,9 +367,7 @@ class DokployGenericWebDeployProvider:
         before_provider_mutation: Callable[[str], None],
         effect_started: Callable[[], None],
     ) -> None:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         execute_dokploy_artifact_deploy(
             host=host,
             token=token,
@@ -388,18 +387,16 @@ class DokployGenericWebDeployProvider:
         resolved_deploy_target: GenericWebResolvedDeployTarget,
         deployment_title: str,
     ) -> GenericWebProviderDeploymentObservation:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         target = resolved_deploy_target.resolved_target
-        deployment = control_plane_dokploy.deployment_for_target_by_title(
+        deployment = dokploy_api.deployment_for_target_by_title(
             host=host,
             token=token,
             target_type=target.target_type,
             target_id=target.target_id,
             title=deployment_title,
         )
-        status = control_plane_dokploy.deployment_status(deployment)
+        status = dokploy_api.deployment_status(deployment)
         if deployment is None:
             return GenericWebProviderDeploymentObservation(outcome="absent")
         if status in {"", "pending", "queued", "running"}:
@@ -430,7 +427,7 @@ class DokployGenericWebDeployProvider:
         return GenericWebProviderDeploymentObservation(
             outcome="present",
             deployment_status=status,
-            deployment_id=control_plane_dokploy.deployment_key(deployment),
+            deployment_id=dokploy_api.deployment_key(deployment),
             started_at=str(
                 deployment.get("startedAt") or deployment.get("started_at") or ""
             ).strip(),
@@ -512,12 +509,12 @@ def _dokploy_target_definition_for_lane(
     *,
     target_record: DokployTargetRecord,
     target_id_record: DokployTargetIdRecord,
-) -> control_plane_dokploy.DokployTargetDefinition:
+) -> dokploy_source.DokployTargetDefinition:
     if target_record.context != target_id_record.context:
         raise click.ClickException("Dokploy target context must match target-id context.")
     if target_record.instance != target_id_record.instance:
         raise click.ClickException("Dokploy target instance must match target-id instance.")
-    return control_plane_dokploy.DokployTargetDefinition(
+    return dokploy_source.DokployTargetDefinition(
         context=target_record.context,
         instance=target_record.instance,
         project_name=target_record.project_name,
@@ -559,7 +556,7 @@ def _dokploy_target_type_from_provider_target(
 def _validate_dokploy_provider_target(
     *,
     provider_target: ProviderTargetRecord,
-    target_definition: control_plane_dokploy.DokployTargetDefinition,
+    target_definition: dokploy_source.DokployTargetDefinition,
 ) -> None:
     expected_provider_id = "dokploy"
     if provider_target.provider_id != expected_provider_id:

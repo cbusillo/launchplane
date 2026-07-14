@@ -8,13 +8,14 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.service_auth import parse_authz_policy_toml
 from control_plane.workflows.ingress_provider import (
     NPMPLUS_BASE_URL_ENV_KEY,
     NPMPLUS_IDENTITY_ENV_KEY,
     NPMPLUS_SECRET_ENV_KEY,
 )
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
 
 LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 _DATABASE_URL_ENV_KEY = "LAUNCHPLANE_DATABASE_URL"
@@ -152,17 +153,15 @@ def execute_launchplane_self_deploy(
     control_plane_root_path: Path,
     request: LaunchplaneSelfDeployRequest,
 ) -> LaunchplaneSelfDeployResult:
-    host, token = control_plane_dokploy.read_dokploy_config(
-        control_plane_root=control_plane_root_path
-    )
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root_path)
+    target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=request.target_type,
         target_id=request.target_id,
     )
     raw_env_text = str(target_payload.get("env") or "")
-    previous_env_map = control_plane_dokploy.parse_dokploy_env_text(raw_env_text)
+    previous_env_map = dokploy_api.parse_dokploy_env_text(raw_env_text)
     updates = {LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY: request.image_reference}
     updates.update(request.oauth_env)
     removals: tuple[str, ...] = request.oauth_env_removals
@@ -173,15 +172,15 @@ def execute_launchplane_self_deploy(
             "LAUNCHPLANE_POLICY_TOML",
             "LAUNCHPLANE_POLICY_FILE",
         )
-    updated_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+    updated_env_text = dokploy_api.render_dokploy_env_text_with_overrides(
         raw_env_text,
         updates=updates,
         removals=removals,
     )
-    updated_env_map = control_plane_dokploy.parse_dokploy_env_text(updated_env_text)
+    updated_env_map = dokploy_api.parse_dokploy_env_text(updated_env_text)
     _validate_bootstrap_target_env(updated_env_map)
     if updated_env_text != raw_env_text:
-        control_plane_dokploy.update_dokploy_target_env(
+        dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
             target_type=request.target_type,
@@ -189,7 +188,7 @@ def execute_launchplane_self_deploy(
             target_payload=target_payload,
             env_text=updated_env_text,
         )
-    control_plane_dokploy.trigger_deployment(
+    dokploy_api.trigger_deployment(
         host=host,
         token=token,
         target_type=request.target_type,

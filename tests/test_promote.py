@@ -932,7 +932,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "control_plane.dokploy.read_dokploy_config",
+                    "control_plane.dokploy.source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
@@ -940,7 +940,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     return_value={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons/shared"},
                 ),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     side_effect=[
                         {"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
                         {
@@ -954,11 +954,11 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     ],
                 ),
                 patch(
-                    "control_plane.dokploy.sync_dokploy_compose_raw_source",
+                    "control_plane.dokploy.compose.sync_dokploy_compose_raw_source",
                     return_value={"source_type": "raw", "compose_sha256": "abc123"},
                 ) as raw_compose_sync,
                 patch(
-                    "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.dokploy.source.read_control_plane_dokploy_source_of_truth",
                     return_value=control_plane_dokploy.DokploySourceOfTruth(
                         schema_version=1,
                         targets=(
@@ -974,7 +974,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "control_plane.dokploy.update_dokploy_target_env",
+                    "control_plane.dokploy.api.update_dokploy_target_env",
                     side_effect=lambda **kwargs: captured_update.update(kwargs),
                 ),
                 patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
@@ -1023,7 +1023,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.dokploy.read_dokploy_config",
+                "control_plane.dokploy.source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
@@ -1031,11 +1031,13 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 return_value={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons/shared"},
             ),
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
             ),
-            patch("control_plane.dokploy.sync_dokploy_compose_raw_source") as raw_compose_sync,
-            patch("control_plane.dokploy.update_dokploy_target_env") as update_target_env,
+            patch(
+                "control_plane.dokploy.compose.sync_dokploy_compose_raw_source"
+            ) as raw_compose_sync,
+            patch("control_plane.dokploy.api.update_dokploy_target_env") as update_target_env,
             patch.dict(os.environ, {}, clear=True),
         ):
             with self.assertRaisesRegex(click.ClickException, "LAUNCHPLANE_DATABASE_URL"):
@@ -1081,11 +1083,11 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "control_plane.dokploy.read_dokploy_config",
+                    "control_plane.dokploy.source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     side_effect=[
                         {"env": stale_env},
                         {
@@ -1098,11 +1100,11 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     ],
                 ),
                 patch(
-                    "control_plane.dokploy.sync_dokploy_compose_raw_source",
+                    "control_plane.dokploy.compose.sync_dokploy_compose_raw_source",
                     return_value={"source_type": "raw", "compose_sha256": "abc123"},
                 ),
                 patch(
-                    "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.dokploy.source.read_control_plane_dokploy_source_of_truth",
                     return_value=control_plane_dokploy.DokploySourceOfTruth(
                         schema_version=1,
                         targets=(
@@ -1118,7 +1120,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "control_plane.dokploy.update_dokploy_target_env",
+                    "control_plane.dokploy.api.update_dokploy_target_env",
                     side_effect=lambda **kwargs: captured_update.update(kwargs),
                 ),
                 patch.dict(
@@ -1175,7 +1177,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "control_plane.dokploy.read_dokploy_config",
+                    "control_plane.dokploy.source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
@@ -1183,12 +1185,12 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     return_value={"SMTP_PASSWORD": "managed-secret-value"},
                 ),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     return_value={
                         "env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:old"
                     },
                 ),
-                patch("control_plane.dokploy.update_dokploy_target_env") as update_target_env,
+                patch("control_plane.dokploy.api.update_dokploy_target_env") as update_target_env,
                 patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
             ):
                 with self.assertRaises(click.ClickException) as error_context:
@@ -1222,7 +1224,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.dokploy.read_dokploy_config",
+                "control_plane.dokploy.source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
@@ -1230,7 +1232,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 return_value={},
             ),
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "sourceType": "git",
                     "customGitUrl": "git@github.com:cbusillo/odoo-ai.git",
@@ -1269,7 +1271,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.dokploy.read_dokploy_config",
+                "control_plane.dokploy.source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
@@ -1277,7 +1279,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 return_value={},
             ),
             patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "env": (
                         "DOCKER_IMAGE=odoo-runtime\n"
@@ -1315,7 +1317,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "control_plane.dokploy.read_dokploy_config",
+                    "control_plane.dokploy.source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
@@ -1323,7 +1325,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     return_value={},
                 ),
                 patch(
-                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     side_effect=[
                         {
                             "env": (
@@ -1336,7 +1338,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     ],
                 ),
                 patch(
-                    "control_plane.dokploy.update_dokploy_target_env",
+                    "control_plane.dokploy.api.update_dokploy_target_env",
                     side_effect=lambda **kwargs: captured_update.update(kwargs),
                 ),
                 patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),

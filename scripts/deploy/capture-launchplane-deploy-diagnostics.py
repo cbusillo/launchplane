@@ -7,7 +7,7 @@ from typing import Any
 
 from click import ClickException
 
-from control_plane import dokploy as control_plane_dokploy
+from control_plane.dokploy import api as control_plane_dokploy
 
 
 def _env(name: str) -> str:
@@ -113,22 +113,22 @@ def _target_containers(*, containers_payload: Any, app_name: str) -> list[dict[s
 
 
 def _container_id(container: Mapping[str, object]) -> str:
-    return str(container.get("containerId") or container.get("id") or container.get("Id") or "").strip()
+    return str(
+        container.get("containerId") or container.get("id") or container.get("Id") or ""
+    ).strip()
 
 
 def _container_config_summary(config_payload: Any) -> dict[str, object]:
     if not isinstance(config_payload, dict):
         return {"config_present": False}
-    labels = ((config_payload.get("Config") or {}).get("Labels") or {})
-    networks = ((config_payload.get("NetworkSettings") or {}).get("Networks") or {})
+    labels = (config_payload.get("Config") or {}).get("Labels") or {}
+    networks = (config_payload.get("NetworkSettings") or {}).get("Networks") or {}
     label_map = labels if isinstance(labels, dict) else {}
     network_map = networks if isinstance(networks, dict) else {}
     return {
         "config_present": True,
         "label_count": len(label_map),
-        "traefik_label_count": len(
-            [key for key in label_map if str(key).startswith("traefik.")]
-        ),
+        "traefik_label_count": len([key for key in label_map if str(key).startswith("traefik.")]),
         "traefik_enable": label_map.get("traefik.enable"),
         "traefik_docker_network": label_map.get("traefik.docker.network"),
         "network_names": sorted(str(key) for key in network_map),

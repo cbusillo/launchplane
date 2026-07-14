@@ -6,8 +6,8 @@ from typing import Literal
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane.dokploy import source as dokploy_source
 
 
 class VeriReelStableEnvironmentRequest(BaseModel):
@@ -43,10 +43,10 @@ def resolve_verireel_stable_environment(
     control_plane_root: Path,
     request: VeriReelStableEnvironmentRequest,
 ) -> VeriReelStableEnvironmentResult:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=request.context,
         instance_name=request.instance,
@@ -60,7 +60,7 @@ def resolve_verireel_stable_environment(
         context_name=request.context,
         instance_name=request.instance,
     )
-    base_urls = control_plane_dokploy.resolve_healthcheck_base_urls(
+    base_urls = dokploy_source.resolve_healthcheck_base_urls(
         target_definition=target_definition,
         environment_values=environment_values,
     )
@@ -68,9 +68,7 @@ def resolve_verireel_stable_environment(
         raise click.ClickException(
             f"No base URL configured for {request.context}/{request.instance}."
         )
-    healthcheck_path = control_plane_dokploy.normalize_healthcheck_path(
-        target_definition.healthcheck_path
-    )
+    healthcheck_path = dokploy_source.normalize_healthcheck_path(target_definition.healthcheck_path)
     return VeriReelStableEnvironmentResult(
         context=request.context,
         instance=request.instance,

@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+from typing import Literal
+from urllib.parse import urlencode
+
+from fastapi import FastAPI
+from httpx2 import Response
+
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord, EdgeEndpointStatus
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
+from control_plane.contracts.ingress_route_audit_record import (
+    IngressRouteAuditOperation,
+    IngressRouteAuditRecord,
+)
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
+from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyRequest,
     NpmplusIngressApplyResult,
     NpmplusIngressRouteDesiredState,
 )
+from tests.support.http import get as http_get
 
 
 class _FakeNpmplusIngressClient:
@@ -107,6 +119,44 @@ def _npmplus_proxy_host(**overrides: object) -> NpmplusProxyHost:
     )
 
 
+def _private_health_endpoint_read_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["repairshopr-sync"],
+                    "contexts": ["repairshopr-sync"],
+                    "actions": ["private_health_endpoint.read"],
+                }
+            ]
+        }
+    )
+
+
+def _ingress_route_audit_read_policy(*, contexts: tuple[str, ...]) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["launchplane"],
+                    "contexts": list(contexts),
+                    "actions": ["ingress_route.plan"],
+                }
+            ]
+        }
+    )
+
+
 def _edge_endpoint_record(*, status: EdgeEndpointStatus = "active") -> EdgeEndpointRecord:
     return EdgeEndpointRecord(
         endpoint_key="cm-prod-dokploy",
@@ -171,6 +221,46 @@ def _ingress_canary_route_record(*, status: str = "active") -> IngressCanaryRout
     )
 
 
+def _ingress_route_audit_record(
+    *,
+    record_id: str = "ingress-route-audit-test",
+    product: str = "launchplane",
+    context: str = "reon-prod",
+    mode: Literal["dry-run", "apply"] = "dry-run",
+    status: Literal["pending", "planned", "applied", "unchanged"] = "planned",
+    dry_run: bool = True,
+    provider_host_id: int | None = 78,
+    trace_id: str = "trace-audit-1",
+    idempotency_key: str = "audit-key-1",
+    recorded_at: str = "2026-06-01T00:00:00Z",
+) -> IngressRouteAuditRecord:
+    return IngressRouteAuditRecord(
+        record_id=record_id,
+        product=product,
+        context=context,
+        mode=mode,
+        status=status,
+        dry_run=dry_run,
+        requested_domains=("app.example.com",),
+        edge_endpoint_key="edge-app",
+        expected_host_id=None,
+        provider_host_id=provider_host_id,
+        operations=(
+            IngressRouteAuditOperation(
+                action="create",
+                host_id=provider_host_id,
+                domain_names=("app.example.com",),
+                requires_apply=mode == "dry-run",
+                change_categories=("create",),
+            ),
+        ),
+        trace_id=trace_id,
+        idempotency_key=idempotency_key,
+        reason="test",
+        recorded_at=recorded_at,
+    )
+
+
 def _ingress_canary_route_record_apply_payload(*, mode: str = "dry-run") -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -179,3 +269,222 @@ def _ingress_canary_route_record_apply_payload(*, mode: str = "dry-run") -> dict
         "reason": "test ingress canary route record apply",
         "confirmation": "APPLY LAUNCHPLANE INGRESS CANARY ROUTE RECORD" if mode == "apply" else "",
     }
+
+
+def _authorization_headers(
+    *,
+    authorization: str,
+    headers: dict[str, str] | None,
+) -> dict[str, str]:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return request_headers
+
+
+def _query_params(**values: str) -> dict[str, str]:
+    return {name: value for name, value in values.items() if value}
+
+
+async def _get_edge_endpoint_records(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    limit: str = "",
+    provider: str = "",
+    status: str = "",
+) -> Response:
+    params = _query_params(limit=limit, provider=provider, status=status)
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await http_get(
+        app,
+        f"/v1/edge-endpoints/records{suffix}",
+        headers=_authorization_headers(authorization=authorization, headers=headers),
+    )
+
+
+async def _get_edge_endpoint_record(
+    app: FastAPI,
+    endpoint_key: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> Response:
+    return await http_get(
+        app,
+        f"/v1/edge-endpoints/records/{endpoint_key}",
+        headers=_authorization_headers(authorization=authorization, headers=headers),
+    )
+
+
+async def _get_private_health_endpoint_records(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "repairshopr-sync",
+    context: str = "repairshopr-sync",
+    instance: str = "",
+    status: str = "",
+    limit: str = "",
+) -> Response:
+    params = _query_params(
+        product=product,
+        context=context,
+        instance=instance,
+        status=status,
+        limit=limit,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await http_get(
+        app,
+        f"/v1/private-health-endpoints/records{suffix}",
+        headers=_authorization_headers(authorization=authorization, headers=headers),
+    )
+
+
+async def _get_private_health_endpoint_record(
+    app: FastAPI,
+    endpoint_key: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "repairshopr-sync",
+    context: str = "repairshopr-sync",
+    instance: str = "prod",
+) -> Response:
+    params = _query_params(product=product, context=context, instance=instance)
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await http_get(
+        app,
+        f"/v1/private-health-endpoints/records/{endpoint_key}{suffix}",
+        headers=_authorization_headers(authorization=authorization, headers=headers),
+    )
+
+
+async def _get_route_binding_records(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "example-product",
+    context: str = "example-testing",
+    instance: str = "",
+    status: str = "",
+    limit: str = "",
+) -> Response:
+    params = _query_params(
+        product=product,
+        context=context,
+        instance=instance,
+        status=status,
+        limit=limit,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await http_get(
+        app,
+        f"/v1/route-bindings/records{suffix}",
+        headers=_authorization_headers(authorization=authorization, headers=headers),
+    )
+
+
+async def _get_route_binding_record(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "example-product",
+    context: str = "example-testing",
+    instance: str = "web",
+) -> Response:
+    params = _query_params(product=product, context=context, instance=instance)
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await http_get(
+        app,
+        f"/v1/route-bindings/records/current{suffix}",
+        headers=_authorization_headers(authorization=authorization, headers=headers),
+    )
+
+
+async def _get_ingress_canary_route_records(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "",
+    context: str = "",
+    status: str = "",
+    limit: str = "",
+) -> Response:
+    params = _query_params(product=product, context=context, status=status, limit=limit)
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await http_get(
+        app,
+        f"/v1/ingress/canary-routes/records{suffix}",
+        headers=_authorization_headers(authorization=authorization, headers=headers),
+    )
+
+
+async def _get_ingress_canary_route_record(
+    app: FastAPI,
+    canary_key: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> Response:
+    return await http_get(
+        app,
+        f"/v1/ingress/canary-routes/records/{canary_key}",
+        headers=_authorization_headers(authorization=authorization, headers=headers),
+    )
+
+
+async def _get_ingress_route_audit_records(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "",
+    context: str = "",
+    status: str = "",
+    mode: str = "",
+    provider_host_id: str = "",
+    trace_id: str = "",
+    idempotency_key: str = "",
+    limit: str = "",
+) -> Response:
+    params = _query_params(
+        product=product,
+        context=context,
+        status=status,
+        mode=mode,
+        provider_host_id=provider_host_id,
+        trace_id=trace_id,
+        idempotency_key=idempotency_key,
+        limit=limit,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await http_get(
+        app,
+        f"/v1/ingress/route-audits/records{suffix}",
+        headers=_authorization_headers(authorization=authorization, headers=headers),
+    )
+
+
+async def _get_ingress_route_audit_record(
+    app: FastAPI,
+    record_id: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "",
+    context: str = "",
+) -> Response:
+    params = _query_params(product=product, context=context)
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await http_get(
+        app,
+        f"/v1/ingress/route-audits/records/{record_id}{suffix}",
+        headers=_authorization_headers(authorization=authorization, headers=headers),
+    )

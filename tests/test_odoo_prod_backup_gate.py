@@ -73,11 +73,11 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_dokploy.run_compose_odoo_backup_gate"
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_gate"
             ) as run_backup_mock,
             patch(
                 "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
@@ -126,11 +126,11 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_dokploy.run_compose_odoo_backup_gate",
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_gate",
                 side_effect=click.ClickException("backup failed"),
             ),
             patch(

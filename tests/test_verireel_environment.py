@@ -30,7 +30,7 @@ class VeriReelStableEnvironmentTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             with (
                 patch(
-                    "control_plane.workflows.verireel_environment.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.workflows.verireel_environment.dokploy_source.read_control_plane_dokploy_source_of_truth",
                     return_value=source_of_truth,
                 ),
                 patch(

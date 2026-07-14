@@ -11,10 +11,8 @@ from urllib.request import Request, urlopen
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
-from control_plane.dokploy import JsonObject, JsonValue
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -44,6 +42,9 @@ from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy.api import JsonObject, JsonValue
 
 
 _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
@@ -440,27 +441,27 @@ def _iter_dokploy_applications(raw_projects: object) -> Iterator[JsonObject]:
             "Dokploy project inventory returned an invalid response payload."
         )
     for raw_project in raw_projects:
-        project = control_plane_dokploy.as_json_object(raw_project)
+        project = dokploy_api.as_json_object(raw_project)
         if project is None:
             continue
         raw_environments = project.get("environments")
         if not isinstance(raw_environments, list):
             continue
         for raw_environment in raw_environments:
-            environment = control_plane_dokploy.as_json_object(raw_environment)
+            environment = dokploy_api.as_json_object(raw_environment)
             if environment is None:
                 continue
             raw_applications = environment.get("applications")
             if not isinstance(raw_applications, list):
                 continue
             for raw_application in raw_applications:
-                application = control_plane_dokploy.as_json_object(raw_application)
+                application = dokploy_api.as_json_object(raw_application)
                 if application is not None:
                     yield application
 
 
 def _find_application_by_name(*, host: str, token: str, application_name: str) -> JsonObject | None:
-    raw_projects = control_plane_dokploy.dokploy_request(
+    raw_projects = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/project.all",
@@ -472,7 +473,7 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
 
 
 def _fetch_application(*, host: str, token: str, application_id: str) -> JsonObject:
-    return control_plane_dokploy.fetch_dokploy_target_payload(
+    return dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type="application",
@@ -506,7 +507,7 @@ def _ensure_application(
         )
     if not server_id:
         raise click.ClickException("Generic web preview template application is missing serverId.")
-    created = control_plane_dokploy.dokploy_request(
+    created = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.create",
@@ -519,7 +520,7 @@ def _ensure_application(
             "serverId": server_id,
         },
     )
-    created_application = control_plane_dokploy.as_json_object(created)
+    created_application = dokploy_api.as_json_object(created)
     created_application_id = str((created_application or {}).get("applicationId") or "").strip()
     if not created_application_id:
         raise click.ClickException(
@@ -544,7 +545,7 @@ def _configure_application(
     application_id = str(application.get("applicationId") or "").strip()
     if not application_id:
         raise click.ClickException("Preview application payload is missing applicationId.")
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.update",
@@ -561,7 +562,7 @@ def _configure_application(
             "enabled": template_application.get("enabled"),
         },
     )
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.saveBuildType",
@@ -578,7 +579,7 @@ def _configure_application(
             "isStaticSpa": template_application.get("isStaticSpa"),
         },
     )
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.saveDockerProvider",
@@ -591,7 +592,7 @@ def _configure_application(
             "registryUrl": template_application.get("registryUrl"),
         },
     )
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.saveEnvironment",
@@ -609,7 +610,7 @@ def _configure_application(
 def _ensure_domain(
     *, host: str, token: str, application_id: str, preview_host: str, runtime_port: int
 ) -> tuple[str, tuple[str, ...]]:
-    raw_domains = control_plane_dokploy.dokploy_request(
+    raw_domains = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.byApplicationId",
@@ -619,7 +620,7 @@ def _ensure_domain(
     existing: JsonObject | None = None
     stale_domain_ids: list[str] = []
     for raw_domain in domains:
-        domain = control_plane_dokploy.as_json_object(raw_domain)
+        domain = dokploy_api.as_json_object(raw_domain)
         if domain is None:
             continue
         domain_host = str(domain.get("host") or "").strip()
@@ -647,7 +648,7 @@ def _ensure_domain(
     if existing is not None:
         existing_domain_id = str(existing.get("domainId") or "").strip()
         update_payload: JsonObject = {"domainId": existing_domain_id, **payload}
-        control_plane_dokploy.dokploy_request(
+        dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/domain.update",
@@ -655,19 +656,19 @@ def _ensure_domain(
             payload=update_payload,
         )
         return "", tuple(stale_domain_ids)
-    created = control_plane_dokploy.dokploy_request(
+    created = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.create",
         method="POST",
         payload=payload,
     )
-    created_domain = control_plane_dokploy.as_json_object(created)
+    created_domain = dokploy_api.as_json_object(created)
     return str((created_domain or {}).get("domainId") or "").strip(), tuple(stale_domain_ids)
 
 
 def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.delete",
@@ -677,7 +678,7 @@ def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
 
 
 def _delete_application(*, host: str, token: str, application_id: str) -> None:
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.delete",
@@ -733,13 +734,13 @@ def _read_template_payload(
     *,
     control_plane_root: Path,
     template_lane: ProductLaneProfile,
-) -> tuple[control_plane_dokploy.DokployTargetDefinition | None, JsonObject | None, str]:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+) -> tuple[dokploy_source.DokployTargetDefinition | None, JsonObject | None, str]:
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
         allow_incomplete_target_ids=True,
         allowed_incomplete_target_routes=((template_lane.context, template_lane.instance),),
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=template_lane.context,
         instance_name=template_lane.instance,
@@ -768,8 +769,8 @@ def _read_template_payload(
             None,
             "Generic web preview readiness requires the template lane to have a Dokploy target_id.",
         )
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    payload = control_plane_dokploy.fetch_dokploy_target_payload(
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+    payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=target_definition.target_type,
@@ -856,9 +857,7 @@ def _render_preview_env_text(
     preview_url: str,
     runtime_identity: RuntimeIdentity | None = None,
 ) -> str:
-    template_env = control_plane_dokploy.parse_dokploy_env_text(
-        str(template_application.get("env") or "")
-    )
+    template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
     preview_host = _preview_host(preview_url)
     updates: dict[str, str] = {}
     for key in profile.preview.copied_env_keys:
@@ -872,7 +871,7 @@ def _render_preview_env_text(
         updates[key] = preview_host
     if runtime_identity is not None:
         updates.update(runtime_identity_env(runtime_identity))
-    return control_plane_dokploy.render_dokploy_env_text_with_overrides(
+    return dokploy_api.render_dokploy_env_text_with_overrides(
         "",
         updates=updates,
     )
@@ -881,9 +880,7 @@ def _render_preview_env_text(
 def _copied_secret_shaped_runtime_keys(
     *, profile: LaunchplaneProductProfileRecord, template_application: JsonObject
 ) -> tuple[str, ...]:
-    template_env = control_plane_dokploy.parse_dokploy_env_text(
-        str(template_application.get("env") or "")
-    )
+    template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
     copied_keys: list[str] = []
     for key in profile.preview.copied_env_keys:
         value = template_env.get(key, "")
@@ -1101,7 +1098,7 @@ def evaluate_generic_web_preview_readiness(
             checks=tuple(checks),
         )
 
-    target_definition: control_plane_dokploy.DokployTargetDefinition | None = None
+    target_definition: dokploy_source.DokployTargetDefinition | None = None
     template_payload: JsonObject | None = None
     target_error = ""
     try:
@@ -1144,7 +1141,7 @@ def evaluate_generic_web_preview_readiness(
 
     assert target_definition is not None
     assert template_payload is not None
-    env_map = control_plane_dokploy.parse_dokploy_env_text(str(template_payload.get("env") or ""))
+    env_map = dokploy_api.parse_dokploy_env_text(str(template_payload.get("env") or ""))
     required_env_parts = (
         *resolved_profile.preview.required_template_env_keys,
         *resolved_profile.preview.copied_env_keys,
@@ -1296,9 +1293,7 @@ def execute_generic_web_preview_refresh(
     host = ""
     token = ""
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         target_definition, template_application, target_error = _read_template_payload(
             control_plane_root=control_plane_root,
             template_lane=template_lane,
@@ -1352,25 +1347,25 @@ def execute_generic_web_preview_refresh(
             preview_host=_preview_host(preview_url),
             runtime_port=resolved_profile.runtime_port,
         )
-        latest_before = control_plane_dokploy.latest_deployment_for_target(
+        latest_before = dokploy_api.latest_deployment_for_target(
             host=host,
             token=token,
             target_type="application",
             target_id=application_id,
         )
-        control_plane_dokploy.trigger_deployment(
+        dokploy_api.trigger_deployment(
             host=host,
             token=token,
             target_type="application",
             target_id=application_id,
             no_cache=request.no_cache,
         )
-        control_plane_dokploy.wait_for_target_deployment(
+        dokploy_api.wait_for_target_deployment(
             host=host,
             token=token,
             target_type="application",
             target_id=application_id,
-            before_key=control_plane_dokploy.deployment_key(latest_before),
+            before_key=dokploy_api.deployment_key(latest_before),
             timeout_seconds=request.timeout_seconds,
         )
         _wait_for_preview_health(
@@ -1469,8 +1464,8 @@ def execute_generic_web_preview_inventory(
             product=request.product,
         )
     app_name_prefix = effective_preview_app_name_prefix(profile=resolved_profile)
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    raw_projects = control_plane_dokploy.dokploy_request(
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+    raw_projects = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/project.all",
@@ -1528,7 +1523,7 @@ def execute_generic_web_preview_destroy(
         app_name_prefix=app_name_prefix,
         preview_slug=request.preview_slug,
     )
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     application = _find_application_by_name(
         host=host,
         token=token,
