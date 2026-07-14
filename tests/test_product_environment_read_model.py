@@ -33,6 +33,14 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+    RouteBindingIngress,
+    RouteBindingProviderTarget,
+    RouteBindingSource,
+    RouteBindingTls,
+)
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
@@ -576,6 +584,9 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         actions = {action.action_id: action for action in overview.available_actions}
         self.assertNotIn("testing_verification", actions)
         self.assertNotIn("preview_verification", actions)
+        self.assertTrue(
+            all(environment.driver_extensions.odoo is None for environment in overview.environments)
+        )
 
     def test_odoo_product_site_overview_uses_inherited_generic_web_actions(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload())
@@ -598,6 +609,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
         self.assertEqual(actions["preview_apply"].route_path, "/v1/drivers/odoo/preview-apply")
         self.assertNotIn("preview_verification", actions)
+        self.assertTrue(
+            all(
+                environment.driver_extensions.odoo is not None
+                for environment in overview.environments
+            )
+        )
 
     def test_product_site_overview_raises_for_unknown_product(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
@@ -960,9 +977,9 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertEqual(detail.managed_secrets[0].trust_state, "disabled")
 
     def test_product_read_model_exposes_prelaunch_rebuild_policy(self) -> None:
-        profile = LaunchplaneProductProfileRecord.model_validate(
-            _site_profile_payload(product="odoo-tenant-opw", preview_enabled=False)
-        )
+        payload = _site_profile_payload(product="odoo-tenant-opw", preview_enabled=False)
+        payload["driver_id"] = "odoo"
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
         store = _PreviewRecordStore(profile, ())
 
         overview = build_product_site_overview(
@@ -978,23 +995,29 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
 
         prod_summary = {summary.environment: summary for summary in overview.environments}["prod"]
-        self.assertTrue(prod_summary.prelaunch_rebuild_allowed)
+        prod_odoo = prod_summary.driver_extensions.odoo
+        detail_odoo = detail.driver_extensions.odoo
+        self.assertIsNotNone(prod_odoo)
+        self.assertIsNotNone(detail_odoo)
+        assert prod_odoo is not None
+        assert detail_odoo is not None
+        self.assertTrue(prod_odoo.prelaunch_rebuild_allowed)
         self.assertEqual(
-            prod_summary.prelaunch_rebuild_data_source_mode,
+            prod_odoo.prelaunch_rebuild_data_source_mode,
             "upstream_restore",
         )
         self.assertEqual(
-            prod_summary.prelaunch_rebuild_approval_issue_url,
+            prod_odoo.prelaunch_rebuild_approval_issue_url,
             "https://github.com/cbusillo/launchplane/issues/573",
         )
-        self.assertTrue(detail.prelaunch_rebuild_allowed)
-        self.assertEqual(detail.prelaunch_rebuild_data_source_mode, "upstream_restore")
-        self.assertEqual(prod_summary.odoo_data_authority, "restorable")
-        self.assertEqual(prod_summary.odoo_allowed_rebuild_sources, ("upstream_restore",))
-        self.assertEqual(prod_summary.odoo_upstream_source, "example-site/prod/upstream")
-        self.assertTrue(detail.odoo_requires_backup_before_destroy)
-        self.assertTrue(detail.odoo_requires_restore_proof)
-        self.assertTrue(detail.odoo_requires_runtime_identity)
+        self.assertTrue(detail_odoo.prelaunch_rebuild_allowed)
+        self.assertEqual(detail_odoo.prelaunch_rebuild_data_source_mode, "upstream_restore")
+        self.assertEqual(prod_odoo.data_authority, "restorable")
+        self.assertEqual(prod_odoo.allowed_rebuild_sources, ("upstream_restore",))
+        self.assertEqual(prod_odoo.upstream_source, "example-site/prod/upstream")
+        self.assertTrue(detail_odoo.requires_backup_before_destroy)
+        self.assertTrue(detail_odoo.requires_restore_proof)
+        self.assertTrue(detail_odoo.requires_runtime_identity)
 
     def test_product_read_model_exposes_public_ingress_observation(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
@@ -1052,7 +1075,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
 
         prod_summary = {summary.environment: summary for summary in overview.environments}["prod"]
         self.assertEqual(prod_summary.public_ingress.status, "fail")
-        self.assertEqual(prod_summary.public_ingress.trust_state, "stale")
+        self.assertEqual(prod_summary.public_ingress.trust_state, "verified")
         self.assertEqual(prod_summary.public_ingress.record_id, observation.record_id)
         self.assertEqual(prod_summary.public_ingress.incident_status, "open")
         self.assertEqual(prod_summary.public_ingress.incident_id, incident.incident_id)
@@ -1240,6 +1263,38 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     source_label="test",
                 )
             )
+            store.write_route_binding_record(
+                EnvironmentRouteBindingRecord(
+                    product=profile.product,
+                    context="example-site-prod",
+                    instance="prod",
+                    provider_target=RouteBindingProviderTarget(
+                        provider_id="dokploy",
+                        target_category="application",
+                        provider_target_type="application",
+                        target_name="example-site-prod",
+                        provider_evidence={"host_id": "provider-host-private"},
+                    ),
+                    ingress=RouteBindingIngress(
+                        provider="dokploy",
+                        termination_kind="direct",
+                    ),
+                    domains=(
+                        RouteBindingDomain(
+                            domain_name="example-site.example",
+                            role="primary",
+                        ),
+                    ),
+                    tls=RouteBindingTls(owner="provider"),
+                    source=RouteBindingSource(
+                        source_kind="service",
+                        source_label="test",
+                        refreshed_at="2026-05-02T22:32:00Z",
+                        freshness_status="recorded",
+                    ),
+                    updated_at="2026-05-02T22:32:00Z",
+                )
+            )
 
             detail = build_product_environment_detail(
                 record_store=store,
@@ -1252,10 +1307,11 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertEqual(detail.target.provider, "dokploy")
         self.assertEqual(detail.target.target_type, "application")
         self.assertEqual(detail.target.target_name, "example-site-prod")
-        self.assertEqual(detail.target.target_id, "app-example-prod")
         self.assertEqual(detail.target.provider_target_type, "application")
         self.assertTrue(detail.target.target_id_recorded)
         self.assertEqual(detail.target.trust_state, "recorded")
+        self.assertNotIn("app-example-prod", detail.model_dump_json())
+        self.assertNotIn("provider-host-private", detail.model_dump_json())
 
     def test_product_environment_detail_does_not_project_provider_target_from_dokploy_pair(
         self,
@@ -1298,10 +1354,9 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             )
             store.close()
 
-        self.assertEqual(detail.target.provider, "dokploy")
+        self.assertEqual(detail.target.provider, "")
         self.assertEqual(detail.target.target_type, "")
         self.assertEqual(detail.target.target_name, "")
-        self.assertEqual(detail.target.target_id, "")
         self.assertEqual(detail.target.provider_target_type, "")
         self.assertFalse(detail.target.target_id_recorded)
         self.assertEqual(detail.target.trust_state, "missing")

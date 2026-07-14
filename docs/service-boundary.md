@@ -1970,12 +1970,19 @@ Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.
 They compose Launchplane-owned product profiles, driver descriptors, stable lane
 records, preview summaries, runtime-environment key summaries, managed secret
-binding metadata, action availability, and trust state. The collection, product,
+binding metadata, action availability, trust state, and one provider-neutral
+topology shell shared by Odoo, generic-web, VeriReel, and future drivers. The
+topology shell separates product-profile desired URL/domain intent,
+route-binding provider-recorded placement/domain/ingress/TLS authority, and
+runtime/public-ingress/TLS observations. Missing neutral route authority remains
+missing even when provider records exist; it is never reconstructed as healthy
+truth from Dokploy or driver-specific payloads. The collection, product,
 activity, and environments routes authorize against the Launchplane service
 context. Single environment detail reads authorize against the selected lane
-context. Raw context names and provider target identifiers remain evidence
-metadata; runtime values, secret plaintext, secret ciphertext, and
-product-specific driver payloads are not exposed as shared top-level fields.
+context. Raw context names remain evidence metadata, while provider target ids,
+host ids, certificate ids, edge addresses, provider evidence maps, runtime
+values, secret plaintext, secret ciphertext, and product-specific driver
+payloads are not exposed.
 `/v1/repo-product-mapping` and `/v1/agent/context` are also native FastAPI routes.
 
 `GET /v1/products/{product}/environments` returns the product's stable
@@ -1983,8 +1990,12 @@ environment summaries from DB-backed Launchplane records. It is the collection
 form of the per-product read model and is intended for operator and UI
 navigation before loading a single environment detail page. It uses the same
 redaction rules as the product overview: environment summaries include context,
-URLs, action availability, trust state, and provenance, but not runtime values or
-secret material.
+URLs, action availability, trust state, provenance, and the topology projection,
+but not runtime values, secret material, or provider-only topology. Typed
+warnings make domain, placement, ingress, ownership, TLS, and freshness
+divergence explicit. A hostname-mismatch read includes the public name,
+recorded terminator/owner, bounded presented certificate names, failure code,
+incident linkage, and a likely cause without requiring provider database access.
 
 `GET /v1/products/{product}/environments/{environment}/config-status` is a
 redacted product/site read under the same action. It compares product-profile

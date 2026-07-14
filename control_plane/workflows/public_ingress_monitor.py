@@ -8,7 +8,6 @@ from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
-import hashlib
 import json
 import os
 import smtplib
@@ -56,6 +55,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     build_public_ingress_lane_incident_id,
     build_public_ingress_notification_attempt_id,
     build_public_ingress_observation_id,
+    build_public_ingress_tls_check_name,
 )
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.route_binding_record import RouteBindingDomain
@@ -1256,7 +1256,7 @@ def _tls_monitor_targets(
                 instance=lane.instance,
                 base_url="",
                 health_url="",
-                check_name=_tls_check_name(domain.domain_name),
+                check_name=build_public_ingress_tls_check_name(domain.domain_name),
                 check_kind="tls",
                 expected_runtime_identity=None,
                 require_runtime_identity=False,
@@ -1277,12 +1277,6 @@ def _tls_monitor_targets(
             )
         )
     return tuple(targets)
-
-
-def _tls_check_name(domain_name: str) -> str:
-    normalized_domain = domain_name.strip().lower().rstrip(".")
-    digest = hashlib.sha256(normalized_domain.encode("utf-8")).hexdigest()[:12]
-    return f"tls-{normalized_domain}-{digest}"
 
 
 def _bounded_probe_error_summary(error: BaseException, *, limit: int = 512) -> str:

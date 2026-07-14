@@ -629,6 +629,16 @@ def build_public_ingress_notification_attempt_id(
     )
 
 
+def build_public_ingress_tls_check_name(domain_name: str) -> str:
+    normalized_domain = (
+        _required_text(domain_name, "public ingress TLS check name requires domain_name")
+        .lower()
+        .rstrip(".")
+    )
+    digest = hashlib.sha256(normalized_domain.encode("utf-8")).hexdigest()[:12]
+    return f"tls-{normalized_domain}-{digest}"
+
+
 def _record_token(value: str) -> str:
     return health_check_record_token(value)
 

@@ -1410,8 +1410,20 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             [environment["environment"] for environment in payload["environments"]],
             ["testing", "prod"],
         )
+        prod_topology = payload["environments"][1]["topology"]
+        self.assertEqual(
+            prod_topology["provider_recorded"]["domains"][0]["domain_name"],
+            "example-site.example",
+        )
+        self.assertEqual(
+            prod_topology["observed"]["tls_domains"][0]["status"],
+            "hostname_mismatch",
+        )
         self.assertNotIn("https://internal.example-site.invalid", response_text)
         self.assertNotIn("super-secret-password", response_text)
+        self.assertNotIn("provider-host-private-123", response_text)
+        self.assertNotIn("edge-host-private-456", response_text)
+        self.assertNotIn("certificate-private-789", response_text)
 
     async def test_read_product_environment_redacts_runtime_and_secret_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1436,10 +1448,29 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(environment["environment"], "prod")
         self.assertEqual(environment["target"]["target_name"], "example-site-prod")
         self.assertTrue(environment["target"]["target_id_recorded"])
+        self.assertNotIn("target_id", environment["target"])
+        topology = environment["topology"]
+        self.assertEqual(topology["desired"]["domains"][0]["domain_name"], "example-site.example")
+        self.assertEqual(
+            topology["provider_recorded"]["placement"]["target_name"],
+            "example-site-prod",
+        )
+        self.assertEqual(topology["provider_recorded"]["ingress"]["path"], "edge_to_provider")
+        self.assertEqual(topology["provider_recorded"]["tls"]["owner"], "launchplane")
+        observed_tls = topology["observed"]["tls_domains"][0]
+        self.assertEqual(observed_tls["status"], "hostname_mismatch")
+        self.assertEqual(observed_tls["failure_code"], "tls_hostname_mismatch")
+        self.assertEqual(observed_tls["incident_status"], "open")
+        self.assertIn("certificate binding", observed_tls["likely_failure_cause"])
+        self.assertIn("tls_mismatch", {warning["code"] for warning in topology["warnings"]})
         self.assertEqual(environment["runtime_settings"][0]["env_keys"], ["INTERNAL_CALLBACK_URL"])
         self.assertEqual(environment["managed_secrets"][0]["binding_key"], "SMTP_PASSWORD")
         self.assertNotIn("https://internal.example-site.invalid", response_text)
         self.assertNotIn("super-secret-password", response_text)
+        self.assertNotIn("app-prod-123", response_text)
+        self.assertNotIn("provider-host-private-123", response_text)
+        self.assertNotIn("edge-host-private-456", response_text)
+        self.assertNotIn("certificate-private-789", response_text)
 
     async def test_product_environment_reads_require_identity(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -1560,6 +1591,8 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["environment"]["product"], "example-site")
+        self.assertNotIn("provider-host-private-123", response.text)
+        self.assertNotIn("certificate-private-789", response.text)
 
     async def test_product_environment_reads_accept_terminal_agent_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1588,6 +1621,8 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["environment"]["product"], "example-site")
+        self.assertNotIn("provider-host-private-123", response.text)
+        self.assertNotIn("certificate-private-789", response.text)
 
     async def test_openapi_includes_product_environment_read_contracts(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -1630,6 +1665,24 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(
                 openapi["components"]["schemas"][response_model_name]["additionalProperties"]
             )
+        topology_schema = openapi["components"]["schemas"]["ProductEnvironmentTopology"]
+        self.assertEqual(
+            set(topology_schema["properties"]),
+            {"desired", "provider_recorded", "observed", "warnings", "trust_state"},
+        )
+        warning_schema = openapi["components"]["schemas"]["ProductTopologyWarning"]
+        warning_codes = set(warning_schema["properties"]["code"]["enum"])
+        self.assertTrue(
+            {
+                "missing_route_authority",
+                "domain_divergence",
+                "stale_route_authority",
+                "tls_ownership_unknown",
+                "tls_mismatch",
+            }.issubset(warning_codes)
+        )
+        target_properties = openapi["components"]["schemas"]["ProductTargetSummary"]["properties"]
+        self.assertNotIn("target_id", target_properties)
 
 
 class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):

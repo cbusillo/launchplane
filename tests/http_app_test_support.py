@@ -72,6 +72,20 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentRecord,
     PublicIngressNotificationDestination,
     PublicIngressNotificationPolicyRecord,
+    PublicIngressObservationRecord,
+    PublicIngressTargetObservation,
+    PublicIngressTlsObservation,
+    PublicIngressTlsProbeEvidence,
+    PublicIngressTlsRecordedEvidence,
+    build_public_ingress_tls_check_name,
+)
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+    RouteBindingIngress,
+    RouteBindingProviderTarget,
+    RouteBindingSource,
+    RouteBindingTls,
 )
 from control_plane.contracts.runner_host_hygiene import (
     RunnerHostHygieneApplyAuditRecord,
@@ -1536,8 +1550,127 @@ def _seed_product_environment_read_records(database_url: str) -> None:
                 target_id="app-prod-123",
                 display_name="example-site-prod",
                 provider_target_type="application",
+                provider_evidence={"host_id": "provider-host-private-123"},
                 updated_at="2026-05-02T22:33:00Z",
                 source_label="test",
+            )
+        )
+        store.write_route_binding_record(
+            EnvironmentRouteBindingRecord(
+                product="example-site",
+                context="example-site",
+                instance="prod",
+                provider_target=RouteBindingProviderTarget(
+                    provider_id="dokploy",
+                    target_category="application",
+                    provider_target_type="application",
+                    target_name="example-site-prod",
+                    provider_evidence={"host_id": "provider-host-private-123"},
+                ),
+                ingress=RouteBindingIngress(
+                    provider="npmplus",
+                    endpoint_key="example-site-edge",
+                    termination_kind="edge",
+                    provider_evidence={"host_id": "edge-host-private-456"},
+                ),
+                domains=(
+                    RouteBindingDomain(
+                        domain_name="example-site.example",
+                        role="primary",
+                    ),
+                ),
+                tls=RouteBindingTls(
+                    owner="launchplane",
+                    provider_evidence={"certificate_id": "certificate-private-789"},
+                ),
+                source=RouteBindingSource(
+                    source_kind="service",
+                    source_label="test",
+                    source_record_ids=("provider-target-record", "ingress-audit-record"),
+                    refreshed_at="2026-07-14T10:30:00Z",
+                    freshness_status="recorded",
+                    stale_after="2099-01-01T00:00:00Z",
+                ),
+                updated_at="2026-07-14T10:30:00Z",
+            )
+        )
+        tls_check_name = build_public_ingress_tls_check_name("example-site.example")
+        tls_observation = PublicIngressObservationRecord(
+            record_id="tls-observation-example-site-prod",
+            product="example-site",
+            repository="every/example-site",
+            driver_id="generic-web",
+            context="example-site",
+            instance="prod",
+            check_name=tls_check_name,
+            check_kind="tls",
+            observed_at="2026-07-14T11:00:00Z",
+            status="fail",
+            failure_code="tls_hostname_mismatch",
+            targets=(
+                PublicIngressTargetObservation(
+                    target="tls_domain",
+                    url="https://example-site.example/",
+                    status="fail",
+                    failure_code="tls_hostname_mismatch",
+                    tls=PublicIngressTlsObservation(
+                        status="hostname_mismatch",
+                        public_name="example-site.example",
+                        issuer="Example Public CA",
+                        subject="CN=wrong.example.test",
+                        not_before="2026-01-01T00:00:00Z",
+                        not_after="2027-01-01T00:00:00Z",
+                        days_remaining=171,
+                        public_name_match=False,
+                        public_name_match_source="none",
+                        presented_san_count=1,
+                        presented_name_evidence=("wrong.example.test",),
+                        recorded=PublicIngressTlsRecordedEvidence(
+                            domain_name="example-site.example",
+                            domain_role="primary",
+                            owner="launchplane",
+                            ingress_provider="npmplus",
+                            termination_kind="edge",
+                            source_kind="service",
+                            source_label="test",
+                            source_record_ids=("provider-target-record",),
+                            refreshed_at="2026-07-14T10:30:00Z",
+                            recorded_at="2026-07-14T10:30:00Z",
+                            freshness_status="recorded",
+                            stale_after="2099-01-01T00:00:00Z",
+                            provider_evidence={"certificate_id": "certificate-private-789"},
+                        ),
+                        probe=PublicIngressTlsProbeEvidence(
+                            observed_at="2026-07-14T11:00:00Z",
+                            validated_address_count=2,
+                            sni_hostname="example-site.example",
+                            freshness_status="recorded",
+                            stale_after="2099-01-01T00:00:00Z",
+                        ),
+                    ),
+                    summary="TLS hostname mismatch for example-site.example.",
+                ),
+            ),
+            summary="TLS hostname mismatch for example-site.example.",
+        )
+        store.write_public_ingress_observation_record(tls_observation)
+        store.write_public_ingress_incident_record(
+            PublicIngressIncidentRecord(
+                incident_id="tls-incident-example-site-prod",
+                product="example-site",
+                repository="every/example-site",
+                driver_id="generic-web",
+                context="example-site",
+                instance="prod",
+                check_name=tls_check_name,
+                check_kind="tls",
+                status="open",
+                opened_at="2026-07-14T11:00:00Z",
+                opened_observation_id=tls_observation.record_id,
+                latest_observation_id=tls_observation.record_id,
+                latest_observed_at=tls_observation.observed_at,
+                failure_code="tls_hostname_mismatch",
+                summary="TLS hostname mismatch is active.",
             )
         )
         with patch.dict(
