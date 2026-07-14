@@ -11,10 +11,12 @@ from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     redacted_route_binding_record,
 )
-from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.http_routes.support import (
+    LAUNCHPLANE_SERVICE_CONTEXT,
+    ApiRouteRegistrar,
+    ReadRouteDependencies,
+)
 from control_plane.service_auth import LaunchplaneIdentity
-
-_LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
 class EdgeEndpointRecordResponse(BaseModel):
@@ -192,7 +194,7 @@ def _ensure_edge_endpoint_read_allowed(
         identity=identity,
         action="edge_endpoint.read",
         product="launchplane",
-        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        context=LAUNCHPLANE_SERVICE_CONTEXT,
     ):
         raise dependencies.http_error(
             status_code=403,
