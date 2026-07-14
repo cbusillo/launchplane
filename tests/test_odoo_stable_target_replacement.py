@@ -372,11 +372,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
     def test_build_plan_allows_issue_backed_opw_upstream_restore_policy(self) -> None:
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "opw-prod",
                     "sourceType": "raw",
@@ -393,7 +393,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-opw", "status": "success"},
             ),
         ):
@@ -425,11 +425,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
     def test_build_plan_proves_prelaunch_domain_from_live_target(self) -> None:
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "opw-prod",
                     "sourceType": "raw",
@@ -445,7 +445,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-opw", "status": "success"},
             ),
         ):
@@ -475,11 +475,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
     def test_build_plan_blocks_upstream_restore_without_issue_backed_policy(self) -> None:
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "opw-prod",
                     "sourceType": "raw",
@@ -495,7 +495,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-opw", "status": "success"},
             ),
         ):
@@ -525,11 +525,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         profile = profile.model_copy(update={"lanes": (lane,)})
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "opw-prod",
                     "sourceType": "raw",
@@ -545,7 +545,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-opw", "status": "success"},
             ),
         ):
@@ -576,11 +576,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "cm-testing",
                     "sourceType": "raw",
@@ -597,7 +597,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
         ):
@@ -654,15 +654,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
     def test_build_plan_blocks_missing_volume_contract(self) -> None:
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={"name": "cm-testing", "env": "ODOO_DATA_VOLUME=data"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value=None,
             ),
         ):
@@ -907,15 +907,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=_fetch_target_payload,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
@@ -923,29 +923,29 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"ODOO_WORKERS": "2"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source",
                 side_effect=_sync_source,
             ) as sync_source,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.render_odoo_raw_compose_file",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.render_odoo_raw_compose_file",
                 return_value=rendered_compose_file,
             ) as render_compose,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
             ) as ensure_domain,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
                 return_value=rendered_compose_file,
             ) as fetch_converted_compose,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env",
                 side_effect=_update_env,
             ) as update_env,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
             ) as trigger_deploy,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.wait_for_target_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.wait_for_target_deployment"
             ) as wait_deploy,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
@@ -1223,15 +1223,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=_fetch_target_payload,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
@@ -1239,13 +1239,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
             ) as sync_source,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
                 return_value=control_plane_dokploy.render_odoo_raw_compose_file(
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:fresh",
                     domain_hosts=("cm-testing.shinycomputers.com",),
@@ -1253,14 +1253,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env",
                 side_effect=_update_env,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.wait_for_target_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.wait_for_target_deployment"
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
@@ -1378,15 +1378,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=_fetch_target_payload,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
@@ -1394,29 +1394,29 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source",
                 return_value={"source_type": "raw", "changed": "true"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.render_odoo_raw_compose_file",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.render_odoo_raw_compose_file",
                 return_value=rendered_compose_file,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
                 return_value=rendered_compose_file,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env",
                 side_effect=_update_env,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.wait_for_target_deployment",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.wait_for_target_deployment",
                 side_effect=_wait_for_deploy,
             ),
             patch(
@@ -1466,11 +1466,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ) as read_config,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "cm-testing",
                     "sourceType": "raw",
@@ -1488,14 +1488,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env"
             ) as update_env,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
             ) as trigger_deploy,
         ):
             with self.assertRaises(click.ClickException) as error_context:
@@ -1547,11 +1547,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "cm-testing",
                     "sourceType": "raw",
@@ -1570,7 +1570,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
@@ -1578,25 +1578,25 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source",
                 return_value={"source_type": "raw", "changed": "true"},
             ) as sync_source,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.render_odoo_raw_compose_file",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.render_odoo_raw_compose_file",
                 return_value=rendered_compose_file,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
                 return_value=rendered_compose_file,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env"
             ) as update_env,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
             ) as trigger_deploy,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy"
@@ -1679,15 +1679,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=_fetch_target_payload,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-opw", "status": "success"},
             ),
             patch(
@@ -1695,13 +1695,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
                 return_value=control_plane_dokploy.render_odoo_raw_compose_file(
                     image_reference="ghcr.io/cbusillo/odoo-tenant-opw@sha256:opw",
                     domain_hosts=("opw-prod.shinycomputers.com",),
@@ -1709,14 +1709,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env",
                 side_effect=_update_env,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.wait_for_target_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.wait_for_target_deployment"
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
@@ -1776,11 +1776,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "cm-testing",
                     "sourceType": "raw",
@@ -1796,7 +1796,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
@@ -1804,13 +1804,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
             ) as sync_source,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env"
             ) as update_env,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
             ) as trigger_deploy,
         ):
             result = execute_odoo_stable_target_replacement_apply(
@@ -1867,11 +1867,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "cm-testing",
                     "sourceType": "raw",
@@ -1887,7 +1887,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
@@ -1895,13 +1895,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
             ) as sync_source,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env"
             ) as update_env,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
             ) as trigger_deploy,
         ):
             result = execute_odoo_stable_target_replacement_apply(
@@ -1959,11 +1959,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "cm-testing",
                     "sourceType": "raw",
@@ -1979,7 +1979,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
@@ -1987,13 +1987,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
             ) as sync_source,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env"
             ) as update_env,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
             ) as trigger_deploy,
         ):
             result = execute_odoo_stable_target_replacement_apply(
@@ -2083,15 +2083,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=_fetch_target_payload,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
@@ -2099,13 +2099,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
                 return_value=control_plane_dokploy.render_odoo_raw_compose_file(
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
                     domain_hosts=("cm-testing.shinycomputers.com",),
@@ -2113,14 +2113,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env",
                 side_effect=_update_env,
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.wait_for_target_deployment"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.wait_for_target_deployment"
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
@@ -2162,11 +2162,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         with (
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "cm-testing",
                     "env": "\n".join(
@@ -2179,7 +2179,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
         ):

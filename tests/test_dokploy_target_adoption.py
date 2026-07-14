@@ -477,7 +477,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
             store.close()
 
             with patch(
-                "control_plane.cli.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.cli.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "discord-blue-lxc",
                     "sourceGitRef": "origin/feature-branch",
@@ -535,7 +535,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.cli.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.cli.dokploy_api.fetch_dokploy_target_payload",
                     return_value={
                         "name": "discord-blue-lxc",
                         "environment": {"project": {"name": "Discord Blue"}},
@@ -619,7 +619,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                 }
 
             with patch(
-                "control_plane.cli.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.cli.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=fetch_payload,
             ):
                 with patch.dict(
@@ -1328,11 +1328,11 @@ class DokployTargetAdoptionTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.dokploy.dokploy_request",
+                    "control_plane.dokploy.api.dokploy_request",
                     side_effect=dokploy_request,
                 ),
                 patch(
-                    "control_plane.cli.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.cli.dokploy_api.fetch_dokploy_target_payload",
                     return_value={
                         "name": "discord-blue-prod",
                         "environment": {"project": {"name": "Discord Blue"}},

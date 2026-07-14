@@ -48,9 +48,7 @@ def _dokploy_request(path: str, query: object | None = None, **_: object) -> obj
     return []
 
 
-def _mismatched_dokploy_request(
-    path: str, query: object | None = None, **_: object
-) -> object:
+def _mismatched_dokploy_request(path: str, query: object | None = None, **_: object) -> object:
     if path == "/api/domain.byComposeId" and query == {"composeId": "compose-cm-testing"}:
         return [{"host": "cm-prod.shinycomputers.com", "domainId": "domain-cm"}]
     return []
@@ -213,11 +211,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
         captured_bootstrap_runs: list[dict[str, object]] = []
         with (
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_post_deploy.run_compose_odoo_stable_bootstrap",
                 side_effect=lambda **kwargs: captured_bootstrap_runs.append(kwargs),
             ),
             patch(
@@ -278,7 +276,9 @@ class OdooStableBootstrapTests(unittest.TestCase):
             timeout_seconds=30,
             retry_interval_seconds=5,
         )
-        self.assertEqual(result.health_url, "https://cm-testing.shinycomputers.com/launchplane/health")
+        self.assertEqual(
+            result.health_url, "https://cm-testing.shinycomputers.com/launchplane/health"
+        )
         self.assertEqual(result.canonical_url, "https://cm-testing.shinycomputers.com")
         self.assertEqual(
             result.logo_urls,
@@ -338,11 +338,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
         captured_bootstrap_runs: list[dict[str, object]] = []
         with (
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_post_deploy.run_compose_odoo_stable_bootstrap",
                 side_effect=lambda **kwargs: captured_bootstrap_runs.append(kwargs),
             ),
             patch(
@@ -443,11 +443,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_post_deploy.run_compose_odoo_stable_bootstrap",
                 side_effect=lambda **kwargs: captured_bootstrap_runs.append(kwargs),
             ),
             patch(
@@ -511,11 +511,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
         )
         with (
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_post_deploy.run_compose_odoo_stable_bootstrap",
             ),
             patch(
                 "control_plane.workflows.odoo_stable_bootstrap.execute_odoo_post_deploy",
@@ -648,7 +648,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
         )
         with (
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             self.assertRaises(click.ClickException) as raised_error,
@@ -713,11 +713,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
         store = _Store()
         with (
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_post_deploy.run_compose_odoo_stable_bootstrap",
                 side_effect=click.ClickException("schedule failed"),
             ),
             patch(
@@ -762,11 +762,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
         store = _Store()
         with (
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_post_deploy.run_compose_odoo_stable_bootstrap",
                 side_effect=lambda **_kwargs: None,
             ),
             patch(
@@ -821,11 +821,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
         store = _Store()
         with (
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_post_deploy.run_compose_odoo_stable_bootstrap",
                 side_effect=lambda **_kwargs: None,
             ),
             patch(
@@ -876,11 +876,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
         store = _Store()
         with (
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_post_deploy.run_compose_odoo_stable_bootstrap",
                 side_effect=lambda **_kwargs: None,
             ),
             patch(
@@ -937,6 +937,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
             store.environment_inventories[0].bootstrap_record_id,
             "deployment-cm-testing-bootstrap",
         )
+
 
 if __name__ == "__main__":
     unittest.main()

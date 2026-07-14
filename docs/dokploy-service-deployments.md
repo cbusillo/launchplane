@@ -32,6 +32,25 @@ service deployments it means reusable image deploy, health evidence, preview
 policy when enabled, promotion evidence, and Launchplane-owned Dokploy
 mutation. It does not require the product to expose a public website.
 
+## Adapter Implementation Boundaries
+
+The Dokploy adapter keeps one import-compatible package surface while its
+implementation is divided by ownership:
+
+- `control_plane.dokploy.source` owns checked-in bootstrap parsing, DB-backed
+  target/source resolution, credentials, and provider target models.
+- `control_plane.dokploy.api` owns generic HTTP requests, deployment lifecycle,
+  logs, environment text, and schedules.
+- `control_plane.dokploy.compose` owns compose rendering, validation, route
+  labels, and raw-source synchronization.
+- `control_plane.dokploy.post_deploy` owns product-specific post-deploy and data
+  workflow orchestration plus generated provider scripts.
+
+Production callers import the canonical owning module. The
+`control_plane.dokploy` package root preserves established imports, but tests
+and new code patch dependencies at the canonical module so the compatibility
+surface does not become a second implementation authority.
+
 Create a product-specific driver only when the service needs behavior beyond
 this contract, such as data migrations, product-specific smoke checks,
 destructive repair actions, backup gates, or custom rollback state.

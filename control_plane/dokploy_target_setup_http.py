@@ -4,7 +4,6 @@ from typing import Literal
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -18,6 +17,9 @@ from control_plane.workflows.dokploy_target_adoption import (
     create_dokploy_compose_target,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy import compose as dokploy_compose
 
 
 class DokployTargetSetupEnvelope(BaseModel):
@@ -143,16 +145,16 @@ def mutate_dokploy_payload_for_target_setup(
     host: str,
     token: str,
     path: str,
-    payload: dict[str, control_plane_dokploy.JsonValue],
-) -> dict[str, control_plane_dokploy.JsonValue]:
-    response = control_plane_dokploy.dokploy_request(
+    payload: dict[str, dokploy_api.JsonValue],
+) -> dict[str, dokploy_api.JsonValue]:
+    response = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path=path,
         method="POST",
         payload=payload,
     )
-    response_object = control_plane_dokploy.as_json_object(response)
+    response_object = dokploy_api.as_json_object(response)
     if response_object is None:
         raise click.ClickException(f"Dokploy API POST {path} returned an invalid response.")
     return response_object
@@ -163,8 +165,8 @@ def fetch_dokploy_compose_domains_for_target_setup(
     host: str,
     token: str,
     compose_id: str,
-) -> tuple[dict[str, control_plane_dokploy.JsonValue], ...]:
-    response = control_plane_dokploy.dokploy_request(
+) -> tuple[dict[str, dokploy_api.JsonValue], ...]:
+    response = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.byComposeId",
@@ -174,16 +176,16 @@ def fetch_dokploy_compose_domains_for_target_setup(
         raise click.ClickException(
             f"Dokploy domain lookup for compose {compose_id} returned an invalid response."
         )
-    domains: list[dict[str, control_plane_dokploy.JsonValue]] = []
+    domains: list[dict[str, dokploy_api.JsonValue]] = []
     for raw_domain in response:
-        domain = control_plane_dokploy.as_json_object(raw_domain)
+        domain = dokploy_api.as_json_object(raw_domain)
         if domain is not None:
             domains.append(domain)
     return tuple(domains)
 
 
 def delete_dokploy_domain_for_target_setup(*, host: str, token: str, domain_id: str) -> None:
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.delete",
@@ -194,7 +196,7 @@ def delete_dokploy_domain_for_target_setup(*, host: str, token: str, domain_id: 
 
 def _dokploy_domain_matches_tracked_compose_web_route(
     *,
-    provider_domain: dict[str, control_plane_dokploy.JsonValue],
+    provider_domain: dict[str, dokploy_api.JsonValue],
     compose_id: str,
     domain_host: str,
 ) -> bool:
@@ -221,8 +223,8 @@ def fetch_dokploy_target_payload_for_setup(
     token: str,
     target_type: str,
     target_id: str,
-) -> dict[str, control_plane_dokploy.JsonValue]:
-    return control_plane_dokploy.fetch_dokploy_target_payload(
+) -> dict[str, dokploy_api.JsonValue]:
+    return dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=target_type,
@@ -250,9 +252,7 @@ def execute_dokploy_target_setup(
     request: DokployTargetSetupEnvelope,
 ) -> dict[str, object]:
     apply_changes = request.mode == "apply"
-    host, token = control_plane_dokploy.read_dokploy_config(
-        control_plane_root=control_plane_root_path
-    )
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root_path)
     result: (
         DokployTargetAdoptionResult
         | DokployTargetCreateResult
@@ -360,7 +360,7 @@ def execute_dokploy_target_setup(
     if apply_changes and request.operation == "create-compose" and request.runtime_port:
         for domain in request.domains:
             route_domain_ids.append(
-                control_plane_dokploy.ensure_compose_web_domain_route(
+                dokploy_compose.ensure_compose_web_domain_route(
                     host=host,
                     token=token,
                     compose_id=result.target_id_record.target_id,
@@ -410,7 +410,7 @@ def _execute_dokploy_compose_domain_reconcile(
     if apply_changes:
         for domain in requested_domains:
             route_domain_ids.append(
-                control_plane_dokploy.ensure_compose_web_domain_route(
+                dokploy_compose.ensure_compose_web_domain_route(
                     host=host,
                     token=token,
                     compose_id=target_id_record.target_id,

@@ -33,20 +33,20 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "env": self._BOOTSTRAP_ENV + "LAUNCHPLANE_NPMPLUS_SECRET=npmplus-secret\n"
                 },
             ),
             patch(
-                "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
             ) as update_env_mock,
             patch(
-                "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
             ) as trigger_mock,
         ):
             result = execute_launchplane_self_deploy(
@@ -90,18 +90,18 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                 return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
             ),
             patch(
-                "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
             ) as update_env_mock,
             patch(
-                "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
             ) as trigger_mock,
         ):
             with self.assertRaisesRegex(ValueError, "Launchplane self deploy target preflight"):

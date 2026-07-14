@@ -87,9 +87,9 @@ class OdooStableAuthorityTests(TestCase):
             "OdooStableTargetReplacementApplyRequest",
         )
         forbidden_tokens = (
-            "control_plane_dokploy.trigger_deployment",
-            "control_plane_dokploy.sync_dokploy_compose_raw_source",
-            "control_plane_dokploy.update_dokploy_target_env",
+            "dokploy_api.trigger_deployment",
+            "dokploy_compose.sync_dokploy_compose_raw_source",
+            "dokploy_api.update_dokploy_target_env",
             "execute_odoo_post_deploy",
             "render_odoo_raw_compose_file",
             "wait_for_target_deployment",

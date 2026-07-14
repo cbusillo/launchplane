@@ -5,9 +5,10 @@ from typing import Literal, Protocol, cast
 
 import click
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
 
 
 TrackedTargetLogSource = Literal["runtime", "deployment"]
@@ -77,22 +78,20 @@ def build_tracked_target_logs_payload(
             f"Configured target_type={target_record.target_type}."
         )
 
-    normalized_line_count = control_plane_dokploy.normalize_dokploy_log_line_count(line_count)
-    normalized_since = control_plane_dokploy.normalize_dokploy_log_since(since)
-    normalized_search = control_plane_dokploy.normalize_dokploy_log_search(search)
+    normalized_line_count = dokploy_api.normalize_dokploy_log_line_count(line_count)
+    normalized_since = dokploy_api.normalize_dokploy_log_since(since)
+    normalized_search = dokploy_api.normalize_dokploy_log_search(search)
     normalized_source = normalize_tracked_target_log_source(source)
     if normalized_source == "deployment" and normalized_since != "all":
         raise ValueError("Tracked deployment logs require since='all'.")
     if normalized_source == "deployment" and normalized_search:
         raise ValueError("Tracked deployment logs do not support search.")
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     except click.ClickException as error:
         raise _provider_error(operation="provider-config", error=error) from error
     try:
-        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        target_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
             token=token,
             target_type=target_record.target_type,
@@ -105,7 +104,7 @@ def build_tracked_target_logs_payload(
     deployment: dict[str, object] | None = None
     if normalized_source == "deployment":
         try:
-            latest_deployment = control_plane_dokploy.latest_deployment_for_target(
+            latest_deployment = dokploy_api.latest_deployment_for_target(
                 host=host,
                 token=token,
                 target_type=target_record.target_type,
@@ -115,7 +114,7 @@ def build_tracked_target_logs_payload(
             raise _provider_error(operation="deployment-list", error=error) from error
         if latest_deployment is None:
             raise ValueError("No Dokploy deployment is available for the requested target.")
-        deployment_id = control_plane_dokploy.deployment_log_id(latest_deployment)
+        deployment_id = dokploy_api.deployment_key(latest_deployment)
         if not deployment_id:
             raise ValueError("No Dokploy deployment is available for the requested target.")
         deployment_target_key = (
@@ -131,7 +130,7 @@ def build_tracked_target_logs_payload(
             deployment_id=deployment_id,
         )
         try:
-            logs = control_plane_dokploy.fetch_dokploy_deployment_logs(
+            logs = dokploy_api.fetch_dokploy_deployment_logs(
                 host=host,
                 token=token,
                 deployment_id=deployment_id,
@@ -141,7 +140,7 @@ def build_tracked_target_logs_payload(
             raise _provider_error(operation="deployment-log-read", error=error) from error
     elif target_record.target_type == "application":
         try:
-            logs = control_plane_dokploy.fetch_dokploy_application_logs(
+            logs = dokploy_api.fetch_dokploy_application_logs(
                 host=host,
                 token=token,
                 application_id=target_id_record.target_id,
@@ -153,7 +152,7 @@ def build_tracked_target_logs_payload(
             raise _provider_error(operation="runtime-log-read", error=error) from error
     else:
         try:
-            logs = control_plane_dokploy.fetch_dokploy_compose_logs(
+            logs = dokploy_api.fetch_dokploy_compose_logs(
                 host=host,
                 token=token,
                 compose_id=target_id_record.target_id,
@@ -166,8 +165,7 @@ def build_tracked_target_logs_payload(
         except click.ClickException as error:
             raise _provider_error(operation="runtime-log-read", error=error) from error
     logs = tuple(
-        control_plane_dokploy.redact_dokploy_log_line(line)
-        for line in logs[-normalized_line_count:]
+        dokploy_api.redact_dokploy_log_line(line) for line in logs[-normalized_line_count:]
     )
     result: dict[str, object] = {
         "context": normalized_context,
@@ -206,7 +204,7 @@ def normalize_tracked_target_log_source(value: str) -> TrackedTargetLogSource:
 
 def _deployment_metadata(
     *,
-    deployment: dict[str, control_plane_dokploy.JsonValue],
+    deployment: dict[str, dokploy_api.JsonValue],
     deployment_id: str,
 ) -> dict[str, object]:
     return {
@@ -223,7 +221,7 @@ def _deployment_metadata(
 
 
 def _deployment_text(
-    deployment: dict[str, control_plane_dokploy.JsonValue],
+    deployment: dict[str, dokploy_api.JsonValue],
     *key_names: str,
 ) -> str:
     for key_name in key_names:
@@ -246,6 +244,4 @@ def _provider_error(
 
 
 def _redacted_text(value: str) -> str:
-    return control_plane_dokploy.redact_dokploy_log_line(value).strip()[
-        :_MAX_PROVIDER_ERROR_DETAIL_LENGTH
-    ]
+    return dokploy_api.redact_dokploy_log_line(value).strip()[:_MAX_PROVIDER_ERROR_DETAIL_LENGTH]

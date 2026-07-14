@@ -418,7 +418,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
     ) -> None:
         with (
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
@@ -448,11 +448,11 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 side_effect=click.ClickException(
                     "Could not load tracked Dokploy targets from Launchplane Postgres storage: connection failed"
                 ),
@@ -469,11 +469,11 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=control_plane_dokploy.DokploySourceOfTruth(
                     schema_version=1,
                     targets=(
@@ -488,7 +488,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.verireel_preview_driver.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=click.ClickException(
                     "Dokploy API GET /api/application.one request failed: timed out"
                 ),
@@ -507,7 +507,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
@@ -555,7 +555,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
@@ -592,14 +592,12 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 return_value=("domain-preview", ()),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.verireel_preview_driver.dokploy_api.latest_deployment_for_target",
                 return_value=None,
             ),
+            patch("control_plane.workflows.verireel_preview_driver.dokploy_api.trigger_deployment"),
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.trigger_deployment"
-            ),
-            patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.wait_for_target_deployment"
+                "control_plane.workflows.verireel_preview_driver.dokploy_api.wait_for_target_deployment"
             ),
             patch(
                 "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
@@ -647,7 +645,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
@@ -682,14 +680,12 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 return_value=("", ()),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.verireel_preview_driver.dokploy_api.latest_deployment_for_target",
                 return_value=None,
             ),
+            patch("control_plane.workflows.verireel_preview_driver.dokploy_api.trigger_deployment"),
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.trigger_deployment"
-            ),
-            patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.wait_for_target_deployment"
+                "control_plane.workflows.verireel_preview_driver.dokploy_api.wait_for_target_deployment"
             ),
             patch(
                 "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"

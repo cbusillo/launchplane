@@ -40,7 +40,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.dokploy_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.dokploy_deploy.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "applicationId": "app-123",
                     "dockerImage": "ghcr.io/every/example:old",
@@ -52,7 +52,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.dokploy_deploy.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.dokploy_deploy.dokploy_api.dokploy_request",
                 side_effect=request,
             ),
         ):
@@ -129,7 +129,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
 
                 with (
                     patch(
-                        "control_plane.workflows.dokploy_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                        "control_plane.workflows.dokploy_deploy.dokploy_api.fetch_dokploy_target_payload",
                         return_value={
                             "applicationId": "app-123",
                             "dockerImage": "ghcr.io/every/example:old",
@@ -141,7 +141,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
                         },
                     ),
                     patch(
-                        "control_plane.workflows.dokploy_deploy.control_plane_dokploy.dokploy_request",
+                        "control_plane.workflows.dokploy_deploy.dokploy_api.dokploy_request",
                         side_effect=request,
                     ),
                 ):
@@ -178,7 +178,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.dokploy_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.dokploy_deploy.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "applicationId": "app-123",
                     "registryId": "registry-123",
@@ -186,7 +186,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.dokploy_deploy.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.dokploy_deploy.dokploy_api.dokploy_request",
                 side_effect=request,
             ),
             self.assertRaisesRegex(
@@ -223,7 +223,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.dokploy_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.dokploy_deploy.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "applicationId": "app-123",
                     "registryId": "registry-123",
@@ -232,7 +232,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.dokploy_deploy.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.dokploy_deploy.dokploy_api.dokploy_request",
                 side_effect=request,
             ),
             self.assertRaisesRegex(
@@ -265,7 +265,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.dokploy_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.dokploy_deploy.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "applicationId": "app-123",
                     "username": "every",
@@ -276,7 +276,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.dokploy_deploy.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.dokploy_deploy.dokploy_api.dokploy_request",
                 side_effect=lambda **kwargs: requests.append(kwargs),
             ),
         ):

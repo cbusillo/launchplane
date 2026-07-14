@@ -5,7 +5,6 @@ from typing import Literal
 
 import click
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.cli_shared import (
     DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
     direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
@@ -23,6 +22,8 @@ from control_plane.workflows.provider_target_dual_write import (
     prepare_provider_target_from_dokploy_records,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
 
 
 DokployTargetType = Literal["compose", "application"]
@@ -33,9 +34,7 @@ def register_dokploy_target_commands(
     *,
     control_plane_root: Callable[[], Path],
     normalize_dokploy_target_type: Callable[[str], DokployTargetType],
-    mutate_dokploy_payload_for_target_creation: Callable[
-        ..., dict[str, control_plane_dokploy.JsonValue]
-    ],
+    mutate_dokploy_payload_for_target_creation: Callable[..., dict[str, dokploy_api.JsonValue]],
 ) -> None:
     global _DOKPLOY_TARGET_CALLBACKS
     _DOKPLOY_TARGET_CALLBACKS = _DokployTargetCallbacks(
@@ -187,7 +186,7 @@ def dokploy_targets_adopt(
         _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     callbacks = _dokploy_target_callbacks()
     launchplane_root = control_plane_root or callbacks.control_plane_root()
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=launchplane_root)
     postgres_store = PostgresRecordStore(database_url=database_url)
     if apply_changes:
         postgres_store.ensure_schema()
@@ -312,7 +311,7 @@ def dokploy_targets_create_application(
         _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
     callbacks = _dokploy_target_callbacks()
     launchplane_root = control_plane_root or callbacks.control_plane_root()
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=launchplane_root)
     postgres_store = PostgresRecordStore(database_url=database_url)
     if apply_changes:
         postgres_store.ensure_schema()
@@ -676,8 +675,8 @@ def _fetch_dokploy_target_payload_for_adoption(
     token: str,
     target_type: str,
     target_id: str,
-) -> dict[str, control_plane_dokploy.JsonValue]:
-    return control_plane_dokploy.fetch_dokploy_target_payload(
+) -> dict[str, dokploy_api.JsonValue]:
+    return dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=target_type,
@@ -832,9 +831,7 @@ class _DokployTargetCallbacks:
         *,
         control_plane_root: Callable[[], Path],
         normalize_dokploy_target_type: Callable[[str], DokployTargetType],
-        mutate_dokploy_payload_for_target_creation: Callable[
-            ..., dict[str, control_plane_dokploy.JsonValue]
-        ],
+        mutate_dokploy_payload_for_target_creation: Callable[..., dict[str, dokploy_api.JsonValue]],
     ) -> None:
         self.control_plane_root = control_plane_root
         self.normalize_dokploy_target_type = normalize_dokploy_target_type
