@@ -11,6 +11,11 @@ from pydantic import ValidationError
 
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import secrets as control_plane_secrets
+from control_plane.cli_shared import (
+    DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
+    direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
+    require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
+)
 from control_plane.odoo_ownership_checks import (
     render_odoo_ownership_scan_json,
     render_odoo_ownership_scan_text,
@@ -29,6 +34,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementRequest,
 )
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.runtime_key_safety import is_secret_shaped_runtime_key
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishRequest,
     OdooArtifactPublishStore,
@@ -45,13 +51,6 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
-_SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
-_DIRECT_DB_MUTATION_MESSAGE = (
-    "Direct local DB mutation is restricted after the Launchplane service boundary. "
-    "Use the deployed service route or operator workflow for shared/production changes, "
-    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
-)
 OdooOverrideApplyStatus = Literal["skipped", "pending", "pass", "fail"]
 
 
@@ -98,21 +97,6 @@ def _read_dokploy_config(*, control_plane_root: Path, database_url: str) -> tupl
     return _odoo_callbacks().read_dokploy_config(
         control_plane_root=control_plane_root, database_url=database_url
     )
-
-
-def _direct_db_mutation_acknowledgement_option(
-    function: Callable[..., object],
-) -> Callable[..., object]:
-    return click.option(
-        "--allow-direct-db-mutation",
-        is_flag=True,
-        help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-    )(function)
-
-
-def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
-    if not allow_direct_db_mutation:
-        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
 
 
 def _relabel_odoo_override_secret_binding(
@@ -253,11 +237,6 @@ def _summarize_odoo_instance_override_record(
     }
 
 
-def _odoo_override_name_requires_secret_store(key_name: str) -> bool:
-    normalized_parts = key_name.replace(".", "_").replace("-", "_").upper().split("_")
-    return any(key_part in _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS for key_part in normalized_parts)
-
-
 def _build_odoo_override_value(
     *,
     value: str | None,
@@ -270,7 +249,7 @@ def _build_odoo_override_value(
     if value is not None and normalized_secret_binding_id:
         raise click.ClickException("Provide only one of --value or --secret-binding-id.")
     if value is not None:
-        if _odoo_override_name_requires_secret_store(value_name):
+        if is_secret_shaped_runtime_key(value_name.replace(".", "_").replace("-", "_")):
             raise click.ClickException(
                 f"Odoo override {value_name!r} looks secret-shaped and must use --secret-binding-id."
             )

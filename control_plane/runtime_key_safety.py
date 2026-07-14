@@ -24,6 +24,13 @@ ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT: dict[RuntimeEnvironmentClass, set[Runtime
     "dev": {"non_prod", "shared_safe"},
     "unknown": set(),
 }
+SECRET_SHAPED_RUNTIME_KEY_PARTS = frozenset({"PASSWORD", "TOKEN", "SECRET", "KEY"})
+
+
+def is_secret_shaped_runtime_key(key_name: str) -> bool:
+    return any(
+        key_part in SECRET_SHAPED_RUNTIME_KEY_PARTS for key_part in key_name.upper().split("_")
+    )
 
 
 def runtime_key_safety_environment_class(instance_name: str) -> RuntimeEnvironmentClass:

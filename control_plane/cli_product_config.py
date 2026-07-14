@@ -7,6 +7,11 @@ import click
 from pydantic import ValidationError
 
 from control_plane import product_config as control_plane_product_config
+from control_plane.cli_shared import (
+    DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
+    direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
+    require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
@@ -15,14 +20,6 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
-
-
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
-_DIRECT_DB_MUTATION_MESSAGE = (
-    "Direct local DB mutation is restricted after the Launchplane service boundary. "
-    "Use the deployed service route or operator workflow for shared/production changes, "
-    "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
-)
 
 
 def register_product_config_commands(
@@ -77,12 +74,7 @@ def product_onboarding() -> None:
 @click.option("--source-label", default="product-config-apply", show_default=True)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False)
 @click.option("--apply", "apply_changes", is_flag=True, default=False)
-@click.option(
-    "--allow-direct-db-mutation",
-    is_flag=True,
-    default=False,
-    help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-)
+@_direct_db_mutation_acknowledgement_option
 def product_config_apply(
     database_url: str,
     input_file: Path,
@@ -94,8 +86,8 @@ def product_config_apply(
 ) -> None:
     if dry_run == apply_changes:
         raise click.ClickException("Choose exactly one of --dry-run or --apply.")
-    if apply_changes and not allow_direct_db_mutation:
-        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
+    if apply_changes:
+        _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
 
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
@@ -128,20 +120,14 @@ def product_config_apply(
     help="Operator-approved JSON product onboarding manifest.",
 )
 @click.option("--updated-at", default="", help="Override manifest updated_at timestamp.")
-@click.option(
-    "--allow-direct-db-mutation",
-    is_flag=True,
-    default=False,
-    help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-)
+@_direct_db_mutation_acknowledgement_option
 def product_onboarding_apply(
     database_url: str,
     manifest_file: Path,
     updated_at: str,
     allow_direct_db_mutation: bool,
 ) -> None:
-    if not allow_direct_db_mutation:
-        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
+    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
 
     callbacks = _product_onboarding_apply_callbacks()
     try:
