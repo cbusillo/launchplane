@@ -22,6 +22,7 @@ from control_plane.dokploy_target_inspect import (
     DokployTargetInspectStore,
     inspect_dokploy_target,
 )
+from control_plane.drivers import native_routes
 from control_plane.drivers.registry import (
     build_driver_context_view,
     list_driver_descriptors,
@@ -31,6 +32,10 @@ from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
     ApiRouteRegistrar,
     ReadRouteDependencies,
+)
+from control_plane.odoo_stable_bootstrap_http import ODOO_STABLE_BOOTSTRAP_ROUTE
+from control_plane.odoo_target_replacement_apply_http import (
+    ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
 )
 from control_plane.service_auth import LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
@@ -303,7 +308,7 @@ def register_operation_status_read_routes(
             ) from error
         if not dependencies.authorization_allows(
             identity=identity,
-            action="odoo_stable_bootstrap.execute",
+            action=native_routes._descriptor_driver_route_authz_action(ODOO_STABLE_BOOTSTRAP_ROUTE),
             product=operation.product,
             context=operation.context,
         ):
@@ -352,7 +357,9 @@ def register_operation_status_read_routes(
             ) from error
         if not dependencies.authorization_allows(
             identity=identity,
-            action="odoo_target_replacement_apply.execute",
+            action=native_routes._descriptor_driver_route_authz_action(
+                ODOO_TARGET_REPLACEMENT_APPLY_ROUTE
+            ),
             product=operation.product,
             context=operation.context,
         ):

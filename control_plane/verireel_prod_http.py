@@ -39,11 +39,6 @@ VERIREEL_PROD_BACKUP_GATE_ROUTE = "/v1/drivers/verireel/prod-backup-gate"
 VERIREEL_PROD_PROMOTION_ROUTE = "/v1/drivers/verireel/prod-promotion"
 VERIREEL_PROD_ROLLBACK_ROUTE = "/v1/drivers/verireel/prod-rollback"
 
-VERIREEL_PROD_DEPLOY_ACTION = "verireel_prod_deploy.execute"
-VERIREEL_PROD_BACKUP_GATE_ACTION = "verireel_prod_backup_gate.execute"
-VERIREEL_PROD_PROMOTION_ACTION = "verireel_prod_promotion.execute"
-VERIREEL_PROD_ROLLBACK_ACTION = "verireel_prod_rollback.execute"
-
 
 class VeriReelProdDeployEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)

@@ -24,9 +24,6 @@ from control_plane.workflows.verireel_stable_deploy import (
 VERIREEL_TESTING_DEPLOY_ROUTE = "/v1/drivers/verireel/testing-deploy"
 VERIREEL_APP_MAINTENANCE_ROUTE = "/v1/drivers/verireel/app-maintenance"
 
-VERIREEL_TESTING_DEPLOY_ACTION = "verireel_testing_deploy.execute"
-VERIREEL_APP_MAINTENANCE_ACTION = "verireel_app_maintenance.execute"
-
 
 class VeriReelTestingDeployEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)

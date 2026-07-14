@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import click
 
+from control_plane.drivers.route_paths import INGRESS_ROUTE_APPLY_ROUTE
+
 
 @dataclass(frozen=True)
 class IngressCliCallbacks:
@@ -192,7 +194,7 @@ def ingress_route_apply(
     )
     response_payload = _post_launchplane_service_json(
         service_url=service_url,
-        path="/v1/drivers/ingress/route-apply",
+        path=INGRESS_ROUTE_APPLY_ROUTE,
         payload=payload,
         bearer_token=bearer_token,
         session_cookie=session_cookie,

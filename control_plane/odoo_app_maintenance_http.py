@@ -21,7 +21,6 @@ from control_plane.workflows.odoo_app_maintenance import (
 
 
 ODOO_APP_MAINTENANCE_ROUTE = "/v1/drivers/odoo/app-maintenance"
-ODOO_APP_MAINTENANCE_ACTION = "odoo_app_maintenance.execute"
 
 
 class OdooAppMaintenanceProductMismatchError(OdooProductMismatchError):

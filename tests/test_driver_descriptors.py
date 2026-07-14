@@ -1,8 +1,9 @@
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -29,7 +30,6 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewDesiredStateEnvelope,
 )
 from control_plane.odoo_artifact_publish_inputs_http import (
-    ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
     ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
     OdooArtifactPublishInputsEnvelope,
 )
@@ -55,6 +55,7 @@ from control_plane.drivers.registry import (
     list_driver_descriptors,
     read_driver_descriptor,
 )
+from control_plane.drivers.route_paths import INGRESS_ROUTE_APPLY_ROUTE
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 
@@ -161,6 +162,56 @@ def _product_profile(*, driver_id: str = "generic-web") -> LaunchplaneProductPro
 RouteMetadataExpectation = tuple[Any, type[Any], str]
 
 
+class _FakeFastApiRoute:
+    def __init__(
+        self,
+        *,
+        path: str,
+        methods: frozenset[str],
+        endpoint: object,
+    ) -> None:
+        self.path = path
+        self.methods = methods
+        self.endpoint = endpoint
+
+
+class _FakeFastApiApp:
+    def __init__(self, routes: tuple[_FakeFastApiRoute, ...]) -> None:
+        self.routes = routes
+
+
+def _fake_native_descriptor(*actions: DriverActionDescriptor) -> DriverDescriptor:
+    return DriverDescriptor(
+        driver_id="fake-native",
+        label="Fake native",
+        product="fake-native",
+        description="Test-only native descriptor driver.",
+        provider_boundary="Test-only provider boundary.",
+        actions=actions,
+    )
+
+
+def _fake_native_action(
+    *,
+    action_id: str = "ping",
+    route_path: str = "/v1/drivers/fake-native/ping",
+    method: Literal["GET", "POST"] = "POST",
+    authz_action: str = "fake_native.ping",
+    alternate_authz_actions: tuple[str, ...] = (),
+) -> DriverActionDescriptor:
+    return DriverActionDescriptor(
+        action_id=action_id,
+        label=action_id.replace("_", " ").title(),
+        description="Test descriptor-backed native route.",
+        safety="safe_write",
+        scope="context",
+        method=method,
+        route_path=route_path,
+        authz_action=authz_action,
+        alternate_authz_actions=alternate_authz_actions,
+    )
+
+
 class DriverDescriptorRegistryTests(unittest.TestCase):
     def assert_route_metadata_matches_descriptor(
         self,
@@ -220,7 +271,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         descriptor = read_driver_descriptor("ingress")
         actions = {action.action_id: action for action in descriptor.actions}
 
-        self.assertEqual(actions["route_apply"].route_path, "/v1/drivers/ingress/route-apply")
+        self.assertEqual(actions["route_apply"].route_path, INGRESS_ROUTE_APPLY_ROUTE)
         self.assertEqual(actions["route_apply"].authz_action, "ingress_route.apply")
         self.assertEqual(actions["route_apply"].alternate_authz_actions, ("ingress_route.plan",))
         self.assertIn("ingress_route.plan", actions["route_apply"].description)
@@ -383,6 +434,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             route_actions["/v1/drivers/verireel/testing-verification"].authz_action,
             "deployment.write",
         )
+        self.assertEqual(
+            route_actions[INGRESS_ROUTE_APPLY_ROUTE].alternate_authz_actions,
+            ("ingress_route.plan",),
+        )
+        self.assertEqual(route_actions[INGRESS_ROUTE_APPLY_ROUTE].method, "POST")
         self.assertFalse(
             route_actions["/v1/drivers/verireel/testing-verification"].operator_visible
         )
@@ -433,7 +489,8 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             self.assertEqual(native_route_metadata[route_path].driver_id, driver_id)
             self.assertEqual(native_route_metadata[route_path].action_id, action_id)
             self.assertEqual(
-                native_routes._descriptor_driver_authz_action(route_path), authz_action
+                native_routes._descriptor_driver_route_metadata(route_path).authz_action,
+                authz_action,
             )
         self.assertNotIn(
             "/v1/drivers/launchplane/self-deploy",
@@ -483,6 +540,180 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         ):
             native_routes._validate_native_descriptor_driver_routes()
 
+    def test_descriptor_driver_route_rejects_missing_authorization_action(self) -> None:
+        descriptor = _fake_native_descriptor(_fake_native_action(authz_action=""))
+
+        with patch(
+            "control_plane.drivers.native_routes.list_driver_descriptors",
+            return_value=(descriptor,),
+        ):
+            with self.assertRaisesRegex(ValueError, "must declare authz_action"):
+                native_routes._driver_route_metadata_from_descriptors()
+
+    def test_descriptor_driver_route_rejects_blank_alternate_authorization_action(
+        self,
+    ) -> None:
+        descriptor = _fake_native_descriptor(_fake_native_action(alternate_authz_actions=("",)))
+
+        with patch(
+            "control_plane.drivers.native_routes.list_driver_descriptors",
+            return_value=(descriptor,),
+        ):
+            with self.assertRaisesRegex(ValueError, "blank alternate_authz_action"):
+                native_routes._driver_route_metadata_from_descriptors()
+
+    def test_descriptor_driver_route_rejects_duplicate_path(self) -> None:
+        descriptor = _fake_native_descriptor(
+            _fake_native_action(action_id="ping"),
+            _fake_native_action(action_id="pong", authz_action="fake_native.pong"),
+        )
+
+        with patch(
+            "control_plane.drivers.native_routes.list_driver_descriptors",
+            return_value=(descriptor,),
+        ):
+            with self.assertRaisesRegex(ValueError, "Duplicate driver action route path"):
+                native_routes._driver_route_metadata_from_descriptors()
+
+    def test_descriptor_driver_route_rejects_invalid_method(self) -> None:
+        invalid_action = _fake_native_action().model_copy(update={"method": "PATCH"})
+        descriptor = _fake_native_descriptor(invalid_action)
+
+        with patch(
+            "control_plane.drivers.native_routes.list_driver_descriptors",
+            return_value=(descriptor,),
+        ):
+            with self.assertRaisesRegex(ValueError, "must declare method GET or POST"):
+                native_routes._driver_route_metadata_from_descriptors()
+
+    def test_descriptor_driver_route_rejects_noncanonical_path(self) -> None:
+        descriptor = _fake_native_descriptor(_fake_native_action(route_path="/v1/fake-native/ping"))
+
+        with patch(
+            "control_plane.drivers.native_routes.list_driver_descriptors",
+            return_value=(descriptor,),
+        ):
+            with self.assertRaisesRegex(ValueError, "canonical /v1/drivers/ route_path"):
+                native_routes._driver_route_metadata_from_descriptors()
+
+    def test_native_fastapi_driver_route_validation_rejects_method_drift(self) -> None:
+        route_path = "/v1/drivers/fake-native/ping"
+        descriptor = _fake_native_descriptor(_fake_native_action(route_path=route_path))
+
+        def endpoint() -> None:
+            return None
+
+        with (
+            patch(
+                "control_plane.drivers.native_routes.list_driver_descriptors",
+                return_value=(descriptor,),
+            ),
+            patch(
+                "control_plane.drivers.native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS",
+                frozenset({route_path}),
+            ),
+        ):
+            native_routes._bind_native_fastapi_driver_handler(
+                route_path=route_path,
+                endpoint=endpoint,
+                declared_methods=frozenset({"POST"}),
+            )
+            app = _FakeFastApiApp(
+                (
+                    _FakeFastApiRoute(
+                        path=route_path,
+                        methods=frozenset({"GET"}),
+                        endpoint=endpoint,
+                    ),
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "route methods must match descriptor metadata",
+            ):
+                native_routes._validate_native_fastapi_driver_routes(app)
+
+    def test_native_fastapi_driver_route_validation_rejects_duplicate_registration(
+        self,
+    ) -> None:
+        route_path = "/v1/drivers/fake-native/ping"
+        descriptor = _fake_native_descriptor(_fake_native_action(route_path=route_path))
+
+        def endpoint() -> None:
+            return None
+
+        with (
+            patch(
+                "control_plane.drivers.native_routes.list_driver_descriptors",
+                return_value=(descriptor,),
+            ),
+            patch(
+                "control_plane.drivers.native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS",
+                frozenset({route_path}),
+            ),
+        ):
+            native_routes._bind_native_fastapi_driver_handler(
+                route_path=route_path,
+                endpoint=endpoint,
+                declared_methods=frozenset({"POST"}),
+            )
+            route = _FakeFastApiRoute(
+                path=route_path,
+                methods=frozenset({"POST"}),
+                endpoint=endpoint,
+            )
+
+            with self.assertRaisesRegex(ValueError, "registered exactly once"):
+                native_routes._validate_native_fastapi_driver_routes(
+                    _FakeFastApiApp((route, route))
+                )
+
+    def test_native_fastapi_driver_route_validation_rejects_handler_authz_drift(
+        self,
+    ) -> None:
+        route_path = "/v1/drivers/fake-native/ping"
+        descriptor = _fake_native_descriptor(_fake_native_action(route_path=route_path))
+
+        def endpoint() -> None:
+            return None
+
+        with (
+            patch(
+                "control_plane.drivers.native_routes.list_driver_descriptors",
+                return_value=(descriptor,),
+            ),
+            patch(
+                "control_plane.drivers.native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS",
+                frozenset({route_path}),
+            ),
+        ):
+            route_metadata = native_routes._bind_native_fastapi_driver_handler(
+                route_path=route_path,
+                endpoint=endpoint,
+                declared_methods=frozenset({"POST"}),
+            )
+            setattr(
+                endpoint,
+                native_routes._NATIVE_DRIVER_ROUTE_METADATA_ATTRIBUTE,
+                replace(route_metadata, authz_action="fake_native.drift"),
+            )
+            app = _FakeFastApiApp(
+                (
+                    _FakeFastApiRoute(
+                        path=route_path,
+                        methods=frozenset({"POST"}),
+                        endpoint=endpoint,
+                    ),
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "handler authorization metadata must match descriptor metadata",
+            ):
+                native_routes._validate_native_fastapi_driver_routes(app)
+
     def test_native_fastapi_driver_routes_are_registered(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -499,7 +730,21 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
             native_post_routes,
         )
-        native_routes._validate_native_fastapi_driver_route_paths(app)
+        native_routes._validate_native_fastapi_driver_routes(app)
+        ingress_route = next(
+            route
+            for route in app.routes
+            if getattr(route, "path", None) == INGRESS_ROUTE_APPLY_ROUTE
+        )
+        ingress_endpoint = getattr(ingress_route, "endpoint", None)
+        self.assertEqual(
+            native_routes._native_driver_route_authz_action(ingress_endpoint),
+            "ingress_route.apply",
+        )
+        self.assertEqual(
+            native_routes._native_driver_route_alternate_authz_action(ingress_endpoint),
+            "ingress_route.plan",
+        )
 
     def test_native_fastapi_driver_route_validation_fails_closed(self) -> None:
         class _Route:
@@ -529,7 +774,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             ValueError,
             "Native FastAPI driver routes must be registered by the FastAPI app",
         ):
-            native_routes._validate_native_fastapi_driver_route_paths(app)
+            native_routes._validate_native_fastapi_driver_routes(app)
 
     def test_generic_web_execution_metadata_matches_descriptors(self) -> None:
         self.assert_route_metadata_matches_descriptor(
@@ -607,7 +852,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertEqual(
             odoo_actions["artifact_publish_inputs"].authz_action,
-            ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
+            "odoo_artifact_publish_inputs.read",
         )
         self.assertEqual(
             OdooArtifactPublishInputsEnvelope.model_json_schema()["title"],

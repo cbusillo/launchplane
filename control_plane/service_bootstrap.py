@@ -218,7 +218,7 @@ def serve_launchplane_service(
             verifier=verifier,
             service_record_store=service_record_store,
         )
-        native_routes._validate_native_fastapi_driver_route_paths(fastapi_application)
+        native_routes._validate_native_fastapi_driver_routes(fastapi_application)
         click.echo(f"Launchplane service listening on http://{host}:{port}")
         uvicorn.run(
             fastapi_application,

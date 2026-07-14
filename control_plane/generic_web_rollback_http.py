@@ -28,12 +28,8 @@ from control_plane.workflows.generic_web_rollback import (
 GENERIC_WEB_DRIVER_ID = "generic-web"
 GENERIC_WEB_ROLLBACK_PLAN_ROUTE = _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path
 GENERIC_WEB_ROLLBACK_ROUTE = _GENERIC_WEB_ROLLBACK_ROUTE.route_path
-GENERIC_WEB_ROLLBACK_PLAN_ACTION = "generic_web_prod_rollback.plan"
-GENERIC_WEB_ROLLBACK_ACTION = "generic_web_prod_rollback.execute"
 
 __all__ = [
-    "GENERIC_WEB_ROLLBACK_ACTION",
-    "GENERIC_WEB_ROLLBACK_PLAN_ACTION",
     "GENERIC_WEB_ROLLBACK_PLAN_ROUTE",
     "GENERIC_WEB_ROLLBACK_ROUTE",
     "GenericWebRollbackEnvelope",

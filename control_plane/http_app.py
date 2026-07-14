@@ -181,8 +181,6 @@ from control_plane.launchplane_self_deploy_http import (
     launchplane_self_deploy_records,
 )
 from control_plane.generic_web_rollback_http import (
-    GENERIC_WEB_ROLLBACK_ACTION,
-    GENERIC_WEB_ROLLBACK_PLAN_ACTION,
     GENERIC_WEB_ROLLBACK_PLAN_ROUTE as _GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
     GENERIC_WEB_ROLLBACK_ROUTE as _GENERIC_WEB_ROLLBACK_ROUTE,
     GenericWebRollbackEnvelope,
@@ -195,7 +193,6 @@ from control_plane.generic_web_rollback_http import (
     should_store_generic_web_rollback_idempotency,
 )
 from control_plane.generic_web_deploy_http import (
-    GENERIC_WEB_DEPLOY_ACTION,
     GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
     GenericWebDeployEnvelope,
     GenericWebDeployProductMismatchError,
@@ -222,9 +219,7 @@ from control_plane.workflows.odoo_generic_web_post_deploy import (
     generic_web_post_deploy_executor_for_driver_id,
 )
 from control_plane.generic_web_promotion_http import (
-    GENERIC_WEB_PROD_PROMOTION_ACTION,
     GENERIC_WEB_PROD_PROMOTION_ROUTE as _GENERIC_WEB_PROD_PROMOTION_ROUTE,
-    GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ACTION,
     GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE as _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
     GenericWebProdPromotionEnvelope,
     GenericWebProdPromotionResponse,
@@ -242,9 +237,7 @@ from control_plane.generic_web_promotion_http import (
     validate_generic_web_prod_promotion_lanes,
 )
 from control_plane.generic_web_verification_http import (
-    GENERIC_WEB_PREVIEW_VERIFICATION_ACTION,
     GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE as _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
-    GENERIC_WEB_STABLE_VERIFICATION_ACTION,
     GENERIC_WEB_STABLE_VERIFICATION_ROUTE as _GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
     GenericWebPreviewVerificationEnvelope,
     GenericWebStableVerificationEnvelope,
@@ -258,19 +251,12 @@ from control_plane.generic_web_verification_http import (
     should_store_generic_web_verification_idempotency,
 )
 from control_plane.verireel_read_http import (
-    VERIREEL_PREVIEW_DESTROY_ACTION,
     VERIREEL_PREVIEW_DESTROY_ROUTE as _VERIREEL_PREVIEW_DESTROY_ROUTE,
-    VERIREEL_PREVIEW_INVENTORY_ACTION,
     VERIREEL_PREVIEW_INVENTORY_ROUTE as _VERIREEL_PREVIEW_INVENTORY_ROUTE,
-    VERIREEL_PREVIEW_REFRESH_ACTION,
     VERIREEL_PREVIEW_REFRESH_ROUTE as _VERIREEL_PREVIEW_REFRESH_ROUTE,
-    VERIREEL_PREVIEW_VERIFICATION_ACTION,
     VERIREEL_PREVIEW_VERIFICATION_ROUTE as _VERIREEL_PREVIEW_VERIFICATION_ROUTE,
-    VERIREEL_RUNTIME_VERIFICATION_ACTION,
     VERIREEL_RUNTIME_VERIFICATION_ROUTE as _VERIREEL_RUNTIME_VERIFICATION_ROUTE,
-    VERIREEL_STABLE_ENVIRONMENT_ACTION,
     VERIREEL_STABLE_ENVIRONMENT_ROUTE as _VERIREEL_STABLE_ENVIRONMENT_ROUTE,
-    VERIREEL_TESTING_VERIFICATION_ACTION,
     VERIREEL_TESTING_VERIFICATION_ROUTE as _VERIREEL_TESTING_VERIFICATION_ROUTE,
     VeriReelPreviewDestroyEnvelope,
     VeriReelPreviewInventoryEnvelope,
@@ -295,9 +281,7 @@ from control_plane.verireel_read_http import (
     verireel_testing_verification_response_records,
 )
 from control_plane.verireel_nonprod_http import (
-    VERIREEL_APP_MAINTENANCE_ACTION,
     VERIREEL_APP_MAINTENANCE_ROUTE as _VERIREEL_APP_MAINTENANCE_ROUTE,
-    VERIREEL_TESTING_DEPLOY_ACTION,
     VERIREEL_TESTING_DEPLOY_ROUTE as _VERIREEL_TESTING_DEPLOY_ROUTE,
     VeriReelAppMaintenanceEnvelope,
     VeriReelTestingDeployEnvelope,
@@ -305,13 +289,9 @@ from control_plane.verireel_nonprod_http import (
     apply_verireel_testing_deploy_result,
 )
 from control_plane.verireel_prod_http import (
-    VERIREEL_PROD_BACKUP_GATE_ACTION,
     VERIREEL_PROD_BACKUP_GATE_ROUTE as _VERIREEL_PROD_BACKUP_GATE_ROUTE,
-    VERIREEL_PROD_DEPLOY_ACTION,
     VERIREEL_PROD_DEPLOY_ROUTE as _VERIREEL_PROD_DEPLOY_ROUTE,
-    VERIREEL_PROD_PROMOTION_ACTION,
     VERIREEL_PROD_PROMOTION_ROUTE as _VERIREEL_PROD_PROMOTION_ROUTE,
-    VERIREEL_PROD_ROLLBACK_ACTION,
     VERIREEL_PROD_ROLLBACK_ROUTE as _VERIREEL_PROD_ROLLBACK_ROUTE,
     VeriReelProdBackupGateEnvelope,
     VeriReelProdDeployEnvelope,
@@ -324,13 +304,9 @@ from control_plane.verireel_prod_http import (
     should_store_verireel_prod_result_idempotency,
 )
 from control_plane.generic_web_preview_http import (
-    GENERIC_WEB_PREVIEW_DESTROY_ACTION,
     GENERIC_WEB_PREVIEW_DESTROY_ROUTE as _GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
-    GENERIC_WEB_PREVIEW_INVENTORY_ACTION,
     GENERIC_WEB_PREVIEW_INVENTORY_ROUTE as _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
-    GENERIC_WEB_PREVIEW_READINESS_ACTION,
     GENERIC_WEB_PREVIEW_READINESS_ROUTE as _GENERIC_WEB_PREVIEW_READINESS_ROUTE,
-    GENERIC_WEB_PREVIEW_REFRESH_ACTION,
     GENERIC_WEB_PREVIEW_REFRESH_ROUTE as _GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
     GenericWebPreviewDestroyEnvelope,
     GenericWebPreviewInventoryEnvelope,
@@ -346,7 +322,6 @@ from control_plane.generic_web_preview_http import (
     should_store_generic_web_preview_idempotency,
 )
 from control_plane.odoo_artifact_publish_inputs_http import (
-    ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
     ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE as _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
     OdooArtifactPublishInputsEnvelope,
     OdooArtifactPublishInputsProductMismatchError,
@@ -355,7 +330,6 @@ from control_plane.odoo_artifact_publish_inputs_http import (
     resolve_odoo_artifact_publish_inputs_profile,
 )
 from control_plane.odoo_artifact_publish_http import (
-    ODOO_ARTIFACT_PUBLISH_ACTION,
     ODOO_ARTIFACT_PUBLISH_ROUTE as _ODOO_ARTIFACT_PUBLISH_ROUTE,
     OdooArtifactPublishEnvelope,
     OdooArtifactPublishProductMismatchError,
@@ -365,8 +339,6 @@ from control_plane.odoo_artifact_publish_http import (
     should_store_odoo_artifact_publish_idempotency,
 )
 from control_plane.odoo_preview_apply_http import (
-    ODOO_PREVIEW_APPLY_ACTION,
-    ODOO_PREVIEW_APPLY_INPUTS_ACTION,
     ODOO_PREVIEW_APPLY_INPUTS_ROUTE as _ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
     ODOO_PREVIEW_APPLY_ROUTE as _ODOO_PREVIEW_APPLY_ROUTE,
     OdooPreviewApplyConfigError,
@@ -381,11 +353,8 @@ from control_plane.odoo_preview_apply_http import (
     resolve_odoo_preview_apply_profile,
 )
 from control_plane.odoo_post_deploy_http import (
-    ODOO_CONFIG_PARAMETER_OVERRIDE_ACTION,
     ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE as _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
-    ODOO_POST_DEPLOY_ACTION,
     ODOO_POST_DEPLOY_ROUTE as _ODOO_POST_DEPLOY_ROUTE,
-    ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ACTION,
     ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE as _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
     OdooConfigParameterOverrideEnvelope,
     OdooInstanceOverrideStore,
@@ -399,7 +368,6 @@ from control_plane.odoo_post_deploy_http import (
     write_odoo_website_bootstrap_override_result,
 )
 from control_plane.odoo_app_maintenance_http import (
-    ODOO_APP_MAINTENANCE_ACTION,
     ODOO_APP_MAINTENANCE_ROUTE as _ODOO_APP_MAINTENANCE_ROUTE,
     OdooAppMaintenanceEnvelope,
     OdooAppMaintenanceProductMismatchError,
@@ -409,7 +377,6 @@ from control_plane.odoo_app_maintenance_http import (
     should_store_odoo_app_maintenance_idempotency,
 )
 from control_plane.odoo_prod_backup_gate_http import (
-    ODOO_PROD_BACKUP_GATE_ACTION,
     ODOO_PROD_BACKUP_GATE_ROUTE as _ODOO_PROD_BACKUP_GATE_ROUTE,
     OdooProdBackupGateEnvelope,
     OdooProdBackupGateProductMismatchError,
@@ -419,11 +386,8 @@ from control_plane.odoo_prod_backup_gate_http import (
     should_store_odoo_prod_backup_gate_idempotency,
 )
 from control_plane.odoo_prod_promotion_http import (
-    ODOO_PROD_PROMOTION_ACTION,
-    ODOO_PROD_PROMOTION_INPUTS_ACTION,
     ODOO_PROD_PROMOTION_INPUTS_ROUTE as _ODOO_PROD_PROMOTION_INPUTS_ROUTE,
     ODOO_PROD_PROMOTION_ROUTE as _ODOO_PROD_PROMOTION_ROUTE,
-    ODOO_PROD_PROMOTION_RUN_ACTION,
     ODOO_PROD_PROMOTION_RUN_ROUTE as _ODOO_PROD_PROMOTION_RUN_ROUTE,
     OdooProdPromotionEnvelope,
     OdooProdPromotionInputsEnvelope,
@@ -437,7 +401,6 @@ from control_plane.odoo_prod_promotion_http import (
     should_store_prod_promotion_idempotency,
 )
 from control_plane.odoo_prod_rollback_http import (
-    ODOO_PROD_ROLLBACK_ACTION,
     ODOO_PROD_ROLLBACK_ROUTE as _ODOO_PROD_ROLLBACK_ROUTE,
     OdooProdRollbackEnvelope,
     OdooProdRollbackProductMismatchError,
@@ -447,7 +410,6 @@ from control_plane.odoo_prod_rollback_http import (
     should_store_odoo_prod_rollback_idempotency,
 )
 from control_plane.odoo_stable_bootstrap_http import (
-    ODOO_STABLE_BOOTSTRAP_ACTION,
     ODOO_STABLE_BOOTSTRAP_ROUTE as _ODOO_STABLE_BOOTSTRAP_ROUTE,
     OdooStableBootstrapEnvelope,
     OdooStableBootstrapIdempotencyKeyReusedError,
@@ -459,7 +421,6 @@ from control_plane.odoo_stable_bootstrap_http import (
     resolve_odoo_stable_bootstrap_product_route,
 )
 from control_plane.odoo_target_replacement_plan_http import (
-    ODOO_TARGET_REPLACEMENT_PLAN_ACTION,
     ODOO_TARGET_REPLACEMENT_PLAN_ROUTE as _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
     OdooTargetReplacementPlanEnvelope,
     OdooTargetReplacementPlanProductMismatchError,
@@ -467,7 +428,6 @@ from control_plane.odoo_target_replacement_plan_http import (
     resolve_odoo_target_replacement_plan_lane,
 )
 from control_plane.odoo_target_replacement_apply_http import (
-    ODOO_TARGET_REPLACEMENT_APPLY_ACTION,
     ODOO_TARGET_REPLACEMENT_APPLY_ROUTE as _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
     OdooTargetReplacementApplyEnvelope,
     OdooTargetReplacementApplyIdempotencyKeyReusedError,
@@ -527,6 +487,10 @@ from control_plane.contracts.runner_lane_registration_evidence import (
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
+from control_plane.drivers import native_routes
+from control_plane.drivers.route_paths import (
+    INGRESS_ROUTE_APPLY_ROUTE as _INGRESS_ROUTE_APPLY_ROUTE,
+)
 from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewDesiredStateEnvelope,
     _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
@@ -687,8 +651,6 @@ _LOGGER = logging.getLogger(__name__)
 
 
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
-_LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
-_LAUNCHPLANE_DRIVER_READ_CONTEXT = "launchplane"
 _DEPLOYMENT_EVIDENCE_ROUTE = "/v1/evidence/deployments"
 _BACKUP_GATE_EVIDENCE_ROUTE = "/v1/evidence/backup-gates"
 _PROMOTION_EVIDENCE_ROUTE = "/v1/evidence/promotions"
@@ -760,7 +722,6 @@ _RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE = "/v1/runtime-key-safety/policies/apply"
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
 _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
 _LIVE_TARGET_RUNTIME_APPLY_ROUTE = "/v1/live-target-runtime/apply"
-_INGRESS_ROUTE_APPLY_ROUTE = "/v1/drivers/ingress/route-apply"
 _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _ROUTE_BINDING_BACKFILL_APPLY_ROUTE = "/v1/route-bindings/backfill/apply"
@@ -3175,6 +3136,13 @@ class _LaunchplaneFastAPI(FastAPI):
         endpoint: Callable[..., Any],
         **kwargs: Any,
     ) -> None:
+        if native_routes._is_native_fastapi_driver_route_path(path):
+            route_metadata = native_routes._bind_native_fastapi_driver_handler(
+                route_path=path,
+                endpoint=endpoint,
+                declared_methods=kwargs.get("methods"),
+            )
+            kwargs["methods"] = [route_metadata.method]
         responses = cast(
             dict[int | str, dict[str, Any]] | None,
             kwargs.get("responses"),
@@ -5047,7 +5015,7 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_ARTIFACT_PUBLISH_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_odoo_artifact_publish),
             product=authorization_product,
             context=publish_request.publish.context,
         ):
@@ -5173,7 +5141,9 @@ def create_launchplane_fastapi_app(
 
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                write_odoo_artifact_publish_inputs
+            ),
             product=inputs_request.product,
             context=inputs_request.inputs.context,
         ):
@@ -5304,7 +5274,7 @@ def create_launchplane_fastapi_app(
 
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_PREVIEW_APPLY_INPUTS_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_odoo_preview_apply_inputs),
             product=product_profile.product,
             context=product_profile.preview.context,
         ):
@@ -5407,7 +5377,7 @@ def create_launchplane_fastapi_app(
 
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_PREVIEW_APPLY_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_odoo_preview_apply),
             product=product_profile.product,
             context=product_profile.preview.context,
         ):
@@ -5550,7 +5520,7 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_POST_DEPLOY_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_odoo_post_deploy),
             product=authorization_product,
             context=post_deploy_request.post_deploy.context,
         ):
@@ -5681,7 +5651,7 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_APP_MAINTENANCE_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_odoo_app_maintenance),
             product=authorization_product,
             context=maintenance_request.maintenance.context,
         ):
@@ -5813,7 +5783,9 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_CONFIG_PARAMETER_OVERRIDE_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                write_odoo_config_parameter_override
+            ),
             product=authorization_product,
             context=override_request.override.context,
         ):
@@ -5943,7 +5915,9 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                write_odoo_website_bootstrap_override
+            ),
             product=authorization_product,
             context=override_request.override.context,
         ):
@@ -6073,7 +6047,7 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_PROD_BACKUP_GATE_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_odoo_prod_backup_gate),
             product=authorization_product,
             context=backup_gate_request.backup_gate.context,
         ):
@@ -6204,7 +6178,7 @@ def create_launchplane_fastapi_app(
 
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_STABLE_BOOTSTRAP_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_odoo_stable_bootstrap),
             product=bootstrap_request.product,
             context=bootstrap_request.bootstrap.context,
         ):
@@ -6334,7 +6308,9 @@ def create_launchplane_fastapi_app(
 
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_TARGET_REPLACEMENT_PLAN_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                write_odoo_target_replacement_plan
+            ),
             product=plan_request.product,
             context=lane.context,
         ):
@@ -6431,7 +6407,9 @@ def create_launchplane_fastapi_app(
 
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_TARGET_REPLACEMENT_APPLY_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                write_odoo_target_replacement_apply
+            ),
             product=apply_request.product,
             context=lane.context,
         ):
@@ -6563,7 +6541,7 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_ROLLBACK_PLAN_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_generic_web_rollback_plan),
             product=rollback_request.product,
             context=lane.context,
         ):
@@ -6687,7 +6665,7 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_ROLLBACK_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_generic_web_rollback),
             product=rollback_request.product,
             context=lane.context,
         ):
@@ -6817,7 +6795,7 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_PROD_ROLLBACK_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_odoo_prod_rollback),
             product=authorization_product,
             context=rollback_request.rollback.context,
         ):
@@ -6947,7 +6925,7 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_PROD_PROMOTION_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_odoo_prod_promotion),
             product=authorization_product,
             context=promotion_request.promotion.context,
         ):
@@ -7079,7 +7057,9 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_PROD_PROMOTION_INPUTS_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                write_odoo_prod_promotion_inputs
+            ),
             product=authorization_product,
             context=inputs_request.inputs.context,
         ):
@@ -7213,7 +7193,7 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=ODOO_PROD_PROMOTION_RUN_ACTION,
+            action=native_routes._native_driver_route_authz_action(write_odoo_prod_promotion_run),
             product=authorization_product,
             context=run_request.run.context,
         ):
@@ -12002,7 +11982,9 @@ def create_launchplane_fastapi_app(
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
         authz_action = (
-            "ingress_route.apply" if route_request.ingress.mode == "apply" else "ingress_route.plan"
+            native_routes._native_driver_route_authz_action(apply_ingress_route)
+            if route_request.ingress.mode == "apply"
+            else native_routes._native_driver_route_alternate_authz_action(apply_ingress_route)
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
@@ -12659,7 +12641,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action="preview_desired_state.discover",
+            action=native_routes._native_driver_route_authz_action(
+                apply_generic_web_preview_desired_state
+            ),
             product=profile.product,
             context=profile.preview.context,
         ):
@@ -12753,7 +12737,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_PREVIEW_INVENTORY_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                apply_generic_web_preview_inventory
+            ),
             product=profile.product,
             context=profile.preview.context,
         ):
@@ -12818,7 +12804,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_PREVIEW_READINESS_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                apply_generic_web_preview_readiness
+            ),
             product=profile.product,
             context=profile.preview.context,
         ):
@@ -12885,7 +12873,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_PREVIEW_REFRESH_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                apply_generic_web_preview_refresh
+            ),
             product=profile.product,
             context=profile.preview.context,
         ):
@@ -12978,7 +12968,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_PREVIEW_DESTROY_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                apply_generic_web_preview_destroy
+            ),
             product=profile.product,
             context=profile.preview.context,
         ):
@@ -13072,7 +13064,7 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_DEPLOY_ACTION,
+            action=native_routes._native_driver_route_authz_action(apply_generic_web_deploy),
             product=profile.product,
             context=lane.context,
         ):
@@ -13189,7 +13181,9 @@ def create_launchplane_fastapi_app(
             )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_PROD_PROMOTION_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                apply_generic_web_prod_promotion
+            ),
             product=profile.product,
             context=lane.context.strip(),
         ):
@@ -13300,7 +13294,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                dispatch_generic_web_prod_promotion_workflow
+            ),
             product=profile.product,
             context=lane.context.strip(),
         ):
@@ -13469,7 +13465,7 @@ def create_launchplane_fastapi_app(
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_PROD_DEPLOY_ACTION,
+            action=native_routes._native_driver_route_authz_action(apply_verireel_prod_deploy),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -13553,7 +13549,7 @@ def create_launchplane_fastapi_app(
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_PROD_BACKUP_GATE_ACTION,
+            action=native_routes._native_driver_route_authz_action(apply_verireel_prod_backup_gate),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -13642,7 +13638,7 @@ def create_launchplane_fastapi_app(
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_PROD_PROMOTION_ACTION,
+            action=native_routes._native_driver_route_authz_action(apply_verireel_prod_promotion),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -13726,7 +13722,7 @@ def create_launchplane_fastapi_app(
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_PROD_ROLLBACK_ACTION,
+            action=native_routes._native_driver_route_authz_action(apply_verireel_prod_rollback),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -13820,7 +13816,7 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_TESTING_DEPLOY_ACTION,
+            action=native_routes._native_driver_route_authz_action(apply_verireel_testing_deploy),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -13910,7 +13906,7 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_APP_MAINTENANCE_ACTION,
+            action=native_routes._native_driver_route_authz_action(apply_verireel_app_maintenance),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -14006,7 +14002,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_TESTING_VERIFICATION_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                apply_verireel_testing_verification
+            ),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -14094,7 +14092,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_STABLE_ENVIRONMENT_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                read_verireel_stable_environment
+            ),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -14152,7 +14152,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_RUNTIME_VERIFICATION_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                run_verireel_runtime_verification
+            ),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -14213,7 +14215,7 @@ def create_launchplane_fastapi_app(
         authorization_context = inventory_request.inventory.context.strip() or authorization_context
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_PREVIEW_INVENTORY_ACTION,
+            action=native_routes._native_driver_route_authz_action(read_verireel_preview_inventory),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -14274,7 +14276,7 @@ def create_launchplane_fastapi_app(
         authorization_context = refresh_request.refresh.context.strip() or authorization_context
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_PREVIEW_REFRESH_ACTION,
+            action=native_routes._native_driver_route_authz_action(apply_verireel_preview_refresh),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -14376,7 +14378,7 @@ def create_launchplane_fastapi_app(
         authorization_context = destroy_request.destroy.context.strip() or authorization_context
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_PREVIEW_DESTROY_ACTION,
+            action=native_routes._native_driver_route_authz_action(apply_verireel_preview_destroy),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -14472,7 +14474,9 @@ def create_launchplane_fastapi_app(
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=VERIREEL_PREVIEW_VERIFICATION_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                apply_verireel_preview_verification
+            ),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -14570,7 +14574,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_STABLE_VERIFICATION_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                apply_generic_web_stable_verification
+            ),
             product=profile.product,
             context=lane.context,
         ):
@@ -14662,7 +14668,9 @@ def create_launchplane_fastapi_app(
             ) from error
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action=GENERIC_WEB_PREVIEW_VERIFICATION_ACTION,
+            action=native_routes._native_driver_route_authz_action(
+                apply_generic_web_preview_verification
+            ),
             product=profile.product,
             context=profile.preview.context,
         ):

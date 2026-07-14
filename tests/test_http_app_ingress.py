@@ -1008,6 +1008,48 @@ class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(records[0].status, "planned")
         self.assertEqual(records[0].trace_id, payload["trace_id"])
 
+    async def test_ingress_route_modes_require_distinct_descriptor_actions(self) -> None:
+        for mode, granted_action in (
+            ("dry-run", "ingress_route.apply"),
+            ("apply", "ingress_route.plan"),
+        ):
+            with self.subTest(mode=mode, granted_action=granted_action):
+                client = _FakeNpmplusIngressClient()
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action=granted_action,
+                        product="launchplane",
+                        context="reon-prod",
+                    ),
+                    record_store_factory=lambda: _MissingProductReadStore(),
+                    npmplus_ingress_client_factory=lambda: client,
+                )
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/drivers/ingress/route-apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": f"ingress-mode-authz-{mode}",
+                    },
+                    payload=_npmplus_ingress_route_payload(mode=mode),
+                )
+
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(
+                    response.json()["error"],
+                    {
+                        "code": "authorization_denied",
+                        "message": (
+                            "Workflow cannot plan or apply the ingress route for the requested "
+                            "product/context."
+                        ),
+                    },
+                )
+                self.assertEqual(client.calls, [])
+
     async def test_ingress_route_dry_run_idempotency_key_does_not_replay(self) -> None:
         client = _FakeNpmplusIngressClient()
         with TemporaryDirectory() as temporary_directory_name:

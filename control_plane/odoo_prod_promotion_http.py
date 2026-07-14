@@ -32,9 +32,6 @@ from control_plane.workflows.odoo_prod_promotion_run import (
 ODOO_PROD_PROMOTION_INPUTS_ROUTE = "/v1/drivers/odoo/prod-promotion-inputs"
 ODOO_PROD_PROMOTION_RUN_ROUTE = "/v1/drivers/odoo/prod-promotion-run"
 ODOO_PROD_PROMOTION_ROUTE = "/v1/drivers/odoo/prod-promotion"
-ODOO_PROD_PROMOTION_INPUTS_ACTION = "odoo_prod_promotion_inputs.read"
-ODOO_PROD_PROMOTION_RUN_ACTION = "odoo_prod_promotion_run.execute"
-ODOO_PROD_PROMOTION_ACTION = "odoo_prod_promotion.execute"
 ODOO_DRIVER_ID = "odoo"
 
 

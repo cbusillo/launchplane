@@ -22,7 +22,6 @@ from control_plane.odoo_product_driver_http import (
 
 
 ODOO_STABLE_BOOTSTRAP_ROUTE = "/v1/drivers/odoo/stable-bootstrap"
-ODOO_STABLE_BOOTSTRAP_ACTION = "odoo_stable_bootstrap.execute"
 
 
 class OdooStableBootstrapProductMismatchError(OdooProductMismatchError):
