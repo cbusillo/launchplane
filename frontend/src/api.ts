@@ -29,6 +29,7 @@ import type {
   ApplyGenericWebProdPromotionData,
   ApplyProductConfigData,
   DispatchGenericWebProdPromotionWorkflowData,
+  ProductOverviewResponse,
   RankWorkGraphSnapshotData,
 } from "./generated/openapi.ts";
 
@@ -130,8 +131,13 @@ function requestGeneratedPost<
   return requestJson<T>(request.url, "POST", request.body, signal);
 }
 
-export function readAuthSession(): Promise<AuthSessionPayload> {
-  return requestJson<AuthSessionPayload>("/v1/auth/session");
+export function readAuthSession(signal?: AbortSignal): Promise<AuthSessionPayload> {
+  return requestJson<AuthSessionPayload>(
+    "/v1/auth/session",
+    "GET",
+    undefined,
+    signal,
+  );
 }
 
 export function logout(): Promise<LogoutPayload> {
@@ -164,8 +170,20 @@ export function listProductProfiles(
   return requestJson<ProductProfileListPayload>(`/v1/product-profiles${query}`);
 }
 
-export function listProducts(): Promise<ProductListPayload> {
-  return requestJson<ProductListPayload>("/v1/products");
+export function listProducts(signal?: AbortSignal): Promise<ProductListPayload> {
+  return requestJson<ProductListPayload>("/v1/products", "GET", undefined, signal);
+}
+
+export function readProduct(
+  product: string,
+  signal?: AbortSignal,
+): Promise<ProductOverviewResponse> {
+  return requestJson<ProductOverviewResponse>(
+    `/v1/products/${encodeURIComponent(product)}`,
+    "GET",
+    undefined,
+    signal,
+  );
 }
 
 export function readProductEnvironmentConfigStatus(
