@@ -346,6 +346,13 @@ The clean-slate shell uses URL-owned product selection under the service-owned
 - `/ui/products/{product}` is the canonical product workspace. The route key is
   the stored product key, while the visible identity remains the product display
   name.
+- `/ui/products/{product}/environments/{environment}` is the canonical stable
+  environment view. Runtime settings, managed secrets, and diagnostics are
+  separate child routes under that environment so secret-binding state is not
+  blurred into ordinary runtime configuration.
+- `/ui/products/{product}/activity` is the operator timeline. It is labelled
+  Recent activity because the current backend read model returns a bounded
+  latest-event window rather than a paginated complete history.
 - `/ui/engineering` is a separate Engineering Ops boundary. Product routes do
   not load work-graph, issue-reconciliation, Every Code, merge-train, or platform
   maintenance data.
@@ -355,4 +362,7 @@ missing, and failure states. A failed read must not become an empty product list
 and a direct product URL must use `GET /v1/products/{product}` rather than a
 driver/context fallback. Environment, settings, secrets, activity, promotion,
 maintenance, and Engineering Ops child routes are added only when their typed
-views and supported controls exist.
+views and supported controls exist. Environment diagnosis uses desired,
+provider-recorded, and observed topology as distinct evidence; a verified read
+is not presented as healthy when the recorded ingress, TLS, or runtime identity
+condition is failing.

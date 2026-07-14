@@ -15,11 +15,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { LaunchplaneApiError, readProduct } from "./api";
 import { formatTime } from "./format";
+import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import {
   emptyResource,
   type ResourceState,
 } from "./resource";
-import { AppLink, productPath } from "./router";
+import {
+  AppLink,
+  productEnvironmentPath,
+  productPath,
+  type AppRoute,
+} from "./router";
 
 import type {
   DataProvenance,
@@ -28,7 +34,7 @@ import type {
   ProductTopologyWarning,
 } from "./generated/openapi.ts";
 
-type TrustState = ProductSiteOverview["trust_state"];
+export type TrustState = ProductSiteOverview["trust_state"];
 type SignalTone = TrustState | "warning" | "danger";
 
 interface WarningItem {
@@ -233,6 +239,7 @@ export function ProductWorkspaceRoute({
     <ProductWorkspace
       product={resource.data}
       refreshError={resource.status === "error" ? resource.error : ""}
+      route={{ kind: "product-workspace", product: productKey }}
       traceId={resource.status === "error" ? resource.traceId : ""}
       updating={resource.status === "loading"}
     />
@@ -313,11 +320,13 @@ function DirectoryLane({
 function ProductWorkspace({
   product,
   refreshError,
+  route,
   traceId,
   updating,
 }: {
   product: ProductSiteOverview;
   refreshError: string;
+  route: AppRoute;
   traceId: string;
   updating: boolean;
 }) {
@@ -381,6 +390,8 @@ function ProductWorkspace({
           </span>
         ) : null}
       </header>
+
+      <ProductWorkspaceNav product={product} route={route} />
 
       <a className="mobile-next-inspection" href={`#${inspection.targetId}`}>
         <span>
@@ -446,7 +457,11 @@ function ProductWorkspace({
           {environments.length ? (
             <div className="lane-list">
               {environments.map((environment) => (
-                <EnvironmentRow key={environment.environment} environment={environment} />
+                <EnvironmentRow
+                  key={environment.environment}
+                  environment={environment}
+                  product={product.product}
+                />
               ))}
             </div>
           ) : (
@@ -486,7 +501,13 @@ function ProductWorkspace({
   );
 }
 
-function EnvironmentRow({ environment }: { environment: ProductEnvironmentSummary }) {
+function EnvironmentRow({
+  environment,
+  product,
+}: {
+  environment: ProductEnvironmentSummary;
+  product: string;
+}) {
   const domain = domainForEnvironment(environment);
   const externalUrl = safeExternalUrl(environment.base_url);
   const tls = environment.topology.observed.tls_domains.find(
@@ -551,6 +572,13 @@ function EnvironmentRow({ environment }: { environment: ProductEnvironmentSummar
           <small>{trustLabel(environment.trust_state)}</small>
         </div>
       </dl>
+      <AppLink
+        className="environment-inspect-link"
+        to={productEnvironmentPath(product, environment.environment)}
+      >
+        Inspect environment
+        <ArrowRight size={14} aria-hidden="true" />
+      </AppLink>
     </article>
   );
 }
@@ -750,7 +778,7 @@ function SignalTile({
   );
 }
 
-function EvidenceBadge({
+export function EvidenceBadge({
   compact = false,
   state,
   timestamp = "",
@@ -838,7 +866,7 @@ function NoProducts({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-function RouteError({
+export function RouteError({
   eyebrow,
   message,
   onRetry,
@@ -878,7 +906,7 @@ function RouteError({
   );
 }
 
-function InlineError({ message, traceId }: { message: string; traceId: string }) {
+export function InlineError({ message, traceId }: { message: string; traceId: string }) {
   return (
     <div className="inline-error" role="alert">
       <AlertTriangle size={17} aria-hidden="true" />
@@ -888,7 +916,7 @@ function InlineError({ message, traceId }: { message: string; traceId: string })
   );
 }
 
-function MissingEvidenceState({ title, detail }: { title: string; detail: string }) {
+export function MissingEvidenceState({ title, detail }: { title: string; detail: string }) {
   return (
     <div className="missing-evidence-state">
       <ShieldQuestion size={20} aria-hidden="true" />
@@ -1093,7 +1121,7 @@ function domainForEnvironment(environment: ProductEnvironmentSummary): string {
   return url?.hostname || "No domain evidence";
 }
 
-function safeExternalUrl(value: string): URL | null {
+export function safeExternalUrl(value: string): URL | null {
   if (!value.trim()) {
     return null;
   }
@@ -1105,11 +1133,11 @@ function safeExternalUrl(value: string): URL | null {
   }
 }
 
-function evidenceTimestamp(provenance: DataProvenance): string {
+export function evidenceTimestamp(provenance: DataProvenance): string {
   return provenance.refreshed_at || provenance.recorded_at;
 }
 
-function formatEvidenceTime(provenance: DataProvenance): string {
+export function formatEvidenceTime(provenance: DataProvenance): string {
   const timestamp = evidenceTimestamp(provenance);
   return timestamp ? formatTime(timestamp) : "No timestamp";
 }
@@ -1118,7 +1146,7 @@ function environmentLabel(environment: string): string {
   return environment === "prod" ? "Production" : humanize(environment);
 }
 
-function trustLabel(state: TrustState): string {
+export function trustLabel(state: TrustState): string {
   return state === "verified"
     ? "Verified"
     : state === "recorded"
@@ -1130,7 +1158,7 @@ function trustLabel(state: TrustState): string {
           : "Missing";
 }
 
-function humanize(value: string): string {
+export function humanize(value: string): string {
   const normalized = value.replaceAll("_", " ").trim();
   return normalized
     ? `${normalized.slice(0, 1).toUpperCase()}${normalized.slice(1)}`

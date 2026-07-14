@@ -1,8 +1,12 @@
 import type {
   DataProvenance,
   GitHubHumanIdentityResponse,
+  ProductActivityReadModel,
+  ProductEnvironmentConfigStatus,
+  ProductEnvironmentDetail,
   ProductEnvironmentSummary,
   ProductSiteOverview,
+  RuntimeIdentity,
 } from "./generated/openapi.ts";
 
 type TrustState = ProductSiteOverview["trust_state"];
@@ -34,6 +38,249 @@ export function productsForFixture(
     return [missingEvidenceProduct];
   }
   return [atlasProduct, missingEvidenceProduct];
+}
+
+export function environmentForFixture(
+  fixture: "products" | "empty" | "error" | "missing",
+  product: string,
+  environment: string,
+): ProductEnvironmentDetail | null {
+  assertFixtureAvailable(fixture);
+  const site = productsForFixture(fixture).find((candidate) => candidate.product === product);
+  const summary = site?.environments.find(
+    (candidate) => candidate.environment === environment,
+  );
+  if (!site || !summary) {
+    return null;
+  }
+  const missingEvidence = site.trust_state === "missing";
+  const expectedIdentity = missingEvidence
+    ? null
+    : runtimeIdentity(site.product, summary.context, environment, "expected");
+  const observedIdentity = missingEvidence
+    ? null
+    : runtimeIdentity(site.product, summary.context, environment, "observed");
+  const runtimeIdentityDetail = missingEvidence
+    ? "No runtime identity evidence is recorded."
+    : "Observed runtime identity matches the expected stable-lane artifact.";
+  const runtimeIdentityStatus = missingEvidence ? "missing" : "match";
+  const runtimeIdentityTrust = missingEvidence ? "missing" : "verified";
+  return {
+    schema_version: 1,
+    product: site.product,
+    display_name: site.display_name,
+    repository: site.repository,
+    driver_id: site.driver_id,
+    base_driver_id: site.base_driver_id,
+    environment: summary.environment,
+    context: summary.context,
+    base_url: summary.base_url,
+    health_url: summary.health_url,
+    trust_state: summary.trust_state,
+    provenance: summary.provenance,
+    warnings: summary.warnings,
+    available_actions: summary.available_actions,
+    driver_extensions: summary.driver_extensions,
+    public_ingress: summary.public_ingress,
+    topology: {
+      ...summary.topology,
+      observed: {
+        ...summary.topology.observed,
+        placement: {
+          expected_runtime_identity: expectedIdentity,
+          observed_runtime_identity: observedIdentity,
+          runtime_identity_detail: runtimeIdentityDetail,
+          runtime_identity_status: runtimeIdentityStatus,
+          trust_state: runtimeIdentityTrust,
+          provenance: provenance(runtimeIdentityTrust, runtimeIdentityDetail),
+        },
+      },
+    },
+    target: {
+      target_name: missingEvidence ? "" : `${site.product}-${environment}`,
+      target_type: missingEvidence ? "" : "application",
+      provider: missingEvidence ? "" : "managed-runtime",
+      provider_target_type: missingEvidence ? "" : "application",
+      target_id_recorded: !missingEvidence,
+      artifact_manifest: null,
+      expected_runtime_identity: expectedIdentity,
+      observed_runtime_identity: observedIdentity,
+      runtime_identity_status: runtimeIdentityStatus,
+      runtime_identity_detail: runtimeIdentityDetail,
+      trust_state: runtimeIdentityTrust,
+    },
+    runtime_settings: missingEvidence
+      ? []
+      : [
+          {
+            scope: "instance",
+            context: summary.context,
+            instance: environment,
+            env_keys: ["LOG_LEVEL", "PUBLIC_ORIGIN"],
+            env_value_count: 2,
+            source_label: "stable lane profile",
+            updated_at: OBSERVED_AT,
+            trust_state: "recorded",
+          },
+        ],
+    managed_secrets: missingEvidence
+      ? []
+      : [
+          {
+            binding_id: `binding-${environment}-smtp-example`,
+            secret_id: "secret-smtp-example",
+            integration: "runtime_environment",
+            binding_type: "env",
+            binding_key: "SMTP_PASSWORD",
+            context: summary.context,
+            instance: environment,
+            status: "configured",
+            updated_at: OBSERVED_AT,
+            trust_state: "recorded",
+          },
+        ],
+  };
+}
+
+export function configStatusForFixture(
+  fixture: "products" | "empty" | "error" | "missing",
+  product: string,
+  environment: string,
+): ProductEnvironmentConfigStatus | null {
+  assertFixtureAvailable(fixture);
+  const detail = environmentForFixture(fixture, product, environment);
+  if (!detail) {
+    return null;
+  }
+  const missingEvidence = detail.trust_state === "missing";
+  return {
+    schema_version: 1,
+    product: detail.product,
+    display_name: detail.display_name,
+    repository: detail.repository,
+    driver_id: detail.driver_id,
+    base_driver_id: detail.base_driver_id,
+    environment: detail.environment,
+    context: detail.context,
+    trust_state: detail.trust_state,
+    provenance: detail.provenance,
+    warnings: detail.warnings,
+    runtime_settings: [
+      {
+        key: "PUBLIC_ORIGIN",
+        status: missingEvidence ? "missing" : "configured",
+        context: detail.context,
+        instance: environment,
+        source_label: missingEvidence ? "" : "stable lane profile",
+        updated_at: missingEvidence ? "" : OBSERVED_AT,
+        trust_state: missingEvidence ? "missing" : "recorded",
+      },
+      {
+        key: "ANALYTICS_WRITE_KEY",
+        status: "missing",
+        context: detail.context,
+        instance: environment,
+        source_label: "",
+        updated_at: "",
+        trust_state: "missing",
+      },
+    ],
+    managed_secrets: [
+      {
+        binding_key: "SMTP_PASSWORD",
+        integration: "runtime_environment",
+        status: missingEvidence ? "missing" : "configured",
+        context: detail.context,
+        instance: environment,
+        updated_at: missingEvidence ? "" : OBSERVED_AT,
+        trust_state: missingEvidence ? "missing" : "recorded",
+      },
+      {
+        binding_key: "ANALYTICS_TOKEN",
+        integration: "runtime_environment",
+        status: "missing",
+        context: detail.context,
+        instance: environment,
+        updated_at: "",
+        trust_state: "missing",
+      },
+    ],
+  };
+}
+
+export function activityForFixture(
+  fixture: "products" | "empty" | "error" | "missing",
+  product: string,
+): ProductActivityReadModel | null {
+  assertFixtureAvailable(fixture);
+  const site = productsForFixture(fixture).find((candidate) => candidate.product === product);
+  if (!site) {
+    return null;
+  }
+  if (site.trust_state === "missing") {
+    return {
+      schema_version: 1,
+      product: site.product,
+      display_name: site.display_name,
+      repository: site.repository,
+      driver_id: site.driver_id,
+      events: [],
+    };
+  }
+  return {
+    schema_version: 1,
+    product: site.product,
+    display_name: site.display_name,
+    repository: site.repository,
+    driver_id: site.driver_id,
+    events: [
+      {
+        event_id: "event-tls-example",
+        event_type: "public_ingress_incident",
+        product: site.product,
+        context: "atlas-prod",
+        environment: "prod",
+        driver_id: site.driver_id,
+        action_id: "public_ingress_probe",
+        title: "Production TLS verification failed",
+        summary: "The certificate presented at the public endpoint did not cover the desired hostname.",
+        status: "fail",
+        occurred_at: "2026-07-14T14:32:00Z",
+        trust_state: "verified",
+        records: [{ record_type: "public_ingress_incident", record_id: "incident-example" }],
+      },
+      {
+        event_id: "event-deploy-example",
+        event_type: "deployment",
+        product: site.product,
+        context: "atlas-testing",
+        environment: "testing",
+        driver_id: site.driver_id,
+        action_id: "stable_deploy",
+        title: "Testing deployment verified",
+        summary: "The testing environment reported the expected public health evidence.",
+        status: "pass",
+        occurred_at: "2026-07-14T13:08:00Z",
+        trust_state: "verified",
+        records: [{ record_type: "deployment", record_id: "deployment-example" }],
+      },
+      {
+        event_id: "event-authz-example",
+        event_type: "authz_policy",
+        product: site.product,
+        context: "launchplane",
+        environment: "",
+        driver_id: "launchplane",
+        action_id: "authz_policy.update",
+        title: "Product read policy recorded",
+        summary: "Launchplane recorded updated product read authority for the stable lanes.",
+        status: "recorded",
+        occurred_at: "2026-07-13T20:15:00Z",
+        trust_state: "recorded",
+        records: [{ record_type: "authz_policy", record_id: "policy-example" }],
+      },
+    ],
+  };
 }
 
 const atlasTesting = environmentFixture({
@@ -404,4 +651,35 @@ function provenance(state: TrustState, detail: string): DataProvenance {
     stale_after: hasEvidence ? STALE_AFTER : "",
     detail,
   };
+}
+
+function runtimeIdentity(
+  product: string,
+  context: string,
+  environment: string,
+  kind: "expected" | "observed",
+): RuntimeIdentity {
+  return {
+    schema_version: 1,
+    product,
+    context,
+    instance: environment,
+    environment_kind: "stable",
+    artifact_id: `${product}-artifact-v17`,
+    image_reference: `registry.example.invalid/${product}@sha256:example`,
+    source_git_ref: "refs/heads/main",
+    release_tuple_id: `${product}-release-v17`,
+    deployment_record_id: `${kind}-deployment-example`,
+    deployed_at: OBSERVED_AT,
+    preview_id: "",
+    preview_generation_id: "",
+  };
+}
+
+function assertFixtureAvailable(
+  fixture: "products" | "empty" | "error" | "missing",
+): void {
+  if (fixture === "error") {
+    throw new Error("The fixture product inventory is intentionally unavailable.");
+  }
 }

@@ -873,7 +873,10 @@ class FastApiOperatorUiTests(unittest.IsolatedAsyncioTestCase):
                 control_plane_root_path=root,
             )
 
-            response = await _asgi_get(app, "/ui/products/example-product")
+            response = await _asgi_get(
+                app,
+                "/ui/products/example-product/environments/prod/runtime-settings",
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Content-Type"], "text/html")

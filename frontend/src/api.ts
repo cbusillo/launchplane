@@ -29,6 +29,8 @@ import type {
   ApplyGenericWebProdPromotionData,
   ApplyProductConfigData,
   DispatchGenericWebProdPromotionWorkflowData,
+  ProductActivityResponse,
+  ProductEnvironmentResponse,
   ProductOverviewResponse,
   RankWorkGraphSnapshotData,
 } from "./generated/openapi.ts";
@@ -180,6 +182,31 @@ export function readProduct(
 ): Promise<ProductOverviewResponse> {
   return requestJson<ProductOverviewResponse>(
     `/v1/products/${encodeURIComponent(product)}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readProductActivity(
+  product: string,
+  signal?: AbortSignal,
+): Promise<ProductActivityResponse> {
+  return requestJson<ProductActivityResponse>(
+    `/v1/products/${encodeURIComponent(product)}/activity`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readProductEnvironment(
+  product: string,
+  environment: string,
+  signal?: AbortSignal,
+): Promise<ProductEnvironmentResponse> {
+  return requestJson<ProductEnvironmentResponse>(
+    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}`,
     "GET",
     undefined,
     signal,
