@@ -1677,10 +1677,20 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     authorization="Bearer worker-token",
                 ),
             )
+            preview_notification_response = await _get_preview_pr_feedback_notification_attempts(
+                app,
+                feedback_id=seeded["preview_feedback_id"],
+                authorization="Bearer worker-token",
+            )
 
         for response in responses:
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(preview_notification_response.status_code, 401)
+        self.assertEqual(
+            preview_notification_response.json()["error"]["code"],
+            "authentication_required",
+        )
 
     async def test_every_code_reads_reject_unauthorized_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

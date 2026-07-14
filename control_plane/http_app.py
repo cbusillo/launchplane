@@ -15,7 +15,7 @@ from pathlib import Path as FilePath
 from typing import Annotated, Any, Literal, NoReturn, Protocol, cast
 from uuid import uuid4
 import click
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -24,11 +24,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from control_plane import authz_grant_service as control_plane_authz_grant_service
-from control_plane.dokploy_target_inspect import (
-    DokployTargetInspectRequest,
-    DokployTargetInspectStore,
-    inspect_dokploy_target,
-)
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
@@ -41,23 +36,38 @@ from control_plane import product_preview_tls as control_plane_product_preview_t
 from control_plane import route_binding_backfill as control_plane_route_binding_backfill
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
-from control_plane import tracked_target_logs as control_plane_tracked_target_logs
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane.http_routes import (
+    DriverReadRouteDependencies,
     ProductReadRouteDependencies,
     ReadRouteDependencies,
+    WorkGraphReadRouteDependencies,
     product_profile_context_cutover_contexts_allowed,
     register_agent_context_read_routes,
     register_deployment_promotion_read_routes,
+    register_dokploy_target_inspect_read_routes,
+    register_driver_descriptor_read_routes,
+    register_every_code_feedback_read_routes,
+    register_every_code_notification_attempt_read_routes,
+    register_every_code_preview_gate_read_routes,
+    register_every_code_work_request_read_routes,
     register_ingress_read_routes,
     register_inventory_operation_read_routes,
     register_managed_secret_read_routes,
+    register_merge_train_read_routes,
+    register_operation_status_read_routes,
+    register_preview_notification_attempt_read_routes,
+    register_preview_readiness_read_routes,
+    register_preview_record_read_routes,
     register_product_config_status_read_routes,
     register_product_context_audit_read_routes,
     register_product_environment_read_routes,
     register_product_profile_read_routes,
     register_protected_artifact_read_routes,
     register_topology_read_routes,
+    register_tracked_target_log_read_routes,
+    register_work_graph_issue_inbox_read_routes,
+    register_work_graph_snapshot_read_routes,
     require_product_profile_read_store,
 )
 from control_plane.contracts.authz_policy_record import (
@@ -77,7 +87,6 @@ from control_plane.contracts.agent_write_intent import (
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
-from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import (
@@ -88,10 +97,6 @@ from control_plane.contracts.every_code_pr_feedback_record import (
 from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationAttemptRecord,
     EveryCodeNotificationPolicyRecord,
-)
-from control_plane.contracts.every_code_summary_read_model import (
-    EveryCodeSummaryReadModel,
-    build_every_code_summary_read_model,
 )
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
@@ -123,20 +128,6 @@ from control_plane.contracts.ingress_route_audit_record import (
     build_ingress_route_audit_record_id,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
-from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
-from control_plane.contracts.merge_train_policy import MergeTrainServiceAuthz
-from control_plane.contracts.odoo_stable_bootstrap_operation import (
-    OdooStableBootstrapOperationRecord,
-)
-from control_plane.contracts.odoo_stable_target_replacement_operation import (
-    OdooStableTargetReplacementOperationRecord,
-)
-from control_plane.merge_train_admission import (
-    MergeTrainControllerStatusReadModel,
-    MergeTrainRunHistoryStore,
-    build_merge_train_controller_status_read_model,
-    evaluate_merge_train_admission_from_store,
-)
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
@@ -453,7 +444,6 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 )
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
-    ProductReadModelStore,
 )
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
@@ -467,7 +457,6 @@ from control_plane.contracts.preview_evidence import (
     PreviewDestroyedEvidenceEnvelope,
     PreviewGenerationEvidenceEnvelope,
 )
-from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
@@ -475,20 +464,13 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecyclePlanRecord,
 )
 from control_plane.contracts.preview_pr_feedback_notifications import (
-    PreviewPrFeedbackNotificationAttemptRecord,
     PreviewPrFeedbackNotificationPolicyRecord,
 )
 from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackRecord,
     PreviewPrFeedbackStatus,
 )
-from control_plane.contracts.preview_readiness_read_model import (
-    PreviewReadinessReadModel,
-    build_preview_readiness_read_model,
-)
-from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
-from control_plane.contracts.work_graph_read_model import WorkGraphSnapshot
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
@@ -506,8 +488,6 @@ from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTa
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers import native_routes
-from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
-from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
 from control_plane.drivers.route_paths import (
     INGRESS_ROUTE_APPLY_ROUTE as _INGRESS_ROUTE_APPLY_ROUTE,
 )
@@ -648,7 +628,6 @@ from control_plane.workflows.generic_web_preview import (
 from control_plane.workflows.launchplane_self_deploy import execute_launchplane_self_deploy
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.work_graph_issue_inbox import (
-    GitHubIssueInboxReadModel,
     GitHubIssueInboxReconcileRequest,
 )
 from control_plane.work_graph_service import (
@@ -660,12 +639,8 @@ from control_plane.work_graph_service import (
     WorkGraphRankEnvelope,
     WorkGraphRankResponse,
     WorkGraphRankResult,
-    WorkGraphWorkRequestStore,
     build_work_graph_rank_result,
-    build_work_graph_snapshot_service_payload,
 )
-from control_plane.dokploy import api as dokploy_api
-from control_plane.dokploy import source as dokploy_source
 
 EveryCodeGitHubWebhookHandler = Callable[
     [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
@@ -676,8 +651,6 @@ _LOGGER = logging.getLogger(__name__)
 
 
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
-_LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
-_LAUNCHPLANE_DRIVER_READ_CONTEXT = "launchplane"
 _DEPLOYMENT_EVIDENCE_ROUTE = "/v1/evidence/deployments"
 _BACKUP_GATE_EVIDENCE_ROUTE = "/v1/evidence/backup-gates"
 _PROMOTION_EVIDENCE_ROUTE = "/v1/evidence/promotions"
@@ -796,22 +769,6 @@ class PreviewDesiredStateWriteStore(Protocol):
         self,
         record: PreviewDesiredStateRecord,
     ) -> object: ...
-
-
-class WorkGraphSnapshotReadStore(ProductReadModelStore, WorkGraphWorkRequestStore, Protocol):
-    pass
-
-
-class OdooStableBootstrapOperationReadStore(Protocol):
-    def read_odoo_stable_bootstrap_operation_record(
-        self, operation_id: str
-    ) -> OdooStableBootstrapOperationRecord: ...
-
-
-class OdooStableTargetReplacementOperationReadStore(Protocol):
-    def read_odoo_stable_target_replacement_operation_record(
-        self, operation_id: str
-    ) -> OdooStableTargetReplacementOperationRecord: ...
 
 
 class GitHubOAuthLoginClient(Protocol):
@@ -1256,207 +1213,6 @@ class VeriReelProdBackupGateOperationWorkerReconcileResponse(BaseModel):
     reconcile_result: VeriReelProdBackupGateOperationWorkerReconcileResultResponse
 
 
-class OdooStableBootstrapOperationStatusResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    operation: dict[str, object]
-    result: dict[str, object] | None = None
-
-
-class OdooStableTargetReplacementOperationStatusResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    operation: dict[str, object]
-    result: dict[str, object] | None = None
-
-
-class WorkGraphSnapshotResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    snapshot: WorkGraphSnapshot
-    source: dict[str, object]
-
-
-class WorkGraphIssueInboxResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    configured: bool
-    inbox: GitHubIssueInboxReadModel
-
-
-class DriverDescriptorsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    drivers: tuple[DriverDescriptor, ...]
-
-
-class DriverDescriptorResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    driver: DriverDescriptor
-
-
-class DriverContextViewResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    view: DriverContextView
-
-
-class MergeTrainAdmissionQuery(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    repository: str
-    base_branch: str = "main"
-
-    @model_validator(mode="after")
-    def _validate_query(self) -> "MergeTrainAdmissionQuery":
-        self.repository = self.repository.strip()
-        self.base_branch = self.base_branch.strip()
-        if not self.repository:
-            raise ValueError("merge train admission requires repository")
-        if "/" not in self.repository:
-            raise ValueError("merge train repository must be owner/name")
-        if not self.base_branch:
-            raise ValueError("merge train admission requires base_branch")
-        return self
-
-
-class MergeTrainAdmissionResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    admission: dict[str, object]
-
-
-class MergeTrainControllerStatusResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    controller_status: MergeTrainControllerStatusReadModel
-
-
-class MergeTrainPolicySummary(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    record_id: str
-    updated_at: str
-    policy_sha256: str
-
-
-class MergeTrainPolicyTarget(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    repository: str
-    base_branch: str
-    policy_key: str
-    scheduler: MergeTrainSchedulerPolicy
-    service_authz: MergeTrainServiceAuthz
-
-
-class MergeTrainPolicyTargetsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    policy: MergeTrainPolicySummary
-    targets: tuple[MergeTrainPolicyTarget, ...]
-
-
-class DokployTargetInspectResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    inspect: dict[str, object]
-
-
-class TrackedTargetLogTargetResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    target_id: str
-    target_type: str
-    target_name: str
-    app_name: str
-    server_id: str
-    source_label: str
-
-
-class TrackedTargetLogRequestResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source: Literal["runtime", "deployment"]
-    line_count: int
-    since: str
-    search: str
-
-
-class TrackedTargetLogLinesResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    line_count: int
-    lines: tuple[str, ...]
-    redacted: bool
-
-
-class TrackedTargetLogDeploymentResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    deployment_id: str
-    status: str
-    error_message: str
-    created_at: str
-    started_at: str
-    finished_at: str
-    log_path_present: bool
-
-
-class TrackedTargetLogsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    context: str
-    instance: str
-    target: TrackedTargetLogTargetResponse
-    request: TrackedTargetLogRequestResponse
-    logs: TrackedTargetLogLinesResponse
-    deployment: TrackedTargetLogDeploymentResponse | None = None
-
-
-class EveryCodeWorkRequestRecordsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    state: str
-    repository: str
-    requests: tuple[EveryCodeWorkRequestRecord, ...]
-
-
-class EveryCodeWorkRequestRecordResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    request: EveryCodeWorkRequestRecord
-
-
 class EveryCodeWorkRequestClaimEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1530,33 +1286,6 @@ class EveryCodeWorkRequestRerunEnvelope(BaseModel):
         return self
 
 
-class EveryCodeSummaryResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    summary: EveryCodeSummaryReadModel
-
-
-class PreviewReadinessResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    readiness: PreviewReadinessReadModel
-
-
-class EveryCodePrFeedbackRecordsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    request_id: str
-    repository: str
-    status_filter: str
-    feedback: tuple[EveryCodePrFeedbackRecord, ...]
-
-
 class EveryCodePrFeedbackStatusEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1571,56 +1300,6 @@ class EveryCodePrFeedbackStatusEnvelope(BaseModel):
         if not self.request_id.strip():
             raise ValueError("Every Code PR feedback status requires request_id")
         return self
-
-
-class EveryCodePreviewGateRecordsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    request_id: str
-    repository: str
-    status_filter: str
-    gates: tuple[EveryCodePreviewGateRecord, ...]
-
-
-class EveryCodeNotificationAttemptRecordsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    request_id: str
-    event_filter: str
-    destination_kind_filter: str
-    attempts: tuple[EveryCodeNotificationAttemptRecord, ...]
-
-
-class PreviewPrFeedbackNotificationAttemptRecordsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    feedback_id: str
-    event_filter: str
-    destination_kind_filter: str
-    attempts: tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]
-
-
-class PreviewRecordResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    record: PreviewRecord
-
-
-class PreviewHistoryResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    preview: PreviewRecord
-    generations: tuple[PreviewGenerationRecord, ...]
 
 
 class DeploymentEvidenceRequest(BaseModel):
@@ -2624,38 +2303,6 @@ class PublicIngressMonitorRunOnceRequest(BaseModel):
         return self
 
 
-class _PreviewReadStore(Protocol):
-    def read_preview_record(self, preview_id: str) -> PreviewRecord: ...
-
-
-class _PreviewHistoryReadStore(Protocol):
-    def read_preview_record(self, preview_id: str) -> PreviewRecord: ...
-
-    def list_preview_generation_records(
-        self,
-        *,
-        preview_id: str = "",
-        limit: int | None = None,
-    ) -> tuple[PreviewGenerationRecord, ...]: ...
-
-
-class _EveryCodeWorkRequestListStore(Protocol):
-    def list_every_code_work_request_records(
-        self,
-        *,
-        state: str = "",
-        repository: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
-
-
-class _EveryCodeWorkRequestRecordStore(Protocol):
-    def read_every_code_work_request_record(
-        self, request_id: str
-    ) -> EveryCodeWorkRequestRecord: ...
-
-
 class _EveryCodeWorkRequestWriteStore(Protocol):
     def write_every_code_work_request_record(
         self, record: EveryCodeWorkRequestRecord
@@ -2768,45 +2415,10 @@ class _EveryCodePrFeedbackStatusStore(
     pass
 
 
-class _EveryCodePreviewGateReadStore(Protocol):
-    def list_every_code_preview_gate_records(
-        self,
-        *,
-        request_id: str = "",
-        repository: str = "",
-        pr_number: int | None = None,
-        status: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
-
-
 class _EveryCodePreviewGateWriteStore(Protocol):
     def write_every_code_preview_gate_record(
         self, record: EveryCodePreviewGateRecord
     ) -> object: ...
-
-
-class _EveryCodeNotificationAttemptReadStore(Protocol):
-    def list_every_code_notification_attempt_records(
-        self,
-        *,
-        request_id: str = "",
-        event: str = "",
-        destination_kind: str = "",
-        limit: int | None = None,
-    ) -> tuple[EveryCodeNotificationAttemptRecord, ...]: ...
-
-
-class _PreviewPrFeedbackNotificationAttemptReadStore(Protocol):
-    def list_preview_pr_feedback_notification_attempt_records(
-        self,
-        *,
-        feedback_id: str = "",
-        event: str = "",
-        destination_kind: str = "",
-        limit: int | None = None,
-    ) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]: ...
 
 
 def require_deployment_evidence_store(record_store: object) -> EvidenceIngestionStore:
@@ -2945,78 +2557,6 @@ def require_runner_lane_registration_audit_evidence_store(
     return cast(_RunnerLaneRegistrationAuditEvidenceStore, record_store)
 
 
-def require_preview_read_store(record_store: object) -> _PreviewReadStore:
-    read_record = getattr(record_store, "read_preview_record", None)
-    if not callable(read_record):
-        raise TypeError(
-            "Launchplane record store does not support preview reads: read_preview_record"
-        )
-    return cast(_PreviewReadStore, record_store)
-
-
-def require_preview_history_read_store(record_store: object) -> _PreviewHistoryReadStore:
-    required_methods = ("read_preview_record", "list_preview_generation_records")
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            f"Launchplane record store does not support preview history reads: {missing_summary}"
-        )
-    return cast(_PreviewHistoryReadStore, record_store)
-
-
-def require_odoo_stable_bootstrap_operation_read_store(
-    record_store: object,
-) -> OdooStableBootstrapOperationReadStore:
-    read_record = getattr(record_store, "read_odoo_stable_bootstrap_operation_record", None)
-    if not callable(read_record):
-        raise TypeError(
-            "Launchplane record store does not support Odoo stable bootstrap operation "
-            "status reads: read_odoo_stable_bootstrap_operation_record"
-        )
-    return cast(OdooStableBootstrapOperationReadStore, record_store)
-
-
-def require_odoo_stable_target_replacement_operation_read_store(
-    record_store: object,
-) -> OdooStableTargetReplacementOperationReadStore:
-    read_record = getattr(
-        record_store,
-        "read_odoo_stable_target_replacement_operation_record",
-        None,
-    )
-    if not callable(read_record):
-        raise TypeError(
-            "Launchplane record store does not support Odoo target replacement operation "
-            "status reads: read_odoo_stable_target_replacement_operation_record"
-        )
-    return cast(OdooStableTargetReplacementOperationReadStore, record_store)
-
-
-def odoo_stable_bootstrap_operation_status_payload(
-    operation: OdooStableBootstrapOperationRecord,
-) -> dict[str, object]:
-    payload = operation.model_dump(mode="json")
-    payload["poll_url"] = (
-        f"/v1/drivers/odoo/stable-bootstrap/operations/{operation.operation_id.strip()}"
-    )
-    return payload
-
-
-def odoo_stable_target_replacement_operation_status_payload(
-    operation: OdooStableTargetReplacementOperationRecord,
-) -> dict[str, object]:
-    payload = operation.model_dump(mode="json")
-    payload["poll_url"] = (
-        f"/v1/drivers/odoo/target-replacement/operations/{operation.operation_id.strip()}"
-    )
-    return payload
-
-
 def require_product_profile_write_store(record_store: object) -> ProductProfileWriteStore:
     write_record = getattr(record_store, "write_product_profile_record", None)
     if not callable(write_record):
@@ -3058,42 +2598,6 @@ def require_public_ingress_monitor_store(
             f"{missing_summary}"
         )
     return cast(PublicIngressMonitorStore, record_store)
-
-
-def require_tracked_target_logs_store(
-    record_store: object,
-) -> control_plane_tracked_target_logs.TrackedTargetLogsStore:
-    required_methods = (
-        "read_dokploy_target_record",
-        "read_dokploy_target_id_record",
-    )
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods or not isinstance(record_store, PostgresRecordStore):
-        missing_summary = ", ".join(missing_methods) or "postgres_storage"
-        raise TypeError(
-            f"Tracked target logs require DB-backed Launchplane storage: {missing_summary}"
-        )
-    return cast(control_plane_tracked_target_logs.TrackedTargetLogsStore, record_store)
-
-
-def require_dokploy_target_inspect_store(record_store: object) -> DokployTargetInspectStore:
-    required_methods = (
-        "read_dokploy_target_record",
-        "read_dokploy_target_id_record",
-        "read_provider_target_record",
-    )
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods or not isinstance(record_store, PostgresRecordStore):
-        raise TypeError("Dokploy target inspect requires Launchplane database storage.")
-    return cast(DokployTargetInspectStore, record_store)
 
 
 def require_edge_endpoint_apply_store(record_store: object) -> _EdgeEndpointApplyStore:
@@ -4347,6 +3851,61 @@ def create_launchplane_fastapi_app(
             raise _authentication_required_error("Mutation routes require GitHub Actions OIDC.")
         return oidc_identity
 
+    def read_route_authorization_allows(
+        *,
+        identity: LaunchplaneIdentity,
+        action: str,
+        product: str,
+        context: str,
+    ) -> bool:
+        return resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+        )
+
+    read_route_dependencies = ReadRouteDependencies(
+        read_identity=read_identity,
+        get_record_store=get_record_store,
+        next_trace_id=next_trace_id,
+        authorization_allows=read_route_authorization_allows,
+        http_error=_launchplane_http_error,
+        error_response_model=LaunchplaneErrorResponse,
+    )
+    product_read_route_dependencies = ProductReadRouteDependencies(
+        common=read_route_dependencies,
+        read_product_profile_list_identity=read_product_profile_list_identity,
+        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
+    )
+    driver_read_route_dependencies = DriverReadRouteDependencies(
+        common=read_route_dependencies,
+        control_plane_root=resolved_control_plane_root,
+        database_url=database_url,
+    )
+
+    def work_graph_product_action_allowed(*, identity: LaunchplaneIdentity) -> ActionAllowed:
+        def action_allowed(
+            requested_action: str,
+            requested_product: str,
+            requested_context: str,
+        ) -> bool:
+            return resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action=requested_action,
+                product=requested_product,
+                context=requested_context,
+            )
+
+        return action_allowed
+
+    work_graph_read_route_dependencies = WorkGraphReadRouteDependencies(
+        common=read_route_dependencies,
+        action_allowed_for_identity=work_graph_product_action_allowed,
+        planning_facts_provider=work_graph_planning_facts_provider,
+        issue_inbox_provider=work_graph_issue_inbox_provider,
+    )
+
     def require_launchplane_service_read_authorization(
         *, identity: LaunchplaneIdentity, trace_id: str
     ) -> None:
@@ -4589,104 +4148,6 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-    def read_odoo_stable_bootstrap_operation_status(
-        operation_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> OdooStableBootstrapOperationStatusResponse:
-        trace_id = next_trace_id()
-        try:
-            operation_store = require_odoo_stable_bootstrap_operation_read_store(record_store)
-            operation = operation_store.read_odoo_stable_bootstrap_operation_record(operation_id)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=native_routes._descriptor_driver_route_authz_action(
-                _ODOO_STABLE_BOOTSTRAP_ROUTE
-            ),
-            product=operation.product,
-            context=operation.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot read Odoo stable bootstrap operation status "
-                    "for the requested product/context."
-                ),
-            )
-        result = operation.result.model_dump(mode="json") if operation.result else None
-        return OdooStableBootstrapOperationStatusResponse(
-            trace_id=trace_id,
-            operation=odoo_stable_bootstrap_operation_status_payload(operation),
-            result=result,
-        )
-
-    def read_odoo_stable_target_replacement_operation_status(
-        operation_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> OdooStableTargetReplacementOperationStatusResponse:
-        trace_id = next_trace_id()
-        try:
-            operation_store = require_odoo_stable_target_replacement_operation_read_store(
-                record_store
-            )
-            operation = operation_store.read_odoo_stable_target_replacement_operation_record(
-                operation_id
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=native_routes._descriptor_driver_route_authz_action(
-                _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE
-            ),
-            product=operation.product,
-            context=operation.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot read Odoo target replacement operation status "
-                    "for the requested product/context."
-                ),
-            )
-        result = operation.result.model_dump(mode="json") if operation.result else None
-        return OdooStableTargetReplacementOperationStatusResponse(
-            trace_id=trace_id,
-            operation=odoo_stable_target_replacement_operation_status_payload(operation),
-            result=result,
-        )
-
     def require_work_graph_rank_authorization(
         *, identity: LaunchplaneIdentity, trace_id: str, message: str
     ) -> None:
@@ -4721,44 +4182,6 @@ def create_launchplane_fastapi_app(
             message="Workflow cannot reconcile the Launchplane GitHub issue inbox.",
         )
 
-    def require_read_store_methods(
-        record_store: object,
-        *,
-        trace_id: str,
-        method_names: tuple[str, ...],
-        message: str,
-    ) -> None:
-        missing_methods = tuple(
-            method_name
-            for method_name in method_names
-            if not callable(getattr(record_store, method_name, None))
-        )
-        if not missing_methods:
-            if isinstance(record_store, PostgresRecordStore):
-                return
-            missing_methods = ("postgres_storage",)
-        missing_method_list = ", ".join(missing_methods)
-        raise _launchplane_http_error(
-            status_code=503,
-            trace_id=trace_id,
-            code="database_storage_required",
-            message=f"{message} Missing store method(s): {missing_method_list}.",
-        )
-
-    def require_work_graph_snapshot_read_store(
-        record_store: object, *, trace_id: str
-    ) -> WorkGraphSnapshotReadStore:
-        require_read_store_methods(
-            record_store,
-            trace_id=trace_id,
-            method_names=(
-                "list_product_profile_records",
-                "list_every_code_work_request_records",
-            ),
-            message="Work graph snapshot reads require a database-backed record store.",
-        )
-        return cast(WorkGraphSnapshotReadStore, record_store)
-
     def require_every_code_read_methods(
         record_store: object,
         *,
@@ -4773,26 +4196,6 @@ def create_launchplane_fastapi_app(
         if missing_methods:
             missing_summary = ", ".join(missing_methods)
             raise TypeError(f"record store does not support {capability}: {missing_summary}")
-
-    def require_every_code_work_request_list_store(
-        record_store: object,
-    ) -> _EveryCodeWorkRequestListStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=("list_every_code_work_request_records",),
-            capability="Every Code work request list reads",
-        )
-        return cast(_EveryCodeWorkRequestListStore, record_store)
-
-    def require_every_code_work_request_record_store(
-        record_store: object,
-    ) -> _EveryCodeWorkRequestRecordStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=("read_every_code_work_request_record",),
-            capability="Every Code work request record reads",
-        )
-        return cast(_EveryCodeWorkRequestRecordStore, record_store)
 
     def require_every_code_work_request_write_store(
         record_store: object,
@@ -5046,16 +4449,6 @@ def create_launchplane_fastapi_app(
                 return record
         return None
 
-    def require_every_code_pr_feedback_read_store(
-        record_store: object,
-    ) -> _EveryCodePrFeedbackReadStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=("list_every_code_pr_feedback_records",),
-            capability="Every Code PR feedback reads",
-        )
-        return cast(_EveryCodePrFeedbackReadStore, record_store)
-
     def require_every_code_pr_feedback_write_store(
         record_store: object,
     ) -> _EveryCodePrFeedbackWriteStore:
@@ -5079,16 +4472,6 @@ def create_launchplane_fastapi_app(
         )
         return cast(_EveryCodePrFeedbackStatusStore, record_store)
 
-    def require_every_code_preview_gate_read_store(
-        record_store: object,
-    ) -> _EveryCodePreviewGateReadStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=("list_every_code_preview_gate_records",),
-            capability="Every Code preview gate reads",
-        )
-        return cast(_EveryCodePreviewGateReadStore, record_store)
-
     def require_every_code_preview_gate_write_store(
         record_store: object,
     ) -> _EveryCodePreviewGateWriteStore:
@@ -5098,160 +4481,6 @@ def create_launchplane_fastapi_app(
             capability="Every Code preview gate writes",
         )
         return cast(_EveryCodePreviewGateWriteStore, record_store)
-
-    def require_every_code_notification_attempt_read_store(
-        record_store: object,
-    ) -> _EveryCodeNotificationAttemptReadStore:
-        list_records = getattr(record_store, "list_every_code_notification_attempt_records", None)
-        if not callable(list_records):
-            raise TypeError("record store does not support Every Code notification attempt reads")
-        return cast(_EveryCodeNotificationAttemptReadStore, record_store)
-
-    def require_preview_pr_feedback_notification_attempt_read_store(
-        record_store: object,
-    ) -> _PreviewPrFeedbackNotificationAttemptReadStore:
-        list_records = getattr(
-            record_store,
-            "list_preview_pr_feedback_notification_attempt_records",
-            None,
-        )
-        if not callable(list_records):
-            raise TypeError(
-                "record store does not support preview PR feedback notification attempt reads"
-            )
-        return cast(_PreviewPrFeedbackNotificationAttemptReadStore, record_store)
-
-    def ensure_every_code_read_allowed(
-        *,
-        identity: LaunchplaneIdentity | None,
-        trace_id: str,
-        action: str,
-        message: str,
-    ) -> None:
-        if identity is None:
-            return
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=action,
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=message,
-            )
-
-    def every_code_pagination_value(
-        raw_value: str,
-        key: str,
-        *,
-        default: int,
-        trace_id: str,
-    ) -> int:
-        try:
-            value = int(raw_value.strip() or str(default))
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=f"Every Code pagination {key} must be an integer",
-            ) from error
-        if value < 0:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=f"Every Code pagination {key} must be non-negative",
-            )
-        return value
-
-    def every_code_optional_int(raw_value: str, key: str, *, trace_id: str) -> int | None:
-        normalized_value = raw_value.strip()
-        if not normalized_value:
-            return None
-        try:
-            return int(normalized_value)
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=f"Query parameter {key} must be an integer",
-            ) from error
-
-    def every_code_read_store_or_503(
-        record_store: object, *, trace_id: str, capability: str
-    ) -> object:
-        try:
-            if capability == "work_request_list":
-                return require_every_code_work_request_list_store(record_store)
-            if capability == "work_request_record":
-                return require_every_code_work_request_record_store(record_store)
-            if capability == "pr_feedback":
-                return require_every_code_pr_feedback_read_store(record_store)
-            if capability == "preview_gate":
-                return require_every_code_preview_gate_read_store(record_store)
-            raise TypeError(f"unknown Every Code read capability: {capability}")
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-    def every_code_invalid_payload_error(*, trace_id: str, error: ValueError) -> HTTPException:
-        return _launchplane_http_error(
-            status_code=400,
-            trace_id=trace_id,
-            code="invalid_payload",
-            message=str(error),
-        )
-
-    def work_graph_product_action_allowed(*, identity: LaunchplaneIdentity) -> ActionAllowed:
-        def action_allowed(
-            requested_action: str,
-            requested_product: str,
-            requested_context: str,
-        ) -> bool:
-            return resolved_authz_policy_runtime.policy.allows(
-                identity=identity,
-                action=requested_action,
-                product=requested_product,
-                context=requested_context,
-            )
-
-        return action_allowed
-
-    def read_work_graph_snapshot(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> WorkGraphSnapshotResponse:
-        trace_id = next_trace_id()
-        require_work_graph_rank_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            message="Workflow cannot read the Launchplane work graph snapshot.",
-        )
-        snapshot_store = require_work_graph_snapshot_read_store(
-            record_store,
-            trace_id=trace_id,
-        )
-        payload = build_work_graph_snapshot_service_payload(
-            generated_at=utc_now_timestamp(),
-            product_store=snapshot_store,
-            work_request_store=snapshot_store,
-            action_allowed=work_graph_product_action_allowed(identity=identity),
-            planning_facts_provider=work_graph_planning_facts_provider,
-        )
-        return WorkGraphSnapshotResponse(
-            trace_id=trace_id,
-            snapshot=WorkGraphSnapshot.model_validate(payload["snapshot"]),
-            source=cast(dict[str, object], payload["source"]),
-        )
 
     def rank_work_graph_snapshot(
         payload: WorkGraphRankEnvelope,
@@ -5271,31 +4500,6 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             records={},
             result=WorkGraphRankResult.model_validate(driver_result),
-        )
-
-    def read_work_graph_issue_inbox(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-    ) -> WorkGraphIssueInboxResponse:
-        trace_id = next_trace_id()
-        require_work_graph_rank_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            message="Workflow cannot read the Launchplane GitHub issue inbox.",
-        )
-        if work_graph_issue_inbox_provider is None:
-            return WorkGraphIssueInboxResponse(
-                trace_id=trace_id,
-                configured=False,
-                inbox=GitHubIssueInboxReadModel(
-                    generated_at="",
-                    repository_count=0,
-                    issue_count=0,
-                ),
-            )
-        return WorkGraphIssueInboxResponse(
-            trace_id=trace_id,
-            configured=True,
-            inbox=work_graph_issue_inbox_provider(),
         )
 
     def reconcile_work_graph_issue_inbox(
@@ -5383,159 +4587,6 @@ def create_launchplane_fastapi_app(
                     "github_status_code": error.status_code,
                 },
             },
-        )
-
-    def merge_train_admission_query(
-        *, repository: str, base_branch: str, trace_id: str
-    ) -> MergeTrainAdmissionQuery:
-        try:
-            return MergeTrainAdmissionQuery.model_validate(
-                {"repository": repository, "base_branch": base_branch}
-            )
-        except ValueError as error:
-            raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
-
-    def read_merge_train_admission(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        repository: Annotated[str, Query()] = "",
-        base_branch: Annotated[str, Query()] = "main",
-    ) -> MergeTrainAdmissionResponse:
-        trace_id = next_trace_id()
-        admission_request = merge_train_admission_query(
-            repository=repository,
-            base_branch=base_branch,
-            trace_id=trace_id,
-        )
-        try:
-            policy_record = resolve_merge_train_policy_record(record_store)
-        except MergeTrainPolicyStoreMissingError as error:
-            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
-        try:
-            repository_policy = policy_record.policy.find_repository_policy(
-                repository=admission_request.repository,
-                base_branch=admission_request.base_branch,
-            )
-        except ValueError as error:
-            raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=repository_policy.service_authz.action,
-            product=repository_policy.service_authz.product,
-            context=repository_policy.service_authz.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read the requested merge train admission decision.",
-            )
-        merge_train_store = cast(MergeTrainRunHistoryStore, record_store)
-        admission_decision = evaluate_merge_train_admission_from_store(
-            store=merge_train_store,
-            repository=admission_request.repository,
-            base_branch=admission_request.base_branch,
-            requested_at=utc_now_timestamp(),
-            current_policy_key=repository_policy.policy_key,
-            current_policy_sha256=policy_record.policy_sha256,
-        )
-        return MergeTrainAdmissionResponse(
-            trace_id=trace_id,
-            admission=admission_decision.model_dump(mode="json"),
-        )
-
-    def read_merge_train_controller_status(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        repository: Annotated[str, Query()] = "",
-        base_branch: Annotated[str, Query()] = "main",
-    ) -> MergeTrainControllerStatusResponse:
-        trace_id = next_trace_id()
-        status_request = merge_train_admission_query(
-            repository=repository,
-            base_branch=base_branch,
-            trace_id=trace_id,
-        )
-        try:
-            policy_record = resolve_merge_train_policy_record(record_store)
-        except MergeTrainPolicyStoreMissingError as error:
-            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
-        try:
-            repository_policy = policy_record.policy.find_repository_policy(
-                repository=status_request.repository,
-                base_branch=status_request.base_branch,
-            )
-        except ValueError as error:
-            raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=repository_policy.service_authz.action,
-            product=repository_policy.service_authz.product,
-            context=repository_policy.service_authz.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read the requested merge train controller status.",
-            )
-        merge_train_store = cast(MergeTrainRunHistoryStore, record_store)
-        read_model = build_merge_train_controller_status_read_model(
-            store=merge_train_store,
-            repository=status_request.repository,
-            base_branch=status_request.base_branch,
-            generated_at=utc_now_timestamp(),
-            current_policy_key=repository_policy.policy_key,
-            current_policy_sha256=policy_record.policy_sha256,
-        )
-        return MergeTrainControllerStatusResponse(
-            trace_id=trace_id,
-            controller_status=read_model,
-        )
-
-    def read_merge_train_policy_targets(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> MergeTrainPolicyTargetsResponse:
-        trace_id = next_trace_id()
-        try:
-            policy_record = resolve_merge_train_policy_record(record_store)
-        except MergeTrainPolicyStoreMissingError as error:
-            raise merge_train_policy_not_configured_error(trace_id=trace_id, error=error) from error
-        targets: list[MergeTrainPolicyTarget] = []
-        local_operator_can_read_targets = resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="merge_train.policy_targets",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        )
-        for repository_policy in policy_record.policy.policies:
-            service_authz_allowed = resolved_authz_policy_runtime.policy.allows(
-                identity=identity,
-                action=repository_policy.service_authz.action,
-                product=repository_policy.service_authz.product,
-                context=repository_policy.service_authz.context,
-            )
-            if not service_authz_allowed and not local_operator_can_read_targets:
-                continue
-            targets.append(
-                MergeTrainPolicyTarget(
-                    repository=repository_policy.repository,
-                    base_branch=repository_policy.base_branch,
-                    policy_key=repository_policy.policy_key,
-                    scheduler=repository_policy.scheduler,
-                    service_authz=repository_policy.service_authz,
-                )
-            )
-        targets.sort(key=lambda target: (target.repository, target.base_branch))
-        return MergeTrainPolicyTargetsResponse(
-            trace_id=trace_id,
-            policy=MergeTrainPolicySummary(
-                record_id=policy_record.record_id,
-                updated_at=policy_record.updated_at,
-                policy_sha256=policy_record.policy_sha256,
-            ),
-            targets=tuple(targets),
         )
 
     async def write_merge_train_batch_candidate_run_once(
@@ -9038,185 +8089,6 @@ def create_launchplane_fastapi_app(
         )
         return response
 
-    def read_every_code_summary(
-        identity: Annotated[
-            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        repository: Annotated[str, Query()] = "",
-        issue_number: Annotated[str, Query()] = "",
-        state: Annotated[str, Query()] = "",
-        limit: Annotated[str, Query()] = "50",
-        offset: Annotated[str, Query()] = "0",
-    ) -> EveryCodeSummaryResponse:
-        trace_id = next_trace_id()
-        ensure_every_code_read_allowed(
-            identity=identity,
-            trace_id=trace_id,
-            action="every_code_work_request.read",
-            message="Workflow cannot read Every Code work requests.",
-        )
-        every_code_store = cast(
-            _EveryCodeWorkRequestListStore,
-            every_code_read_store_or_503(
-                record_store,
-                trace_id=trace_id,
-                capability="work_request_list",
-            ),
-        )
-        try:
-            summary = build_every_code_summary_read_model(
-                generated_at=utc_now_timestamp(),
-                record_store=every_code_store,
-                repository=repository.strip(),
-                issue_number=every_code_optional_int(
-                    issue_number,
-                    "issue_number",
-                    trace_id=trace_id,
-                ),
-                state=state.strip(),
-                limit=every_code_pagination_value(
-                    limit,
-                    "limit",
-                    default=50,
-                    trace_id=trace_id,
-                ),
-                offset=every_code_pagination_value(
-                    offset,
-                    "offset",
-                    default=0,
-                    trace_id=trace_id,
-                ),
-            )
-        except ValueError as error:
-            raise every_code_invalid_payload_error(trace_id=trace_id, error=error) from error
-        return EveryCodeSummaryResponse(trace_id=trace_id, summary=summary)
-
-    def read_preview_readiness(
-        identity: Annotated[
-            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        repository: Annotated[str, Query()] = "",
-        pr_number: Annotated[str, Query()] = "",
-        status: Annotated[str, Query()] = "",
-        limit: Annotated[str, Query()] = "50",
-        offset: Annotated[str, Query()] = "0",
-    ) -> PreviewReadinessResponse:
-        trace_id = next_trace_id()
-        ensure_every_code_read_allowed(
-            identity=identity,
-            trace_id=trace_id,
-            action="every_code_preview_gate.read",
-            message="Workflow cannot read Every Code preview readiness.",
-        )
-        every_code_store = cast(
-            _EveryCodePreviewGateReadStore,
-            every_code_read_store_or_503(
-                record_store,
-                trace_id=trace_id,
-                capability="preview_gate",
-            ),
-        )
-        try:
-            readiness = build_preview_readiness_read_model(
-                generated_at=utc_now_timestamp(),
-                record_store=every_code_store,
-                repository=repository.strip(),
-                pr_number=every_code_optional_int(
-                    pr_number,
-                    "pr_number",
-                    trace_id=trace_id,
-                ),
-                status=status.strip(),
-                limit=every_code_pagination_value(
-                    limit,
-                    "limit",
-                    default=50,
-                    trace_id=trace_id,
-                ),
-                offset=every_code_pagination_value(
-                    offset,
-                    "offset",
-                    default=0,
-                    trace_id=trace_id,
-                ),
-            )
-        except ValueError as error:
-            raise every_code_invalid_payload_error(trace_id=trace_id, error=error) from error
-        return PreviewReadinessResponse(trace_id=trace_id, readiness=readiness)
-
-    def list_every_code_work_requests(
-        identity: Annotated[
-            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        state: Annotated[str, Query()] = "",
-        repository: Annotated[str, Query()] = "",
-        limit: Annotated[str, Query()] = "50",
-        offset: Annotated[str, Query()] = "0",
-    ) -> EveryCodeWorkRequestRecordsResponse:
-        trace_id = next_trace_id()
-        ensure_every_code_read_allowed(
-            identity=identity,
-            trace_id=trace_id,
-            action="every_code_work_request.read",
-            message="Workflow cannot read Every Code work requests.",
-        )
-        every_code_store = cast(
-            _EveryCodeWorkRequestListStore,
-            every_code_read_store_or_503(
-                record_store,
-                trace_id=trace_id,
-                capability="work_request_list",
-            ),
-        )
-        records = every_code_store.list_every_code_work_request_records(
-            state=state.strip(),
-            repository=repository.strip(),
-            limit=every_code_pagination_value(limit, "limit", default=50, trace_id=trace_id),
-            offset=every_code_pagination_value(offset, "offset", default=0, trace_id=trace_id),
-        )
-        return EveryCodeWorkRequestRecordsResponse(
-            trace_id=trace_id,
-            state=state.strip(),
-            repository=repository.strip(),
-            requests=records,
-        )
-
-    def read_every_code_work_request(
-        request_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[
-            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> EveryCodeWorkRequestRecordResponse:
-        trace_id = next_trace_id()
-        ensure_every_code_read_allowed(
-            identity=identity,
-            trace_id=trace_id,
-            action="every_code_work_request.read",
-            message="Workflow cannot read Every Code work requests.",
-        )
-        every_code_store = cast(
-            _EveryCodeWorkRequestRecordStore,
-            every_code_read_store_or_503(
-                record_store,
-                trace_id=trace_id,
-                capability="work_request_record",
-            ),
-        )
-        try:
-            record = every_code_store.read_every_code_work_request_record(request_id)
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        return EveryCodeWorkRequestRecordResponse(trace_id=trace_id, request=record)
-
     async def evaluate_agent_write_intent_route(
         request: Request,
         intent_request: AgentWriteIntentRequest,
@@ -9976,49 +8848,6 @@ def create_launchplane_fastapi_app(
             )
         return response
 
-    def list_every_code_pr_feedback(
-        identity: Annotated[
-            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        request_id: Annotated[str, Query()] = "",
-        repository: Annotated[str, Query()] = "",
-        pr_number: Annotated[str, Query()] = "",
-        status: Annotated[str, Query()] = "",
-        limit: Annotated[str, Query()] = "50",
-        offset: Annotated[str, Query()] = "0",
-    ) -> EveryCodePrFeedbackRecordsResponse:
-        trace_id = next_trace_id()
-        ensure_every_code_read_allowed(
-            identity=identity,
-            trace_id=trace_id,
-            action="every_code_pr_feedback.read",
-            message="Workflow cannot read Every Code PR feedback.",
-        )
-        every_code_store = cast(
-            _EveryCodePrFeedbackReadStore,
-            every_code_read_store_or_503(
-                record_store,
-                trace_id=trace_id,
-                capability="pr_feedback",
-            ),
-        )
-        records = every_code_store.list_every_code_pr_feedback_records(
-            request_id=request_id.strip(),
-            repository=repository.strip(),
-            pr_number=every_code_optional_int(pr_number, "pr_number", trace_id=trace_id),
-            status=status.strip(),
-            limit=every_code_pagination_value(limit, "limit", default=50, trace_id=trace_id),
-            offset=every_code_pagination_value(offset, "offset", default=0, trace_id=trace_id),
-        )
-        return EveryCodePrFeedbackRecordsResponse(
-            trace_id=trace_id,
-            request_id=request_id.strip(),
-            repository=repository.strip(),
-            status_filter=status.strip(),
-            feedback=records,
-        )
-
     def write_every_code_pr_feedback(
         payload: dict[str, object],
         _worker_token: Annotated[None, Depends(require_every_code_worker_write_token)],
@@ -10119,49 +8948,6 @@ def create_launchplane_fastapi_app(
             result={"feedback": updated_feedback_record.model_dump(mode="json")},
         )
 
-    def list_every_code_preview_gates(
-        identity: Annotated[
-            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        request_id: Annotated[str, Query()] = "",
-        repository: Annotated[str, Query()] = "",
-        pr_number: Annotated[str, Query()] = "",
-        status: Annotated[str, Query()] = "",
-        limit: Annotated[str, Query()] = "50",
-        offset: Annotated[str, Query()] = "0",
-    ) -> EveryCodePreviewGateRecordsResponse:
-        trace_id = next_trace_id()
-        ensure_every_code_read_allowed(
-            identity=identity,
-            trace_id=trace_id,
-            action="every_code_preview_gate.read",
-            message="Workflow cannot read Every Code preview readiness.",
-        )
-        every_code_store = cast(
-            _EveryCodePreviewGateReadStore,
-            every_code_read_store_or_503(
-                record_store,
-                trace_id=trace_id,
-                capability="preview_gate",
-            ),
-        )
-        records = every_code_store.list_every_code_preview_gate_records(
-            request_id=request_id.strip(),
-            repository=repository.strip(),
-            pr_number=every_code_optional_int(pr_number, "pr_number", trace_id=trace_id),
-            status=status.strip(),
-            limit=every_code_pagination_value(limit, "limit", default=50, trace_id=trace_id),
-            offset=every_code_pagination_value(offset, "offset", default=0, trace_id=trace_id),
-        )
-        return EveryCodePreviewGateRecordsResponse(
-            trace_id=trace_id,
-            request_id=request_id.strip(),
-            repository=repository.strip(),
-            status_filter=status.strip(),
-            gates=records,
-        )
-
     def write_every_code_preview_gate(
         payload: dict[str, object],
         _worker_token: Annotated[None, Depends(require_every_code_worker_write_token)],
@@ -10197,329 +8983,6 @@ def create_launchplane_fastapi_app(
             result={"gate": gate_record.model_dump(mode="json")},
         )
 
-    def list_every_code_notification_attempts(
-        identity: Annotated[
-            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        request_id: Annotated[str, Query()] = "",
-        event: Annotated[str, Query()] = "",
-        destination_kind: Annotated[str, Query()] = "",
-        limit: Annotated[str, Query()] = "50",
-    ) -> EveryCodeNotificationAttemptRecordsResponse:
-        trace_id = next_trace_id()
-        ensure_every_code_read_allowed(
-            identity=identity,
-            trace_id=trace_id,
-            action="every_code_notification_attempt.read",
-            message="Workflow cannot read Every Code notification attempts.",
-        )
-        try:
-            notification_store = require_every_code_notification_attempt_read_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        records = notification_store.list_every_code_notification_attempt_records(
-            request_id=request_id.strip(),
-            event=event.strip(),
-            destination_kind=destination_kind.strip(),
-            limit=every_code_pagination_value(limit, "limit", default=50, trace_id=trace_id),
-        )
-        return EveryCodeNotificationAttemptRecordsResponse(
-            trace_id=trace_id,
-            request_id=request_id.strip(),
-            event_filter=event.strip(),
-            destination_kind_filter=destination_kind.strip(),
-            attempts=records,
-        )
-
-    def list_preview_pr_feedback_notification_attempts(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        feedback_id: Annotated[str, Query()] = "",
-        event: Annotated[str, Query()] = "",
-        destination_kind: Annotated[str, Query()] = "",
-        limit: Annotated[str, Query()] = "50",
-    ) -> PreviewPrFeedbackNotificationAttemptRecordsResponse:
-        trace_id = next_trace_id()
-        ensure_every_code_read_allowed(
-            identity=identity,
-            trace_id=trace_id,
-            action="preview_pr_feedback_notification_attempt.read",
-            message="Workflow cannot read preview PR feedback notification attempts.",
-        )
-        try:
-            notification_store = require_preview_pr_feedback_notification_attempt_read_store(
-                record_store
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        records = notification_store.list_preview_pr_feedback_notification_attempt_records(
-            feedback_id=feedback_id.strip(),
-            event=event.strip(),
-            destination_kind=destination_kind.strip(),
-            limit=every_code_pagination_value(limit, "limit", default=50, trace_id=trace_id),
-        )
-        return PreviewPrFeedbackNotificationAttemptRecordsResponse(
-            trace_id=trace_id,
-            feedback_id=feedback_id.strip(),
-            event_filter=event.strip(),
-            destination_kind_filter=destination_kind.strip(),
-            attempts=records,
-        )
-
-    def ensure_driver_read_allowed(
-        *,
-        identity: LaunchplaneIdentity,
-        trace_id: str,
-        context: str = _LAUNCHPLANE_DRIVER_READ_CONTEXT,
-    ) -> None:
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="driver.read",
-            product=_LAUNCHPLANE_DRIVER_READ_PRODUCT,
-            context=context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read driver metadata for the requested context.",
-            )
-
-    def read_driver_descriptors(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-    ) -> DriverDescriptorsResponse:
-        trace_id = next_trace_id()
-        ensure_driver_read_allowed(identity=identity, trace_id=trace_id)
-        return DriverDescriptorsResponse(
-            trace_id=trace_id,
-            drivers=list_driver_descriptors(),
-        )
-
-    def read_driver_descriptor(
-        driver_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-    ) -> DriverDescriptorResponse:
-        trace_id = next_trace_id()
-        ensure_driver_read_allowed(identity=identity, trace_id=trace_id)
-        try:
-            descriptor = read_driver_descriptor_record(driver_id)
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        return DriverDescriptorResponse(trace_id=trace_id, driver=descriptor)
-
-    def read_driver_context_view(
-        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> DriverContextViewResponse:
-        trace_id = next_trace_id()
-        ensure_driver_read_allowed(identity=identity, trace_id=trace_id, context=context)
-        view = build_driver_context_view(
-            record_store=record_store,
-            context_name=context,
-        )
-        return DriverContextViewResponse(trace_id=trace_id, view=view)
-
-    def read_driver_instance_view(
-        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> DriverContextViewResponse:
-        trace_id = next_trace_id()
-        ensure_driver_read_allowed(identity=identity, trace_id=trace_id, context=context)
-        view = build_driver_context_view(
-            record_store=record_store,
-            context_name=context,
-            instance_name=instance,
-        )
-        return DriverContextViewResponse(trace_id=trace_id, view=view)
-
-    def read_dokploy_target_inspect(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        context: Annotated[str, Query()] = "",
-        instance: Annotated[str, Query()] = "",
-        target_type: Annotated[str, Query()] = "",
-        target_id: Annotated[str, Query()] = "",
-    ) -> DokployTargetInspectResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="dokploy_target.inspect",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot inspect Launchplane Dokploy targets.",
-            )
-        try:
-            inspect_store = require_dokploy_target_inspect_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_required",
-                message=str(error),
-            ) from error
-        try:
-            inspect_request = DokployTargetInspectRequest.model_validate(
-                {
-                    "schema_version": 1,
-                    "product": "launchplane",
-                    "context": context,
-                    "instance": instance,
-                    "target_type": target_type,
-                    "target_id": target_id,
-                }
-            )
-            host, token = dokploy_source.read_dokploy_config(
-                control_plane_root=resolved_control_plane_root,
-                database_url=database_url,
-            )
-            inspect_result = inspect_dokploy_target(
-                record_store=inspect_store,
-                host=host,
-                token=token,
-                request=inspect_request,
-            )
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_dokploy_target_inspect",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        return DokployTargetInspectResponse(trace_id=trace_id, inspect=inspect_result)
-
-    def read_tracked_target_logs(
-        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        lines: Annotated[str, Query()] = str(dokploy_api.DEFAULT_DOKPLOY_LOG_LINE_COUNT),
-        since: Annotated[str, Query()] = "all",
-        search: Annotated[str, Query()] = "",
-        source: Annotated[str, Query()] = "runtime",
-    ) -> TrackedTargetLogsResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="target_logs.read",
-            product="launchplane",
-            context=context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read tracked target logs for the requested context.",
-            )
-        try:
-            line_count = control_plane_service_status.query_int_value(
-                lines,
-                "lines",
-                default=dokploy_api.DEFAULT_DOKPLOY_LOG_LINE_COUNT,
-                minimum=1,
-                maximum=dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT,
-            )
-            assert line_count is not None
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_query",
-                message=str(error),
-            ) from error
-        try:
-            normalized_since = dokploy_api.normalize_dokploy_log_since(since)
-            normalized_search = dokploy_api.normalize_dokploy_log_search(search)
-            normalized_source = (
-                control_plane_tracked_target_logs.normalize_tracked_target_log_source(source)
-            )
-            if normalized_source == "deployment" and normalized_since != "all":
-                raise ValueError("Tracked deployment logs require since='all'.")
-            if normalized_source == "deployment" and normalized_search:
-                raise ValueError("Tracked deployment logs do not support search.")
-        except (ValueError, click.ClickException) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_query",
-                message=str(error),
-            ) from error
-        try:
-            target_logs_store = require_tracked_target_logs_store(record_store)
-            logs_payload = control_plane_tracked_target_logs.build_tracked_target_logs_payload(
-                record_store=target_logs_store,
-                control_plane_root=resolved_control_plane_root,
-                context_name=context,
-                instance_name=instance,
-                line_count=line_count,
-                since=normalized_since,
-                search=normalized_search,
-                source=normalized_source,
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_required",
-                message=str(error),
-            ) from error
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error),
-            ) from error
-        except control_plane_tracked_target_logs.TrackedTargetLogsProviderError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="target_logs_unavailable",
-                message=(
-                    f"Tracked target logs are unavailable during {error.operation}: {error.detail}"
-                ),
-            ) from error
-        except click.ClickException as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="target_logs_unavailable",
-                message="Tracked target logs are unavailable from the provider.",
-            ) from error
-        return TrackedTargetLogsResponse.model_validate(
-            {"status": "ok", "trace_id": trace_id, **logs_payload}
-        )
-
     def ensure_route_binding_allowed(
         *,
         identity: LaunchplaneIdentity,
@@ -10541,102 +9004,6 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message=message,
             )
-
-    def read_preview_record(
-        preview_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> PreviewRecordResponse:
-        trace_id = next_trace_id()
-        try:
-            preview_store = require_preview_read_store(record_store)
-            preview = preview_store.read_preview_record(preview_id)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="preview.read",
-            product="launchplane",
-            context=preview.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read previews for the requested context.",
-            )
-        return PreviewRecordResponse(trace_id=trace_id, record=preview)
-
-    def read_preview_history(
-        preview_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
-        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> PreviewHistoryResponse:
-        trace_id = next_trace_id()
-        try:
-            preview_store = require_preview_history_read_store(record_store)
-            preview = preview_store.read_preview_record(preview_id)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="preview.read",
-            product="launchplane",
-            context=preview.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read previews for the requested context.",
-            )
-        try:
-            generations = preview_store.list_preview_generation_records(
-                preview_id=preview.preview_id
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        return PreviewHistoryResponse(
-            trace_id=trace_id,
-            preview=preview,
-            generations=generations,
-        )
 
     async def write_product_profile(
         request: Request,
@@ -18681,123 +17048,12 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/drivers/odoo/stable-bootstrap/operations/{operation_id}",
-        read_odoo_stable_bootstrap_operation_status,
-        methods=["GET"],
-        response_model=OdooStableBootstrapOperationStatusResponse,
-        response_model_exclude_none=True,
-        operation_id="read_odoo_stable_bootstrap_operation_status",
-        summary="Read Odoo stable bootstrap operation status",
-        responses={
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        "/v1/drivers/odoo/target-replacement/operations/{operation_id}",
-        read_odoo_stable_target_replacement_operation_status,
-        methods=["GET"],
-        response_model=OdooStableTargetReplacementOperationStatusResponse,
-        response_model_exclude_none=True,
-        operation_id="read_odoo_target_replacement_operation_status",
-        summary="Read Odoo target replacement operation status",
-        responses={
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    def read_route_authorization_allows(
-        *,
-        identity: LaunchplaneIdentity,
-        action: str,
-        product: str,
-        context: str,
-    ) -> bool:
-        return resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=action,
-            product=product,
-            context=context,
-        )
-
-    read_route_dependencies = ReadRouteDependencies(
-        read_identity=read_identity,
-        get_record_store=get_record_store,
-        next_trace_id=next_trace_id,
-        authorization_allows=read_route_authorization_allows,
-        http_error=_launchplane_http_error,
-        error_response_model=LaunchplaneErrorResponse,
-    )
-    product_read_route_dependencies = ProductReadRouteDependencies(
-        common=read_route_dependencies,
-        read_product_profile_list_identity=read_product_profile_list_identity,
-        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
-    )
+    register_operation_status_read_routes(app, dependencies=read_route_dependencies)
     register_protected_artifact_read_routes(
         app,
         dependencies=product_read_route_dependencies,
     )
-
-    app.add_api_route(
-        "/v1/drivers",
-        read_driver_descriptors,
-        methods=["GET"],
-        response_model=DriverDescriptorsResponse,
-        operation_id="read_driver_descriptors",
-        summary="Read Launchplane driver descriptors",
-        responses={
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        "/v1/drivers/{driver_id}",
-        read_driver_descriptor,
-        methods=["GET"],
-        response_model=DriverDescriptorResponse,
-        operation_id="read_driver_descriptor",
-        summary="Read one Launchplane driver descriptor",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        "/v1/contexts/{context}/driver-view",
-        read_driver_context_view,
-        methods=["GET"],
-        response_model=DriverContextViewResponse,
-        operation_id="read_driver_context_view",
-        summary="Read Launchplane driver view for a context",
-        responses={
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        "/v1/contexts/{context}/instances/{instance}/driver-view",
-        read_driver_instance_view,
-        methods=["GET"],
-        response_model=DriverContextViewResponse,
-        operation_id="read_driver_instance_view",
-        summary="Read Launchplane driver view for one context instance",
-        responses={
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-        },
-    )
+    register_driver_descriptor_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(
         _LAUNCHPLANE_SELF_DEPLOY_ROUTE,
@@ -19253,20 +17509,9 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/dokploy-targets/inspect",
-        read_dokploy_target_inspect,
-        methods=["GET"],
-        response_model=DokployTargetInspectResponse,
-        operation_id="read_dokploy_target_inspect",
-        summary="Read redacted Dokploy target identity",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+    register_dokploy_target_inspect_read_routes(
+        app,
+        dependencies=driver_read_route_dependencies,
     )
 
     app.add_api_route(
@@ -19287,19 +17532,9 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/contexts/{context}/instances/{instance}/logs",
-        read_tracked_target_logs,
-        methods=["GET"],
-        response_model=TrackedTargetLogsResponse,
-        operation_id="read_tracked_target_logs",
-        summary="Read tracked target logs",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
+    register_tracked_target_log_read_routes(
+        app,
+        dependencies=driver_read_route_dependencies,
     )
 
     app.add_api_route(
@@ -19412,13 +17647,6 @@ def create_launchplane_fastapi_app(
     register_ingress_read_routes(app, dependencies=read_route_dependencies)
     register_deployment_promotion_read_routes(app, dependencies=read_route_dependencies)
 
-    every_code_read_error_responses: dict[int | str, dict[str, object]] = {
-        400: {"model": LaunchplaneErrorResponse},
-        401: {"model": LaunchplaneErrorResponse},
-        403: {"model": LaunchplaneErrorResponse},
-        404: {"model": LaunchplaneErrorResponse},
-        503: {"model": LaunchplaneErrorResponse},
-    }
     every_code_work_request_write_error_responses: dict[int | str, dict[str, object]] = {
         400: {"model": LaunchplaneErrorResponse},
         401: {"model": LaunchplaneErrorResponse},
@@ -19465,69 +17693,22 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/previews/readiness",
-        read_preview_readiness,
-        methods=["GET"],
-        response_model=PreviewReadinessResponse,
-        operation_id="read_preview_readiness",
-        summary="Read preview readiness",
-        responses=every_code_read_error_responses,
+    register_preview_readiness_read_routes(
+        app,
+        dependencies=read_route_dependencies,
+        read_identity=read_every_code_worker_read_identity,
     )
-
-    app.add_api_route(
-        "/v1/previews/{preview_id}",
-        read_preview_record,
-        methods=["GET"],
-        response_model=PreviewRecordResponse,
-        operation_id="read_preview_record",
-        summary="Read one preview record",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        "/v1/previews/{preview_id}/history",
-        read_preview_history,
-        methods=["GET"],
-        response_model=PreviewHistoryResponse,
-        operation_id="read_preview_history",
-        summary="Read one preview record with generation history",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
+    register_preview_record_read_routes(app, dependencies=read_route_dependencies)
 
     register_inventory_operation_read_routes(app, dependencies=read_route_dependencies)
-
-    work_graph_error_responses: dict[int | str, dict[str, object]] = {
-        401: {"model": LaunchplaneErrorResponse},
-        403: {"model": LaunchplaneErrorResponse},
-        503: {"model": LaunchplaneErrorResponse},
-    }
 
     register_agent_context_read_routes(
         app,
         dependencies=product_read_route_dependencies,
     )
-
-    app.add_api_route(
-        "/v1/work-graph/snapshot",
-        read_work_graph_snapshot,
-        methods=["GET"],
-        response_model=WorkGraphSnapshotResponse,
-        operation_id="read_work_graph_snapshot",
-        summary="Read Launchplane work graph snapshot",
-        responses=work_graph_error_responses,
+    register_work_graph_snapshot_read_routes(
+        app,
+        dependencies=work_graph_read_route_dependencies,
     )
 
     app.add_api_route(
@@ -19545,14 +17726,9 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/work-graph/github/issues",
-        read_work_graph_issue_inbox,
-        methods=["GET"],
-        response_model=WorkGraphIssueInboxResponse,
-        operation_id="read_work_graph_issue_inbox",
-        summary="Read Launchplane GitHub issue inbox",
-        responses=work_graph_error_responses,
+    register_work_graph_issue_inbox_read_routes(
+        app,
+        dependencies=work_graph_read_route_dependencies,
     )
 
     app.add_api_route(
@@ -19570,42 +17746,7 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    merge_train_read_error_responses: dict[int | str, dict[str, object]] = {
-        400: {"model": LaunchplaneErrorResponse},
-        401: {"model": LaunchplaneErrorResponse},
-        403: {"model": LaunchplaneErrorResponse},
-        503: {"model": LaunchplaneErrorResponse},
-    }
-
-    app.add_api_route(
-        "/v1/work-graph/merge-train/admission",
-        read_merge_train_admission,
-        methods=["GET"],
-        response_model=MergeTrainAdmissionResponse,
-        operation_id="read_merge_train_admission",
-        summary="Read merge train admission",
-        responses=merge_train_read_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/work-graph/merge-train/controller/status",
-        read_merge_train_controller_status,
-        methods=["GET"],
-        response_model=MergeTrainControllerStatusResponse,
-        operation_id="read_merge_train_controller_status",
-        summary="Read merge train controller status",
-        responses=merge_train_read_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/work-graph/merge-train/policy-targets",
-        read_merge_train_policy_targets,
-        methods=["GET"],
-        response_model=MergeTrainPolicyTargetsResponse,
-        operation_id="read_merge_train_policy_targets",
-        summary="Read merge train policy targets",
-        responses=merge_train_read_error_responses,
-    )
+    register_merge_train_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(
         _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,
@@ -19779,34 +17920,10 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/every-code/summary",
-        read_every_code_summary,
-        methods=["GET"],
-        response_model=EveryCodeSummaryResponse,
-        operation_id="read_every_code_summary",
-        summary="Read Every Code work request summary",
-        responses=every_code_read_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/every-code/work-requests",
-        list_every_code_work_requests,
-        methods=["GET"],
-        response_model=EveryCodeWorkRequestRecordsResponse,
-        operation_id="list_every_code_work_requests",
-        summary="List Every Code work requests",
-        responses=every_code_read_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/every-code/work-requests/{request_id}",
-        read_every_code_work_request,
-        methods=["GET"],
-        response_model=EveryCodeWorkRequestRecordResponse,
-        operation_id="read_every_code_work_request",
-        summary="Read one Every Code work request",
-        responses=every_code_read_error_responses,
+    register_every_code_work_request_read_routes(
+        app,
+        dependencies=read_route_dependencies,
+        read_identity=read_every_code_worker_read_identity,
     )
 
     app.add_api_route(
@@ -19936,14 +18053,10 @@ def create_launchplane_fastapi_app(
         responses=every_code_worker_status_error_responses,
     )
 
-    app.add_api_route(
-        "/v1/every-code/pr-feedback",
-        list_every_code_pr_feedback,
-        methods=["GET"],
-        response_model=EveryCodePrFeedbackRecordsResponse,
-        operation_id="list_every_code_pr_feedback",
-        summary="List Every Code PR feedback records",
-        responses=every_code_read_error_responses,
+    register_every_code_feedback_read_routes(
+        app,
+        dependencies=read_route_dependencies,
+        read_identity=read_every_code_worker_read_identity,
     )
 
     app.add_api_route(
@@ -19970,14 +18083,10 @@ def create_launchplane_fastapi_app(
         responses=every_code_worker_status_error_responses,
     )
 
-    app.add_api_route(
-        "/v1/every-code/preview-gates",
-        list_every_code_preview_gates,
-        methods=["GET"],
-        response_model=EveryCodePreviewGateRecordsResponse,
-        operation_id="list_every_code_preview_gates",
-        summary="List Every Code preview gates",
-        responses=every_code_read_error_responses,
+    register_every_code_preview_gate_read_routes(
+        app,
+        dependencies=read_route_dependencies,
+        read_identity=read_every_code_worker_read_identity,
     )
 
     app.add_api_route(
@@ -19992,24 +18101,14 @@ def create_launchplane_fastapi_app(
         responses=every_code_worker_write_error_responses,
     )
 
-    app.add_api_route(
-        "/v1/every-code/notification-attempts",
-        list_every_code_notification_attempts,
-        methods=["GET"],
-        response_model=EveryCodeNotificationAttemptRecordsResponse,
-        operation_id="list_every_code_notification_attempts",
-        summary="List Every Code notification attempts",
-        responses=every_code_read_error_responses,
+    register_every_code_notification_attempt_read_routes(
+        app,
+        dependencies=read_route_dependencies,
+        read_identity=read_every_code_worker_read_identity,
     )
-
-    app.add_api_route(
-        "/v1/previews/pr-feedback/notification-attempts",
-        list_preview_pr_feedback_notification_attempts,
-        methods=["GET"],
-        response_model=PreviewPrFeedbackNotificationAttemptRecordsResponse,
-        operation_id="list_preview_pr_feedback_notification_attempts",
-        summary="List preview PR feedback notification attempts",
-        responses=every_code_read_error_responses,
+    register_preview_notification_attempt_read_routes(
+        app,
+        dependencies=read_route_dependencies,
     )
 
     register_product_environment_read_routes(

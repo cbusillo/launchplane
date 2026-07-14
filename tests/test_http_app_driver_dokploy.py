@@ -516,7 +516,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             with (
                 patch(
-                    "control_plane.http_app.dokploy_source.read_dokploy_config",
+                    "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ) as read_dokploy_config,
                 patch(
@@ -657,7 +657,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             with patch(
-                "control_plane.http_app.dokploy_source.read_dokploy_config",
+                "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.invalid", "token"),
             ):
                 app = create_launchplane_fastapi_app(

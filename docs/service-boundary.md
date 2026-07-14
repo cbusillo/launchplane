@@ -47,8 +47,10 @@ Service implementation ownership is split by runtime responsibility:
   webhook store protocol, signature verification boundary, payload parsing,
   actor trust, deduplication, issue and pull-request closure, preview
   validation, and PR-feedback handling.
-- `control_plane/http_app.py` owns HTTP route registration and injects the
-  webhook callable into the unauthenticated GitHub route.
+- `control_plane/http_app.py` owns FastAPI composition, core and mutation route
+  registration, read-route dependency injection, and the webhook callable used
+  by the unauthenticated GitHub route. Domain modules under
+  `control_plane/http_routes/` own extracted read handlers and registrations.
 - `control_plane/drivers/native_routes.py` owns native descriptor metadata,
   handler authorization binding, and FastAPI driver-route validation.
 
@@ -411,16 +413,19 @@ New or changed service route families must preserve the completed HTTP boundary:
 typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
-Read-only ingress, topology, operational-record, managed-secret, and product
-route families are registered from dependency-explicit modules under
-`control_plane.http_routes`. `http_app.py` remains the composition root: it
-passes frozen dependency objects and callables into the registrars, and each
-registrar calls the Launchplane FastAPI app's custom `add_api_route` directly so
-shared error-schema handling and route order remain centralized without an
-`APIRouter` compatibility layer. Route families with intervening write or UI
-registrations expose multiple registrar entrypoints rather than being reordered;
-in particular, product environment config-status remains the final API route
-registered immediately before the exception handlers.
+Read-only ingress, topology, operational-record, managed-secret, product,
+driver, preview, work-graph, merge-train, and Every Code route families are
+registered from dependency-explicit modules under `control_plane.http_routes`.
+`http_app.py` remains the composition root: it passes frozen dependency objects
+and callables into the registrars, and each registrar calls the Launchplane
+FastAPI app's custom `add_api_route` directly so shared error-schema handling and
+route order remain centralized without an `APIRouter` compatibility layer.
+Route families with intervening write or UI registrations expose multiple
+registrar entrypoints rather than being reordered; in particular, product
+environment config-status remains the final API route registered immediately
+before the exception handlers. Core auth, session, service-status, and mutation
+handlers remain in the composition root until their own domain boundary is
+proven.
 
 Frontend contract generation uses the same boundary. Run
 `uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`
