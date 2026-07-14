@@ -10,6 +10,7 @@ import click
 from control_plane import every_code_reconciliation as control_plane_every_code_reconciliation
 from control_plane import every_code_webhooks as control_plane_every_code_webhooks
 from control_plane.child_process_errors import normalize_child_process_failure
+from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
 from control_plane.every_code_reconciliation import (
     EveryCodeReconciliationStore,
     EveryCodeRerunStore,
@@ -35,7 +36,6 @@ from control_plane.every_code_worker import (
 )
 
 
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 _EVERY_CODE_WORKER_TOKEN_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN"
 _EVERY_CODE_WEBHOOK_URL_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_WEBHOOK_URL"
 

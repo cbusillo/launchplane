@@ -12,7 +12,6 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentScope
 from control_plane.contracts.runtime_environment_record import ScalarValue
 from control_plane.contracts.runtime_key_safety_policy import (
-    RuntimeEnvironmentClass,
     RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
 )
@@ -21,14 +20,15 @@ from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
+    is_secret_shaped_runtime_key,
     latest_active_runtime_key_safety_policy,
+    runtime_key_safety_environment_class,
 )
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundleStore
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 ProductConfigMode = Literal["dry-run", "apply"]
 _VALID_SECRET_SCOPES: tuple[SecretScope, ...] = ("global", "context", "context_instance")
 
@@ -360,7 +360,7 @@ def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarVa
         if not isinstance(raw_key, str):
             raise ProductConfigError("Product config runtime env keys must be strings.")
         key_name = _normalize_runtime_environment_key(raw_key)
-        if _runtime_environment_key_requires_secret_store(key_name):
+        if is_secret_shaped_runtime_key(key_name):
             raise ProductConfigError(
                 f"Runtime environment key {key_name!r} must be written as a managed secret."
             )
@@ -664,7 +664,7 @@ def _evaluate_product_config_runtime_key_safety(
     target = RuntimeKeySafetyTarget(
         context=context_name,
         instance=instance_name,
-        environment_class=_product_config_runtime_environment_class(instance_name),
+        environment_class=runtime_key_safety_environment_class(instance_name),
     )
     evaluation = evaluate_runtime_key_safety(
         target=target,
@@ -840,21 +840,6 @@ def _planned_disabled_runtime_secret_placeholder_retirements(
     return tuple(retirements)
 
 
-def _product_config_runtime_environment_class(
-    instance_name: str,
-) -> RuntimeEnvironmentClass:
-    normalized_instance = instance_name.strip().lower()
-    if normalized_instance in {"prod", "production"}:
-        return "prod"
-    if normalized_instance in {"testing", "test", "staging", "stage"}:
-        return "testing"
-    if normalized_instance in {"preview", "pr"} or normalized_instance.startswith("pr-"):
-        return "preview"
-    if normalized_instance in {"dev", "local", "development"}:
-        return "dev"
-    return "unknown"
-
-
 def _summarize_product_config_secret_input(
     *, action: str, secret: dict[str, object], secret_id: str = ""
 ) -> dict[str, object]:
@@ -946,13 +931,6 @@ def _normalize_runtime_environment_key(raw_key: str) -> str:
     if not normalized_key:
         raise ProductConfigError("Runtime environment keys must be non-empty.")
     return normalized_key
-
-
-def _runtime_environment_key_requires_secret_store(key_name: str) -> bool:
-    return any(
-        key_part in SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS
-        for key_part in key_name.strip().upper().split("_")
-    )
 
 
 def _validate_runtime_environment_scope_route(

@@ -8,6 +8,7 @@ from typing import (
 )
 
 from click import ClickException
+from fastapi.routing import APIRoute
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -23,23 +24,12 @@ from control_plane.workflows.npmplus_ingress import (
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
-    _get_edge_endpoint_record,
-    _get_edge_endpoint_records,
-    _get_ingress_canary_route_record,
-    _get_ingress_canary_route_records,
-    _get_ingress_route_audit_record,
-    _get_ingress_route_audit_records,
-    _get_private_health_endpoint_record,
-    _get_private_health_endpoint_records,
     _github_human_identity,
     _github_human_ingress_route_policy,
     _github_oauth_config,
     _ingress_canary_route_apply_payload,
-    _ingress_route_audit_read_policy,
-    _ingress_route_audit_record,
     _MissingProductReadStore,
     _notification_policy_apply_policy,
-    _private_health_endpoint_read_policy,
     _record_read_policy,
     _RejectingVerifier,
 )
@@ -50,13 +40,99 @@ from tests.support.ingress import (
     _edge_endpoint_record,
     _FakeIngressProvider,
     _FakeNpmplusIngressClient,
+    _get_edge_endpoint_record,
+    _get_edge_endpoint_records,
+    _get_ingress_canary_route_record,
+    _get_ingress_canary_route_records,
+    _get_ingress_route_audit_record,
+    _get_ingress_route_audit_records,
+    _get_private_health_endpoint_record,
+    _get_private_health_endpoint_records,
     _ingress_canary_route_record,
     _ingress_canary_route_record_apply_payload,
+    _ingress_route_audit_read_policy,
+    _ingress_route_audit_record,
     _npmplus_ingress_route_payload,
     _npmplus_proxy_host,
     _private_health_endpoint_apply_payload,
+    _private_health_endpoint_read_policy,
     _private_health_endpoint_record,
 )
+
+
+class FastApiIngressTopologyRegistrarTests(unittest.TestCase):
+    def test_read_routes_preserve_order_names_and_module_ownership(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+        api_routes = [route for route in app.routes if isinstance(route, APIRoute)]
+        route_paths = [route.path for route in api_routes]
+        expected_routes = (
+            (
+                "/v1/route-bindings/records",
+                "list_route_binding_records",
+                "control_plane.http_routes.topology",
+            ),
+            (
+                "/v1/route-bindings/records/current",
+                "read_route_binding_record",
+                "control_plane.http_routes.topology",
+            ),
+            (
+                "/v1/edge-endpoints/records",
+                "list_edge_endpoint_records",
+                "control_plane.http_routes.topology",
+            ),
+            (
+                "/v1/edge-endpoints/records/{endpoint_key}",
+                "read_edge_endpoint_record",
+                "control_plane.http_routes.topology",
+            ),
+            (
+                "/v1/private-health-endpoints/records",
+                "list_private_health_endpoint_records",
+                "control_plane.http_routes.topology",
+            ),
+            (
+                "/v1/private-health-endpoints/records/{endpoint_key}",
+                "read_private_health_endpoint_record",
+                "control_plane.http_routes.topology",
+            ),
+            (
+                "/v1/ingress/canary-routes/records",
+                "list_ingress_canary_route_records",
+                "control_plane.http_routes.ingress",
+            ),
+            (
+                "/v1/ingress/canary-routes/records/{canary_key}",
+                "read_ingress_canary_route_record",
+                "control_plane.http_routes.ingress",
+            ),
+            (
+                "/v1/ingress/route-audits/records",
+                "list_ingress_route_audit_records",
+                "control_plane.http_routes.ingress",
+            ),
+            (
+                "/v1/ingress/route-audits/records/{record_id}",
+                "read_ingress_route_audit_record",
+                "control_plane.http_routes.ingress",
+            ),
+        )
+        expected_paths = [path for path, _, _ in expected_routes]
+        preceding_route_index = route_paths.index("/v1/ingress/canary-routes/apply")
+
+        self.assertEqual(
+            route_paths[preceding_route_index : preceding_route_index + len(expected_paths) + 2],
+            ["/v1/ingress/canary-routes/apply", *expected_paths, "/v1/deployments/{record_id}"],
+        )
+        routes_by_path = {route.path: route for route in api_routes}
+        for path, name, module_name in expected_routes:
+            route = routes_by_path[path]
+            self.assertEqual(route.name, name)
+            self.assertEqual(route.endpoint.__module__, module_name)
 
 
 class FastApiEdgeEndpointReadTests(unittest.IsolatedAsyncioTestCase):

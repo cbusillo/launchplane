@@ -2,14 +2,18 @@ import json
 import click
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.cli_shared import (
+    DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
+    direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
+    require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
+)
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.provider_target_audit import audit_provider_targets
 from control_plane.workflows.provider_target_backfill import backfill_provider_targets
 
 
-_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
-_DIRECT_DB_MUTATION_MESSAGE = (
+_SECRET_WRITE_DIRECT_DB_MUTATION_MESSAGE = (
     "Direct local DB mutation is restricted after the Launchplane service boundary. "
     "Use the deployed service route or operator workflow for shared/production "
     "secret writes, or pass --allow-direct-db-mutation only for explicit "
@@ -45,11 +49,6 @@ def normalize_secret_scope(scope: str) -> SecretScope:
         raise click.ClickException(
             "Secret scope must be one of global, context, or context_instance."
         ) from exc
-
-
-def _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation: bool) -> None:
-    if not allow_direct_db_mutation:
-        raise click.ClickException(_DIRECT_DB_MUTATION_MESSAGE)
 
 
 @storage.command("provider-target-audit")
@@ -135,12 +134,7 @@ def storage_provider_target_backfill(
 @click.option("--instance", "instance_name", default="")
 @click.option("--description", default="")
 @click.option("--actor", default="cli", show_default=True)
-@click.option(
-    "--allow-direct-db-mutation",
-    is_flag=True,
-    default=False,
-    help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-)
+@_direct_db_mutation_acknowledgement_option
 def secrets_put(
     database_url: str,
     scope: str,
@@ -154,7 +148,10 @@ def secrets_put(
     actor: str,
     allow_direct_db_mutation: bool,
 ) -> None:
-    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
+    _require_direct_db_mutation_acknowledgement(
+        allow_direct_db_mutation,
+        message=_SECRET_WRITE_DIRECT_DB_MUTATION_MESSAGE,
+    )
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
@@ -246,12 +243,7 @@ def secrets_show(database_url: str, secret_id: str) -> None:
     default="",
     help="Operator reason recorded with an applied re-encryption.",
 )
-@click.option(
-    "--allow-direct-db-mutation",
-    is_flag=True,
-    default=False,
-    help="Acknowledge direct local DB mutation for explicit local/bootstrap repair.",
-)
+@_direct_db_mutation_acknowledgement_option
 def secrets_reencrypt(
     database_url: str,
     apply: bool,
@@ -259,7 +251,10 @@ def secrets_reencrypt(
     reason: str,
     allow_direct_db_mutation: bool,
 ) -> None:
-    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
+    _require_direct_db_mutation_acknowledgement(
+        allow_direct_db_mutation,
+        message=_SECRET_WRITE_DIRECT_DB_MUTATION_MESSAGE,
+    )
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
