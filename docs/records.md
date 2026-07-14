@@ -691,10 +691,11 @@ runtime identity match detail when available, and whether Launchplane delivered
 a configured transition notification.
 
 These records are the source for the product environment read model's
-`public_ingress` summary. A passing observation is verified evidence, a failing
-observation marks the lane stale/unhealthy, and a public check whose literal or
-resolved destination is non-public records a failing `private_url` observation.
-The `skipped` status remains readable for historical records, but current public
+`public_ingress` summary. Passing and failing observations are both verified
+evidence of the latest probe; failure marks the lane unhealthy without
+mislabeling current evidence as stale. A public check whose literal or resolved
+destination is non-public records a failing `private_url` observation. The
+`skipped` status remains readable for historical records, but current public
 checks do not treat a private destination as unsupported or silently healthy.
 
 ## Product Environment Topology Projection
@@ -733,6 +734,12 @@ ids, edge addresses, private resolver details, and raw provider payloads. The
 legacy `target` summary is backed by the same neutral route authority and
 reports only whether a physical provider-target record exists; it no longer
 returns the provider target id.
+
+Shared environment summaries keep driver-specific policy under the
+`driver_extensions` namespace. Odoo data-authority and prelaunch-rebuild policy
+appear only in `driver_extensions.odoo`; generic-web, VeriReel, and future
+drivers do not receive misleading Odoo defaults at the shared model's top
+level.
 
 ## Public Ingress Incident Records
 

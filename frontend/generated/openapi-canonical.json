@@ -11220,6 +11220,9 @@
             "title": "Display Name",
             "type": "string"
           },
+          "driver_extensions": {
+            "$ref": "#/components/schemas/ProductEnvironmentDriverExtensions"
+          },
           "driver_id": {
             "title": "Driver Id",
             "type": "string"
@@ -11240,54 +11243,6 @@
             },
             "title": "Managed Secrets",
             "type": "array"
-          },
-          "odoo_allowed_rebuild_sources": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Odoo Allowed Rebuild Sources",
-            "type": "array"
-          },
-          "odoo_data_authority": {
-            "default": "unknown",
-            "title": "Odoo Data Authority",
-            "type": "string"
-          },
-          "odoo_requires_backup_before_destroy": {
-            "default": true,
-            "title": "Odoo Requires Backup Before Destroy",
-            "type": "boolean"
-          },
-          "odoo_requires_restore_proof": {
-            "default": true,
-            "title": "Odoo Requires Restore Proof",
-            "type": "boolean"
-          },
-          "odoo_requires_runtime_identity": {
-            "default": true,
-            "title": "Odoo Requires Runtime Identity",
-            "type": "boolean"
-          },
-          "odoo_upstream_source": {
-            "default": "",
-            "title": "Odoo Upstream Source",
-            "type": "string"
-          },
-          "prelaunch_rebuild_allowed": {
-            "default": false,
-            "title": "Prelaunch Rebuild Allowed",
-            "type": "boolean"
-          },
-          "prelaunch_rebuild_approval_issue_url": {
-            "default": "",
-            "title": "Prelaunch Rebuild Approval Issue Url",
-            "type": "string"
-          },
-          "prelaunch_rebuild_data_source_mode": {
-            "default": "",
-            "title": "Prelaunch Rebuild Data Source Mode",
-            "type": "string"
           },
           "product": {
             "title": "Product",
@@ -11355,6 +11310,23 @@
           "provenance"
         ],
         "title": "ProductEnvironmentDetail",
+        "type": "object"
+      },
+      "ProductEnvironmentDriverExtensions": {
+        "additionalProperties": false,
+        "properties": {
+          "odoo": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductOdooEnvironmentExtension"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "ProductEnvironmentDriverExtensions",
         "type": "object"
       },
       "ProductEnvironmentListResponse": {
@@ -11429,6 +11401,9 @@
             "title": "Context",
             "type": "string"
           },
+          "driver_extensions": {
+            "$ref": "#/components/schemas/ProductEnvironmentDriverExtensions"
+          },
           "environment": {
             "title": "Environment",
             "type": "string"
@@ -11436,54 +11411,6 @@
           "health_url": {
             "default": "",
             "title": "Health Url",
-            "type": "string"
-          },
-          "odoo_allowed_rebuild_sources": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Odoo Allowed Rebuild Sources",
-            "type": "array"
-          },
-          "odoo_data_authority": {
-            "default": "unknown",
-            "title": "Odoo Data Authority",
-            "type": "string"
-          },
-          "odoo_requires_backup_before_destroy": {
-            "default": true,
-            "title": "Odoo Requires Backup Before Destroy",
-            "type": "boolean"
-          },
-          "odoo_requires_restore_proof": {
-            "default": true,
-            "title": "Odoo Requires Restore Proof",
-            "type": "boolean"
-          },
-          "odoo_requires_runtime_identity": {
-            "default": true,
-            "title": "Odoo Requires Runtime Identity",
-            "type": "boolean"
-          },
-          "odoo_upstream_source": {
-            "default": "",
-            "title": "Odoo Upstream Source",
-            "type": "string"
-          },
-          "prelaunch_rebuild_allowed": {
-            "default": false,
-            "title": "Prelaunch Rebuild Allowed",
-            "type": "boolean"
-          },
-          "prelaunch_rebuild_approval_issue_url": {
-            "default": "",
-            "title": "Prelaunch Rebuild Approval Issue Url",
-            "type": "string"
-          },
-          "prelaunch_rebuild_data_source_mode": {
-            "default": "",
-            "title": "Prelaunch Rebuild Data Source Mode",
             "type": "string"
           },
           "provenance": {
@@ -12156,6 +12083,61 @@
           }
         },
         "title": "ProductObservedTopology",
+        "type": "object"
+      },
+      "ProductOdooEnvironmentExtension": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_rebuild_sources": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Rebuild Sources",
+            "type": "array"
+          },
+          "data_authority": {
+            "default": "unknown",
+            "title": "Data Authority",
+            "type": "string"
+          },
+          "prelaunch_rebuild_allowed": {
+            "default": false,
+            "title": "Prelaunch Rebuild Allowed",
+            "type": "boolean"
+          },
+          "prelaunch_rebuild_approval_issue_url": {
+            "default": "",
+            "title": "Prelaunch Rebuild Approval Issue Url",
+            "type": "string"
+          },
+          "prelaunch_rebuild_data_source_mode": {
+            "default": "",
+            "title": "Prelaunch Rebuild Data Source Mode",
+            "type": "string"
+          },
+          "requires_backup_before_destroy": {
+            "default": true,
+            "title": "Requires Backup Before Destroy",
+            "type": "boolean"
+          },
+          "requires_restore_proof": {
+            "default": true,
+            "title": "Requires Restore Proof",
+            "type": "boolean"
+          },
+          "requires_runtime_identity": {
+            "default": true,
+            "title": "Requires Runtime Identity",
+            "type": "boolean"
+          },
+          "upstream_source": {
+            "default": "",
+            "title": "Upstream Source",
+            "type": "string"
+          }
+        },
+        "title": "ProductOdooEnvironmentExtension",
         "type": "object"
       },
       "ProductOdooLaneDataPolicy": {

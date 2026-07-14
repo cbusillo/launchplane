@@ -1215,19 +1215,11 @@ export type ProductEnvironmentDetail = {
     base_url: string;
     context: string;
     display_name: string;
+    driver_extensions: ProductEnvironmentDriverExtensions;
     driver_id: string;
     environment: string;
     health_url: string;
     managed_secrets: Array<ProductSecretBindingSummary>;
-    odoo_allowed_rebuild_sources: Array<string>;
-    odoo_data_authority: string;
-    odoo_requires_backup_before_destroy: boolean;
-    odoo_requires_restore_proof: boolean;
-    odoo_requires_runtime_identity: boolean;
-    odoo_upstream_source: string;
-    prelaunch_rebuild_allowed: boolean;
-    prelaunch_rebuild_approval_issue_url: string;
-    prelaunch_rebuild_data_source_mode: string;
     product: string;
     provenance: DataProvenance;
     public_ingress: ProductPublicIngressSummary;
@@ -1238,6 +1230,10 @@ export type ProductEnvironmentDetail = {
     topology: ProductEnvironmentTopology;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
     warnings: Array<string>;
+};
+
+export type ProductEnvironmentDriverExtensions = {
+    odoo: ProductOdooEnvironmentExtension | null;
 };
 
 export type ProductEnvironmentListResponse = {
@@ -1256,17 +1252,9 @@ export type ProductEnvironmentSummary = {
     available_actions: Array<ProductActionAvailability>;
     base_url: string;
     context: string;
+    driver_extensions: ProductEnvironmentDriverExtensions;
     environment: string;
     health_url: string;
-    odoo_allowed_rebuild_sources: Array<string>;
-    odoo_data_authority: string;
-    odoo_requires_backup_before_destroy: boolean;
-    odoo_requires_restore_proof: boolean;
-    odoo_requires_runtime_identity: boolean;
-    odoo_upstream_source: string;
-    prelaunch_rebuild_allowed: boolean;
-    prelaunch_rebuild_approval_issue_url: string;
-    prelaunch_rebuild_data_source_mode: string;
     provenance: DataProvenance;
     public_ingress: ProductPublicIngressSummary;
     topology: ProductEnvironmentTopology;
@@ -1392,6 +1380,18 @@ export type ProductObservedTopology = {
     placement: ProductObservedPlacement;
     tls_domains: Array<ProductObservedTlsDomain>;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductOdooEnvironmentExtension = {
+    allowed_rebuild_sources: Array<string>;
+    data_authority: string;
+    prelaunch_rebuild_allowed: boolean;
+    prelaunch_rebuild_approval_issue_url: string;
+    prelaunch_rebuild_data_source_mode: string;
+    requires_backup_before_destroy: boolean;
+    requires_restore_proof: boolean;
+    requires_runtime_identity: boolean;
+    upstream_source: string;
 };
 
 export type ProductOdooLaneDataPolicy = {

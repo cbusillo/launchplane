@@ -269,6 +269,26 @@ class ProductPublicIngressSummary(BaseModel):
     )
 
 
+class ProductOdooEnvironmentExtension(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prelaunch_rebuild_allowed: bool = False
+    prelaunch_rebuild_data_source_mode: str = ""
+    prelaunch_rebuild_approval_issue_url: str = ""
+    data_authority: str = "unknown"
+    allowed_rebuild_sources: tuple[str, ...] = ()
+    upstream_source: str = ""
+    requires_backup_before_destroy: bool = True
+    requires_restore_proof: bool = True
+    requires_runtime_identity: bool = True
+
+
+class ProductEnvironmentDriverExtensions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    odoo: ProductOdooEnvironmentExtension | None = None
+
+
 class ProductEnvironmentSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -276,15 +296,9 @@ class ProductEnvironmentSummary(BaseModel):
     context: str
     base_url: str = ""
     health_url: str = ""
-    prelaunch_rebuild_allowed: bool = False
-    prelaunch_rebuild_data_source_mode: str = ""
-    prelaunch_rebuild_approval_issue_url: str = ""
-    odoo_data_authority: str = "unknown"
-    odoo_allowed_rebuild_sources: tuple[str, ...] = ()
-    odoo_upstream_source: str = ""
-    odoo_requires_backup_before_destroy: bool = True
-    odoo_requires_restore_proof: bool = True
-    odoo_requires_runtime_identity: bool = True
+    driver_extensions: ProductEnvironmentDriverExtensions = Field(
+        default_factory=ProductEnvironmentDriverExtensions
+    )
     topology: ProductEnvironmentTopology = Field(default_factory=ProductEnvironmentTopology)
     public_ingress: ProductPublicIngressSummary = Field(default_factory=ProductPublicIngressSummary)
     trust_state: FreshnessStatus
@@ -339,15 +353,9 @@ class ProductEnvironmentDetail(BaseModel):
     context: str
     base_url: str = ""
     health_url: str = ""
-    prelaunch_rebuild_allowed: bool = False
-    prelaunch_rebuild_data_source_mode: str = ""
-    prelaunch_rebuild_approval_issue_url: str = ""
-    odoo_data_authority: str = "unknown"
-    odoo_allowed_rebuild_sources: tuple[str, ...] = ()
-    odoo_upstream_source: str = ""
-    odoo_requires_backup_before_destroy: bool = True
-    odoo_requires_restore_proof: bool = True
-    odoo_requires_runtime_identity: bool = True
+    driver_extensions: ProductEnvironmentDriverExtensions = Field(
+        default_factory=ProductEnvironmentDriverExtensions
+    )
     target: ProductTargetSummary
     topology: ProductEnvironmentTopology = Field(default_factory=ProductEnvironmentTopology)
     public_ingress: ProductPublicIngressSummary = Field(default_factory=ProductPublicIngressSummary)
@@ -537,17 +545,11 @@ def build_product_environment_detail(
         context=lane.context,
         base_url=lane.base_url,
         health_url=lane.health_url,
-        prelaunch_rebuild_allowed=lane.odoo_prelaunch_rebuild.enabled,
-        prelaunch_rebuild_data_source_mode=lane.odoo_prelaunch_rebuild.data_source_mode
-        if lane.odoo_prelaunch_rebuild.enabled
-        else "",
-        prelaunch_rebuild_approval_issue_url=lane.odoo_prelaunch_rebuild.approval_issue_url,
-        odoo_data_authority=lane.odoo_data_policy.data_authority,
-        odoo_allowed_rebuild_sources=lane.odoo_data_policy.allowed_rebuild_sources,
-        odoo_upstream_source=lane.odoo_data_policy.upstream_source,
-        odoo_requires_backup_before_destroy=lane.odoo_data_policy.requires_backup_before_destroy,
-        odoo_requires_restore_proof=lane.odoo_data_policy.requires_restore_proof,
-        odoo_requires_runtime_identity=lane.odoo_data_policy.requires_runtime_identity,
+        driver_extensions=_environment_driver_extensions(
+            profile=profile,
+            descriptor=descriptor,
+            lane=lane,
+        ),
         target=_target_summary(lane_summary, topology=topology),
         topology=topology,
         public_ingress=_public_ingress_summary(
@@ -1229,17 +1231,11 @@ def _build_environment_summary(
         context=lane.context,
         base_url=lane.base_url,
         health_url=lane.health_url,
-        prelaunch_rebuild_allowed=lane.odoo_prelaunch_rebuild.enabled,
-        prelaunch_rebuild_data_source_mode=lane.odoo_prelaunch_rebuild.data_source_mode
-        if lane.odoo_prelaunch_rebuild.enabled
-        else "",
-        prelaunch_rebuild_approval_issue_url=lane.odoo_prelaunch_rebuild.approval_issue_url,
-        odoo_data_authority=lane.odoo_data_policy.data_authority,
-        odoo_allowed_rebuild_sources=lane.odoo_data_policy.allowed_rebuild_sources,
-        odoo_upstream_source=lane.odoo_data_policy.upstream_source,
-        odoo_requires_backup_before_destroy=lane.odoo_data_policy.requires_backup_before_destroy,
-        odoo_requires_restore_proof=lane.odoo_data_policy.requires_restore_proof,
-        odoo_requires_runtime_identity=lane.odoo_data_policy.requires_runtime_identity,
+        driver_extensions=_environment_driver_extensions(
+            profile=profile,
+            descriptor=descriptor,
+            lane=lane,
+        ),
         topology=topology,
         public_ingress=_public_ingress_summary(
             record_store=record_store,
@@ -1419,7 +1415,7 @@ def _public_ingress_freshness(status: str) -> FreshnessStatus:
     if status == "pass":
         return "verified"
     if status == "fail":
-        return "stale"
+        return "verified"
     if status == "skipped":
         return "unsupported"
     return "missing"
@@ -1730,6 +1726,36 @@ def _config_requirement_applies(
     if requirement_context != lane.context:
         return False
     return not requirement_instance or requirement_instance == lane.instance
+
+
+def _environment_driver_extensions(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    descriptor: DriverDescriptor | None,
+    lane: ProductLaneProfile,
+) -> ProductEnvironmentDriverExtensions:
+    driver_ids = {profile.driver_id}
+    if descriptor is not None and descriptor.base_driver_id:
+        driver_ids.add(descriptor.base_driver_id)
+    if "odoo" not in driver_ids:
+        return ProductEnvironmentDriverExtensions()
+    return ProductEnvironmentDriverExtensions(
+        odoo=ProductOdooEnvironmentExtension(
+            prelaunch_rebuild_allowed=lane.odoo_prelaunch_rebuild.enabled,
+            prelaunch_rebuild_data_source_mode=(
+                lane.odoo_prelaunch_rebuild.data_source_mode
+                if lane.odoo_prelaunch_rebuild.enabled
+                else ""
+            ),
+            prelaunch_rebuild_approval_issue_url=lane.odoo_prelaunch_rebuild.approval_issue_url,
+            data_authority=lane.odoo_data_policy.data_authority,
+            allowed_rebuild_sources=lane.odoo_data_policy.allowed_rebuild_sources,
+            upstream_source=lane.odoo_data_policy.upstream_source,
+            requires_backup_before_destroy=lane.odoo_data_policy.requires_backup_before_destroy,
+            requires_restore_proof=lane.odoo_data_policy.requires_restore_proof,
+            requires_runtime_identity=lane.odoo_data_policy.requires_runtime_identity,
+        )
+    )
 
 
 def _target_summary(
