@@ -19495,7 +19495,7 @@ def create_launchplane_fastapi_app(
 
     register_inventory_operation_read_routes(app, dependencies=read_route_dependencies)
 
-    agent_context_error_responses: dict[int | str, dict[str, object]] = {
+    work_graph_error_responses: dict[int | str, dict[str, object]] = {
         401: {"model": LaunchplaneErrorResponse},
         403: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
@@ -19513,7 +19513,7 @@ def create_launchplane_fastapi_app(
         response_model=WorkGraphSnapshotResponse,
         operation_id="read_work_graph_snapshot",
         summary="Read Launchplane work graph snapshot",
-        responses=agent_context_error_responses,
+        responses=work_graph_error_responses,
     )
 
     app.add_api_route(
@@ -19538,7 +19538,7 @@ def create_launchplane_fastapi_app(
         response_model=WorkGraphIssueInboxResponse,
         operation_id="read_work_graph_issue_inbox",
         summary="Read Launchplane GitHub issue inbox",
-        responses=agent_context_error_responses,
+        responses=work_graph_error_responses,
     )
 
     app.add_api_route(

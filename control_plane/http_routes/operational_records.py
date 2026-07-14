@@ -9,11 +9,13 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.secret_record import SecretScope
-from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.http_routes.support import (
+    LAUNCHPLANE_SERVICE_CONTEXT,
+    ApiRouteRegistrar,
+    ReadRouteDependencies,
+)
 from control_plane.service_auth import LaunchplaneIdentity
 from control_plane.storage.factory import storage_backend_name
-
-_LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
 class DeploymentRecordResponse(BaseModel):
@@ -510,7 +512,7 @@ def register_managed_secret_read_routes(
         if not dependencies.authorization_allows(
             identity=identity,
             action="secret.list",
-            product=_LAUNCHPLANE_SERVICE_CONTEXT,
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
             context=context,
         ):
             raise dependencies.http_error(
@@ -609,7 +611,7 @@ def register_managed_secret_read_routes(
         if not dependencies.authorization_allows(
             identity=identity,
             action="secret.read",
-            product=_LAUNCHPLANE_SERVICE_CONTEXT,
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
             context=secret_status.context,
         ):
             raise dependencies.http_error(

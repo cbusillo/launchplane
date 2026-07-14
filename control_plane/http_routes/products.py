@@ -29,7 +29,11 @@ from control_plane.contracts.protected_artifacts import (
     build_protected_artifact_set,
 )
 from control_plane.contracts.repo_product_mapping_read_model import RepoProductMapping
-from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.http_routes.support import (
+    LAUNCHPLANE_SERVICE_CONTEXT,
+    ApiRouteRegistrar,
+    ReadRouteDependencies,
+)
 from control_plane.service_auth import LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.work_graph_service import (
@@ -37,8 +41,6 @@ from control_plane.work_graph_service import (
     build_repo_product_mapping_service_payload,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-
-_LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,8 +399,8 @@ def _require_agent_context_read_authorization(
     if dependencies.authorization_allows(
         identity=identity,
         action="product_environment.read",
-        product=_LAUNCHPLANE_SERVICE_CONTEXT,
-        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        product=LAUNCHPLANE_SERVICE_CONTEXT,
+        context=LAUNCHPLANE_SERVICE_CONTEXT,
     ):
         return
     raise dependencies.http_error(
@@ -675,8 +677,8 @@ def register_product_environment_read_routes(
         if not common.authorization_allows(
             identity=identity,
             action="product_environment.read",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
         ):
             raise common.http_error(
                 status_code=403,
@@ -829,7 +831,7 @@ def register_product_environment_read_routes(
             identity=identity,
             action="product_profile.read",
             product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
         ):
             raise common.http_error(
                 status_code=403,
@@ -965,7 +967,7 @@ def register_product_profile_read_routes(
             identity=identity,
             action="product_profile.read",
             product=profile.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
         ):
             raise common.http_error(
                 status_code=403,
@@ -1028,7 +1030,7 @@ def register_product_context_audit_read_routes(
             identity=identity,
             action="product_profile.read",
             product=profile.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
         ):
             raise common.http_error(
                 status_code=403,

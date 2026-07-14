@@ -7,6 +7,8 @@ from pydantic import BaseModel
 
 from control_plane.service_auth import LaunchplaneIdentity
 
+LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+
 
 class ApiRouteRegistrar(Protocol):
     def add_api_route(
