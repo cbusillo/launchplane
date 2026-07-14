@@ -40,10 +40,9 @@ from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
-    _get_route_binding_record,
-    _get_route_binding_records,
 )
 from tests.support.auth import _StubVerifier, _identity
+from tests.support.ingress import _get_route_binding_record, _get_route_binding_records
 
 
 def _sqlite_database_url(database_path: Path) -> str:
