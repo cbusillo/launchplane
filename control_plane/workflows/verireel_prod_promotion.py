@@ -7,7 +7,6 @@ from typing import Protocol, cast
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -33,6 +32,9 @@ from control_plane.workflows.verireel_rollout import (
     resolve_verireel_rollout_base_urls,
     verify_verireel_rollout,
 )
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
 
 
 class VeriReelProdPromotionStore(Protocol):
@@ -593,10 +595,10 @@ def _resolve_application_id(
 ) -> str:
     if target_type == "application" and target_id.strip():
         return target_id.strip()
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=request.context,
         instance_name=request.to_instance,
@@ -614,8 +616,8 @@ def _resolve_application_id(
 
 def _find_application_schedule(
     *, host: str, token: str, application_id: str, schedule_name: str
-) -> control_plane_dokploy.JsonObject | None:
-    for schedule in control_plane_dokploy.list_dokploy_schedules(
+) -> dokploy_api.JsonObject | None:
+    for schedule in dokploy_api.list_dokploy_schedules(
         host=host,
         token=token,
         target_id=application_id,
@@ -640,9 +642,9 @@ def _upsert_application_schedule(
         application_id=application_id,
         schedule_name=schedule_name,
     )
-    payload: control_plane_dokploy.JsonObject = {
+    payload: dokploy_api.JsonObject = {
         "name": schedule_name,
-        "cronExpression": control_plane_dokploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+        "cronExpression": dokploy_post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
         "scheduleType": "application",
         "shellType": "sh",
         "command": command,
@@ -651,7 +653,7 @@ def _upsert_application_schedule(
         "timezone": "UTC",
     }
     if existing_schedule is None:
-        control_plane_dokploy.dokploy_request(
+        dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/schedule.create",
@@ -659,11 +661,11 @@ def _upsert_application_schedule(
             payload=payload,
         )
     else:
-        update_payload: control_plane_dokploy.JsonObject = {
-            "scheduleId": control_plane_dokploy.schedule_key(existing_schedule),
+        update_payload: dokploy_api.JsonObject = {
+            "scheduleId": dokploy_api.schedule_key(existing_schedule),
             **payload,
         }
-        control_plane_dokploy.dokploy_request(
+        dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/schedule.update",
@@ -680,7 +682,7 @@ def _upsert_application_schedule(
         raise click.ClickException(
             f"Dokploy schedule {schedule_name!r} for application {application_id!r} could not be resolved."
         )
-    schedule_id = control_plane_dokploy.schedule_key(resolved_schedule)
+    schedule_id = dokploy_api.schedule_key(resolved_schedule)
     if not schedule_id:
         raise click.ClickException(
             f"Dokploy schedule {schedule_name!r} for application {application_id!r} did not expose a schedule id."
@@ -710,12 +712,12 @@ def _run_application_command_with_retries(
                 schedule_name=schedule_name,
                 command=command,
             )
-            latest_before = control_plane_dokploy.latest_deployment_for_schedule(
+            latest_before = dokploy_api.latest_deployment_for_schedule(
                 host=host,
                 token=token,
                 schedule_id=schedule_id,
             )
-            control_plane_dokploy.dokploy_request(
+            dokploy_api.dokploy_request(
                 host=host,
                 token=token,
                 path="/api/schedule.runManually",
@@ -723,11 +725,11 @@ def _run_application_command_with_retries(
                 payload={"scheduleId": schedule_id},
                 timeout_seconds=timeout_seconds,
             )
-            control_plane_dokploy.wait_for_dokploy_schedule_deployment(
+            dokploy_api.wait_for_dokploy_schedule_deployment(
                 host=host,
                 token=token,
                 schedule_id=schedule_id,
-                before_key=control_plane_dokploy.deployment_key(latest_before),
+                before_key=dokploy_api.deployment_key(latest_before),
                 timeout_seconds=timeout_seconds,
             )
             return
@@ -744,7 +746,7 @@ def _run_prisma_migrations(
     target_type: DokployTargetType,
     target_id: str,
 ) -> None:
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     application_id = _resolve_application_id(
         control_plane_root=control_plane_root,
         request=request,

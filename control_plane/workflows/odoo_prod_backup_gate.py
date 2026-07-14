@@ -6,12 +6,13 @@ from typing import Literal, Protocol, cast
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
 
 BACKUP_GATE_SOURCE = "launchplane-odoo-prod-backup-gate"
 
@@ -69,7 +70,7 @@ def _read_target_definition(
     *,
     record_store: OdooProdBackupGateStore,
     request: OdooProdBackupGateRequest,
-) -> control_plane_dokploy.DokployTargetDefinition:
+) -> dokploy_source.DokployTargetDefinition:
     try:
         target_record = record_store.read_dokploy_target_record(
             context_name=request.context,
@@ -88,7 +89,7 @@ def _read_target_definition(
         exclude={"schema_version", "updated_at", "source_label"},
     )
     payload["target_id"] = target_id_record.target_id
-    target_definition = control_plane_dokploy.DokployTargetDefinition.model_validate(payload)
+    target_definition = dokploy_source.DokployTargetDefinition.model_validate(payload)
     if target_definition.target_type != "compose":
         raise click.ClickException(
             "Odoo prod backup gate requires a compose target in Launchplane Dokploy records. "
@@ -201,10 +202,8 @@ def execute_odoo_prod_backup_gate(
         evidence={},
     )
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
-        control_plane_dokploy.run_compose_odoo_backup_gate(
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+        dokploy_post_deploy.run_compose_odoo_backup_gate(
             host=host,
             token=token,
             target_definition=target_definition,

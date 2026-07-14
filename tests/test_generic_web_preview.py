@@ -358,11 +358,11 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
                 return_value=raw_projects,
             ),
         ):
@@ -388,11 +388,11 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
         ):
@@ -422,15 +422,15 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "env": "SMTP_HOST=smtp.example\nSMTP_FROM=hello@example.com\n",
                     "dockerImage": "ghcr.io/cbusillo/sellyouroutboard:sha",
@@ -469,15 +469,15 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "env": "SMTP_HOST=\n",
                     "dockerImage": "",
@@ -519,14 +519,14 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source,
             ) as source_of_truth,
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config"
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config"
             ) as read_dokploy_config,
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload"
+                "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload"
             ) as fetch_dokploy_target_payload,
         ):
             result = evaluate_generic_web_preview_readiness(
@@ -569,7 +569,7 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source,
             ),
             patch(
@@ -579,10 +579,10 @@ class GenericWebPreviewTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config"
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config"
             ) as read_dokploy_config,
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload"
+                "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload"
             ) as fetch_dokploy_target_payload,
         ):
             result = evaluate_generic_web_preview_readiness(
@@ -621,7 +621,7 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source,
             ),
             patch(
@@ -631,10 +631,10 @@ class GenericWebPreviewTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config"
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config"
             ) as read_dokploy_config,
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload"
+                "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload"
             ) as fetch_dokploy_target_payload,
         ):
             result = evaluate_generic_web_preview_readiness(
@@ -668,19 +668,19 @@ class GenericWebPreviewTests(unittest.TestCase):
         )
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload",
                 return_value={"env": "", "dockerImage": "", "registry": {}},
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request"
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
             ) as dokploy_request,
         ):
             result = execute_generic_web_preview_refresh(
@@ -782,7 +782,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request"
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
             ) as dokploy_request,
             patch(
                 "control_plane.workflows.generic_web_preview.utc_now_timestamp",
@@ -829,7 +829,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request"
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
             ) as dokploy_request,
         ):
             with self.assertRaisesRegex(click.ClickException, "root URL"):
@@ -1159,30 +1159,30 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=_fake_fetch,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.generic_web_preview.dokploy_api.latest_deployment_for_target",
                 return_value=None,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.trigger_deployment",
+                "control_plane.workflows.generic_web_preview.dokploy_api.trigger_deployment",
             ) as trigger_deployment,
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.wait_for_target_deployment",
+                "control_plane.workflows.generic_web_preview.dokploy_api.wait_for_target_deployment",
             ),
             patch(
                 "control_plane.workflows.generic_web_preview._wait_for_preview_health"
@@ -1271,15 +1271,15 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "applicationId": "app-testing",
                     "env": "SMTP_HOST=smtp.example\nSMTP_PASSWORD=secret-value\n",
@@ -1288,7 +1288,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request"
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
             ) as dokploy_request,
         ):
             result = execute_generic_web_preview_refresh(
@@ -1326,7 +1326,7 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source,
             ),
             patch(
@@ -1336,10 +1336,10 @@ class GenericWebPreviewTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config"
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config"
             ) as read_dokploy_config,
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request"
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
             ) as dokploy_request,
         ):
             result = execute_generic_web_preview_refresh(
@@ -1432,30 +1432,30 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=_fake_fetch,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.generic_web_preview.dokploy_api.latest_deployment_for_target",
                 return_value=None,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.trigger_deployment",
+                "control_plane.workflows.generic_web_preview.dokploy_api.trigger_deployment",
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.wait_for_target_deployment",
+                "control_plane.workflows.generic_web_preview.dokploy_api.wait_for_target_deployment",
             ),
             patch("control_plane.workflows.generic_web_preview._wait_for_preview_health"),
             patch(
@@ -1509,11 +1509,11 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
@@ -1571,11 +1571,11 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
@@ -1611,7 +1611,7 @@ class GenericWebPreviewTests(unittest.TestCase):
     ) -> None:
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config"
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config"
             ) as read_dokploy_config,
             self.assertRaisesRegex(click.ClickException, "slug policy"),
         ):
@@ -1654,11 +1654,11 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
@@ -1709,11 +1709,11 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
@@ -1759,11 +1759,11 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
@@ -1796,11 +1796,11 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(

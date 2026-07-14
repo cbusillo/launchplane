@@ -6,7 +6,6 @@ from typing import Literal, Protocol
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
@@ -29,6 +28,7 @@ from control_plane.workflows.verireel_rollout import (
     health_evidence_from_rollout,
     verify_verireel_rollout,
 )
+from control_plane.dokploy import source as dokploy_source
 
 
 StableInstanceName = Literal["testing", "prod"]
@@ -227,10 +227,10 @@ def _resolve_ship_request(
     control_plane_root: Path,
     request: VeriReelStableDeployRequest,
 ) -> tuple[ShipRequest, ResolvedTargetEvidence, int]:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=request.context,
         instance_name=request.instance,
@@ -246,7 +246,7 @@ def _resolve_ship_request(
         instance_name=request.instance,
     )
     deploy_mode = _resolve_deploy_mode(
-        configured_ship_mode=control_plane_dokploy.resolve_dokploy_ship_mode(
+        configured_ship_mode=dokploy_source.resolve_dokploy_ship_mode(
             request.context,
             request.instance,
             environment_values,
@@ -276,7 +276,7 @@ def _resolve_ship_request(
         target_id=target_definition.target_id,
         target_name=target_definition.target_name.strip() or ship_request.target_name,
     )
-    deploy_timeout_seconds = control_plane_dokploy.resolve_ship_timeout_seconds(
+    deploy_timeout_seconds = dokploy_source.resolve_ship_timeout_seconds(
         timeout_override_seconds=request.timeout_seconds,
         target_definition=target_definition,
     )
@@ -291,7 +291,7 @@ def _execute_dokploy_deploy(
     deploy_timeout_seconds: int,
     runtime_identity: RuntimeIdentity | None = None,
 ) -> None:
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     execute_dokploy_artifact_deploy(
         host=host,
         token=token,

@@ -14,10 +14,8 @@ from urllib.request import Request, urlopen
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
-from control_plane.dokploy import JsonObject
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_record import SecretBinding
@@ -31,6 +29,10 @@ from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
+from control_plane.dokploy.api import JsonObject
 
 
 DEFAULT_PREVIEW_TIMEOUT_SECONDS = 300
@@ -372,7 +374,7 @@ def _retarget_secret_bindings_for_preview_safety(
 def _enforce_verireel_preview_runtime_key_safety(
     *,
     record_store: RuntimeKeySafetyPolicyReadStore | None,
-    template_target: control_plane_dokploy.DokployTargetDefinition,
+    template_target: dokploy_source.DokployTargetDefinition,
     template_env_map: dict[str, str],
     request: VeriReelPreviewRefreshRequest,
 ) -> None:
@@ -468,16 +470,16 @@ def _resolve_preview_secret(
 
 def _template_application_payload(
     *, control_plane_root: Path, host: str, token: str
-) -> tuple[control_plane_dokploy.DokployTargetDefinition, JsonObject]:
+) -> tuple[dokploy_source.DokployTargetDefinition, JsonObject]:
     try:
-        source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
             control_plane_root=control_plane_root,
         )
     except click.ClickException as exc:
         if _is_source_of_truth_backend_failure(exc):
             raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
         raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name="verireel",
         instance_name="testing",
@@ -495,7 +497,7 @@ def _template_application_payload(
             "VeriReel testing target requires a Dokploy target_id before preview execution."
         )
     try:
-        payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
             token=token,
             target_type="application",
@@ -526,7 +528,7 @@ def _is_dokploy_provider_failure(error: click.ClickException) -> bool:
 
 
 def _find_application_by_name(*, host: str, token: str, application_name: str) -> JsonObject | None:
-    raw_projects = control_plane_dokploy.dokploy_request(
+    raw_projects = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/project.all",
@@ -534,21 +536,21 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
     if not isinstance(raw_projects, list):
         return None
     for raw_project in raw_projects:
-        project = control_plane_dokploy.as_json_object(raw_project)
+        project = dokploy_api.as_json_object(raw_project)
         if project is None:
             continue
         raw_environments = project.get("environments")
         if not isinstance(raw_environments, list):
             continue
         for raw_environment in raw_environments:
-            environment = control_plane_dokploy.as_json_object(raw_environment)
+            environment = dokploy_api.as_json_object(raw_environment)
             if environment is None:
                 continue
             raw_applications = environment.get("applications")
             if not isinstance(raw_applications, list):
                 continue
             for raw_application in raw_applications:
-                application = control_plane_dokploy.as_json_object(raw_application)
+                application = dokploy_api.as_json_object(raw_application)
                 if application is None:
                     continue
                 if str(application.get("name") or "").strip() == application_name:
@@ -561,8 +563,8 @@ def execute_verireel_preview_inventory(
     control_plane_root: Path,
     request: VeriReelPreviewInventoryRequest,
 ) -> VeriReelPreviewInventoryResult:
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    raw_projects = control_plane_dokploy.dokploy_request(
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+    raw_projects = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/project.all",
@@ -573,21 +575,21 @@ def execute_verireel_preview_inventory(
         )
     preview_items: list[VeriReelPreviewInventoryItem] = []
     for raw_project in raw_projects:
-        project = control_plane_dokploy.as_json_object(raw_project)
+        project = dokploy_api.as_json_object(raw_project)
         if project is None:
             continue
         raw_environments = project.get("environments")
         if not isinstance(raw_environments, list):
             continue
         for raw_environment in raw_environments:
-            environment = control_plane_dokploy.as_json_object(raw_environment)
+            environment = dokploy_api.as_json_object(raw_environment)
             if environment is None:
                 continue
             raw_applications = environment.get("applications")
             if not isinstance(raw_applications, list):
                 continue
             for raw_application in raw_applications:
-                application = control_plane_dokploy.as_json_object(raw_application)
+                application = dokploy_api.as_json_object(raw_application)
                 if application is None:
                     continue
                 application_name = str(application.get("name") or "").strip()
@@ -613,13 +615,13 @@ def execute_verireel_preview_inventory(
 
 
 def _fetch_application(*, host: str, token: str, application_id: str) -> JsonObject:
-    payload = control_plane_dokploy.dokploy_request(
+    payload = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.one",
         query={"applicationId": application_id},
     )
-    application = control_plane_dokploy.as_json_object(payload)
+    application = dokploy_api.as_json_object(payload)
     if application is None:
         raise click.ClickException(
             f"Dokploy application {application_id!r} returned an invalid payload."
@@ -655,7 +657,7 @@ def _ensure_application(
         raise click.ClickException(
             "VeriReel preview driver could not resolve the Dokploy testing serverId."
         )
-    created = control_plane_dokploy.dokploy_request(
+    created = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.create",
@@ -668,7 +670,7 @@ def _ensure_application(
             "serverId": server_id,
         },
     )
-    created_application = control_plane_dokploy.as_json_object(created)
+    created_application = dokploy_api.as_json_object(created)
     created_application_id = str((created_application or {}).get("applicationId") or "").strip()
     if not created_application_id:
         raise click.ClickException(
@@ -690,7 +692,7 @@ def _configure_application(
     if not application_id:
         raise click.ClickException("Preview application payload is missing applicationId.")
     endpoint_spec = template_application.get("endpointSpecSwarm") or {"Mode": "dnsrr"}
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.update",
@@ -707,7 +709,7 @@ def _configure_application(
             "enabled": template_application.get("enabled"),
         },
     )
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.saveBuildType",
@@ -724,7 +726,7 @@ def _configure_application(
             "isStaticSpa": template_application.get("isStaticSpa"),
         },
     )
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.saveDockerProvider",
@@ -737,7 +739,7 @@ def _configure_application(
             "registryUrl": template_application.get("registryUrl"),
         },
     )
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.saveEnvironment",
@@ -768,25 +770,25 @@ def _restore_existing_application(
         env_text=str(application_snapshot.get("env") or ""),
     )
     application_id = str(application_snapshot.get("applicationId") or "").strip()
-    latest_before = control_plane_dokploy.latest_deployment_for_target(
+    latest_before = dokploy_api.latest_deployment_for_target(
         host=host,
         token=token,
         target_type="application",
         target_id=application_id,
     )
-    control_plane_dokploy.trigger_deployment(
+    dokploy_api.trigger_deployment(
         host=host,
         token=token,
         target_type="application",
         target_id=application_id,
         no_cache=False,
     )
-    control_plane_dokploy.wait_for_target_deployment(
+    dokploy_api.wait_for_target_deployment(
         host=host,
         token=token,
         target_type="application",
         target_id=application_id,
-        before_key=control_plane_dokploy.deployment_key(latest_before),
+        before_key=dokploy_api.deployment_key(latest_before),
         timeout_seconds=timeout_seconds,
     )
 
@@ -794,7 +796,7 @@ def _restore_existing_application(
 def _ensure_domain(
     *, host: str, token: str, application_id: str, preview_host: str
 ) -> tuple[str, tuple[str, ...]]:
-    raw_domains = control_plane_dokploy.dokploy_request(
+    raw_domains = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.byApplicationId",
@@ -804,7 +806,7 @@ def _ensure_domain(
     existing: JsonObject | None = None
     stale_domain_ids: list[str] = []
     for raw_domain in domains:
-        domain = control_plane_dokploy.as_json_object(raw_domain)
+        domain = dokploy_api.as_json_object(raw_domain)
         if domain is None:
             continue
         domain_host = str(domain.get("host") or "").strip()
@@ -831,7 +833,7 @@ def _ensure_domain(
     }
     if existing is not None:
         existing_domain_id = str(existing.get("domainId") or "").strip()
-        control_plane_dokploy.dokploy_request(
+        dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/domain.update",
@@ -839,19 +841,19 @@ def _ensure_domain(
             payload={"domainId": existing_domain_id, **payload},
         )
         return "", tuple(stale_domain_ids)
-    created = control_plane_dokploy.dokploy_request(
+    created = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.create",
         method="POST",
         payload=payload,
     )
-    created_domain = control_plane_dokploy.as_json_object(created)
+    created_domain = dokploy_api.as_json_object(created)
     return str((created_domain or {}).get("domainId") or "").strip(), tuple(stale_domain_ids)
 
 
 def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.delete",
@@ -861,7 +863,7 @@ def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
 
 
 def _delete_application(*, host: str, token: str, application_id: str) -> None:
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.delete",
@@ -873,7 +875,7 @@ def _delete_application(*, host: str, token: str, application_id: str) -> None:
 def _find_application_schedule(
     *, host: str, token: str, application_id: str, schedule_name: str
 ) -> JsonObject | None:
-    for schedule in control_plane_dokploy.list_dokploy_schedules(
+    for schedule in dokploy_api.list_dokploy_schedules(
         host=host,
         token=token,
         target_id=application_id,
@@ -900,7 +902,7 @@ def _upsert_application_schedule(
     )
     payload: JsonObject = {
         "name": schedule_name,
-        "cronExpression": control_plane_dokploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+        "cronExpression": dokploy_post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
         "scheduleType": "application",
         "shellType": "sh",
         "command": command,
@@ -909,7 +911,7 @@ def _upsert_application_schedule(
         "timezone": "UTC",
     }
     if existing is None:
-        control_plane_dokploy.dokploy_request(
+        dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/schedule.create",
@@ -917,12 +919,12 @@ def _upsert_application_schedule(
             payload=payload,
         )
     else:
-        control_plane_dokploy.dokploy_request(
+        dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/schedule.update",
             method="POST",
-            payload={"scheduleId": control_plane_dokploy.schedule_key(existing), **payload},
+            payload={"scheduleId": dokploy_api.schedule_key(existing), **payload},
         )
     resolved = _find_application_schedule(
         host=host,
@@ -934,7 +936,7 @@ def _upsert_application_schedule(
         raise click.ClickException(
             f"Dokploy schedule {schedule_name!r} for preview application {application_id!r} could not be resolved."
         )
-    schedule_id = control_plane_dokploy.schedule_key(resolved)
+    schedule_id = dokploy_api.schedule_key(resolved)
     if not schedule_id:
         raise click.ClickException(
             f"Dokploy schedule {schedule_name!r} for preview application {application_id!r} did not expose a schedule id."
@@ -958,12 +960,12 @@ def _run_application_command(
         schedule_name=schedule_name,
         command=command,
     )
-    latest_before = control_plane_dokploy.latest_deployment_for_schedule(
+    latest_before = dokploy_api.latest_deployment_for_schedule(
         host=host,
         token=token,
         schedule_id=schedule_id,
     )
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/schedule.runManually",
@@ -971,11 +973,11 @@ def _run_application_command(
         payload={"scheduleId": schedule_id},
         timeout_seconds=timeout_seconds,
     )
-    control_plane_dokploy.wait_for_dokploy_schedule_deployment(
+    dokploy_api.wait_for_dokploy_schedule_deployment(
         host=host,
         token=token,
         schedule_id=schedule_id,
-        before_key=control_plane_dokploy.deployment_key(latest_before),
+        before_key=dokploy_api.deployment_key(latest_before),
         timeout_seconds=timeout_seconds,
     )
 
@@ -1178,7 +1180,7 @@ def _resolve_existing_preview_database(
 ) -> _DatabaseParts | None:
     if existing_application is None:
         return None
-    database_url = control_plane_dokploy.parse_dokploy_env_text(
+    database_url = dokploy_api.parse_dokploy_env_text(
         str(existing_application.get("env") or "")
     ).get(
         "DATABASE_URL",
@@ -1196,9 +1198,7 @@ def execute_verireel_preview_refresh(
     record_store: RuntimeKeySafetyPolicyReadStore | None = None,
 ) -> VeriReelPreviewRefreshResult:
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     except click.ClickException as exc:
         raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
     template_target, template_application = _template_application_payload(
@@ -1206,7 +1206,7 @@ def execute_verireel_preview_refresh(
         host=host,
         token=token,
     )
-    template_env_map = control_plane_dokploy.parse_dokploy_env_text(
+    template_env_map = dokploy_api.parse_dokploy_env_text(
         str(template_application.get("env") or "")
     )
     template_database_url = str(template_env_map.get("DATABASE_URL") or "").strip()
@@ -1243,7 +1243,7 @@ def execute_verireel_preview_refresh(
                 raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
             raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
     existing_database = _resolve_existing_preview_database(existing_snapshot)
-    existing_env_map = control_plane_dokploy.parse_dokploy_env_text(
+    existing_env_map = dokploy_api.parse_dokploy_env_text(
         str((existing_snapshot or {}).get("env") or "")
     )
     database_name, role_name = _preview_database_identifiers(request.preview_slug)
@@ -1276,7 +1276,7 @@ def execute_verireel_preview_refresh(
             ),
             timeout_seconds=request.timeout_seconds,
         )
-        env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+        env_text = dokploy_api.render_dokploy_env_text_with_overrides(
             str(template_application.get("env") or ""),
             updates={
                 "VERIREEL_APP_URL": preview_url,
@@ -1342,25 +1342,25 @@ def execute_verireel_preview_refresh(
             application_id=application_id,
             preview_host=preview_host,
         )
-        latest_before = control_plane_dokploy.latest_deployment_for_target(
+        latest_before = dokploy_api.latest_deployment_for_target(
             host=host,
             token=token,
             target_type="application",
             target_id=application_id,
         )
-        control_plane_dokploy.trigger_deployment(
+        dokploy_api.trigger_deployment(
             host=host,
             token=token,
             target_type="application",
             target_id=application_id,
             no_cache=False,
         )
-        control_plane_dokploy.wait_for_target_deployment(
+        dokploy_api.wait_for_target_deployment(
             host=host,
             token=token,
             target_type="application",
             target_id=application_id,
-            before_key=control_plane_dokploy.deployment_key(latest_before),
+            before_key=dokploy_api.deployment_key(latest_before),
             timeout_seconds=request.timeout_seconds,
         )
         migration_started = True
@@ -1456,13 +1456,13 @@ def execute_verireel_preview_destroy(
     control_plane_root: Path,
     request: VeriReelPreviewDestroyRequest,
 ) -> VeriReelPreviewDestroyResult:
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     template_target, template_application = _template_application_payload(
         control_plane_root=control_plane_root,
         host=host,
         token=token,
     )
-    template_env_map = control_plane_dokploy.parse_dokploy_env_text(
+    template_env_map = dokploy_api.parse_dokploy_env_text(
         str(template_application.get("env") or "")
     )
     template_database_url = str(template_env_map.get("DATABASE_URL") or "").strip()

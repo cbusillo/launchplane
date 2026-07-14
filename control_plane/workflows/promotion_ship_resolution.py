@@ -2,10 +2,10 @@ from pathlib import Path
 
 import click
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.promotion_record import BackupGateEvidence, HealthcheckEvidence
 from control_plane.contracts.promotion_record import PromotionRequest, ReleaseStatus
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.dokploy import source as dokploy_source
 
 DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF = "origin/main"
 
@@ -18,12 +18,12 @@ def resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
 
 def require_dokploy_target_definition(
     *,
-    source_of_truth: control_plane_dokploy.DokploySourceOfTruth,
+    source_of_truth: dokploy_source.DokploySourceOfTruth,
     context_name: str,
     instance_name: str,
     operation_name: str,
-) -> control_plane_dokploy.DokployTargetDefinition:
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+) -> dokploy_source.DokployTargetDefinition:
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=context_name,
         instance_name=instance_name,
@@ -55,7 +55,7 @@ def resolve_native_ship_request(
     if not normalized_artifact_id:
         raise click.ClickException("ship request requires artifact_id")
 
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
     target_definition = require_dokploy_target_definition(
@@ -71,11 +71,11 @@ def resolve_native_ship_request(
         or target_definition.source_git_ref.strip()
         or DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF
     )
-    destination_health_timeout_seconds = control_plane_dokploy.resolve_ship_health_timeout_seconds(
+    destination_health_timeout_seconds = dokploy_source.resolve_ship_health_timeout_seconds(
         health_timeout_override_seconds=health_timeout_override_seconds,
         target_definition=target_definition,
     )
-    destination_healthcheck_urls = control_plane_dokploy.resolve_ship_healthcheck_urls(
+    destination_healthcheck_urls = dokploy_source.resolve_ship_healthcheck_urls(
         target_definition=target_definition,
         environment_values=resolved_environment_values,
     )
@@ -86,7 +86,7 @@ def resolve_native_ship_request(
             "Define domains in the tracked Dokploy target record or disable with --no-verify-health."
         )
 
-    configured_ship_mode = control_plane_dokploy.resolve_dokploy_ship_mode(
+    configured_ship_mode = dokploy_source.resolve_dokploy_ship_mode(
         context_name,
         instance_name,
         resolved_environment_values,
@@ -210,7 +210,7 @@ def resolve_native_promotion_request(
     if not normalized_backup_record_id:
         raise click.ClickException("promotion request requires backup_record_id")
 
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
     source_target_definition = require_dokploy_target_definition(
@@ -233,20 +233,20 @@ def resolve_native_promotion_request(
         or source_target_definition.source_git_ref.strip()
         or DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF
     )
-    source_health_timeout_seconds = control_plane_dokploy.resolve_ship_health_timeout_seconds(
+    source_health_timeout_seconds = dokploy_source.resolve_ship_health_timeout_seconds(
         health_timeout_override_seconds=health_timeout_override_seconds,
         target_definition=source_target_definition,
     )
-    source_healthcheck_urls = control_plane_dokploy.resolve_ship_healthcheck_urls(
+    source_healthcheck_urls = dokploy_source.resolve_ship_healthcheck_urls(
         target_definition=source_target_definition,
         environment_values=resolved_source_environment_values,
     )
     source_health_status: ReleaseStatus = "pending" if source_healthcheck_urls else "skipped"
-    destination_health_timeout_seconds = control_plane_dokploy.resolve_ship_health_timeout_seconds(
+    destination_health_timeout_seconds = dokploy_source.resolve_ship_health_timeout_seconds(
         health_timeout_override_seconds=health_timeout_override_seconds,
         target_definition=destination_target_definition,
     )
-    destination_healthcheck_urls = control_plane_dokploy.resolve_ship_healthcheck_urls(
+    destination_healthcheck_urls = dokploy_source.resolve_ship_healthcheck_urls(
         target_definition=destination_target_definition,
         environment_values=resolved_destination_environment_values,
     )
@@ -256,7 +256,7 @@ def resolve_native_promotion_request(
             "Healthcheck verification requested but no target domain/URL was resolved. "
             "Define domains in the DB-backed target record or disable with --no-verify-health."
         )
-    configured_ship_mode = control_plane_dokploy.resolve_dokploy_ship_mode(
+    configured_ship_mode = dokploy_source.resolve_dokploy_ship_mode(
         context_name,
         to_instance_name,
         resolved_destination_environment_values,

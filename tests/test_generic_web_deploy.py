@@ -1483,12 +1483,12 @@ class GenericWebDeployTests(unittest.TestCase):
         with (
             patch(
                 "control_plane.workflows.generic_web_deploy_provider."
-                "control_plane_dokploy.read_dokploy_config",
+                "dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
                 "control_plane.workflows.generic_web_deploy_provider."
-                "control_plane_dokploy.deployment_for_target_by_title",
+                "dokploy_api.deployment_for_target_by_title",
                 return_value={
                     "deploymentId": "deployment-123",
                     "title": "Launchplane operation abc",
@@ -1533,12 +1533,12 @@ class GenericWebDeployTests(unittest.TestCase):
         with (
             patch(
                 "control_plane.workflows.generic_web_deploy_provider."
-                "control_plane_dokploy.read_dokploy_config",
+                "dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
                 "control_plane.workflows.generic_web_deploy_provider."
-                "control_plane_dokploy.deployment_for_target_by_title",
+                "dokploy_api.deployment_for_target_by_title",
                 return_value=None,
             ),
         ):

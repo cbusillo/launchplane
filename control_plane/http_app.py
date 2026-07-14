@@ -24,7 +24,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from control_plane import authz_grant_service as control_plane_authz_grant_service
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy_target_inspect import (
     DokployTargetInspectRequest,
     DokployTargetInspectStore,
@@ -712,6 +711,8 @@ from control_plane.work_graph_service import (
     build_work_graph_rank_result,
     build_work_graph_snapshot_service_payload,
 )
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
 
 EveryCodeGitHubWebhookHandler = Callable[
     [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
@@ -11357,7 +11358,7 @@ def create_launchplane_fastapi_app(
                     "target_id": target_id,
                 }
             )
-            host, token = control_plane_dokploy.read_dokploy_config(
+            host, token = dokploy_source.read_dokploy_config(
                 control_plane_root=resolved_control_plane_root,
                 database_url=database_url,
             )
@@ -11388,7 +11389,7 @@ def create_launchplane_fastapi_app(
         instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
-        lines: Annotated[str, Query()] = str(control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT),
+        lines: Annotated[str, Query()] = str(dokploy_api.DEFAULT_DOKPLOY_LOG_LINE_COUNT),
         since: Annotated[str, Query()] = "all",
         search: Annotated[str, Query()] = "",
         source: Annotated[str, Query()] = "runtime",
@@ -11410,9 +11411,9 @@ def create_launchplane_fastapi_app(
             line_count = control_plane_service_status.query_int_value(
                 lines,
                 "lines",
-                default=control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT,
+                default=dokploy_api.DEFAULT_DOKPLOY_LOG_LINE_COUNT,
                 minimum=1,
-                maximum=control_plane_dokploy.MAX_DOKPLOY_LOG_LINE_COUNT,
+                maximum=dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT,
             )
             assert line_count is not None
         except ValueError as error:
@@ -11423,8 +11424,8 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         try:
-            normalized_since = control_plane_dokploy.normalize_dokploy_log_since(since)
-            normalized_search = control_plane_dokploy.normalize_dokploy_log_search(search)
+            normalized_since = dokploy_api.normalize_dokploy_log_since(since)
+            normalized_search = dokploy_api.normalize_dokploy_log_search(search)
             normalized_source = (
                 control_plane_tracked_target_logs.normalize_tracked_target_log_source(source)
             )

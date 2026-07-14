@@ -7,7 +7,6 @@ from typing import Literal, Protocol
 import click
 from pydantic import BaseModel, ConfigDict
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
@@ -32,7 +31,6 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementRequest,
 )
-from control_plane.dokploy import JsonObject, JsonValue
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
 from control_plane.workflows.odoo_verification import (
@@ -47,6 +45,11 @@ from control_plane.workflows.ship import (
     generate_deployment_record_id,
     utc_now_timestamp,
 )
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy import compose as dokploy_compose
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
+from control_plane.dokploy.api import JsonObject, JsonValue
 
 
 class OdooStableTargetReplacementStore(RuntimeKeySafetyPolicyReadStore, Protocol):
@@ -231,7 +234,7 @@ def _raw_compose_route_evidence(
     domain_hosts: tuple[str, ...],
 ) -> dict[str, str]:
     evidence: dict[str, str] = {
-        "compose_sha256": control_plane_dokploy.compose_file_sha256(compose_file),
+        "compose_sha256": dokploy_compose.compose_file_sha256(compose_file),
         "domain_hosts": ",".join(domain_hosts),
         "traefik_router_label_count": str(compose_file.count("traefik.http.routers.")),
         "traefik_service_label_count": str(compose_file.count("traefik.http.services.")),
@@ -246,7 +249,7 @@ def _raw_compose_route_evidence(
         domain_host = raw_domain_host.strip().lower()
         if not domain_host:
             continue
-        route_name = control_plane_dokploy._traefik_route_name(domain_host=domain_host)
+        route_name = dokploy_compose._traefik_route_name(domain_host=domain_host)
         evidence[f"domain_{domain_host}_http_rule_present"] = (
             "true"
             if f"traefik.http.routers.{route_name}-web.rule=Host(`{domain_host}`)" in compose_file
@@ -332,7 +335,7 @@ def _dokploy_domain_route_evidence(
 
 def _dokploy_compose_metadata_evidence(target_payload: JsonObject) -> dict[str, str]:
     deployments = _collect_json_objects(target_payload.get("deployments"))
-    latest_deployment = control_plane_dokploy._latest_deployment_from_list(deployments)
+    latest_deployment = dokploy_api._latest_deployment_from_list(deployments)
     evidence: dict[str, str] = {
         "compose_app_name": _runtime_source_value(target_payload.get("appName")),
         "compose_status": _runtime_source_value(target_payload.get("composeStatus")),
@@ -350,7 +353,7 @@ def _dokploy_compose_metadata_evidence(target_payload: JsonObject) -> dict[str, 
     if latest_deployment is not None:
         evidence.update(
             {
-                "latest_deployment_key": control_plane_dokploy.deployment_key(latest_deployment),
+                "latest_deployment_key": dokploy_api.deployment_key(latest_deployment),
                 "latest_deployment_status": _runtime_source_value(latest_deployment.get("status")),
                 "latest_deployment_title": _runtime_source_value(latest_deployment.get("title")),
                 "latest_deployment_created_at": _runtime_source_value(
@@ -395,7 +398,7 @@ def _web_container_for_app(*, containers_payload: JsonValue, app_name: str) -> J
 
 
 def _container_config_labels(config_payload: JsonValue) -> dict[str, str]:
-    config = control_plane_dokploy.as_json_object(config_payload)
+    config = dokploy_api.as_json_object(config_payload)
     if config is None:
         return {}
     current: object = config
@@ -410,7 +413,7 @@ def _container_config_labels(config_payload: JsonValue) -> dict[str, str]:
 
 
 def _container_config_network_names(config_payload: JsonValue) -> tuple[str, ...]:
-    config = control_plane_dokploy.as_json_object(config_payload)
+    config = dokploy_api.as_json_object(config_payload)
     if config is None:
         return ()
     current: object = config
@@ -474,7 +477,7 @@ def _dokploy_container_route_evidence(
         domain_host = raw_domain_host.strip().lower()
         if not domain_host:
             continue
-        route_name = control_plane_dokploy._traefik_route_name(domain_host=domain_host)
+        route_name = dokploy_compose._traefik_route_name(domain_host=domain_host)
         prefix = f"container_domain_{domain_host}"
         evidence[f"{prefix}_http_rule_present"] = (
             "true"
@@ -501,7 +504,7 @@ def _collect_json_objects(raw_items: JsonValue | None) -> list[JsonObject]:
     return [
         item_as_object
         for raw_item in raw_items
-        if (item_as_object := control_plane_dokploy.as_json_object(raw_item)) is not None
+        if (item_as_object := dokploy_api.as_json_object(raw_item)) is not None
     ]
 
 
@@ -510,7 +513,7 @@ def _domain_hosts_from_payload(raw_domains: JsonValue) -> tuple[str, ...]:
         return ()
     hosts: list[str] = []
     for raw_domain in raw_domains:
-        domain = control_plane_dokploy.as_json_object(raw_domain)
+        domain = dokploy_api.as_json_object(raw_domain)
         if domain is None:
             continue
         host = str(domain.get("host") or "").strip()
@@ -801,19 +804,19 @@ def _snapshot_current_target(
     target_id_record: DokployTargetIdRecord,
     request: DokployRequest,
 ) -> OdooStableTargetRuntimeSnapshot:
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+    target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=target_record.target_type,
         target_id=target_id_record.target_id,
     )
-    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
     required_volume_keys = ("ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME", "ODOO_DB_VOLUME")
     present_volume_keys = tuple(key for key in required_volume_keys if env_map.get(key, "").strip())
     missing_volume_keys = tuple(
         key for key in required_volume_keys if key not in present_volume_keys
     )
-    latest_deployment = control_plane_dokploy.latest_deployment_for_target(
+    latest_deployment = dokploy_api.latest_deployment_for_target(
         host=host,
         token=token,
         target_type=target_record.target_type,
@@ -832,7 +835,7 @@ def _snapshot_current_target(
         compose_path=str(
             target_payload.get("composePath") or target_record.compose_path or ""
         ).strip(),
-        compose_file_sha256=control_plane_dokploy.compose_file_sha256(compose_file)
+        compose_file_sha256=dokploy_compose.compose_file_sha256(compose_file)
         if compose_file
         else "",
         domain_hosts=_domains_for_target(
@@ -906,10 +909,8 @@ def build_odoo_stable_target_replacement_plan(
     dokploy_request: DokployRequest | None = None,
     dokploy_config_reader: DokployConfigReader | None = None,
 ) -> OdooStableTargetReplacementPlan:
-    resolved_dokploy_request = dokploy_request or control_plane_dokploy.dokploy_request
-    resolved_dokploy_config_reader = (
-        dokploy_config_reader or control_plane_dokploy.read_dokploy_config
-    )
+    resolved_dokploy_request = dokploy_request or dokploy_api.dokploy_request
+    resolved_dokploy_config_reader = dokploy_config_reader or dokploy_source.read_dokploy_config
     try:
         profile = record_store.read_product_profile_record(request.product)
     except FileNotFoundError as error:
@@ -1034,7 +1035,7 @@ def execute_odoo_stable_target_replacement_apply(
     control_plane_root: Path,
     record_store: OdooStableTargetReplacementStore,
     request: OdooStableTargetReplacementApplyRequest,
-    dokploy_request: DokployRequest = control_plane_dokploy.dokploy_request,
+    dokploy_request: DokployRequest = dokploy_api.dokploy_request,
 ) -> OdooStableTargetReplacementApplyResult:
     plan = build_odoo_stable_target_replacement_plan(
         control_plane_root=control_plane_root,
@@ -1098,12 +1099,12 @@ def execute_odoo_stable_target_replacement_apply(
     deploy_timeout_seconds = (
         request.timeout_seconds
         or target_record.deploy_timeout_seconds
-        or control_plane_dokploy.DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+        or dokploy_source.DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
     )
     health_timeout_seconds = (
         request.health_timeout_seconds
         or target_record.healthcheck_timeout_seconds
-        or control_plane_dokploy.DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS
+        or dokploy_source.DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS
     )
     ship_request = _build_ship_request(
         plan=plan,
@@ -1205,10 +1206,8 @@ def execute_odoo_stable_target_replacement_apply(
         runtime_source["runtime_override_payload_rendered"] = "false"
 
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
-        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+        target_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
             token=token,
             target_type="compose",
@@ -1249,7 +1248,7 @@ def execute_odoo_stable_target_replacement_apply(
                 if key in {"required", "status", "policy_record_id", "policy_sha256"}
             }
         )
-        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+        compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=image_reference,
             domain_hosts=plan.expected_domain_hosts,
             runtime_port=profile.runtime_port,
@@ -1263,7 +1262,7 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
-        raw_compose_evidence = control_plane_dokploy.sync_dokploy_compose_raw_source(
+        raw_compose_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,
             token=token,
             compose_id=target_id_record.target_id,
@@ -1275,7 +1274,7 @@ def execute_odoo_stable_target_replacement_apply(
             {f"raw_compose_{key}": value for key, value in raw_compose_evidence.items()}
         )
         for domain_host in plan.expected_domain_hosts:
-            control_plane_dokploy.ensure_compose_web_domain_route(
+            dokploy_compose.ensure_compose_web_domain_route(
                 host=host,
                 token=token,
                 compose_id=target_id_record.target_id,
@@ -1298,7 +1297,7 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
-        converted_compose_file = control_plane_dokploy.fetch_dokploy_converted_compose_file(
+        converted_compose_file = dokploy_compose.fetch_dokploy_converted_compose_file(
             host=host,
             token=token,
             compose_id=target_id_record.target_id,
@@ -1312,12 +1311,10 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
-        current_env_map = control_plane_dokploy.parse_dokploy_env_text(
-            str(target_payload.get("env") or "")
-        )
+        current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         legacy_odoo_install_modules = current_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
         desired_env_map = dict(current_env_map)
-        for key in control_plane_dokploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS:
+        for key in dokploy_post_deploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS:
             desired_env_map.pop(key, None)
         desired_env_map.pop(ODOO_INSTALL_MODULES_ENV_KEY, None)
         desired_env_map.update(runtime_environment_values)
@@ -1355,15 +1352,15 @@ def execute_odoo_stable_target_replacement_apply(
         desired_env_map["PLATFORM_INSTANCE"] = plan.instance
         desired_env_map["DOCKER_IMAGE_REFERENCE"] = image_reference
         desired_env_map.update(runtime_identity_env(runtime_identity))
-        control_plane_dokploy.update_dokploy_target_env(
+        dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
             target_type="compose",
             target_id=target_id_record.target_id,
             target_payload=target_payload,
-            env_text=control_plane_dokploy.serialize_dokploy_env_text(desired_env_map),
+            env_text=dokploy_api.serialize_dokploy_env_text(desired_env_map),
         )
-        refreshed_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
             token=token,
             target_type="compose",
@@ -1387,7 +1384,7 @@ def execute_odoo_stable_target_replacement_apply(
                 for key, value in _dokploy_compose_metadata_evidence(refreshed_payload).items()
             }
         )
-        refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
+        refreshed_env_map = dokploy_api.parse_dokploy_env_text(
             str(refreshed_payload.get("env") or "")
         )
         missing_keys = sorted(
@@ -1397,28 +1394,28 @@ def execute_odoo_stable_target_replacement_apply(
             raise click.ClickException(
                 "Odoo target replacement env did not persist key(s): " + ", ".join(missing_keys)
             )
-        latest_before = control_plane_dokploy.latest_deployment_for_target(
+        latest_before = dokploy_api.latest_deployment_for_target(
             host=host,
             token=token,
             target_type="compose",
             target_id=target_id_record.target_id,
         )
-        control_plane_dokploy.trigger_deployment(
+        dokploy_api.trigger_deployment(
             host=host,
             token=token,
             target_type="compose",
             target_id=target_id_record.target_id,
             no_cache=request.no_cache,
         )
-        control_plane_dokploy.wait_for_target_deployment(
+        dokploy_api.wait_for_target_deployment(
             host=host,
             token=token,
             target_type="compose",
             target_id=target_id_record.target_id,
-            before_key=control_plane_dokploy.deployment_key(latest_before),
+            before_key=dokploy_api.deployment_key(latest_before),
             timeout_seconds=deploy_timeout_seconds,
         )
-        deployed_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        deployed_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
             token=token,
             target_type="compose",
@@ -1430,12 +1427,10 @@ def execute_odoo_stable_target_replacement_apply(
                 for key, value in _dokploy_compose_metadata_evidence(deployed_payload).items()
             }
         )
-        deployed_converted_compose_file = (
-            control_plane_dokploy.fetch_dokploy_converted_compose_file(
-                host=host,
-                token=token,
-                compose_id=target_id_record.target_id,
-            )
+        deployed_converted_compose_file = dokploy_compose.fetch_dokploy_converted_compose_file(
+            host=host,
+            token=token,
+            compose_id=target_id_record.target_id,
         )
         runtime_source.update(
             {

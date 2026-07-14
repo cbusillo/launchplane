@@ -1003,15 +1003,15 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             with (
                 patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=False),
                 patch(
-                    "control_plane.dokploy.read_dokploy_config",
+                    "control_plane.dokploy.source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.dokploy.source.read_control_plane_dokploy_source_of_truth",
                     return_value=source_of_truth,
                 ),
                 patch(
-                    "control_plane.dokploy.run_compose_post_deploy_update",
+                    "control_plane.dokploy.post_deploy.run_compose_post_deploy_update",
                     side_effect=capture_post_deploy_update,
                 ),
             ):
@@ -1104,15 +1104,15 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             with (
                 patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=False),
                 patch(
-                    "control_plane.dokploy.read_dokploy_config",
+                    "control_plane.dokploy.source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                    "control_plane.dokploy.source.read_control_plane_dokploy_source_of_truth",
                     return_value=source_of_truth,
                 ),
                 patch(
-                    "control_plane.dokploy.run_compose_post_deploy_update",
+                    "control_plane.dokploy.post_deploy.run_compose_post_deploy_update",
                     side_effect=lambda **kwargs: captured_required_environment_keys.extend(
                         kwargs["required_workflow_environment_keys"]
                     ),
@@ -1148,14 +1148,14 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         with (
             patch.dict("os.environ", {}, clear=True),
             patch(
-                "control_plane.dokploy.read_dokploy_config",
+                "control_plane.dokploy.source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.dokploy.source.read_control_plane_dokploy_source_of_truth",
                 return_value=source_of_truth,
             ),
-            patch("control_plane.dokploy.run_compose_post_deploy_update") as runner,
+            patch("control_plane.dokploy.post_deploy.run_compose_post_deploy_update") as runner,
         ):
             with self.assertRaisesRegex(click.ClickException, "LAUNCHPLANE_DATABASE_URL"):
                 _run_compose_post_deploy_update(env_file=None, request=_ship_request())

@@ -9,10 +9,10 @@ from urllib.request import Request, urlopen
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.promotion_record import HealthcheckEvidence, ReleaseStatus
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy import source as dokploy_source
 
 
 DEFAULT_ROLLOUT_TIMEOUT_SECONDS = 300
@@ -57,10 +57,10 @@ def resolve_verireel_rollout_base_urls(
     context: str,
     instance: str,
 ) -> tuple[str, ...]:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+    target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=context,
         instance_name=instance,
@@ -73,7 +73,7 @@ def resolve_verireel_rollout_base_urls(
         context_name=context,
         instance_name=instance,
     )
-    base_urls = control_plane_dokploy.resolve_healthcheck_base_urls(
+    base_urls = dokploy_source.resolve_healthcheck_base_urls(
         target_definition=target_definition,
         environment_values=environment_values,
     )

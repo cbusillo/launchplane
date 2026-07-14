@@ -5,9 +5,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 import click
-
-from control_plane import dokploy as control_plane_dokploy
-from control_plane.dokploy import JsonObject
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy.api import JsonObject
 
 
 PreviewResourceType = Literal["application", "compose"]
@@ -107,7 +106,7 @@ def _preview_resource_domain_ids(
     resource_id: str,
     domain_host: str,
 ) -> tuple[str, ...]:
-    raw_domains = control_plane_dokploy.dokploy_request(
+    raw_domains = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path=_domain_lookup_path(resource_type),
@@ -117,7 +116,7 @@ def _preview_resource_domain_ids(
         return ()
     domain_ids: list[str] = []
     for raw_domain in raw_domains:
-        domain = control_plane_dokploy.as_json_object(raw_domain)
+        domain = dokploy_api.as_json_object(raw_domain)
         if domain is None:
             continue
         candidate_domain_id = str(domain.get("domainId") or "").strip()
@@ -128,7 +127,7 @@ def _preview_resource_domain_ids(
 
 
 def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/domain.delete",
@@ -148,7 +147,7 @@ def _delete_preview_resource(
     payload: JsonObject = {_resource_id_key(resource_type): resource_id}
     if resource_type == "compose":
         payload["deleteVolumes"] = delete_volumes
-    control_plane_dokploy.dokploy_request(
+    dokploy_api.dokploy_request(
         host=host,
         token=token,
         path=_delete_path(resource_type),

@@ -516,11 +516,11 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             with (
                 patch(
-                    "control_plane.http_app.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.http_app.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ) as read_dokploy_config,
                 patch(
-                    "control_plane.dokploy_target_inspect.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.dokploy_target_inspect.dokploy_api.fetch_dokploy_target_payload",
                     return_value={
                         "id": "compose-cm-prod",
                         "name": "cm-prod",
@@ -657,7 +657,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             with patch(
-                "control_plane.http_app.control_plane_dokploy.read_dokploy_config",
+                "control_plane.http_app.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.invalid", "token"),
             ):
                 app = create_launchplane_fastapi_app(
@@ -774,18 +774,18 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"env": self._BOOTSTRAP_ENV},
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
                 ) as update_env_mock,
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
                 ) as trigger_mock,
             ):
                 response = await _post_launchplane_self_deploy(
@@ -834,18 +834,18 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"env": self._BOOTSTRAP_ENV},
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
                 ) as trigger_mock,
             ):
                 first_response = await _post_launchplane_self_deploy(
@@ -876,18 +876,18 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"env": self._BOOTSTRAP_ENV},
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
                 ),
             ):
                 first_response = await _post_launchplane_self_deploy(
@@ -934,18 +934,18 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
                 ) as update_env_mock,
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
                 ) as trigger_mock,
             ):
                 response = await _post_launchplane_self_deploy(
@@ -974,18 +974,18 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"env": bootstrap_env},
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
                 ) as update_env_mock,
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment",
                     return_value={"deploymentId": "deploy-new"},
                 ) as trigger_mock,
             ):
@@ -1029,11 +1029,11 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                     return_value={
                         "env": (
                             self._BOOTSTRAP_ENV
@@ -1044,10 +1044,10 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ),
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
                 ) as update_env_mock,
                 patch(
-                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
                 ),
             ):
                 response = await _post_launchplane_self_deploy(
@@ -1193,15 +1193,15 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             with (
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "secret-token"),
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
                     return_value=("contact form submitted",),
                 ) as logs_mock,
             ):
@@ -1262,15 +1262,15 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             with (
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "secret-token"),
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.latest_deployment_for_target",
+                    "control_plane.tracked_target_logs.dokploy_api.latest_deployment_for_target",
                     return_value={
                         "deploymentId": "deployment-123",
                         "applicationId": "app-123",
@@ -1283,14 +1283,14 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ) as latest_deployment_mock,
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_deployment_logs",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_deployment_logs",
                     return_value=(
                         "starting deployment",
                         "SMTP_PASSWORD=smtp-secret deployment complete",
                     ),
                 ) as deployment_logs_mock,
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs"
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs"
                 ) as runtime_logs_mock,
             ):
                 app = create_launchplane_fastapi_app(
@@ -1369,22 +1369,22 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                     app_store = PostgresRecordStore(database_url=database_url)
                     with (
                         patch(
-                            "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                            "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                             return_value=("https://dokploy.example.com", "secret-token"),
                         ),
                         patch(
-                            "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                            "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
                             return_value={
                                 "appName": "syo-testing-gfbiqh",
                                 "serverId": "server-1",
                             },
                         ),
                         patch(
-                            "control_plane.tracked_target_logs.control_plane_dokploy.latest_deployment_for_target",
+                            "control_plane.tracked_target_logs.dokploy_api.latest_deployment_for_target",
                             return_value=deployment,
                         ),
                         patch(
-                            "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_deployment_logs"
+                            "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_deployment_logs"
                         ) as deployment_logs_mock,
                     ):
                         app = create_launchplane_fastapi_app(
@@ -1426,15 +1426,15 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             with (
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "secret-token"),
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
                     return_value=("API_TOKEN=plain-secret-value",),
                 ),
             ):
@@ -1475,15 +1475,15 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             with (
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "secret-token"),
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
                     return_value=("contact form submitted",),
                 ),
             ):
@@ -1524,15 +1524,15 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             with (
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "secret-token"),
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"appName": "cm-website-testing-iul0ql", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_compose_logs",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_compose_logs",
                     return_value=("booting", "ODOO_ADMIN_PASSWORD=[redacted]"),
                 ) as logs_mock,
             ):
@@ -1587,15 +1587,15 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             with (
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "secret-token"),
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"appName": "cm-website-testing-iul0ql", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_compose_logs",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_compose_logs",
                     return_value=("website_bootstrap_applied name=Cell Mechanic",),
                 ) as logs_mock,
             ):
@@ -1712,7 +1712,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             app_store.ensure_schema()
             with patch(
-                "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config"
+                "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config"
             ) as read_config_mock:
                 app = create_launchplane_fastapi_app(
                     verifier=_StubVerifier(_identity()),
@@ -1750,7 +1750,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             )
             app_store = PostgresRecordStore(database_url=database_url)
             with patch(
-                "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                 side_effect=ClickException(
                     f"API_TOKEN=provider-secret request failed. {'x' * 2000}"
                 ),
@@ -1799,15 +1799,15 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             with (
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "secret-token"),
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.latest_deployment_for_target",
+                    "control_plane.tracked_target_logs.dokploy_api.latest_deployment_for_target",
                     return_value={
                         "deploymentId": "deployment-123",
                         "applicationId": "app-123",
@@ -1815,7 +1815,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_deployment_logs",
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_deployment_logs",
                     side_effect=ClickException(
                         "Dokploy API GET /api/deployment.readLogs failed (500): "
                         "DATABASE_URL=postgresql://user:provider-secret@example/db"

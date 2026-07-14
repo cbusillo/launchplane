@@ -11,9 +11,7 @@ from control_plane.workflows.preview_resource_destroy import (
 )
 
 
-PATCH_TARGET = (
-    "control_plane.workflows.preview_resource_destroy.control_plane_dokploy.dokploy_request"
-)
+PATCH_TARGET = "control_plane.workflows.preview_resource_destroy.dokploy_api.dokploy_request"
 
 
 def _run_destroy_with_fake_requests(

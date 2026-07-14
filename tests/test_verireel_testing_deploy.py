@@ -209,15 +209,15 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.verireel_stable_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.latest_deployment_for_target",
+                    "control_plane.workflows.dokploy_deploy.dokploy_api.latest_deployment_for_target",
                     return_value={"deploymentId": "deploy-old"},
                 ),
                 patch(
-                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.workflows.dokploy_deploy.dokploy_api.fetch_dokploy_target_payload",
                     return_value={
                         "applicationId": "testing-app-123",
                         "dockerImage": "ghcr.io/every/verireel-app:prod",
@@ -227,15 +227,15 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
                     },
                 ),
                 patch(
-                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.dokploy_request",
+                    "control_plane.workflows.dokploy_deploy.dokploy_api.dokploy_request",
                     side_effect=lambda **kwargs: captured_dokploy_requests.append(kwargs),
                 ),
                 patch(
-                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.trigger_deployment",
+                    "control_plane.workflows.dokploy_deploy.dokploy_api.trigger_deployment",
                     side_effect=lambda **kwargs: captured_trigger_calls.append(kwargs),
                 ),
                 patch(
-                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.wait_for_target_deployment",
+                    "control_plane.workflows.dokploy_deploy.dokploy_api.wait_for_target_deployment",
                     return_value="deployment=deploy-new status=done",
                 ),
             ):

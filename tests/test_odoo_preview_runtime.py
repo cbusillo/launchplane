@@ -313,19 +313,19 @@ def _patched_apply_inputs_runtime(*, dokploy_side_effect: object) -> Iterator[No
     with ExitStack() as stack:
         stack.enter_context(
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             )
         )
         stack.enter_context(
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 side_effect=dokploy_side_effect,
             )
         )
         stack.enter_context(
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=_source_of_truth(),
             )
         )
@@ -767,15 +767,15 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
     def test_apply_inputs_destroy_blocks_without_matching_preview_compose(self) -> None:
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 return_value=[{"environments": [{"composes": []}]}],
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=_source_of_truth(),
             ),
             patch(
@@ -811,15 +811,15 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=_source_of_truth(),
             ),
             patch(
@@ -877,11 +877,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
     def test_apply_inputs_blocks_when_preview_url_authority_is_missing(self) -> None:
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 side_effect=click.ClickException("Dokploy inventory unavailable"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=_source_of_truth(),
             ),
             patch(
@@ -917,11 +917,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
     def test_apply_inputs_blocks_when_runtime_environment_authority_is_missing(self) -> None:
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 side_effect=click.ClickException("Dokploy inventory unavailable"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=_source_of_truth(),
             ),
             patch(
@@ -963,15 +963,15 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=_source_of_truth(),
             ),
             patch(
@@ -1201,15 +1201,15 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=_source_of_truth(),
             ),
             patch(
@@ -1245,11 +1245,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
     def test_apply_inputs_blocks_on_duplicate_discovered_preview_composes(self) -> None:
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 side_effect=(
                     [
                         {
@@ -1284,7 +1284,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=_source_of_truth(),
             ),
             patch(
@@ -1635,15 +1635,15 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=(
                     {
                         "composeId": "compose-template",
@@ -1658,24 +1658,24 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ),
             ) as fetch_target_payload,
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.sync_dokploy_compose_raw_source",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
             ) as sync_source,
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.update_dokploy_target_env",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env",
             ) as update_env,
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.ensure_compose_web_domain_route",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.ensure_compose_web_domain_route",
                 return_value="domain-cm-pr-45",
             ) as ensure_domain,
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "before"},
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.trigger_deployment",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.trigger_deployment",
             ) as trigger_deployment,
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.wait_for_target_deployment",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.wait_for_target_deployment",
             ) as wait_deploy,
             patch(
                 "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",
@@ -1748,11 +1748,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 return_value=_target(),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy."
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api."
                 "deployment_for_target_by_title",
                 return_value={
                     "deploymentId": "deployment-cm-pr-45",
@@ -1808,15 +1808,15 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=(
                     {
                         "composeId": "compose-template",
@@ -1831,24 +1831,24 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.sync_dokploy_compose_raw_source",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.update_dokploy_target_env",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env",
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.ensure_compose_web_domain_route",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.ensure_compose_web_domain_route",
                 return_value="domain-cm-pr-45",
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "before"},
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.trigger_deployment",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.trigger_deployment",
             ) as trigger_deployment,
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.wait_for_target_deployment",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.wait_for_target_deployment",
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",
@@ -1887,11 +1887,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         request = OdooPreviewDokployApplyRequest(dry_run_plan=dry_run)
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
                 return_value={"composeId": "compose-cm-pr-45"},
             ),
         ):
@@ -1916,11 +1916,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         request = OdooPreviewDokployApplyRequest(dry_run_plan=dry_run)
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=click.ClickException(
                     "Dokploy API GET /api/compose.one failed (404): Not Found"
                 ),
@@ -1955,7 +1955,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
@@ -1963,7 +1963,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 return_value=_target(),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.deployment_for_target_by_title",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.deployment_for_target_by_title",
                 return_value=None,
             ),
         ):
@@ -1993,11 +1993,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
             ) as fetch_target_payload,
         ):
             result = execute_odoo_preview_dokploy_apply(
@@ -2022,7 +2022,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
 
         with patch(
-            "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config"
+            "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config"
         ) as read_dokploy_config:
             result = execute_odoo_preview_dokploy_apply(
                 control_plane_root=ANY,
@@ -2047,11 +2047,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "composeId": "compose-cm-pr-45",
                     "environmentId": "env-cm-preview",
@@ -2059,24 +2059,24 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.sync_dokploy_compose_raw_source",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.update_dokploy_target_env",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env",
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.ensure_compose_web_domain_route",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.ensure_compose_web_domain_route",
                 return_value="domain-cm-pr-45",
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.latest_deployment_for_target",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.latest_deployment_for_target",
                 return_value={"deploymentId": "before"},
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.trigger_deployment",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.trigger_deployment",
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.wait_for_target_deployment",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.wait_for_target_deployment",
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",
@@ -2118,15 +2118,15 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
                 return_value={"composeId": "compose-template", "environmentId": "env-cm-preview"},
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 return_value=[],
             ) as dokploy_request,
         ):
@@ -2168,11 +2168,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
         ):
@@ -2217,11 +2217,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
         ):
@@ -2267,11 +2267,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
                 side_effect=_fake_dokploy_request,
             ),
         ):

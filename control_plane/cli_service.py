@@ -10,7 +10,6 @@ import uuid
 
 import click
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
 from control_plane.outbox_worker import (
     DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS,
@@ -52,6 +51,8 @@ from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
     run_verireel_prod_backup_gate_operation_worker_once,
 )
 from control_plane.workflows.public_ingress_monitor import public_ingress_notification_drivers
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
 
 
 _SERVICE_TARGET_TYPE_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_TYPE",)
@@ -65,7 +66,7 @@ class ServiceCliCallbacks:
     build_bootstrap_policy_payload: Callable[..., dict[str, object]]
     sync_launchplane_bootstrap_policy: Callable[..., dict[str, object]]
     inspect_launchplane_service_dokploy_target: Callable[
-        ..., tuple[control_plane_dokploy.JsonObject, dict[str, object]]
+        ..., tuple[dokploy_api.JsonObject, dict[str, object]]
     ]
     launchplane_service_target_preflight_error_message: Callable[..., str]
     inspect_local_launchplane_config_boundary: Callable[..., dict[str, object]]
@@ -1044,7 +1045,7 @@ def service_inspect_dokploy_target(
 ) -> None:
     callbacks = _service_callbacks()
     launchplane_root = control_plane_root or _control_plane_root()
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=launchplane_root)
     _, preflight_payload = callbacks.inspect_launchplane_service_dokploy_target(
         host=host,
         token=token,

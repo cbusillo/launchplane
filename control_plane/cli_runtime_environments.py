@@ -7,7 +7,6 @@ import time
 
 import click
 
-from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.cli_shared import (
     DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
@@ -25,6 +24,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.runtime_key_safety import is_secret_shaped_runtime_key
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy import api as dokploy_api
 
 
 _REDACTED_RUNTIME_ENVIRONMENT_VALUE = "<redacted>"
@@ -409,7 +409,7 @@ def environments_show_live_target(context_name: str, instance_name: str) -> None
     "--lines",
     "line_count",
     type=int,
-    default=control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT,
+    default=dokploy_api.DEFAULT_DOKPLOY_LOG_LINE_COUNT,
     show_default=True,
 )
 @click.option("--since", default="all", show_default=True)
