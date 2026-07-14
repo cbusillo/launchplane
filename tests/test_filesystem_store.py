@@ -99,6 +99,9 @@ from control_plane.contracts.public_ingress_monitoring import PublicIngressNotif
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
+from control_plane.contracts.public_ingress_monitoring import PublicIngressTlsObservation
+from control_plane.contracts.public_ingress_monitoring import PublicIngressTlsProbeEvidence
+from control_plane.contracts.public_ingress_monitoring import PublicIngressTlsRecordedEvidence
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
@@ -1038,6 +1041,85 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             [newer_record.record_id, older_record.record_id],
         )
         self.assertEqual([record.record_id for record in limited_records], [newer_record.record_id])
+
+    def test_public_ingress_observation_round_trips_tls_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            record = PublicIngressObservationRecord(
+                record_id="public-ingress-example-site-prod-tls-1",
+                product="example-site",
+                context="example-site",
+                instance="prod",
+                check_name="tls-example-test",
+                check_kind="tls",
+                observed_at="2026-07-14T12:00:00Z",
+                status="fail",
+                failure_code="tls_expiring",
+                targets=(
+                    PublicIngressTargetObservation(
+                        target="tls_domain",
+                        url="https://example.test/",
+                        status="fail",
+                        failure_code="tls_expiring",
+                        tls=PublicIngressTlsObservation(
+                            status="expiring",
+                            public_name="example.test",
+                            issuer="CN=Example Issuer",
+                            subject="CN=example.test",
+                            not_before="2026-07-01T00:00:00Z",
+                            not_after="2026-07-20T00:00:00Z",
+                            days_remaining=6,
+                            public_name_match=True,
+                            public_name_match_source="san",
+                            presented_san_count=1,
+                            presented_name_evidence=("example.test",),
+                            recorded=PublicIngressTlsRecordedEvidence(
+                                domain_name="example.test",
+                                domain_role="primary",
+                                route_binding_status="active",
+                                owner="launchplane",
+                                ingress_provider="npmplus",
+                                termination_kind="edge",
+                                source_kind="service",
+                                source_label="test",
+                                source_record_ids=("route-binding:test",),
+                                source_versions={},
+                                refreshed_at="2026-07-14T12:00:00Z",
+                                recorded_at="2026-07-14T12:00:00Z",
+                                freshness_status="recorded",
+                                stale_after="2026-07-14T14:00:00Z",
+                                provider_evidence={"audit_record": "audit-1"},
+                            ),
+                            probe=PublicIngressTlsProbeEvidence(
+                                observed_at="2026-07-14T12:00:00Z",
+                                validated_address_count=2,
+                                sni_hostname="example.test",
+                                freshness_status="recorded",
+                                stale_after="2026-07-14T14:00:00Z",
+                            ),
+                        ),
+                        summary="TLS certificate expires within 6 day(s).",
+                    ),
+                ),
+                summary="Public TLS failed for example-site/prod: TLS certificate expires within 6 day(s).",
+            )
+
+            store.write_public_ingress_observation_record(record)
+            loaded = store.list_public_ingress_observation_records(
+                product="example-site",
+                context_name="example-site",
+                instance_name="prod",
+                check_kind="tls",
+                limit=1,
+            )[0]
+
+        self.assertEqual(loaded.check_kind, "tls")
+        self.assertIsNotNone(loaded.targets[0].tls)
+        assert loaded.targets[0].tls is not None
+        self.assertEqual(loaded.targets[0].tls.status, "expiring")
+        self.assertEqual(loaded.targets[0].tls.recorded.owner, "launchplane")
+        self.assertEqual(loaded.targets[0].tls.probe.validated_address_count, 2)
 
     def test_write_and_list_ingress_route_audit_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

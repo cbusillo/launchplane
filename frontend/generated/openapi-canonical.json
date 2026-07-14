@@ -13338,7 +13338,8 @@
                 "enum": [
                   "public_http",
                   "private_http",
-                  "provider"
+                  "provider",
+                  "tls"
                 ],
                 "type": "string"
               },

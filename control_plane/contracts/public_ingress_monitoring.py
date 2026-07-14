@@ -6,10 +6,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.data_provenance import FreshnessStatus
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
 from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
+from control_plane.contracts.route_binding_record import RouteBindingStatus
+from control_plane.contracts.route_binding_record import RouteBindingTerminationKind
+from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 
 
@@ -19,8 +23,16 @@ PublicIngressIncidentEvent = Literal["opened", "updated", "resolved"]
 PublicIngressNotificationDestinationKind = Literal["github_issue", "email", "discord"]
 PublicIngressNotificationStatus = Literal["enabled", "disabled"]
 PublicIngressNotificationDeliveryStatus = Literal["delivered", "skipped", "failed"]
-PublicIngressHealthCheckKind = Literal["public_http", "private_http", "provider"]
-PublicIngressTargetKind = Literal["base_url", "health_url", "private_health_url", "provider"]
+PublicIngressCheckKind = Literal["public_http", "private_http", "provider", "tls"]
+PublicIngressHealthCheckKind = PublicIngressCheckKind
+PublicIngressNotificationCheckKind = PublicIngressCheckKind
+PublicIngressTargetKind = Literal[
+    "base_url",
+    "health_url",
+    "private_health_url",
+    "provider",
+    "tls_domain",
+]
 PublicIngressFailureCode = Literal[
     "connection_timeout",
     "dns_failure",
@@ -34,10 +46,170 @@ PublicIngressFailureCode = Literal[
     "provider_check_unavailable",
     "redirect_loop",
     "self_redirect",
+    "tls_chain_failure",
+    "tls_expired",
+    "tls_expiring",
     "tls_failure",
+    "tls_hostname_mismatch",
+    "tls_self_signed",
+    "tls_unsupported",
     "wrong_runtime_identity",
     "unknown_error",
 ]
+
+PublicIngressTlsStatus = Literal[
+    "valid",
+    "expiring",
+    "expired",
+    "hostname_mismatch",
+    "untrusted",
+    "self_signed",
+    "unreachable",
+    "unknown",
+    "unsupported",
+]
+PublicIngressTlsNameMatchSource = Literal["san", "subject", "none"]
+PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service"]
+
+PUBLIC_TLS_EXPIRING_DAYS = 14
+PUBLIC_TLS_STALE_AFTER_SECONDS = 2 * 60 * 60
+
+
+class PublicIngressTlsRecordedEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    domain_name: str
+    domain_role: Literal["primary", "alias"]
+    route_binding_status: RouteBindingStatus = "active"
+    owner: RouteBindingTlsOwner
+    ingress_provider: str = ""
+    termination_kind: RouteBindingTerminationKind
+    source_kind: PublicIngressRouteBindingSourceKind = "service"
+    source_label: str
+    source_record_ids: tuple[str, ...] = ()
+    source_versions: dict[str, str] = Field(default_factory=dict)
+    refreshed_at: str
+    recorded_at: str
+    freshness_status: FreshnessStatus = "recorded"
+    stale_after: str = ""
+    provider_evidence: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_recorded_evidence(self) -> "PublicIngressTlsRecordedEvidence":
+        self.domain_name = _required_text(
+            self.domain_name, "public ingress TLS evidence requires domain_name"
+        ).lower()
+        self.ingress_provider = self.ingress_provider.strip().lower()
+        self.source_label = _required_text(
+            self.source_label, "public ingress TLS evidence requires source_label"
+        )
+        self.refreshed_at = _required_text(
+            self.refreshed_at, "public ingress TLS evidence requires refreshed_at"
+        )
+        self.recorded_at = _required_text(
+            self.recorded_at, "public ingress TLS evidence requires recorded_at"
+        )
+        self.stale_after = self.stale_after.strip()
+        self.source_record_ids = tuple(
+            _required_text(
+                source_record_id,
+                "public ingress TLS evidence source_record_ids must be non-empty",
+            )
+            for source_record_id in self.source_record_ids
+        )
+        self.source_versions = {
+            _required_text(
+                source_record_id,
+                "public ingress TLS evidence source version ids must be non-empty",
+            ): _required_text(
+                source_version,
+                "public ingress TLS evidence source versions must be non-empty",
+            )
+            for source_record_id, source_version in self.source_versions.items()
+        }
+        self.provider_evidence = {
+            _required_text(
+                evidence_key,
+                "public ingress TLS evidence provider evidence keys must be non-empty",
+            ): _required_text(
+                evidence_value,
+                "public ingress TLS evidence provider evidence values must be non-empty",
+            )
+            for evidence_key, evidence_value in self.provider_evidence.items()
+        }
+        return self
+
+
+class PublicIngressTlsProbeEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["active_probe"] = "active_probe"
+    observed_at: str
+    validated_address_count: int = Field(default=0, ge=0)
+    sni_hostname: str
+    freshness_status: FreshnessStatus = "verified"
+    stale_after: str = ""
+
+    @model_validator(mode="after")
+    def _validate_probe_evidence(self) -> "PublicIngressTlsProbeEvidence":
+        self.observed_at = _required_text(
+            self.observed_at, "public ingress TLS probe evidence requires observed_at"
+        )
+        self.sni_hostname = _required_text(
+            self.sni_hostname, "public ingress TLS probe evidence requires sni_hostname"
+        ).lower()
+        self.stale_after = self.stale_after.strip()
+        return self
+
+
+class PublicIngressTlsObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: PublicIngressTlsStatus
+    public_name: str
+    incident_id: str = ""
+    issuer: str = ""
+    subject: str = ""
+    not_before: str = ""
+    not_after: str = ""
+    days_remaining: int | None = None
+    public_name_match: bool = False
+    public_name_match_source: PublicIngressTlsNameMatchSource = "none"
+    presented_san_count: int = Field(default=0, ge=0)
+    presented_name_evidence: tuple[str, ...] = ()
+    recorded: PublicIngressTlsRecordedEvidence
+    probe: PublicIngressTlsProbeEvidence
+
+    @model_validator(mode="after")
+    def _validate_tls_observation(self) -> "PublicIngressTlsObservation":
+        self.public_name = _required_text(
+            self.public_name, "public ingress TLS observation requires public_name"
+        ).lower()
+        self.incident_id = self.incident_id.strip()
+        self.issuer = self.issuer.strip()
+        self.subject = self.subject.strip()
+        self.not_before = self.not_before.strip()
+        self.not_after = self.not_after.strip()
+        self.presented_name_evidence = tuple(
+            _required_text(
+                presented_name,
+                "public ingress TLS presented_name_evidence must be non-empty",
+            ).lower()
+            for presented_name in self.presented_name_evidence
+        )
+        if self.status in {
+            "valid",
+            "expiring",
+            "expired",
+            "hostname_mismatch",
+            "untrusted",
+            "self_signed",
+        }:
+            if not (self.not_before and self.not_after):
+                raise ValueError(
+                    "public ingress TLS certificate states require not_before and not_after"
+                )
+        return self
 
 
 class PublicIngressTargetObservation(BaseModel):
@@ -53,6 +225,7 @@ class PublicIngressTargetObservation(BaseModel):
     runtime_identity_status: RuntimeIdentityStatus = "unchecked"
     runtime_identity_detail: str = ""
     observed_runtime_identity: RuntimeIdentity | None = None
+    tls: PublicIngressTlsObservation | None = None
     summary: str
 
     @model_validator(mode="after")
@@ -66,8 +239,19 @@ class PublicIngressTargetObservation(BaseModel):
             raise ValueError("passing public ingress target cannot include failure_code")
         if self.status == "fail" and self.failure_code is None:
             raise ValueError("failing public ingress target requires failure_code")
-        if self.status == "skipped" and self.failure_code not in {None, "private_url"}:
-            raise ValueError("skipped public ingress target can only use private_url failure_code")
+        if self.status == "skipped" and self.failure_code not in {
+            None,
+            "private_url",
+            "tls_unsupported",
+        }:
+            raise ValueError(
+                "skipped public ingress target can only use private_url or tls_unsupported failure_code"
+            )
+        if self.target == "tls_domain":
+            if self.tls is None:
+                raise ValueError("TLS public ingress target requires TLS evidence")
+        elif self.tls is not None:
+            raise ValueError("non-TLS public ingress targets cannot include TLS evidence")
         return self
 
 
@@ -82,7 +266,7 @@ class PublicIngressObservationRecord(BaseModel):
     context: str
     instance: str
     check_name: str = "public-ingress"
-    check_kind: PublicIngressHealthCheckKind = "public_http"
+    check_kind: PublicIngressCheckKind = "public_http"
     observed_at: str
     status: PublicIngressObservationStatus
     failure_code: PublicIngressFailureCode | None = None
@@ -120,9 +304,13 @@ class PublicIngressObservationRecord(BaseModel):
             raise ValueError("passing public ingress observation cannot include failure_code")
         if self.status == "fail" and self.failure_code is None:
             raise ValueError("failing public ingress observation requires failure_code")
-        if self.status == "skipped" and self.failure_code not in {None, "private_url"}:
+        if self.status == "skipped" and self.failure_code not in {
+            None,
+            "private_url",
+            "tls_unsupported",
+        }:
             raise ValueError(
-                "skipped public ingress observation can only use private_url failure_code"
+                "skipped public ingress observation can only use private_url or tls_unsupported failure_code"
             )
         if not self.targets:
             raise ValueError("public ingress observation requires at least one target")
@@ -144,7 +332,7 @@ class PublicIngressIncidentRecord(BaseModel):
     context: str
     instance: str
     check_name: str = "public-ingress"
-    check_kind: PublicIngressHealthCheckKind = "public_http"
+    check_kind: PublicIngressCheckKind = "public_http"
     status: PublicIngressIncidentStatus
     opened_at: str
     opened_observation_id: str
@@ -273,7 +461,7 @@ class PublicIngressNotificationPolicyRecord(BaseModel):
     context: str = ""
     instance: str = ""
     check_name: str = ""
-    check_kind: PublicIngressHealthCheckKind | Literal[""] = ""
+    check_kind: PublicIngressNotificationCheckKind | Literal[""] = ""
     status: PublicIngressNotificationStatus = "enabled"
     destinations: tuple[PublicIngressNotificationDestination, ...] = ()
     created_at: str
