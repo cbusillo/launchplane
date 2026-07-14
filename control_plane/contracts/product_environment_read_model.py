@@ -1330,6 +1330,7 @@ def _public_ingress_summary(
         product=profile.product,
         context_name=lane.context,
         instance_name=lane.instance,
+        check_kind="public_http",
         limit=1,
     )
     latest = next(iter(records), None)
@@ -1341,6 +1342,7 @@ def _public_ingress_summary(
         product=profile.product,
         context_name=lane.context,
         instance_name=lane.instance,
+        check_kind="public_http",
         status="open",
         limit=1,
     )

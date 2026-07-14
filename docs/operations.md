@@ -508,6 +508,41 @@ resolver still owns its own DNS lookup timeout. `private_http` is intentionally
 separate: only a scoped active private-health endpoint record can select the
 explicit private client, and public checks never fall back to that path.
 
+TLS observations reuse the same monitor run, record family, and incident
+lifecycle. For each active environment route binding, Launchplane probes one
+TLS target per bound domain so primary names and aliases are recorded
+independently. The recorded route-binding evidence stays distinct from the live
+probe evidence: route bindings contribute ownership, ingress, source, and
+provider-safe certificate reference metadata, while the active probe contributes
+validated-address counts, hostname match evidence, issuer/subject summaries,
+and the observed validity window. Launchplane does not persist full chains,
+private addresses, internal hostnames, raw socket topology, or secrets.
+
+The TLS probe reuses `resolve_public_http_destination` and the validated-address
+direct-connect path. Launchplane resolves the public name once, rejects any
+non-public DNS answer, connects directly to the validated address set, and uses
+the original domain for SNI and hostname verification. No redirect path exists
+for TLS observations, no second DNS lookup is allowed during connect, and each
+connect-plus-handshake phase recomputes its socket timeout from the same phase
+deadline. DNS and IP subject-alternative-name evidence are both represented
+truthfully when a route binding names a public host or public IP literal.
+Deterministic TLS states are `valid`, `expiring`, `expired`,
+`hostname_mismatch`, `untrusted`, `self_signed`, `unreachable`, `unknown`, and
+`unsupported`. DNS failure and timeout map to `unreachable`; private or malformed
+destinations and unexpected handshake failures are failing evidence rather than
+skips. Only explicit protocol/version incompatibility maps to `unsupported`.
+Hostname mismatch, chain failure, expiry, self-signed, and unsupported protocol
+each retain their own failure codes so the existing incident authority can open,
+update, and resolve without a parallel TLS incident system.
+
+The initial conservative thresholds are intentionally simple: a certificate is
+`expiring` when it has 14 or fewer whole days remaining, and active TLS probe
+evidence becomes stale after 2 hours. The monitor workflow currently runs twice
+per hour, so the 2-hour freshness window tolerates one or two missed scheduled
+passes without treating old evidence as current for an entire workday, while the
+14-day expiry window gives operators enough time to review ownership and
+rotation before a certificate crosses into an outage condition.
+
 Notification routing is a separate service-backed policy and delivery concern,
 not lane-owned text config. The initial notification destinations are GitHub
 issues, email, and Discord; each is selected by DB-backed policy and evidenced

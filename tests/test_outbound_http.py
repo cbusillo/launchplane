@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 import socket
+import ssl
 import unittest
 from unittest.mock import MagicMock, patch
+
+from cryptography import x509
 
 from control_plane import outbound_http
 from control_plane.outbound_http import (
@@ -11,7 +15,9 @@ from control_plane.outbound_http import (
     PublicHttpDestination,
     PublicHttpDestinationError,
     PublicHttpResponse,
+    PublicTlsCertificate,
     ResolvedAddressInfo,
+    probe_public_tls,
     request_private_http,
     request_public_http,
     resolve_public_http_destination,
@@ -373,6 +379,416 @@ class PublicOutboundHttpTests(unittest.TestCase):
                 post_discord_webhook("https://example.com/hook", {"content": "hello"})
 
         request.assert_not_called()
+
+    def test_public_tls_probe_reports_valid_certificate(self) -> None:
+        fetched_destinations: list[PublicHttpDestination] = []
+        verified_destinations: list[PublicHttpDestination] = []
+
+        def fetch_certificate(
+            destination: PublicHttpDestination,
+            _timeout: float,
+            _now: datetime,
+        ) -> tuple[PublicTlsCertificate, int]:
+            fetched_destinations.append(destination)
+            return (
+                PublicTlsCertificate(
+                    issuer="CN=Example Issuer",
+                    subject="CN=public.example",
+                    not_before="2026-07-01T00:00:00Z",
+                    not_after="2026-08-30T00:00:00Z",
+                    days_remaining=40,
+                    public_name_match=True,
+                    public_name_match_source="san",
+                    presented_san_count=2,
+                    presented_name_evidence=("public.example",),
+                ),
+                len(destination.addresses),
+            )
+
+        def verify_handshake(destination: PublicHttpDestination, _timeout: float) -> None:
+            verified_destinations.append(destination)
+
+        result = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=_resolver_for(_PUBLIC_IPV4),
+            fetch_certificate=fetch_certificate,
+            verify_handshake=verify_handshake,
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result.status, "valid")
+        self.assertIsNone(result.failure_code)
+        self.assertEqual(result.validated_address_count, 1)
+        self.assertEqual(fetched_destinations[0].hostname, "public.example")
+        self.assertEqual(verified_destinations[0].hostname, "public.example")
+
+    def test_public_tls_probe_maps_hostname_mismatch_and_chain_failures(self) -> None:
+        certificate = PublicTlsCertificate(
+            issuer="CN=Issuer",
+            subject="CN=other.example",
+            not_before="2026-07-01T00:00:00Z",
+            not_after="2026-07-21T00:00:00Z",
+            days_remaining=10,
+            public_name_match=False,
+            public_name_match_source="none",
+            presented_san_count=1,
+            presented_name_evidence=(),
+        )
+
+        mismatch_result = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=_resolver_for(_PUBLIC_IPV4),
+            fetch_certificate=lambda destination, _timeout, _now: (
+                certificate,
+                len(destination.addresses),
+            ),
+            verify_handshake=lambda _destination, _timeout: (_ for _ in ()).throw(
+                ssl.CertificateError("hostname mismatch")
+            ),
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+        )
+        chain_failure_result = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=_resolver_for(_PUBLIC_IPV4),
+            fetch_certificate=lambda destination, _timeout, _now: (
+                certificate,
+                len(destination.addresses),
+            ),
+            verify_handshake=lambda _destination, _timeout: (_ for _ in ()).throw(
+                ssl.SSLCertVerificationError("unable to get local issuer certificate")
+            ),
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(mismatch_result.status, "hostname_mismatch")
+        self.assertEqual(mismatch_result.failure_code, "tls_hostname_mismatch")
+        self.assertEqual(chain_failure_result.status, "untrusted")
+        self.assertEqual(chain_failure_result.failure_code, "tls_chain_failure")
+
+    def test_public_tls_certificate_does_not_fall_back_to_common_name_when_san_exists(
+        self,
+    ) -> None:
+        certificate = MagicMock()
+        certificate.not_valid_before_utc = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        certificate.not_valid_after_utc = datetime(2026, 8, 30, tzinfo=timezone.utc)
+        certificate.issuer.rfc4514_string.return_value = "CN=Example Issuer"
+        certificate.subject.rfc4514_string.return_value = "CN=public.example"
+        certificate.extensions.get_extension_for_class.return_value.value.get_values_for_type.side_effect = (
+            lambda name_type: ("other.example",) if name_type is x509.DNSName else ()
+        )
+        common_name = MagicMock()
+        common_name.value = "public.example"
+        certificate.subject.get_attributes_for_oid.return_value = (common_name,)
+
+        with patch(
+            "control_plane.outbound_http.x509.load_der_x509_certificate",
+            return_value=certificate,
+        ):
+            parsed = outbound_http._parse_public_tls_certificate(
+                b"certificate",
+                public_name="public.example",
+                now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(parsed.public_name_match)
+        self.assertEqual(parsed.public_name_match_source, "none")
+        self.assertEqual(parsed.presented_san_count, 1)
+        self.assertEqual(parsed.presented_name_evidence, ())
+
+    def test_public_tls_certificate_uses_common_name_only_without_dns_sans(self) -> None:
+        certificate = MagicMock()
+        certificate.not_valid_before_utc = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        certificate.not_valid_after_utc = datetime(2026, 8, 30, tzinfo=timezone.utc)
+        certificate.issuer.rfc4514_string.return_value = "CN=Example Issuer"
+        certificate.subject.rfc4514_string.return_value = "CN=public.example"
+        common_name = MagicMock()
+        common_name.value = "public.example"
+        certificate.subject.get_attributes_for_oid.return_value = (common_name,)
+
+        with (
+            patch(
+                "control_plane.outbound_http.x509.load_der_x509_certificate",
+                return_value=certificate,
+            ),
+            patch("control_plane.outbound_http._certificate_san_names", return_value=((), ())),
+        ):
+            parsed = outbound_http._parse_public_tls_certificate(
+                b"certificate",
+                public_name="public.example",
+                now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(parsed.public_name_match)
+        self.assertEqual(parsed.public_name_match_source, "subject")
+        self.assertEqual(parsed.presented_san_count, 0)
+        self.assertEqual(parsed.presented_name_evidence, ("public.example",))
+
+    def test_public_tls_certificate_reports_matching_ip_san(self) -> None:
+        certificate = MagicMock()
+        certificate.not_valid_before_utc = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        certificate.not_valid_after_utc = datetime(2026, 8, 30, tzinfo=timezone.utc)
+        certificate.issuer.rfc4514_string.return_value = "CN=Example Issuer"
+        certificate.subject.rfc4514_string.return_value = "CN=ignored.example"
+        certificate.subject.get_attributes_for_oid.return_value = ()
+
+        with (
+            patch(
+                "control_plane.outbound_http.x509.load_der_x509_certificate",
+                return_value=certificate,
+            ),
+            patch(
+                "control_plane.outbound_http._certificate_san_names",
+                return_value=((), (_PUBLIC_IPV4,)),
+            ),
+        ):
+            parsed = outbound_http._parse_public_tls_certificate(
+                b"certificate",
+                public_name=_PUBLIC_IPV4,
+                now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(parsed.public_name_match)
+        self.assertEqual(parsed.public_name_match_source, "san")
+        self.assertEqual(parsed.presented_san_count, 1)
+        self.assertEqual(parsed.presented_name_evidence, (_PUBLIC_IPV4,))
+
+    def test_public_tls_probe_maps_expiring_expired_self_signed_timeout_and_unsupported(
+        self,
+    ) -> None:
+        valid_certificate = PublicTlsCertificate(
+            issuer="CN=Issuer",
+            subject="CN=public.example",
+            not_before="2026-07-01T00:00:00Z",
+            not_after="2026-07-21T00:00:00Z",
+            days_remaining=7,
+            public_name_match=True,
+            public_name_match_source="san",
+            presented_san_count=1,
+            presented_name_evidence=("public.example",),
+        )
+        expired_certificate = PublicTlsCertificate(
+            issuer="CN=Issuer",
+            subject="CN=public.example",
+            not_before="2026-05-01T00:00:00Z",
+            not_after="2026-06-01T00:00:00Z",
+            days_remaining=-1,
+            public_name_match=True,
+            public_name_match_source="san",
+            presented_san_count=1,
+            presented_name_evidence=("public.example",),
+        )
+
+        expiring_result = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=_resolver_for(_PUBLIC_IPV4),
+            fetch_certificate=lambda destination, _timeout, _now: (
+                valid_certificate,
+                len(destination.addresses),
+            ),
+            verify_handshake=lambda _destination, _timeout: None,
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+            expiring_days=14,
+        )
+        expired_result = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=_resolver_for(_PUBLIC_IPV4),
+            fetch_certificate=lambda destination, _timeout, _now: (
+                expired_certificate,
+                len(destination.addresses),
+            ),
+            verify_handshake=lambda _destination, _timeout: (_ for _ in ()).throw(
+                ssl.SSLCertVerificationError("certificate has expired")
+            ),
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+        )
+        self_signed_result = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=_resolver_for(_PUBLIC_IPV4),
+            fetch_certificate=lambda destination, _timeout, _now: (
+                valid_certificate,
+                len(destination.addresses),
+            ),
+            verify_handshake=lambda _destination, _timeout: (_ for _ in ()).throw(
+                ssl.SSLCertVerificationError("self-signed certificate")
+            ),
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+        )
+        timeout_result = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=_resolver_for(_PUBLIC_IPV4),
+            fetch_certificate=lambda _destination, _timeout, _now: (_ for _ in ()).throw(
+                TimeoutError("timed out")
+            ),
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+        )
+        unsupported_result = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=_resolver_for(_PUBLIC_IPV4),
+            fetch_certificate=lambda _destination, _timeout, _now: (_ for _ in ()).throw(
+                ssl.SSLError("wrong version number")
+            ),
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(expiring_result.status, "expiring")
+        self.assertEqual(expiring_result.failure_code, "tls_expiring")
+        self.assertEqual(expired_result.status, "expired")
+        self.assertEqual(expired_result.failure_code, "tls_expired")
+        self.assertEqual(self_signed_result.status, "self_signed")
+        self.assertEqual(self_signed_result.failure_code, "tls_self_signed")
+        self.assertEqual(timeout_result.status, "unreachable")
+        self.assertEqual(timeout_result.failure_code, "connection_timeout")
+        self.assertEqual(unsupported_result.status, "unsupported")
+        self.assertEqual(unsupported_result.failure_code, "tls_unsupported")
+
+    def test_public_tls_probe_maps_dns_and_private_destination_fail_closed(self) -> None:
+        dns_failure = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=lambda _hostname, _port: (_ for _ in ()).throw(socket.gaierror("dns failed")),
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+        )
+        private_destination = probe_public_tls(
+            "localhost",
+            timeout_seconds=5,
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(dns_failure.status, "unreachable")
+        self.assertEqual(dns_failure.failure_code, "dns_failure")
+        self.assertEqual(private_destination.status, "unknown")
+        self.assertEqual(private_destination.failure_code, "private_url")
+
+    def test_public_tls_probe_treats_unexpected_eof_as_failure(self) -> None:
+        result = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=_resolver_for(_PUBLIC_IPV4),
+            fetch_certificate=lambda _destination, _timeout, _now: (_ for _ in ()).throw(
+                ssl.SSLError("unexpected eof while reading")
+            ),
+            now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(result.failure_code, "tls_failure")
+
+    def test_public_tls_probe_rechecks_expiry_after_verification(self) -> None:
+        certificate = PublicTlsCertificate(
+            issuer="CN=Issuer",
+            subject="CN=public.example",
+            not_before="2026-07-01T00:00:00Z",
+            not_after="2026-07-14T12:00:00Z",
+            days_remaining=0,
+            public_name_match=True,
+            public_name_match_source="san",
+            presented_san_count=1,
+            presented_name_evidence=("public.example",),
+        )
+        observed_times = iter(
+            (
+                datetime(2026, 7, 14, 11, 59, 59, tzinfo=timezone.utc),
+                datetime(2026, 7, 14, 12, 0, 1, tzinfo=timezone.utc),
+            )
+        )
+
+        result = probe_public_tls(
+            "public.example",
+            timeout_seconds=5,
+            resolver=_resolver_for(_PUBLIC_IPV4),
+            fetch_certificate=lambda destination, _timeout, _now: (
+                certificate,
+                len(destination.addresses),
+            ),
+            verify_handshake=lambda _destination, _timeout: (_ for _ in ()).throw(
+                ssl.SSLCertVerificationError("certificate verify failed")
+            ),
+            now=lambda: next(observed_times),
+        )
+
+        self.assertEqual(result.status, "expired")
+        self.assertEqual(result.failure_code, "tls_expired")
+        assert result.certificate is not None
+        self.assertEqual(result.certificate.days_remaining, -1)
+
+    def test_public_tls_handshakes_apply_timeout_before_handshake(self) -> None:
+        destination = resolve_public_http_destination(
+            "https://public.example/",
+            resolver=_resolver_for(_PUBLIC_IPV4),
+        )
+        connection_socket = MagicMock()
+        connection_socket.fileno.return_value = -1
+        tls_socket = MagicMock()
+        tls_socket.getpeercert.return_value = b"certificate"
+        tls_context = MagicMock()
+        tls_context.wrap_socket.return_value.__enter__.return_value = tls_socket
+        connect_timeouts: list[float] = []
+        handshake_timeouts: list[float] = []
+        events: list[str] = []
+
+        def record_handshake_timeout(timeout: float) -> None:
+            handshake_timeouts.append(timeout)
+            events.append("timeout")
+
+        def connect_to_validated_address(
+            _address: tuple[str, int],
+            timeout: float,
+            _source: tuple[str, int] | None,
+        ) -> MagicMock:
+            connect_timeouts.append(timeout)
+            return connection_socket
+
+        tls_socket.settimeout.side_effect = record_handshake_timeout
+        tls_socket.do_handshake.side_effect = lambda: events.append("handshake")
+        parsed_certificate = PublicTlsCertificate(
+            issuer="CN=Issuer",
+            subject="CN=public.example",
+            not_before="2026-07-01T00:00:00Z",
+            not_after="2026-08-30T00:00:00Z",
+            days_remaining=47,
+            public_name_match=True,
+            public_name_match_source="san",
+            presented_san_count=1,
+            presented_name_evidence=("public.example",),
+        )
+
+        with (
+            patch(
+                "control_plane.outbound_http._ValidatedAddressConnector",
+                return_value=connect_to_validated_address,
+            ),
+            patch(
+                "control_plane.outbound_http.ssl.create_default_context", return_value=tls_context
+            ),
+            patch(
+                "control_plane.outbound_http.monotonic",
+                side_effect=(100.0, 101.0, 104.0, 200.0, 201.0, 204.0),
+            ),
+            patch(
+                "control_plane.outbound_http._parse_public_tls_certificate",
+                return_value=parsed_certificate,
+            ),
+        ):
+            outbound_http._fetch_public_tls_certificate(
+                destination,
+                5,
+                datetime(2026, 7, 14, tzinfo=timezone.utc),
+            )
+            outbound_http._verify_public_tls_destination(destination, 5)
+
+        self.assertEqual(events, ["timeout", "handshake", "timeout", "handshake"])
+        self.assertEqual(connect_timeouts, [4.0, 4.0])
+        self.assertEqual(handshake_timeouts, [1.0, 1.0])
+        for call in tls_context.wrap_socket.call_args_list:
+            self.assertFalse(call.kwargs["do_handshake_on_connect"])
 
 
 if __name__ == "__main__":

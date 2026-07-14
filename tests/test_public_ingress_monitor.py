@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from typing import Literal
+from typing import Callable, Literal
 from unittest.mock import patch
 from urllib.request import Request
 
@@ -26,24 +26,36 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneHealthCheck,
 )
 from control_plane.contracts.promotion_record import DeploymentEvidence
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.contracts.route_binding_record import RouteBindingDomain
+from control_plane.contracts.route_binding_record import RouteBindingIngress
+from control_plane.contracts.route_binding_record import RouteBindingProviderTarget
+from control_plane.contracts.route_binding_record import RouteBindingSource
+from control_plane.contracts.route_binding_record import RouteBindingTls
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressCheckKind
+from control_plane.contracts.public_ingress_monitoring import PublicIngressHealthCheckKind
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationAttemptRecord,
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.contracts.public_ingress_monitoring import build_public_ingress_lane_incident_id
+from control_plane.contracts.public_ingress_monitoring import build_public_ingress_observation_id
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
     PublicIngressNotificationDriverSet,
     _gh_issue_client,
+    _incident_event,
     deliver_public_ingress_notification_outbox_delivery,
     discover_public_ingress_monitor_targets,
     run_public_ingress_monitor_once,
 )
 from control_plane.outbound_http import PublicHttpDestinationError
+from control_plane.outbound_http import PublicTlsCertificate
+from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.outbox_worker import run_outbox_worker_once
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.stores import _sqlite_database_url
@@ -71,6 +83,7 @@ class _Store:
         self.notification_attempts: list[PublicIngressNotificationAttemptRecord] = []
         self.lane_summaries: dict[tuple[str, str], LaunchplaneLaneSummary] = {}
         self.private_health_endpoints: dict[str, PrivateHealthEndpointRecord] = {}
+        self.route_bindings: list[EnvironmentRouteBindingRecord] = []
 
     def list_product_profile_records(
         self, *, driver_id: str = ""
@@ -211,6 +224,28 @@ class _Store:
         except KeyError as error:
             raise FileNotFoundError(endpoint_key) from error
 
+    def list_route_binding_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EnvironmentRouteBindingRecord, ...]:
+        records = [
+            record
+            for record in self.route_bindings
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.binding_key), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
 
 def _profile(
     *, driver_id: str = "generic-web", lane: ProductLaneProfile | None = None
@@ -246,6 +281,79 @@ def _identity() -> RuntimeIdentity:
         artifact_id="ghcr.io/cbusillo/example-site@sha256:abc123",
         source_git_ref="abc123",
     )
+
+
+def _route_binding(
+    *,
+    product: str = "example-site",
+    context: str = "example-site",
+    instance: str = "prod",
+    domains: tuple[tuple[str, Literal["primary", "alias"]], ...] = (("example.test", "primary"),),
+    tls_owner: Literal["launchplane", "provider", "external", "none"] = "launchplane",
+) -> EnvironmentRouteBindingRecord:
+    return EnvironmentRouteBindingRecord(
+        product=product,
+        context=context,
+        instance=instance,
+        provider_target=RouteBindingProviderTarget(
+            provider_id="dokploy",
+            target_category="compose",
+            provider_target_type="compose",
+            target_name="example-site-prod",
+            provider_evidence={"target_record": f"{context}:{instance}"},
+        ),
+        ingress=RouteBindingIngress(
+            provider="npmplus",
+            endpoint_key="example-edge",
+            termination_kind="edge",
+            provider_evidence={"audit_record": "audit-1"},
+        ),
+        domains=tuple(
+            RouteBindingDomain(domain_name=domain_name, role=role) for domain_name, role in domains
+        ),
+        tls=RouteBindingTls(
+            owner=tls_owner,
+            provider_evidence={"audit_record": "audit-1", "provider_certificate_ref": "101"},
+        ),
+        source=RouteBindingSource(
+            source_kind="service",
+            source_label="test",
+            source_record_ids=("route-binding:test",),
+            refreshed_at="2026-07-14T12:00:00Z",
+            freshness_status="recorded",
+            stale_after="2026-07-14T14:00:00Z",
+        ),
+        updated_at="2026-07-14T12:00:00Z",
+    )
+
+
+def _tls_certificate(
+    *,
+    days_remaining: int = 45,
+    public_name_match: bool = True,
+    public_name_match_source: Literal["san", "subject", "none"] = "san",
+    presented_name_evidence: tuple[str, ...] = ("example.test",),
+) -> PublicTlsCertificate:
+    return PublicTlsCertificate(
+        issuer="CN=Example Issuer",
+        subject="CN=example.test",
+        not_before="2026-07-01T00:00:00Z",
+        not_after="2026-08-30T00:00:00Z",
+        days_remaining=days_remaining,
+        public_name_match=public_name_match,
+        public_name_match_source=public_name_match_source,
+        presented_san_count=1,
+        presented_name_evidence=presented_name_evidence,
+    )
+
+
+def _constant_tls_probe(
+    probe_result: PublicTlsProbeResult,
+) -> Callable[[str, int], PublicTlsProbeResult]:
+    def tls_get(_domain: str, _timeout: int) -> PublicTlsProbeResult:
+        return probe_result
+
+    return tls_get
 
 
 def _notification_policy(
@@ -331,6 +439,59 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].base_url, "https://example.test")
         self.assertEqual(targets[0].health_url, "https://example.test/healthz")
+
+    def test_discovers_tls_targets_for_each_active_route_binding_domain(self) -> None:
+        store = _Store((_profile(),))
+        store.route_bindings.append(
+            _route_binding(domains=(("example.test", "primary"), ("www.example.test", "alias")))
+        )
+
+        targets = discover_public_ingress_monitor_targets(store)
+
+        tls_targets = [target for target in targets if target.check_kind == "tls"]
+        self.assertEqual(
+            [target.tls_domain_name for target in tls_targets], ["example.test", "www.example.test"]
+        )
+        self.assertEqual([target.tls_domain_role for target in tls_targets], ["primary", "alias"])
+
+    def test_tls_aliases_use_collision_resistant_record_identities(self) -> None:
+        store = _Store((_profile(),))
+        store.route_bindings.append(
+            _route_binding(
+                domains=(
+                    ("tls-foo.bar.example", "primary"),
+                    ("tls-foo-bar.example", "alias"),
+                )
+            )
+        )
+
+        targets = [
+            target
+            for target in discover_public_ingress_monitor_targets(store)
+            if target.check_kind == "tls"
+        ]
+        record_ids = {
+            build_public_ingress_observation_id(
+                product=target.product,
+                context=target.context,
+                instance=target.instance,
+                observed_at="2026-07-14T12:00:00Z",
+                check_name=target.check_name,
+            )
+            for target in targets
+        }
+        incident_ids = {
+            build_public_ingress_lane_incident_id(
+                product=target.product,
+                context=target.context,
+                instance=target.instance,
+                check_name=target.check_name,
+            )
+            for target in targets
+        }
+
+        self.assertEqual(len(record_ids), 2)
+        self.assertEqual(len(incident_ids), 2)
 
     def test_discovers_inherited_generic_web_drivers(self) -> None:
         store = _Store(
@@ -432,6 +593,300 @@ class PublicIngressMonitorTests(unittest.TestCase):
 
         self.assertEqual(result.fail_count, 1)
         self.assertEqual(store.records[0].failure_code, "connection_timeout")
+
+    def test_tls_valid_result_records_passing_observation(self) -> None:
+        store = _Store((_profile(),))
+        store.route_bindings.append(_route_binding())
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-14T12:10:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+            tls_get=lambda _domain, _timeout: PublicTlsProbeResult(
+                status="valid",
+                failure_code=None,
+                summary="TLS certificate is valid.",
+                validated_address_count=2,
+                certificate=_tls_certificate(),
+            ),
+        )
+
+        self.assertEqual(result.pass_count, 2)
+        tls_record = next(record for record in store.records if record.check_kind == "tls")
+        self.assertEqual(tls_record.status, "pass")
+        self.assertIsNone(tls_record.failure_code)
+        self.assertIsNotNone(tls_record.targets[0].tls)
+        assert tls_record.targets[0].tls is not None
+        self.assertEqual(tls_record.targets[0].tls.status, "valid")
+        self.assertEqual(tls_record.targets[0].tls.recorded.owner, "launchplane")
+        self.assertEqual(tls_record.targets[0].tls.recorded.domain_role, "primary")
+        self.assertEqual(tls_record.targets[0].tls.probe.validated_address_count, 2)
+
+    def test_tls_expiring_result_opens_incident(self) -> None:
+        store = _Store((_profile(),))
+        store.route_bindings.append(_route_binding())
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-14T12:11:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+            tls_get=lambda _domain, _timeout: PublicTlsProbeResult(
+                status="expiring",
+                failure_code="tls_expiring",
+                summary="TLS certificate expires within 7 day(s).",
+                validated_address_count=1,
+                certificate=_tls_certificate(days_remaining=7),
+            ),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        tls_record = next(record for record in store.records if record.check_kind == "tls")
+        self.assertEqual(tls_record.failure_code, "tls_expiring")
+        self.assertEqual(store.incidents[0].check_kind, "tls")
+        self.assertEqual(store.incidents[0].failure_code, "tls_expiring")
+
+    def test_tls_probe_timeout_records_failure_without_aborting_monitor(self) -> None:
+        store = _Store((_profile(),))
+        store.route_bindings.append(_route_binding())
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-14T12:11:30Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+            tls_get=lambda _domain, _timeout: (_ for _ in ()).throw(TimeoutError("timed out")),
+        )
+
+        self.assertEqual(result.pass_count, 1)
+        self.assertEqual(result.fail_count, 1)
+        tls_record = next(record for record in store.records if record.check_kind == "tls")
+        self.assertEqual(tls_record.failure_code, "connection_timeout")
+        self.assertIsNotNone(tls_record.targets[0].tls)
+        assert tls_record.targets[0].tls is not None
+        self.assertEqual(tls_record.targets[0].tls.status, "unreachable")
+        self.assertEqual(store.incidents[0].check_kind, "tls")
+
+    def test_tls_failure_mappings_are_deterministic(self) -> None:
+        cases = (
+            (
+                PublicTlsProbeResult(
+                    status="expired",
+                    failure_code="tls_expired",
+                    summary="TLS certificate is expired.",
+                    certificate=_tls_certificate(days_remaining=-1),
+                ),
+                "fail",
+                "tls_expired",
+            ),
+            (
+                PublicTlsProbeResult(
+                    status="hostname_mismatch",
+                    failure_code="tls_hostname_mismatch",
+                    summary="hostname mismatch",
+                    certificate=_tls_certificate(
+                        public_name_match=False,
+                        public_name_match_source="none",
+                        presented_name_evidence=(),
+                    ),
+                ),
+                "fail",
+                "tls_hostname_mismatch",
+            ),
+            (
+                PublicTlsProbeResult(
+                    status="untrusted",
+                    failure_code="tls_chain_failure",
+                    summary="chain failure",
+                    certificate=_tls_certificate(),
+                ),
+                "fail",
+                "tls_chain_failure",
+            ),
+            (
+                PublicTlsProbeResult(
+                    status="self_signed",
+                    failure_code="tls_self_signed",
+                    summary="self signed",
+                    certificate=_tls_certificate(),
+                ),
+                "fail",
+                "tls_self_signed",
+            ),
+            (
+                PublicTlsProbeResult(
+                    status="unreachable",
+                    failure_code="dns_failure",
+                    summary="dns failed",
+                ),
+                "fail",
+                "dns_failure",
+            ),
+            (
+                PublicTlsProbeResult(
+                    status="unsupported",
+                    failure_code="tls_unsupported",
+                    summary="unsupported protocol",
+                ),
+                "skipped",
+                "tls_unsupported",
+            ),
+            (
+                PublicTlsProbeResult(
+                    status="unknown",
+                    failure_code="private_url",
+                    summary="private destination",
+                ),
+                "fail",
+                "private_url",
+            ),
+            (
+                PublicTlsProbeResult(
+                    status="unknown",
+                    failure_code="invalid_url",
+                    summary="invalid destination",
+                ),
+                "fail",
+                "invalid_url",
+            ),
+        )
+        for probe_result, expected_status, expected_failure_code in cases:
+            with self.subTest(status=probe_result.status):
+                store = _Store((_profile(),))
+                store.route_bindings.append(_route_binding())
+
+                run_public_ingress_monitor_once(
+                    record_store=store,
+                    checked_at="2026-07-14T12:12:00Z",
+                    http_get=lambda url, _timeout: HttpObservation(
+                        status_code=200,
+                        final_url=url,
+                        redirect_count=0,
+                    ),
+                    tls_get=_constant_tls_probe(probe_result),
+                )
+
+                tls_record = next(record for record in store.records if record.check_kind == "tls")
+                self.assertEqual(tls_record.status, expected_status)
+                self.assertEqual(tls_record.failure_code, expected_failure_code)
+
+    def test_tls_failure_after_skipped_probe_updates_open_incident(self) -> None:
+        store = _Store((_profile(),))
+        store.route_bindings.append(_route_binding())
+        failure = PublicTlsProbeResult(
+            status="unreachable",
+            failure_code="dns_failure",
+            summary="dns failed",
+        )
+        unsupported = PublicTlsProbeResult(
+            status="unsupported",
+            failure_code="tls_unsupported",
+            summary="unsupported protocol",
+        )
+
+        for checked_at, probe_result in (
+            ("2026-07-14T12:13:00Z", failure),
+            ("2026-07-14T12:14:00Z", unsupported),
+            ("2026-07-14T12:15:00Z", failure),
+        ):
+            run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at=checked_at,
+                http_get=lambda url, _timeout: HttpObservation(
+                    status_code=200,
+                    final_url=url,
+                    redirect_count=0,
+                ),
+                tls_get=_constant_tls_probe(probe_result),
+            )
+
+        tls_incident = next(
+            incident for incident in store.incidents if incident.check_kind == "tls"
+        )
+        self.assertEqual(_incident_event(incident=tls_incident), "updated")
+
+    def test_tls_notification_policy_scope_and_health_kind_alias(self) -> None:
+        destination = PublicIngressNotificationDestination(
+            destination_id="github-main",
+            kind="github_issue",
+            github_repository="cbusillo/launchplane",
+            github_label="public-ingress",
+        )
+        policy = _notification_policy(destination).model_copy(update={"check_kind": "tls"})
+        incident = PublicIngressIncidentRecord(
+            incident_id="public-ingress-incident-example-site-prod-tls",
+            product="example-site",
+            repository="cbusillo/example-site",
+            driver_id="generic-web",
+            context="example-site",
+            instance="prod",
+            check_name="tls-example-test-deadbeef0000",
+            check_kind="tls",
+            status="open",
+            opened_at="2026-07-14T12:13:00Z",
+            opened_observation_id="observation-1",
+            latest_observation_id="observation-1",
+            latest_observed_at="2026-07-14T12:13:00Z",
+            failure_code="dns_failure",
+            summary="dns failed",
+        )
+
+        self.assertTrue(policy.matches(incident))
+        self.assertEqual(PublicIngressHealthCheckKind, PublicIngressCheckKind)
+
+    def test_tls_incident_resolves_after_recovery(self) -> None:
+        store = _Store((_profile(),))
+        store.route_bindings.append(_route_binding())
+
+        first_failure = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-14T12:13:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+            tls_get=lambda _domain, _timeout: PublicTlsProbeResult(
+                status="hostname_mismatch",
+                failure_code="tls_hostname_mismatch",
+                summary="hostname mismatch",
+                certificate=_tls_certificate(
+                    public_name_match=False,
+                    public_name_match_source="none",
+                    presented_name_evidence=(),
+                ),
+            ),
+        )
+        recovery = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-14T12:14:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+            tls_get=lambda _domain, _timeout: PublicTlsProbeResult(
+                status="valid",
+                failure_code=None,
+                summary="TLS certificate is valid.",
+                certificate=_tls_certificate(),
+            ),
+        )
+
+        self.assertEqual(first_failure.fail_count, 1)
+        self.assertEqual(recovery.pass_count, 2)
+        tls_incidents = [incident for incident in store.incidents if incident.check_kind == "tls"]
+        self.assertEqual(tls_incidents[-1].status, "resolved")
 
     def test_public_http_destination_policy_failure_records_private_url(self) -> None:
         store = _Store((_profile(),))
