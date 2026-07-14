@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+import hashlib
 import json
 import os
 import smtplib
@@ -29,11 +31,13 @@ from control_plane.contracts.product_health_monitoring_migration import (
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneHealthCheck,
-    ProductLaneHealthCheckKind,
     ProductLaneProfile,
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.public_ingress_monitoring import (
+    PUBLIC_TLS_EXPIRING_DAYS,
+    PUBLIC_TLS_STALE_AFTER_SECONDS,
+    PublicIngressCheckKind,
     PublicIngressFailureCode,
     PublicIngressIncidentEvent,
     PublicIngressIncidentRecord,
@@ -45,11 +49,18 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
     PublicIngressObservationStatus,
     PublicIngressTargetKind,
+    PublicIngressTlsObservation,
+    PublicIngressTlsProbeEvidence,
+    PublicIngressTlsRecordedEvidence,
     PublicIngressTargetObservation,
     build_public_ingress_lane_incident_id,
     build_public_ingress_notification_attempt_id,
     build_public_ingress_observation_id,
 )
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.contracts.route_binding_record import RouteBindingDomain
+from control_plane.contracts.route_binding_record import RouteBindingTerminationKind
+from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
     RuntimeIdentityStatus,
@@ -62,6 +73,8 @@ from control_plane.notifications import (
     public_url_error,
 )
 from control_plane.outbound_http import PublicHttpDestinationError
+from control_plane.outbound_http import PublicTlsProbeResult
+from control_plane.outbound_http import probe_public_tls
 from control_plane.outbound_http import request_private_http
 from control_plane.outbound_http import request_public_http
 from control_plane.workflows.odoo_verification import (
@@ -74,6 +87,9 @@ from control_plane.workflows.ship import utc_now_timestamp
 MAX_REDIRECTS = 10
 USER_AGENT = "Launchplane public-ingress-monitor/1.0"
 PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"
+
+
+PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service"]
 
 
 class PublicIngressMonitorStore(Protocol):
@@ -139,6 +155,16 @@ class PublicIngressMonitorStore(Protocol):
         self, endpoint_key: str
     ) -> PrivateHealthEndpointRecord: ...
 
+    def list_route_binding_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EnvironmentRouteBindingRecord, ...]: ...
+
 
 @dataclass(frozen=True)
 class PublicIngressMonitorTarget:
@@ -150,7 +176,7 @@ class PublicIngressMonitorTarget:
     base_url: str
     health_url: str
     check_name: str
-    check_kind: ProductLaneHealthCheckKind
+    check_kind: PublicIngressCheckKind
     expected_runtime_identity: RuntimeIdentity | None
     require_runtime_identity: bool
     provider: str = ""
@@ -158,6 +184,22 @@ class PublicIngressMonitorTarget:
     private_endpoint_key: str = ""
     resolution_failure_code: PublicIngressFailureCode | None = None
     resolution_failure_summary: str = ""
+    tls_domain_name: str = ""
+    tls_domain_role: Literal["primary", "alias"] = "primary"
+    tls_owner: RouteBindingTlsOwner = "none"
+    tls_ingress_provider: str = ""
+    tls_termination_kind: RouteBindingTerminationKind = "none"
+    tls_source_kind: PublicIngressRouteBindingSourceKind = "service"
+    tls_source_label: str = ""
+    tls_source_record_ids: tuple[str, ...] = ()
+    tls_source_versions: dict[str, str] | None = None
+    tls_refreshed_at: str = ""
+    tls_recorded_at: str = ""
+    tls_freshness_status: Literal["verified", "recorded", "stale", "missing", "unsupported"] = (
+        "recorded"
+    )
+    tls_stale_after: str = ""
+    tls_provider_evidence: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +248,7 @@ class PublicIngressMonitorResult(BaseModel):
 
 
 HttpGet = Callable[[str, int], HttpObservation]
+TlsGet = Callable[[str, int], PublicTlsProbeResult]
 
 
 def discover_public_ingress_monitor_targets(
@@ -228,6 +271,12 @@ def discover_public_ingress_monitor_targets(
                 if target is None:
                     continue
                 targets.append(target)
+            for tls_target in _tls_monitor_targets(
+                record_store=record_store,
+                profile=profile,
+                lane=lane,
+            ):
+                targets.append(tls_target)
     return tuple(targets)
 
 
@@ -343,29 +392,30 @@ def run_public_ingress_monitor_once(
     notify: bool = True,
     http_get: HttpGet | None = None,
     private_http_get: HttpGet | None = None,
+    tls_get: TlsGet | None = None,
     notification_drivers: PublicIngressNotificationDrivers | None = None,
 ) -> PublicIngressMonitorResult:
     observed_at = checked_at.strip() or utc_now_timestamp()
     public_get = http_get or fetch_public_ingress_url
     private_get = private_http_get or fetch_private_health_url
+    tls_probe = tls_get or fetch_public_tls
     records: list[PublicIngressObservationRecord] = []
     incidents: list[PublicIngressIncidentRecord] = []
     delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
     open_incident_count = 0
     resolved_incident_count = 0
     for target in discover_public_ingress_monitor_targets(record_store):
-        previous_record = _latest_observation(record_store=record_store, target=target)
         record = check_public_ingress_target(
             target=target,
             checked_at=observed_at,
             timeout_seconds=timeout_seconds,
             http_get=(private_get if target.check_kind == "private_http" else public_get),
+            tls_get=tls_probe,
         )
         records.append(record)
         incident_records = reconcile_public_ingress_incident(
             record_store=record_store,
             record=record,
-            previous_record=previous_record,
             write_records=False,
         )
         outbox_deliveries = (
@@ -373,7 +423,6 @@ def run_public_ingress_monitor_once(
                 record_store=record_store,
                 incident_records=incident_records,
                 observation=record,
-                previous_record=previous_record,
             )
             if notify
             else ()
@@ -408,7 +457,7 @@ def run_public_ingress_monitor_once(
                 delivery_attempts.extend(
                     deliver_public_ingress_incident_notifications(
                         record_store=record_store,
-                        event=_incident_event(incident=incident, previous_record=previous_record),
+                        event=_incident_event(incident=incident),
                         incident=incident,
                         observation=record,
                         drivers=notification_drivers,
@@ -502,11 +551,10 @@ def _public_ingress_notification_outbox_deliveries(
     record_store: PublicIngressMonitorStore,
     incident_records: tuple[PublicIngressIncidentRecord, ...],
     observation: PublicIngressObservationRecord,
-    previous_record: PublicIngressObservationRecord | None,
 ) -> tuple[OutboxDeliveryRecord, ...]:
     deliveries: list[OutboxDeliveryRecord] = []
     for incident in incident_records:
-        event = _incident_event(incident=incident, previous_record=previous_record)
+        event = _incident_event(incident=incident)
         for policy in _matching_notification_policies(record_store=record_store, incident=incident):
             for destination in policy.destinations:
                 if destination.kind != "github_issue" or destination.status != "enabled":
@@ -579,7 +627,6 @@ def reconcile_public_ingress_incident(
     *,
     record_store: PublicIngressMonitorStore,
     record: PublicIngressObservationRecord,
-    previous_record: PublicIngressObservationRecord | None,
     write_records: bool = True,
 ) -> tuple[PublicIngressIncidentRecord, ...]:
     open_incidents = _open_incidents(record_store=record_store, record=record)
@@ -643,14 +690,12 @@ def reconcile_public_ingress_incident(
     return ()
 
 
-def _incident_event(
-    *, incident: PublicIngressIncidentRecord, previous_record: PublicIngressObservationRecord | None
-) -> PublicIngressIncidentEvent:
+def _incident_event(*, incident: PublicIngressIncidentRecord) -> PublicIngressIncidentEvent:
     if incident.status == "resolved":
         return "resolved"
-    if previous_record is not None and previous_record.status == "fail":
-        return "updated"
-    return "opened"
+    if incident.opened_observation_id == incident.latest_observation_id:
+        return "opened"
+    return "updated"
 
 
 def _matching_notification_policies(
@@ -691,6 +736,7 @@ def check_public_ingress_target(
     checked_at: str,
     timeout_seconds: int,
     http_get: HttpGet,
+    tls_get: TlsGet,
 ) -> PublicIngressObservationRecord:
     target_observations: list[PublicIngressTargetObservation] = []
     for target_kind, url in _target_urls(target):
@@ -701,6 +747,8 @@ def check_public_ingress_target(
                 timeout_seconds=timeout_seconds,
                 target=target,
                 http_get=http_get,
+                tls_get=tls_get,
+                checked_at=checked_at,
             )
         )
     status, failure_code = _record_status(target_observations)
@@ -773,6 +821,14 @@ def fetch_private_health_url(url: str, timeout_seconds: int) -> HttpObservation:
     )
 
 
+def fetch_public_tls(public_name: str, timeout_seconds: int) -> PublicTlsProbeResult:
+    return probe_public_tls(
+        public_name,
+        timeout_seconds=timeout_seconds,
+        expiring_days=PUBLIC_TLS_EXPIRING_DAYS,
+    )
+
+
 def _check_url(
     *,
     target_kind: PublicIngressTargetKind,
@@ -780,7 +836,18 @@ def _check_url(
     timeout_seconds: int,
     target: PublicIngressMonitorTarget,
     http_get: HttpGet,
+    tls_get: TlsGet,
+    checked_at: str,
 ) -> PublicIngressTargetObservation:
+    if target.check_kind == "tls":
+        return _check_tls_target(
+            target_kind=target_kind,
+            url=url,
+            timeout_seconds=timeout_seconds,
+            target=target,
+            tls_get=tls_get,
+            checked_at=checked_at,
+        )
     if target.check_kind == "provider":
         return _provider_check_unavailable(target=target)
     if target.resolution_failure_code is not None:
@@ -910,6 +977,61 @@ def _check_url(
     )
 
 
+def _check_tls_target(
+    *,
+    target_kind: PublicIngressTargetKind,
+    url: str,
+    timeout_seconds: int,
+    target: PublicIngressMonitorTarget,
+    tls_get: TlsGet,
+    checked_at: str,
+) -> PublicIngressTargetObservation:
+    domain_name = target.tls_domain_name.strip().lower()
+    if not domain_name:
+        domain_name = "missing.invalid"
+        probe_result = PublicTlsProbeResult(
+            status="unknown",
+            failure_code="unknown_error",
+            summary="TLS monitor target is missing a bound domain.",
+        )
+    else:
+        try:
+            probe_result = tls_get(domain_name, timeout_seconds)
+        except TimeoutError:
+            probe_result = PublicTlsProbeResult(
+                status="unreachable",
+                failure_code="connection_timeout",
+                summary="Public TLS probe timed out.",
+            )
+        except Exception as error:  # noqa: BLE001 - probe failures become monitor evidence.
+            probe_result = PublicTlsProbeResult(
+                status="unknown",
+                failure_code="unknown_error",
+                summary=_bounded_probe_error_summary(error),
+            )
+
+    tls_evidence = _tls_observation(
+        target=target,
+        public_name=domain_name,
+        probe_result=probe_result,
+        checked_at=checked_at,
+    )
+    target_status: PublicIngressObservationStatus = (
+        "pass" if probe_result.status == "valid" else "fail"
+    )
+    failure_code = probe_result.failure_code
+    if probe_result.status == "unsupported" and failure_code == "tls_unsupported":
+        target_status = "skipped"
+    return PublicIngressTargetObservation(
+        target=target_kind,
+        url=url,
+        status=target_status,
+        failure_code=failure_code,
+        tls=tls_evidence,
+        summary=probe_result.summary,
+    )
+
+
 def _provider_check_unavailable(
     *,
     target: PublicIngressMonitorTarget,
@@ -957,20 +1079,6 @@ def _expected_runtime_identity(
     return None
 
 
-def _latest_observation(
-    *, record_store: PublicIngressMonitorStore, target: PublicIngressMonitorTarget
-) -> PublicIngressObservationRecord | None:
-    records = record_store.list_public_ingress_observation_records(
-        product=target.product,
-        context_name=target.context,
-        instance_name=target.instance,
-        check_name=target.check_name,
-        check_kind=target.check_kind,
-        limit=1,
-    )
-    return next(iter(records), None)
-
-
 def _open_incidents(
     *, record_store: PublicIngressMonitorStore, record: PublicIngressObservationRecord
 ) -> tuple[PublicIngressIncidentRecord, ...]:
@@ -998,6 +1106,10 @@ def _target_urls(
     target: PublicIngressMonitorTarget,
 ) -> tuple[tuple[PublicIngressTargetKind, str], ...]:
     urls: list[tuple[PublicIngressTargetKind, str]] = []
+    if target.check_kind == "tls":
+        domain_name = target.tls_domain_name.strip().lower() or "missing.invalid"
+        urls.append(("tls_domain", f"https://{domain_name}/"))
+        return tuple(urls)
     if target.check_kind == "provider":
         urls.append(("provider", f"provider://{target.provider}/{target.provider_check}"))
         return tuple(urls)
@@ -1023,7 +1135,15 @@ def _record_status(
     if failing is not None:
         return "fail", failing.failure_code
     if all(observation.status == "skipped" for observation in observations):
-        return "skipped", "private_url"
+        skipped_failure_code = next(
+            (
+                observation.failure_code
+                for observation in observations
+                if observation.failure_code is not None
+            ),
+            None,
+        )
+        return "skipped", skipped_failure_code
     return "pass", None
 
 
@@ -1044,6 +1164,8 @@ def _record_summary(
 
 
 def _check_label(target: PublicIngressMonitorTarget) -> str:
+    if target.check_kind == "tls":
+        return "Public TLS"
     if target.check_kind == "private_http":
         return "Private health check"
     if target.check_kind == "provider":
@@ -1052,6 +1174,8 @@ def _check_label(target: PublicIngressMonitorTarget) -> str:
 
 
 def _successful_target_summary(target: PublicIngressMonitorTarget) -> str:
+    if target.check_kind == "tls":
+        return "Public TLS certificate is valid."
     if target.check_kind == "private_http":
         return "Private health check returned a successful response."
     return "Public ingress returned a successful response."
@@ -1098,6 +1222,144 @@ def _failed_target(
 
 def _failure_summary(code: PublicIngressFailureCode) -> str:
     return code.replace("_", " ")
+
+
+def _tls_monitor_targets(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+) -> tuple[PublicIngressMonitorTarget, ...]:
+    list_route_bindings = getattr(record_store, "list_route_binding_records", None)
+    if not callable(list_route_bindings):
+        return ()
+    route_bindings = list_route_bindings(
+        product=profile.product,
+        context_name=lane.context,
+        instance_name=lane.instance,
+        status="active",
+        limit=1,
+    )
+    route_binding = next(iter(route_bindings), None)
+    if route_binding is None or not isinstance(route_binding, EnvironmentRouteBindingRecord):
+        return ()
+    targets: list[PublicIngressMonitorTarget] = []
+    for domain in route_binding.domains:
+        if not isinstance(domain, RouteBindingDomain):
+            continue
+        targets.append(
+            PublicIngressMonitorTarget(
+                product=profile.product,
+                repository=profile.repository,
+                driver_id=profile.driver_id,
+                context=lane.context,
+                instance=lane.instance,
+                base_url="",
+                health_url="",
+                check_name=_tls_check_name(domain.domain_name),
+                check_kind="tls",
+                expected_runtime_identity=None,
+                require_runtime_identity=False,
+                tls_domain_name=domain.domain_name,
+                tls_domain_role=domain.role,
+                tls_owner=route_binding.tls.owner,
+                tls_ingress_provider=route_binding.ingress.provider,
+                tls_termination_kind=route_binding.ingress.termination_kind,
+                tls_source_kind=route_binding.source.source_kind,
+                tls_source_label=route_binding.source.source_label,
+                tls_source_record_ids=route_binding.source.source_record_ids,
+                tls_source_versions=dict(route_binding.source.source_versions),
+                tls_refreshed_at=route_binding.source.refreshed_at,
+                tls_recorded_at=route_binding.updated_at,
+                tls_freshness_status=route_binding.source.freshness_status,
+                tls_stale_after=route_binding.source.stale_after,
+                tls_provider_evidence=dict(route_binding.tls.provider_evidence),
+            )
+        )
+    return tuple(targets)
+
+
+def _tls_check_name(domain_name: str) -> str:
+    normalized_domain = domain_name.strip().lower().rstrip(".")
+    digest = hashlib.sha256(normalized_domain.encode("utf-8")).hexdigest()[:12]
+    return f"tls-{normalized_domain}-{digest}"
+
+
+def _bounded_probe_error_summary(error: BaseException, *, limit: int = 512) -> str:
+    normalized_summary = " ".join(
+        (str(error) or error.__class__.__name__).replace("\n", " ").split()
+    )
+    if len(normalized_summary) <= limit:
+        return normalized_summary
+    return f"{normalized_summary[: limit - 1].rstrip()}…"
+
+
+def _tls_observation(
+    *,
+    target: PublicIngressMonitorTarget,
+    public_name: str,
+    probe_result: PublicTlsProbeResult,
+    checked_at: str,
+) -> PublicIngressTlsObservation:
+    stale_after = _format_utc_timestamp(
+        _parse_utc_timestamp(checked_at) + timedelta(seconds=PUBLIC_TLS_STALE_AFTER_SECONDS)
+    )
+    certificate = probe_result.certificate
+    return PublicIngressTlsObservation(
+        status=probe_result.status,
+        public_name=public_name,
+        issuer=certificate.issuer if certificate is not None else "",
+        subject=certificate.subject if certificate is not None else "",
+        not_before=certificate.not_before if certificate is not None else "",
+        not_after=certificate.not_after if certificate is not None else "",
+        days_remaining=certificate.days_remaining if certificate is not None else None,
+        public_name_match=certificate.public_name_match if certificate is not None else False,
+        public_name_match_source=(
+            certificate.public_name_match_source if certificate is not None else "none"
+        ),
+        presented_san_count=certificate.presented_san_count if certificate is not None else 0,
+        presented_name_evidence=(
+            certificate.presented_name_evidence if certificate is not None else ()
+        ),
+        recorded=PublicIngressTlsRecordedEvidence(
+            domain_name=public_name,
+            domain_role=target.tls_domain_role,
+            route_binding_status="active",
+            owner=target.tls_owner,
+            ingress_provider=target.tls_ingress_provider,
+            termination_kind=target.tls_termination_kind,
+            source_kind=target.tls_source_kind,
+            source_label=target.tls_source_label,
+            source_record_ids=target.tls_source_record_ids,
+            source_versions=dict(target.tls_source_versions or {}),
+            refreshed_at=target.tls_refreshed_at,
+            recorded_at=target.tls_recorded_at,
+            freshness_status=target.tls_freshness_status,
+            stale_after=target.tls_stale_after,
+            provider_evidence=dict(target.tls_provider_evidence or {}),
+        ),
+        probe=PublicIngressTlsProbeEvidence(
+            observed_at=checked_at,
+            validated_address_count=probe_result.validated_address_count,
+            sni_hostname=public_name,
+            freshness_status="verified" if probe_result.status == "valid" else "recorded",
+            stale_after=stale_after,
+        ),
+    )
+
+
+def _parse_utc_timestamp(value: str) -> datetime:
+    normalized_value = value.strip()
+    if normalized_value.endswith("Z"):
+        normalized_value = f"{normalized_value[:-1]}+00:00"
+    parsed = datetime.fromisoformat(normalized_value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_utc_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _health_url(base_url: str, health_path: str) -> str:
