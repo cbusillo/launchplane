@@ -35,6 +35,28 @@ approval gate.
 The service boundary is implemented and deployed for the current Odoo and
 VeriReel product paths:
 
+Service implementation ownership is split by runtime responsibility:
+
+- `control_plane/service.py` is the stable public `serve_launchplane_service`
+  entrypoint only.
+- `control_plane/service_bootstrap.py` owns environment-derived identity
+  configuration, policy and provider composition, OAuth/session wiring,
+  FastAPI application construction, startup validation, Uvicorn execution, and
+  store cleanup.
+- `control_plane/every_code_github_webhook.py` owns the Every Code GitHub
+  webhook store protocol, signature verification boundary, payload parsing,
+  actor trust, deduplication, issue and pull-request closure, preview
+  validation, and PR-feedback handling.
+- `control_plane/http_app.py` owns HTTP route registration and injects the
+  webhook callable into the unauthenticated GitHub route.
+- `control_plane/drivers/native_routes.py` owns native descriptor metadata and
+  FastAPI driver-route validation.
+
+Startup validates native descriptor metadata before opening shared storage or
+seeding durable authorization policy. After storage opens, policy resolution,
+application construction, FastAPI route validation, Uvicorn startup, and all
+failure exits share one cleanup scope so the store is always closed.
+
 - CLI: `uv run launchplane service serve`
 - server runtime: FastAPI served directly by Uvicorn
 - native FastAPI health route: `GET /v1/health`, backed by a Pydantic response

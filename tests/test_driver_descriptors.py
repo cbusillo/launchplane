@@ -5,7 +5,6 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
-from control_plane import service as control_plane_service
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.contracts.driver_descriptor import (
     DriverActionDescriptor,
@@ -20,7 +19,12 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
-from control_plane.drivers import native_routes, registry
+from control_plane.drivers import (
+    generic_web_dispatch,
+    generic_web_preview_dispatch,
+    native_routes,
+    registry,
+)
 from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewDesiredStateEnvelope,
 )
@@ -29,10 +33,22 @@ from control_plane.odoo_artifact_publish_inputs_http import (
     ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
     OdooArtifactPublishInputsEnvelope,
 )
+from control_plane.odoo_app_maintenance_http import ODOO_APP_MAINTENANCE_ROUTE
+from control_plane.odoo_artifact_publish_http import ODOO_ARTIFACT_PUBLISH_ROUTE
+from control_plane.odoo_post_deploy_http import ODOO_POST_DEPLOY_ROUTE
 from control_plane.odoo_preview_apply_http import (
-    OdooPreviewApplyEnvelope,
-    OdooPreviewApplyInputsEnvelope,
+    ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+    ODOO_PREVIEW_APPLY_ROUTE,
 )
+from control_plane.odoo_prod_backup_gate_http import ODOO_PROD_BACKUP_GATE_ROUTE
+from control_plane.odoo_prod_promotion_http import (
+    ODOO_PROD_PROMOTION_INPUTS_ROUTE,
+    ODOO_PROD_PROMOTION_ROUTE,
+    ODOO_PROD_PROMOTION_RUN_ROUTE,
+)
+from control_plane.odoo_prod_rollback_http import ODOO_PROD_ROLLBACK_ROUTE
+from control_plane.odoo_stable_bootstrap_http import ODOO_STABLE_BOOTSTRAP_ROUTE
+from control_plane import verireel_nonprod_http, verireel_prod_http, verireel_read_http
 from control_plane.drivers.registry import (
     build_driver_context_view,
     effective_driver_actions,
@@ -171,6 +187,20 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     denial_message_fragment,
                     execution_metadata.denial_message,
                 )
+
+    def assert_route_paths_match_descriptor(
+        self,
+        *,
+        driver_id: str,
+        route_paths_by_action: dict[str, str],
+    ) -> None:
+        descriptor = read_driver_descriptor(driver_id)
+        actions = {action.action_id: action for action in descriptor.actions}
+
+        for action_id, route_path in route_paths_by_action.items():
+            with self.subTest(driver_id=driver_id, action_id=action_id):
+                self.assertIn(action_id, actions)
+                self.assertEqual(route_path, actions[action_id].route_path)
 
     def test_registry_lists_product_drivers_without_provider_vocabulary(self) -> None:
         descriptors = list_driver_descriptors()
@@ -506,63 +536,63 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             driver_id="generic-web",
             route_metadata_by_action={
                 "stable_deploy": (
-                    control_plane_service._GENERIC_WEB_DEPLOY_ROUTE,
-                    control_plane_service.GenericWebDeployEnvelope,
+                    generic_web_dispatch._GENERIC_WEB_DEPLOY_ROUTE,
+                    generic_web_dispatch.GenericWebDeployEnvelope,
                     "deploy driver",
                 ),
                 "prod_promotion": (
-                    control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE,
-                    control_plane_service.GenericWebProdPromotionEnvelope,
+                    generic_web_dispatch._GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                    generic_web_dispatch.GenericWebProdPromotionEnvelope,
                     "prod promotion driver",
                 ),
                 "prod_promotion_workflow": (
-                    control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
-                    control_plane_service.GenericWebPromotionWorkflowEnvelope,
+                    generic_web_dispatch._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
+                    generic_web_dispatch.GenericWebPromotionWorkflowEnvelope,
                     "prod promotion workflow",
                 ),
                 "prod_rollback_plan": (
-                    control_plane_service._GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
-                    control_plane_service.GenericWebRollbackPlanEnvelope,
+                    generic_web_dispatch._GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
+                    generic_web_dispatch.GenericWebRollbackPlanEnvelope,
                     "rollback",
                 ),
                 "prod_rollback": (
-                    control_plane_service._GENERIC_WEB_ROLLBACK_ROUTE,
-                    control_plane_service.GenericWebRollbackEnvelope,
+                    generic_web_dispatch._GENERIC_WEB_ROLLBACK_ROUTE,
+                    generic_web_dispatch.GenericWebRollbackEnvelope,
                     "rollback",
                 ),
                 "stable_verification": (
-                    control_plane_service._GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
-                    control_plane_service.GenericWebStableVerificationEnvelope,
+                    generic_web_dispatch._GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
+                    generic_web_dispatch.GenericWebStableVerificationEnvelope,
                     "stable verification",
                 ),
                 "preview_desired_state": (
-                    control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
+                    generic_web_preview_dispatch._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
                     GenericWebPreviewDesiredStateEnvelope,
                     "preview desired state",
                 ),
                 "preview_inventory": (
-                    control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
-                    control_plane_service.GenericWebPreviewInventoryEnvelope,
+                    generic_web_preview_dispatch._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+                    generic_web_preview_dispatch.GenericWebPreviewInventoryEnvelope,
                     "preview inventory",
                 ),
                 "preview_refresh": (
-                    control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
-                    control_plane_service.GenericWebPreviewRefreshEnvelope,
+                    generic_web_preview_dispatch._GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+                    generic_web_preview_dispatch.GenericWebPreviewRefreshEnvelope,
                     "refresh generic",
                 ),
                 "preview_readiness": (
-                    control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE,
-                    control_plane_service.GenericWebPreviewReadinessEnvelope,
+                    generic_web_preview_dispatch._GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+                    generic_web_preview_dispatch.GenericWebPreviewReadinessEnvelope,
                     "preview readiness",
                 ),
                 "preview_destroy": (
-                    control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
-                    control_plane_service.GenericWebPreviewDestroyEnvelope,
+                    generic_web_preview_dispatch._GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+                    generic_web_preview_dispatch.GenericWebPreviewDestroyEnvelope,
                     "destroy generic",
                 ),
                 "preview_verification": (
-                    control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
-                    control_plane_service.GenericWebPreviewVerificationEnvelope,
+                    generic_web_preview_dispatch._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
+                    generic_web_preview_dispatch.GenericWebPreviewVerificationEnvelope,
                     "preview verification",
                 ),
             },
@@ -583,61 +613,25 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             OdooArtifactPublishInputsEnvelope.model_json_schema()["title"],
             "OdooArtifactPublishInputsEnvelope",
         )
-        self.assert_route_metadata_matches_descriptor(
+        self.assert_route_paths_match_descriptor(
             driver_id="odoo",
-            route_metadata_by_action={
-                "artifact_publish": (
-                    control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE,
-                    control_plane_service.OdooArtifactPublishEnvelope,
-                    "artifact publish evidence",
-                ),
-                "post_deploy": (
-                    control_plane_service._ODOO_POST_DEPLOY_ROUTE,
-                    control_plane_service.OdooPostDeployEnvelope,
-                    "post-deploy driver",
-                ),
-                "app_maintenance": (
-                    control_plane_service._ODOO_APP_MAINTENANCE_ROUTE,
-                    control_plane_service.OdooAppMaintenanceEnvelope,
-                    "app maintenance driver",
-                ),
-                "stable_bootstrap": (
-                    control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE,
-                    control_plane_service.OdooStableBootstrapEnvelope,
-                    "stable bootstrap",
-                ),
+            route_paths_by_action={
+                "artifact_publish": ODOO_ARTIFACT_PUBLISH_ROUTE,
+                "post_deploy": ODOO_POST_DEPLOY_ROUTE,
+                "app_maintenance": ODOO_APP_MAINTENANCE_ROUTE,
+                "stable_bootstrap": ODOO_STABLE_BOOTSTRAP_ROUTE,
             },
         )
 
     def test_odoo_prod_execution_metadata_matches_descriptors(self) -> None:
-        self.assert_route_metadata_matches_descriptor(
+        self.assert_route_paths_match_descriptor(
             driver_id="odoo",
-            route_metadata_by_action={
-                "prod_backup_gate": (
-                    control_plane_service._ODOO_PROD_BACKUP_GATE_METADATA,
-                    control_plane_service.OdooProdBackupGateEnvelope,
-                    "prod backup-gate driver",
-                ),
-                "prod_promotion_inputs": (
-                    control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE,
-                    control_plane_service.OdooProdPromotionInputsEnvelope,
-                    "prod promotion inputs",
-                ),
-                "prod_promotion_run": (
-                    control_plane_service._ODOO_PROD_PROMOTION_RUN_ROUTE,
-                    control_plane_service.OdooProdPromotionRunEnvelope,
-                    "prod promotion run",
-                ),
-                "prod_promotion": (
-                    control_plane_service._ODOO_PROD_PROMOTION_ROUTE,
-                    control_plane_service.OdooProdPromotionEnvelope,
-                    "prod promotion driver",
-                ),
-                "prod_rollback": (
-                    control_plane_service._ODOO_PROD_ROLLBACK_METADATA,
-                    control_plane_service.OdooProdRollbackEnvelope,
-                    "prod rollback driver",
-                ),
+            route_paths_by_action={
+                "prod_backup_gate": ODOO_PROD_BACKUP_GATE_ROUTE,
+                "prod_promotion_inputs": ODOO_PROD_PROMOTION_INPUTS_ROUTE,
+                "prod_promotion_run": ODOO_PROD_PROMOTION_RUN_ROUTE,
+                "prod_promotion": ODOO_PROD_PROMOTION_ROUTE,
+                "prod_rollback": ODOO_PROD_ROLLBACK_ROUTE,
             },
         )
 
@@ -674,19 +668,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "/v1/drivers/odoo/prod-rollback-plan",
             native_routes._driver_route_metadata_from_descriptors(),
         )
-        self.assert_route_metadata_matches_descriptor(
+        self.assert_route_paths_match_descriptor(
             driver_id="odoo",
-            route_metadata_by_action={
-                "preview_apply": (
-                    control_plane_service._ODOO_PREVIEW_APPLY_ROUTE,
-                    OdooPreviewApplyEnvelope,
-                    "apply Odoo preview",
-                ),
-                "preview_apply_inputs": (
-                    control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
-                    OdooPreviewApplyInputsEnvelope,
-                    "preview apply inputs",
-                ),
+            route_paths_by_action={
+                "preview_apply": ODOO_PREVIEW_APPLY_ROUTE,
+                "preview_apply_inputs": ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
             },
         )
 
@@ -695,23 +681,23 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             driver_id="verireel",
             route_metadata_by_action={
                 "prod_deploy": (
-                    control_plane_service._VERIREEL_PROD_DEPLOY_ROUTE,
-                    control_plane_service.VeriReelProdDeployEnvelope,
+                    verireel_prod_http._VERIREEL_PROD_DEPLOY_ROUTE,
+                    verireel_prod_http.VeriReelProdDeployEnvelope,
                     "prod deploy driver",
                 ),
                 "prod_backup_gate": (
-                    control_plane_service._VERIREEL_PROD_BACKUP_GATE_ROUTE,
-                    control_plane_service.VeriReelProdBackupGateEnvelope,
+                    verireel_prod_http._VERIREEL_PROD_BACKUP_GATE_ROUTE,
+                    verireel_prod_http.VeriReelProdBackupGateEnvelope,
                     "prod backup gate driver",
                 ),
                 "prod_promotion": (
-                    control_plane_service._VERIREEL_PROD_PROMOTION_ROUTE,
-                    control_plane_service.VeriReelProdPromotionEnvelope,
+                    verireel_prod_http._VERIREEL_PROD_PROMOTION_ROUTE,
+                    verireel_prod_http.VeriReelProdPromotionEnvelope,
                     "prod promotion driver",
                 ),
                 "prod_rollback": (
-                    control_plane_service._VERIREEL_PROD_ROLLBACK_ROUTE,
-                    control_plane_service.VeriReelProdRollbackEnvelope,
+                    verireel_prod_http._VERIREEL_PROD_ROLLBACK_ROUTE,
+                    verireel_prod_http.VeriReelProdRollbackEnvelope,
                     "prod rollback driver",
                 ),
             },
@@ -722,28 +708,28 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             driver_id="verireel",
             route_metadata_by_action={
                 "testing_deploy": (
-                    control_plane_service._VERIREEL_TESTING_DEPLOY_ROUTE,
-                    control_plane_service.VeriReelTestingDeployEnvelope,
+                    verireel_nonprod_http._VERIREEL_TESTING_DEPLOY_ROUTE,
+                    verireel_nonprod_http.VeriReelTestingDeployEnvelope,
                     "testing deploy driver",
                 ),
                 "testing_verification": (
-                    control_plane_service._VERIREEL_TESTING_VERIFICATION_ROUTE,
-                    control_plane_service.VeriReelTestingVerificationEnvelope,
+                    verireel_read_http._VERIREEL_TESTING_VERIFICATION_ROUTE,
+                    verireel_read_http.VeriReelTestingVerificationEnvelope,
                     "testing verification",
                 ),
                 "stable_environment": (
-                    control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE,
-                    control_plane_service.VeriReelStableEnvironmentEnvelope,
+                    verireel_read_http._VERIREEL_STABLE_ENVIRONMENT_ROUTE,
+                    verireel_read_http.VeriReelStableEnvironmentEnvelope,
                     "stable environment",
                 ),
                 "runtime_verification": (
-                    control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE,
-                    control_plane_service.VeriReelRuntimeVerificationEnvelope,
+                    verireel_read_http._VERIREEL_RUNTIME_VERIFICATION_ROUTE,
+                    verireel_read_http.VeriReelRuntimeVerificationEnvelope,
                     "runtime verification driver",
                 ),
                 "app_maintenance": (
-                    control_plane_service._VERIREEL_APP_MAINTENANCE_ROUTE,
-                    control_plane_service.VeriReelAppMaintenanceEnvelope,
+                    verireel_nonprod_http._VERIREEL_APP_MAINTENANCE_ROUTE,
+                    verireel_nonprod_http.VeriReelAppMaintenanceEnvelope,
                     "app maintenance driver",
                 ),
             },
@@ -754,29 +740,29 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             driver_id="verireel",
             route_metadata_by_action={
                 "preview_refresh": (
-                    control_plane_service._VERIREEL_PREVIEW_REFRESH_ROUTE,
-                    control_plane_service.VeriReelPreviewRefreshEnvelope,
+                    verireel_read_http._VERIREEL_PREVIEW_REFRESH_ROUTE,
+                    verireel_read_http.VeriReelPreviewRefreshEnvelope,
                     "preview refresh driver",
                 ),
                 "preview_inventory": (
-                    control_plane_service._VERIREEL_PREVIEW_INVENTORY_ROUTE,
-                    control_plane_service.VeriReelPreviewInventoryEnvelope,
+                    verireel_read_http._VERIREEL_PREVIEW_INVENTORY_ROUTE,
+                    verireel_read_http.VeriReelPreviewInventoryEnvelope,
                     "preview inventory",
                 ),
                 "preview_destroy": (
-                    control_plane_service._VERIREEL_PREVIEW_DESTROY_ROUTE,
-                    control_plane_service.VeriReelPreviewDestroyEnvelope,
+                    verireel_read_http._VERIREEL_PREVIEW_DESTROY_ROUTE,
+                    verireel_read_http.VeriReelPreviewDestroyEnvelope,
                     "preview destroy driver",
                 ),
                 "preview_verification": (
-                    control_plane_service._VERIREEL_PREVIEW_VERIFICATION_ROUTE,
-                    control_plane_service.VeriReelPreviewVerificationEnvelope,
+                    verireel_read_http._VERIREEL_PREVIEW_VERIFICATION_ROUTE,
+                    verireel_read_http.VeriReelPreviewVerificationEnvelope,
                     "preview verification",
                 ),
             },
         )
 
-    def test_route_policy_sets_use_execution_metadata(self) -> None:
+    def test_native_route_set_includes_generic_web_routes(self) -> None:
         self.assertIn(
             "/v1/drivers/generic-web/prod-promotion",
             native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
@@ -786,12 +772,8 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
         )
         self.assertIn(
-            control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
-            control_plane_service._GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS,
-        )
-        self.assertNotIn(
-            control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
-            control_plane_service._GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS,
+            generic_web_preview_dispatch._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
+            native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
         )
 
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
