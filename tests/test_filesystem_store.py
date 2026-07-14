@@ -1,7 +1,10 @@
 import json
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from click.testing import CliRunner
 from pydantic import ValidationError
@@ -47,6 +50,12 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate_ref,
     build_merge_train_batch_id,
     build_merge_train_batch_landing_plan,
+)
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerLeaseHeldError,
+    MergeTrainControllerLeaseLostError,
+    MergeTrainControllerStateRecord,
+    build_merge_train_controller_key,
 )
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
@@ -258,6 +267,47 @@ def _merge_train_batch_candidate_record(
             created_at="2026-05-14T00:59:00Z",
             updated_at=updated_at,
         ),
+    )
+
+
+def _merge_train_controller_state_record(
+    *,
+    updated_at: str = "2026-05-14T01:00:00Z",
+    status: str = "running",
+) -> MergeTrainControllerStateRecord:
+    repository = "example/merge-train-repo"
+    base_branch = "main"
+    return MergeTrainControllerStateRecord(
+        controller_key=build_merge_train_controller_key(
+            repository=repository,
+            base_branch=base_branch,
+        ),
+        repository=repository,
+        base_branch=base_branch,
+        policy_key=f"{repository}:{base_branch}",
+        policy_sha256="policy-digest",
+        status=status,  # type: ignore[arg-type]
+        updated_at=updated_at,
+        lease_owner=(
+            "github-actions:example/merge-train-repo:run-1001" if status == "running" else ""
+        ),
+        lease_acquired_at="2026-05-14T00:59:00Z" if status == "running" else "",
+        lease_expires_at="2026-05-14T01:05:00Z" if status == "running" else "",
+        heartbeat_at=updated_at if status == "running" else "",
+        active_action="land_batch" if status == "running" else "",
+        active_phase="cleanup_candidate_ref" if status == "running" else "",
+        active_record_id="landing-record" if status == "running" else "",
+        step_payload=(
+            {"candidate_ref": "refs/heads/launchplane/train/example/merge-train-repo/main/batch-1"}
+            if status == "running"
+            else {}
+        ),
+        last_owner="github-actions:example/merge-train-repo:run-1000",
+        last_action="plan_landing",
+        last_phase="planned",
+        last_record_id="candidate-record",
+        last_transition_at="2026-05-14T00:58:00Z",
+        reconciliation_status="clean",
     )
 
 
@@ -1352,6 +1402,188 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         )
         self.assertEqual([record.record_id for record in listed_records], [active_record.record_id])
         self.assertEqual(listed_records[0].candidate.entries[1].pull_request_number, 11)
+
+    def test_write_and_list_merge_train_controller_state_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            active_record = _merge_train_controller_state_record()
+            idle_record = _merge_train_controller_state_record(
+                updated_at="2026-05-14T00:55:00Z",
+                status="idle",
+            )
+
+            store.write_merge_train_controller_state_record(idle_record)
+            written_path = store.write_merge_train_controller_state_record(active_record)
+            listed_records = store.list_merge_train_controller_state_records(
+                repository="example/merge-train-repo",
+                base_branch="main",
+                status="running",
+            )
+            loaded_record = store.read_merge_train_controller_state_record(
+                active_record.controller_key
+            )
+
+        self.assertEqual(
+            written_path.relative_to(state_dir).as_posix(),
+            "launchplane_merge_train_controller_states/"
+            "47c1c59e746a500135a5270dd7d31530a328e8a715dcd46c7bab1c3823a31f76.json",
+        )
+        self.assertEqual(
+            [record.controller_key for record in listed_records],
+            [active_record.controller_key],
+        )
+        self.assertEqual(loaded_record.active_phase, "cleanup_candidate_ref")
+        self.assertEqual(
+            loaded_record.step_payload["candidate_ref"],
+            "refs/heads/launchplane/train/example/merge-train-repo/main/batch-1",
+        )
+
+    def test_merge_train_controller_state_with_slash_branch_is_listed(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            acquired = store.acquire_merge_train_controller_state_record(
+                repository="example/merge-train-repo",
+                base_branch="release/1.x",
+                policy_key="example/merge-train-repo:release/1.x",
+                policy_sha256="policy-sha",
+                lease_owner="controller-a",
+                lease_seconds=30,
+            )
+
+            listed_records = store.list_merge_train_controller_state_records(
+                repository="example/merge-train-repo",
+                base_branch="release/1.x",
+            )
+
+        self.assertEqual(listed_records, (acquired,))
+
+    def test_merge_train_controller_acquire_is_atomic_across_store_instances(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            barrier = threading.Barrier(2)
+
+            def acquire(owner: str) -> MergeTrainControllerStateRecord | BaseException:
+                store = FilesystemRecordStore(state_dir=state_dir)
+                try:
+                    barrier.wait(timeout=5)
+                    return store.acquire_merge_train_controller_state_record(
+                        repository="example/merge-train-repo",
+                        base_branch="main",
+                        policy_key="example/merge-train-repo:main",
+                        policy_sha256="policy-sha",
+                        lease_owner=owner,
+                        lease_seconds=30,
+                    )
+                except BaseException as error:  # noqa: BLE001
+                    return error
+
+            with (
+                patch(
+                    "control_plane.storage.filesystem._utc_now_timestamp",
+                    return_value="2026-05-14T01:00:00Z",
+                ),
+                ThreadPoolExecutor(max_workers=2) as executor,
+            ):
+                results = tuple(executor.map(acquire, ("controller-a", "controller-b")))
+
+        self.assertEqual(
+            sum(isinstance(result, MergeTrainControllerStateRecord) for result in results),
+            1,
+        )
+        self.assertEqual(
+            sum(isinstance(result, MergeTrainControllerLeaseHeldError) for result in results),
+            1,
+        )
+
+    def test_merge_train_controller_cas_uses_storage_clock_for_expiry(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            with patch(
+                "control_plane.storage.filesystem._utc_now_timestamp",
+                return_value="2026-05-14T01:00:00Z",
+            ):
+                acquired = store.acquire_merge_train_controller_state_record(
+                    repository="example/merge-train-repo",
+                    base_branch="main",
+                    policy_key="example/merge-train-repo:main",
+                    policy_sha256="policy-sha",
+                    lease_owner="controller-a",
+                    lease_seconds=1,
+                )
+            with (
+                patch(
+                    "control_plane.storage.filesystem._utc_now_timestamp",
+                    return_value="2026-05-14T01:00:02Z",
+                ),
+                self.assertRaisesRegex(
+                    MergeTrainControllerLeaseLostError,
+                    "lease expired",
+                ),
+            ):
+                store.compare_and_set_merge_train_controller_state_record(
+                    record=acquired.model_copy(
+                        update={
+                            "updated_at": "2026-05-14T01:00:00Z",
+                            "active_action": "build_candidate",
+                            "active_phase": "build_candidate_ref",
+                        }
+                    ),
+                    expected_lease_owner=acquired.lease_owner,
+                    expected_lease_acquired_at=acquired.lease_acquired_at,
+                    lease_seconds=30,
+                )
+
+    def test_merge_train_controller_operator_required_state_is_retried_by_service(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            with patch(
+                "control_plane.storage.filesystem._utc_now_timestamp",
+                side_effect=(
+                    "2026-05-14T01:00:00Z",
+                    "2026-05-14T01:00:01Z",
+                    "2026-05-14T01:00:02Z",
+                ),
+            ):
+                acquired = store.acquire_merge_train_controller_state_record(
+                    repository="example/merge-train-repo",
+                    base_branch="main",
+                    policy_key="example/merge-train-repo:main",
+                    policy_sha256="policy-sha",
+                    lease_owner="controller-a",
+                    lease_seconds=30,
+                )
+                store.compare_and_set_merge_train_controller_state_record(
+                    record=acquired.model_copy(
+                        update={
+                            "status": "reconcile_required",
+                            "lease_owner": "",
+                            "lease_acquired_at": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "active_action": "execute_stack_collapse",
+                            "active_phase": "merge_stack_branches",
+                            "reconciliation_status": "required",
+                            "reconciliation_detail": ("operator_required:github_request_rejected"),
+                        }
+                    ),
+                    expected_lease_owner=acquired.lease_owner,
+                    expected_lease_acquired_at=acquired.lease_acquired_at,
+                    lease_seconds=30,
+                )
+                adopted = store.acquire_merge_train_controller_state_record(
+                    repository="example/merge-train-repo",
+                    base_branch="main",
+                    policy_key="example/merge-train-repo:main",
+                    policy_sha256="policy-sha",
+                    lease_owner="controller-b",
+                    lease_seconds=30,
+                )
+
+        self.assertEqual(adopted.lease_owner, "controller-b")
+        self.assertEqual(adopted.reconciliation_status, "adopted")
+        self.assertEqual(adopted.active_phase, "merge_stack_branches")
+        self.assertIn("operator_required:github_request_rejected", adopted.reconciliation_detail)
 
     def test_write_and_list_merge_train_batch_landing_plan_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

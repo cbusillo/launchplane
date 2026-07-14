@@ -353,6 +353,19 @@ an ORM column/table or remains only in the evidence payload.
   and intent source. The initial intent source is the root PR's merge-train
   enqueue label; no file-backed or hardcoded repository config participates in
   live collapse authority.
+- Merge train controller state: modeled fields are `controller_key`,
+  `repository`, `base_branch`, `status`, `policy_key`, `policy_sha256`,
+  `updated_at`, `lease_owner`, `lease_expires_at`, `active_action`, and
+  `active_phase`. The payload carries the active record id, pull-request scope,
+  step payload, last-transition evidence, and reconciliation status/detail.
+  This row is Launchplane's repository/base-branch controller fence and resume
+  checkpoint: it is the durable owner/phase record that lets a restarted
+  controller adopt already-observed GitHub effects instead of continuing from
+  stale in-memory assumptions. PostgreSQL acquisition and transition writes use
+  one repository/base advisory lock, row-level compare-and-set checks, and the
+  database clock for lease expiry; a stale owner cannot overwrite or release a
+  successor lease. Runtime repository/base authority still comes from the active
+  merge-train policy record and live request scope, not from checked-in config.
 - Dokploy target id: modeled fields are `context`, `instance`, `target_id`, and
   `updated_at`. Provider lookup/import evidence stays payload-only.
 - Dokploy target: modeled fields are `context`, `instance`, and `updated_at`.

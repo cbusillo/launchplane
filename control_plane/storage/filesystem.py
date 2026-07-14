@@ -7,6 +7,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
+from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Literal, TypeVar
@@ -41,6 +42,12 @@ from control_plane.contracts.ingress_canary_route_record import IngressCanaryRou
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerLeaseHeldError,
+    MergeTrainControllerLeaseLostError,
+    MergeTrainControllerStateRecord,
+    build_merge_train_controller_resume_detail,
+)
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
@@ -141,6 +148,20 @@ class _AuthorityBundleStageManifest(BaseModel):
 
 def _utc_now_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _lease_expires_at(*, observed_at: str, lease_seconds: int) -> str:
+    if lease_seconds < 1 or lease_seconds > 86_400:
+        raise ValueError("Merge train controller lease_seconds must be between 1 and 86400.")
+    parsed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (
+        (parsed.astimezone(timezone.utc) + timedelta(seconds=lease_seconds))
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 class FilesystemRecordStore:
@@ -795,6 +816,187 @@ class FilesystemRecordStore:
         return self._write_model(
             "launchplane_merge_train_batch_candidates", record.record_id, record
         )
+
+    def write_merge_train_controller_state_record(
+        self, record: MergeTrainControllerStateRecord
+    ) -> Path:
+        record_type = "launchplane_merge_train_controller_states"
+        with self._exclusive_record_lock(record_type, record.controller_key):
+            return self._write_model_locked(
+                record_type,
+                _merge_train_controller_storage_id(record.controller_key),
+                record,
+            )
+
+    def read_merge_train_controller_state_record(
+        self, controller_key: str
+    ) -> MergeTrainControllerStateRecord:
+        return MergeTrainControllerStateRecord.model_validate(
+            self._read_model(
+                MergeTrainControllerStateRecord,
+                "launchplane_merge_train_controller_states",
+                _merge_train_controller_storage_id(controller_key),
+            ).model_dump(mode="json")
+        )
+
+    def list_merge_train_controller_state_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeTrainControllerStateRecord,
+                "launchplane_merge_train_controller_states",
+            )
+            if (not repository or record.repository == repository)
+            and (not base_branch or record.base_branch == base_branch)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.controller_key), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def acquire_merge_train_controller_state_record(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        policy_key: str,
+        policy_sha256: str,
+        lease_owner: str,
+        lease_seconds: int,
+    ) -> MergeTrainControllerStateRecord:
+        from control_plane.contracts.merge_train_controller_state import (
+            build_merge_train_controller_key,
+            build_merge_train_controller_state_record,
+        )
+
+        record_type = "launchplane_merge_train_controller_states"
+        controller_key = build_merge_train_controller_key(
+            repository=repository,
+            base_branch=base_branch,
+        )
+        storage_id = _merge_train_controller_storage_id(controller_key)
+        with self._exclusive_record_lock(record_type, controller_key):
+            observed_at = _utc_now_timestamp()
+            record_path = self._record_path(record_type, storage_id)
+            current_record = (
+                self._read_model_locked(
+                    MergeTrainControllerStateRecord,
+                    record_type,
+                    storage_id,
+                )
+                if record_path.exists()
+                else build_merge_train_controller_state_record(
+                    repository=repository,
+                    base_branch=base_branch,
+                    policy_key=policy_key,
+                    policy_sha256=policy_sha256,
+                    updated_at=observed_at,
+                )
+            )
+            if (
+                current_record.status == "running"
+                and current_record.lease_expires_at
+                and current_record.lease_expires_at > observed_at
+            ):
+                raise MergeTrainControllerLeaseHeldError(
+                    "merge train controller lease is held by another owner"
+                )
+            adopting = current_record.status == "reconcile_required" or bool(
+                current_record.active_action and current_record.active_phase
+            )
+            leased_record = current_record.model_copy(
+                update={
+                    "policy_key": policy_key,
+                    "policy_sha256": policy_sha256,
+                    "status": "running",
+                    "updated_at": observed_at,
+                    "lease_owner": lease_owner,
+                    "lease_acquired_at": observed_at,
+                    "lease_expires_at": _lease_expires_at(
+                        observed_at=observed_at,
+                        lease_seconds=lease_seconds,
+                    ),
+                    "heartbeat_at": observed_at,
+                    "active_action": current_record.active_action or "controller_run_once",
+                    "active_phase": current_record.active_phase or "select_next_action",
+                    "reconciliation_status": "adopted" if adopting else "clean",
+                    "reconciliation_detail": (
+                        build_merge_train_controller_resume_detail(current_record)
+                        if adopting
+                        else ""
+                    ),
+                }
+            )
+            leased_record = MergeTrainControllerStateRecord.model_validate(
+                leased_record.model_dump(mode="json")
+            )
+            self._write_model_locked(record_type, storage_id, leased_record)
+            return leased_record
+
+    def compare_and_set_merge_train_controller_state_record(
+        self,
+        *,
+        record: MergeTrainControllerStateRecord,
+        expected_lease_owner: str,
+        expected_lease_acquired_at: str,
+        lease_seconds: int,
+    ) -> MergeTrainControllerStateRecord:
+        record_type = "launchplane_merge_train_controller_states"
+        storage_id = _merge_train_controller_storage_id(record.controller_key)
+        with self._exclusive_record_lock(record_type, record.controller_key):
+            observed_at = _utc_now_timestamp()
+            try:
+                current_record = self._read_model_locked(
+                    MergeTrainControllerStateRecord,
+                    record_type,
+                    storage_id,
+                )
+            except FileNotFoundError as error:
+                raise MergeTrainControllerLeaseLostError(
+                    "merge train controller state is missing"
+                ) from error
+            if current_record.lease_owner != expected_lease_owner:
+                raise MergeTrainControllerLeaseLostError(
+                    "merge train controller lease owner changed"
+                )
+            if current_record.lease_acquired_at != expected_lease_acquired_at:
+                raise MergeTrainControllerLeaseLostError(
+                    "merge train controller lease token changed"
+                )
+            if (
+                not current_record.lease_expires_at
+                or current_record.lease_expires_at <= observed_at
+            ):
+                raise MergeTrainControllerLeaseLostError("merge train controller lease expired")
+            persisted_record = record.model_copy(
+                update={
+                    "updated_at": observed_at,
+                    **(
+                        {
+                            "heartbeat_at": observed_at,
+                            "lease_expires_at": _lease_expires_at(
+                                observed_at=observed_at,
+                                lease_seconds=lease_seconds,
+                            ),
+                        }
+                        if record.status == "running"
+                        else {"last_transition_at": observed_at}
+                    ),
+                }
+            )
+            persisted_record = MergeTrainControllerStateRecord.model_validate(
+                persisted_record.model_dump(mode="json")
+            )
+            self._write_model_locked(record_type, storage_id, persisted_record)
+            return persisted_record
 
     def list_merge_train_batch_candidate_records(
         self,
@@ -3343,6 +3545,10 @@ def _record_id_from_parts(*parts: str) -> str:
     raw_id = "-".join(normalized_parts)
     digest = hashlib.sha256("\x1f".join(normalized_parts).encode("utf-8")).hexdigest()[:12]
     return raw_id.replace("/", "-").replace("\\", "-") + f"-{digest}"
+
+
+def _merge_train_controller_storage_id(controller_key: str) -> str:
+    return hashlib.sha256(controller_key.encode("utf-8")).hexdigest()
 
 
 def _edge_endpoint_record_id(endpoint_key: str) -> str:

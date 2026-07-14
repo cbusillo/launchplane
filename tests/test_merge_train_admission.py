@@ -11,6 +11,10 @@ from control_plane.contracts.merge_train_batch import build_merge_train_batch_ca
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    build_merge_train_controller_key,
+)
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.merge_train_stack_collapse import (
@@ -63,11 +67,13 @@ class _RunHistoryStore:
         candidate_records: tuple[MergeTrainBatchCandidateRecord, ...] = (),
         landing_plan_records: tuple[MergeTrainBatchLandingPlanRecord, ...] = (),
         stack_collapse_plan_records: tuple[MergeTrainStackCollapsePlanRecord, ...] = (),
+        controller_state_records: tuple[MergeTrainControllerStateRecord, ...] = (),
     ) -> None:
         self.latest_run = latest_run
         self.candidate_records = candidate_records
         self.landing_plan_records = landing_plan_records
         self.stack_collapse_plan_records = stack_collapse_plan_records
+        self.controller_state_records = controller_state_records
         self.requests: list[tuple[str, str]] = []
 
     def latest_merge_train_run_record(
@@ -105,6 +111,16 @@ class _RunHistoryStore:
         limit: int | None = None,
     ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
         return self.stack_collapse_plan_records
+
+    def list_merge_train_controller_state_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        return self.controller_state_records
 
 
 class MergeTrainAdmissionTests(unittest.TestCase):
@@ -509,10 +525,84 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             42,
         )
 
-    def test_controller_status_omits_latest_dry_run_summary_for_mutations(self) -> None:
-        store = _RunHistoryStore(
-            _run_record(recorded_at="2026-05-09T02:10:00Z", mutation="wait")
+    def test_controller_status_includes_latest_controller_state(self) -> None:
+        latest_run = _idle_run_record(recorded_at="2026-05-09T02:10:00Z")
+        controller_state = MergeTrainControllerStateRecord(
+            controller_key=build_merge_train_controller_key(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+            ),
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            policy_key="cbusillo/sellyouroutboard:main",
+            policy_sha256="policy-sha",
+            status="reconcile_required",
+            updated_at="2026-05-09T02:11:00Z",
+            active_action="land_batch",
+            active_phase="cleanup_candidate_ref",
+            active_record_id="landing-record",
+            reconciliation_status="required",
+            reconciliation_detail="controller_exception",
+            step_payload={"candidate_ref": "refs/heads/launchplane/train/x"},
         )
+        store = _RunHistoryStore(
+            latest_run,
+            controller_state_records=(controller_state,),
+        )
+
+        read_model = build_merge_train_controller_status_read_model(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            generated_at="2026-05-09T02:12:00Z",
+        )
+
+        self.assertIsNotNone(read_model.controller_state)
+        assert read_model.controller_state is not None
+        self.assertEqual(read_model.controller_state.active_phase, "cleanup_candidate_ref")
+        self.assertEqual(read_model.controller_state.reconciliation_status, "required")
+
+    def test_controller_status_reports_lease_and_heartbeat_age(self) -> None:
+        controller_state = MergeTrainControllerStateRecord(
+            controller_key=build_merge_train_controller_key(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+            ),
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            policy_key="cbusillo/sellyouroutboard:main",
+            policy_sha256="policy-sha",
+            status="running",
+            updated_at="2026-05-09T02:11:00Z",
+            lease_owner="controller-a",
+            lease_acquired_at="2026-05-09T02:10:00Z",
+            lease_expires_at="2026-05-09T02:15:00Z",
+            heartbeat_at="2026-05-09T02:11:00Z",
+            active_action="land_batch",
+            active_phase="merge_pull_request",
+            active_pull_request_number=42,
+        )
+        store = _RunHistoryStore(
+            _idle_run_record(recorded_at="2026-05-09T02:10:00Z"),
+            controller_state_records=(controller_state,),
+        )
+
+        read_model = build_merge_train_controller_status_read_model(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            generated_at="2026-05-09T02:12:00Z",
+        )
+
+        self.assertIsNotNone(read_model.controller_diagnostics)
+        assert read_model.controller_diagnostics is not None
+        self.assertEqual(read_model.controller_diagnostics.owner, "controller-a")
+        self.assertEqual(read_model.controller_diagnostics.active_phase, "merge_pull_request")
+        self.assertEqual(read_model.controller_diagnostics.lease_age_seconds, 120)
+        self.assertEqual(read_model.controller_diagnostics.heartbeat_age_seconds, 60)
+
+    def test_controller_status_omits_latest_dry_run_summary_for_mutations(self) -> None:
+        store = _RunHistoryStore(_run_record(recorded_at="2026-05-09T02:10:00Z", mutation="wait"))
 
         read_model = build_merge_train_controller_status_read_model(
             store=store,

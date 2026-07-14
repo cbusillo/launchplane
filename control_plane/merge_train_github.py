@@ -1,5 +1,5 @@
 import json
-from typing import Protocol
+from typing import Callable, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapseBranchClient
@@ -79,17 +80,28 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self.transport = transport
 
     def build_batch_candidate(
-        self, *, candidate: MergeTrainBatchCandidate
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        checkpoint: (
+            Callable[[MergeTrainBatchCandidate, MergeTrainBatchEntry | None, str], None] | None
+        ) = None,
     ) -> MergeTrainBatchCandidate:
         repository_path = _repository_path(candidate.repository)
         candidate_branch = _branch_name_from_ref(candidate.candidate_ref)
+        if checkpoint is not None:
+            checkpoint(candidate, None, "reset_candidate_ref")
         self._create_or_reset_reference(
             repository_path=repository_path,
             reference=candidate.candidate_ref,
             sha=candidate.base_sha,
         )
+        if checkpoint is not None:
+            checkpoint(candidate, None, "candidate_ref_ready")
         candidate_sha = candidate.base_sha
-        for entry in candidate.entries:
+        for entry_index, entry in enumerate(candidate.entries, start=1):
+            if checkpoint is not None:
+                checkpoint(candidate, entry, "merge_candidate_entry")
             payload = self.transport.request(
                 method="POST",
                 path=f"/repos/{repository_path}/merges",
@@ -103,12 +115,24 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 },
             )
             if payload is None:
+                if checkpoint is not None:
+                    checkpoint(
+                        candidate.model_copy(update={"candidate_sha": candidate_sha}),
+                        entry,
+                        f"candidate_entry_merged:{entry_index}",
+                    )
                 continue
             if not isinstance(payload, dict):
                 raise MergeTrainGitHubError("GitHub merge response must be a JSON object.")
             candidate_sha = _required_text(
                 payload.get("sha"), "GitHub merge response requires sha."
             )
+            if checkpoint is not None:
+                checkpoint(
+                    candidate.model_copy(update={"candidate_sha": candidate_sha}),
+                    entry,
+                    f"candidate_entry_merged:{entry_index}",
+                )
         return candidate.model_copy(
             update={"candidate_sha": candidate_sha, "status": "ready_for_checks"}
         )
@@ -136,12 +160,17 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
 
     def land_batch_candidate(
-        self, *, landing_plan: MergeTrainBatchLandingPlan
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        checkpoint: (
+            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
+        ) = None,
     ) -> MergeTrainBatchLandingPlan:
         repository_path = _repository_path(landing_plan.repository)
         expected_base_sha = landing_plan.entries[0].expected_base_sha
         merged_entries = []
-        for entry in landing_plan.entries:
+        for entry_index, entry in enumerate(landing_plan.entries):
             current_base_sha = _base_branch_sha(
                 transport=self.transport,
                 repository_path=repository_path,
@@ -156,6 +185,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     already_merged_entry = self._already_merged_landing_entry(
                         repository_path=repository_path,
                         entry=entry,
+                        expected_base_ref=landing_plan.base_branch,
                     )
                     if already_merged_entry is None:
                         raise MergeTrainGitHubStaleHeadError(
@@ -166,6 +196,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                             "Pull request merge commit does not match the batch landing plan.",
                             status_code=409,
                         )
+                    if not self.branch_contains_commit(
+                        repository=landing_plan.repository,
+                        branch_ref=landing_plan.base_branch,
+                        commit_sha=merge_commit_sha,
+                    ):
+                        raise MergeTrainGitHubStaleHeadError(
+                            "Merged pull request commit is not contained by the target branch.",
+                            status_code=409,
+                        )
                 merged_entries.append(entry)
                 expected_base_sha = merge_commit_sha
                 continue
@@ -173,33 +212,87 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 already_merged_entry = self._already_merged_landing_entry(
                     repository_path=repository_path,
                     entry=entry,
+                    expected_base_ref=landing_plan.base_branch,
                 )
                 if already_merged_entry is None:
                     raise MergeTrainGitHubStaleHeadError(
                         "Base branch moved outside the batch landing plan.", status_code=409
                     )
+                if not self.branch_contains_commit(
+                    repository=landing_plan.repository,
+                    branch_ref=landing_plan.base_branch,
+                    commit_sha=already_merged_entry.merge_commit_sha,
+                ):
+                    raise MergeTrainGitHubStaleHeadError(
+                        "Merged pull request commit is not contained by the target branch.",
+                        status_code=409,
+                    )
                 merged_entries.append(already_merged_entry)
                 expected_base_sha = already_merged_entry.merge_commit_sha
+                if checkpoint is not None:
+                    checkpoint(
+                        landing_plan.model_copy(
+                            update={
+                                "entries": tuple(merged_entries)
+                                + landing_plan.entries[entry_index + 1 :]
+                            }
+                        ),
+                        already_merged_entry,
+                        "entry_merged",
+                    )
                 continue
+            self._validate_open_landing_pull_request(
+                repository_path=repository_path,
+                entry=entry,
+                expected_base_ref=landing_plan.base_branch,
+                expected_base_sha=expected_base_sha,
+            )
+            if checkpoint is not None:
+                checkpoint(
+                    landing_plan.model_copy(
+                        update={
+                            "entries": tuple(merged_entries) + landing_plan.entries[entry_index:]
+                        }
+                    ),
+                    entry,
+                    "merge_entry",
+                )
             merge_commit_sha = self.merge_pull_request(
                 repository=landing_plan.repository,
                 pull_request_number=entry.pull_request_number,
                 head_sha=entry.expected_head_sha,
                 merge_method=entry.merge_method,
             )
-            merged_entries.append(
-                entry.model_copy(update={"status": "merged", "merge_commit_sha": merge_commit_sha})
+            merged_entry = entry.model_copy(
+                update={"status": "merged", "merge_commit_sha": merge_commit_sha}
             )
+            merged_entries.append(merged_entry)
             expected_base_sha = merge_commit_sha
+            if checkpoint is not None:
+                checkpoint(
+                    landing_plan.model_copy(
+                        update={
+                            "entries": tuple(merged_entries)
+                            + landing_plan.entries[entry_index + 1 :]
+                        }
+                    ),
+                    merged_entry,
+                    "entry_merged",
+                )
         current_base_sha = _base_branch_sha(
             transport=self.transport,
             repository_path=repository_path,
             base_branch=landing_plan.base_branch,
         )
         if current_base_sha != expected_base_sha:
-            raise MergeTrainGitHubStaleHeadError(
-                "Base branch moved outside the batch landing plan.", status_code=409
-            )
+            if not self.branch_contains_commit(
+                repository=landing_plan.repository,
+                branch_ref=landing_plan.base_branch,
+                commit_sha=expected_base_sha,
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Base branch moved outside the batch landing plan.", status_code=409
+                )
         return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
 
     def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
@@ -209,8 +302,139 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             reference=landing_plan.candidate_ref,
         )
 
+    def candidate_ref_exists(self, *, repository: str, reference: str) -> bool:
+        repository_path = _repository_path(repository)
+        try:
+            self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/git/ref/{_reference_path(reference)}",
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code == 404:
+                return False
+            raise
+        return True
+
+    def pull_request_has_label(
+        self, *, repository: str, pull_request_number: int, label: str
+    ) -> bool:
+        pull_request = self._pull_request_detail(
+            repository=repository,
+            pull_request_number=pull_request_number,
+        )
+        labels = pull_request.get("labels")
+        if not isinstance(labels, list):
+            return False
+        normalized_label = _required_value(label, "GitHub label is required.")
+        for label_payload in labels:
+            if not isinstance(label_payload, dict):
+                continue
+            if str(label_payload.get("name") or "").strip() == normalized_label:
+                return True
+        return False
+
+    def pull_request_is_closed(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> bool:
+        pull_request = self._pull_request_detail(
+            repository=repository,
+            pull_request_number=pull_request_number,
+        )
+        head = _json_object(pull_request.get("head"), "GitHub pull request head")
+        head_sha = _required_text(head.get("sha"), "GitHub pull request head requires sha.")
+        if head_sha != _required_value(
+            expected_head_sha, "Expected pull request head SHA is required."
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Stack child PR moved outside the stored collapse plan.",
+                status_code=409,
+            )
+        return _pull_request_state(str(pull_request.get("state") or "")) == "closed"
+
+    def find_pull_request_comment_url(
+        self, *, repository: str, pull_request_number: int, body_contains: str
+    ) -> str:
+        repository_path = _repository_path(repository)
+        payload = self.transport.request(
+            method="GET",
+            path=f"/repos/{repository_path}/issues/{pull_request_number}/comments",
+        )
+        if not isinstance(payload, list):
+            raise MergeTrainGitHubError("GitHub issue comments response must be a JSON list.")
+        needle = _required_value(body_contains, "GitHub comment match text is required.")
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            body = str(item.get("body") or "")
+            if needle in body:
+                return str(item.get("html_url") or "").strip()
+        return ""
+
+    def pull_request_is_merged(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> str:
+        pull_request = self._pull_request_detail(
+            repository=repository,
+            pull_request_number=pull_request_number,
+        )
+        if pull_request.get("merged") is not True:
+            return ""
+        head = _json_object(pull_request.get("head"), "GitHub pull request head")
+        head_sha = _required_text(head.get("sha"), "GitHub pull request head requires sha.")
+        if head_sha != _required_value(
+            expected_head_sha, "Expected pull request head SHA is required."
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Pull request was merged with a different head SHA than the batch landing plan.",
+                status_code=409,
+            )
+        return _required_text(
+            pull_request.get("merge_commit_sha"),
+            "Merged GitHub pull request requires merge_commit_sha.",
+        )
+
+    def branch_contains_commit(self, *, repository: str, branch_ref: str, commit_sha: str) -> bool:
+        repository_path = _repository_path(repository)
+        branch_name = quote(_required_value(branch_ref, "GitHub branch ref is required."), safe="")
+        normalized_commit_sha = quote(
+            _required_value(commit_sha, "GitHub commit SHA is required."),
+            safe="",
+        )
+        payload = _json_object(
+            self.transport.request(
+                method="GET",
+                path=(f"/repos/{repository_path}/compare/{normalized_commit_sha}...{branch_name}"),
+            ),
+            "GitHub compare response",
+        )
+        return str(payload.get("status") or "").strip() in {"ahead", "identical"}
+
+    def branch_head_sha(self, *, repository: str, branch_ref: str) -> str:
+        repository_path = _repository_path(repository)
+        return _base_branch_sha(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_branch=_required_value(branch_ref, "GitHub branch ref is required."),
+        )
+
+    def _pull_request_detail(
+        self, *, repository: str, pull_request_number: int
+    ) -> dict[str, object]:
+        repository_path = _repository_path(repository)
+        return _json_object(
+            self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/pulls/{pull_request_number}",
+            ),
+            "GitHub pull request detail response",
+        )
+
     def _already_merged_landing_entry(
-        self, *, repository_path: str, entry: MergeTrainBatchLandingEntry
+        self,
+        *,
+        repository_path: str,
+        entry: MergeTrainBatchLandingEntry,
+        expected_base_ref: str,
     ) -> MergeTrainBatchLandingEntry | None:
         pull_request = _json_object(
             self.transport.request(
@@ -223,6 +447,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             return None
         if pull_request.get("merged") is not True:
             return None
+        base = _json_object(pull_request.get("base"), "GitHub pull request base")
+        base_ref = _required_text(base.get("ref"), "GitHub pull request base requires ref.")
+        if base_ref != _required_value(
+            expected_base_ref, "Expected pull request base ref is required."
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Pull request was merged into a different base branch than the batch landing plan.",
+                status_code=409,
+            )
         head = _json_object(pull_request.get("head"), "GitHub pull request head")
         head_sha = _required_text(head.get("sha"), "GitHub pull request head requires sha.")
         if head_sha != entry.expected_head_sha:
@@ -235,6 +468,48 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             "Merged GitHub pull request requires merge_commit_sha.",
         )
         return entry.model_copy(update={"status": "merged", "merge_commit_sha": merge_commit_sha})
+
+    def _validate_open_landing_pull_request(
+        self,
+        *,
+        repository_path: str,
+        entry: MergeTrainBatchLandingEntry,
+        expected_base_ref: str,
+        expected_base_sha: str,
+    ) -> None:
+        pull_request = _json_object(
+            self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/pulls/{entry.pull_request_number}",
+            ),
+            "GitHub pull request detail response",
+        )
+        if _pull_request_state(str(pull_request.get("state") or "")) != "open":
+            raise MergeTrainGitHubStaleHeadError(
+                "Pull request is no longer open for batch landing.", status_code=409
+            )
+        head = _json_object(pull_request.get("head"), "GitHub pull request head")
+        head_sha = _required_text(head.get("sha"), "GitHub pull request head requires sha.")
+        if head_sha != entry.expected_head_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Pull request head moved outside the batch landing plan.", status_code=409
+            )
+        base = _json_object(pull_request.get("base"), "GitHub pull request base")
+        base_ref = _required_text(base.get("ref"), "GitHub pull request base requires ref.")
+        base_sha = _required_text(base.get("sha"), "GitHub pull request base requires sha.")
+        if base_ref != _required_value(
+            expected_base_ref, "Expected pull request base ref is required."
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Pull request targets a different base branch than the batch landing plan.",
+                status_code=409,
+            )
+        if base_sha != _required_value(
+            expected_base_sha, "Expected pull request base SHA is required."
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Pull request base moved outside the batch landing plan.", status_code=409
+            )
 
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
@@ -316,15 +591,26 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 "Stack child PR moved outside the stored collapse plan.",
                 status_code=409,
             )
-        self.transport.request(
-            method="PATCH",
-            path=pull_request_path,
-            body={"state": "closed"},
+        closed_pull_request = _json_object(
+            self.transport.request(
+                method="PATCH",
+                path=pull_request_path,
+                body={"state": "closed"},
+            ),
+            "GitHub close pull request response",
         )
-        closed_head_sha = self._pull_request_head_sha(pull_request_path=pull_request_path)
+        closed_head = _json_object(closed_pull_request.get("head"), "GitHub pull request head")
+        closed_head_sha = _required_text(
+            closed_head.get("sha"), "GitHub pull request head requires sha."
+        )
         if closed_head_sha != expected_sha:
             raise MergeTrainGitHubStaleHeadError(
                 "Stack child PR moved while Launchplane was closing it.",
+                status_code=409,
+            )
+        if _pull_request_state(str(closed_pull_request.get("state") or "")) != "closed":
+            raise MergeTrainGitHubStaleHeadError(
+                "Stack child PR did not remain closed.",
                 status_code=409,
             )
 
@@ -335,6 +621,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        protected_base_ref: str,
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -343,7 +630,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         normalized_parent_ref = _required_value(
             parent_head_ref, "Stack collapse parent head ref is required."
         )
-        if normalized_parent_ref in {"main", "master"}:
+        if normalized_parent_ref == _required_value(
+            protected_base_ref, "Stack collapse protected base ref is required."
+        ):
             raise MergeTrainGitHubError("Stack collapse cannot mutate a protected base branch.")
         current_parent_sha = _base_branch_sha(
             transport=self.transport,
@@ -366,15 +655,72 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 "head": _required_value(
                     child_head_sha, "Stack collapse child head SHA is required."
                 ),
-                "commit_message": (
-                    f"Launchplane stack collapse {collapse_id}: merge PR "
-                    f"#{child_pull_request_number} into PR #{parent_pull_request_number}"
+                "commit_message": _stack_collapse_commit_message(
+                    collapse_id=collapse_id,
+                    child_pull_request_number=child_pull_request_number,
+                    parent_pull_request_number=parent_pull_request_number,
                 ),
             },
         )
         if not isinstance(payload, dict):
             raise MergeTrainGitHubError("GitHub stack merge response must be a JSON object.")
         return _required_text(payload.get("sha"), "GitHub stack merge response requires sha.")
+
+    def find_stack_child_merge_commit(
+        self,
+        *,
+        repository: str,
+        child_head_sha: str,
+        expected_parent_head_sha: str,
+        parent_head_ref: str,
+        collapse_id: str,
+        child_pull_request_number: int,
+        parent_pull_request_number: int,
+    ) -> str:
+        repository_path = _repository_path(repository)
+        current_parent_sha = _base_branch_sha(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_branch=_required_value(
+                parent_head_ref,
+                "Stack collapse parent head ref is required.",
+            ),
+        )
+        expected_parent_sha = _required_value(
+            expected_parent_head_sha,
+            "Stack collapse expected parent SHA is required.",
+        )
+        if current_parent_sha == expected_parent_sha:
+            return ""
+        payload = _json_object(
+            self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/commits/{quote(current_parent_sha, safe='')}",
+            ),
+            "GitHub commit response",
+        )
+        commit = _json_object(payload.get("commit"), "GitHub commit detail")
+        message = str(commit.get("message") or "").strip()
+        parents = payload.get("parents")
+        parent_shas = (
+            {str(parent.get("sha") or "").strip() for parent in parents if isinstance(parent, dict)}
+            if isinstance(parents, list)
+            else set()
+        )
+        expected_message = _stack_collapse_commit_message(
+            collapse_id=collapse_id,
+            child_pull_request_number=child_pull_request_number,
+            parent_pull_request_number=parent_pull_request_number,
+        )
+        if message == expected_message and parent_shas == {
+            expected_parent_sha,
+            _required_value(child_head_sha, "Stack collapse child head SHA is required."),
+        }:
+            return current_parent_sha
+        raise MergeTrainGitHubStaleHeadError(
+            "Stack collapse parent branch moved outside the stored plan.",
+            status_code=409,
+        )
 
     def _create_or_reset_reference(self, *, repository_path: str, reference: str, sha: str) -> None:
         normalized_sha = _required_value(sha, "GitHub reference SHA is required.")
@@ -848,6 +1194,18 @@ def _combine_check_statuses(*statuses: MergeTrainCheckStatus) -> MergeTrainCheck
     if any(status == "pass" for status in statuses):
         return "pass"
     return "unknown"
+
+
+def _stack_collapse_commit_message(
+    *,
+    collapse_id: str,
+    child_pull_request_number: int,
+    parent_pull_request_number: int,
+) -> str:
+    return (
+        f"Launchplane stack collapse {collapse_id}: merge PR "
+        f"#{child_pull_request_number} into PR #{parent_pull_request_number}"
+    )
 
 
 def _required_value(value: str, message: str) -> str:

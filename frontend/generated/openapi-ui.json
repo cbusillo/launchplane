@@ -6078,6 +6078,97 @@
         "title": "MergeTrainAdmissionDecision",
         "type": "object"
       },
+      "MergeTrainControllerLeaseDiagnostics": {
+        "additionalProperties": false,
+        "properties": {
+          "active_action": {
+            "default": "",
+            "title": "Active Action",
+            "type": "string"
+          },
+          "active_phase": {
+            "default": "",
+            "title": "Active Phase",
+            "type": "string"
+          },
+          "active_pull_request_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Pull Request Number"
+          },
+          "active_record_id": {
+            "default": "",
+            "title": "Active Record Id",
+            "type": "string"
+          },
+          "heartbeat_age_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heartbeat Age Seconds"
+          },
+          "lease_age_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lease Age Seconds"
+          },
+          "lease_expires_at": {
+            "default": "",
+            "title": "Lease Expires At",
+            "type": "string"
+          },
+          "owner": {
+            "default": "",
+            "title": "Owner",
+            "type": "string"
+          },
+          "reconciliation_detail": {
+            "default": "",
+            "title": "Reconciliation Detail",
+            "type": "string"
+          },
+          "reconciliation_status": {
+            "title": "Reconciliation Status",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "active_action",
+          "active_phase",
+          "active_pull_request_number",
+          "active_record_id",
+          "heartbeat_age_seconds",
+          "lease_age_seconds",
+          "lease_expires_at",
+          "owner",
+          "reconciliation_detail",
+          "reconciliation_status",
+          "status"
+        ],
+        "title": "MergeTrainControllerLeaseDiagnostics",
+        "type": "object"
+      },
       "MergeTrainControllerRecordSummary": {
         "additionalProperties": false,
         "properties": {
@@ -6193,6 +6284,182 @@
         "title": "MergeTrainControllerRecordSummary",
         "type": "object"
       },
+      "MergeTrainControllerStateRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "active_action": {
+            "default": "",
+            "title": "Active Action",
+            "type": "string"
+          },
+          "active_phase": {
+            "default": "",
+            "title": "Active Phase",
+            "type": "string"
+          },
+          "active_pull_request_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Pull Request Number"
+          },
+          "active_record_id": {
+            "default": "",
+            "title": "Active Record Id",
+            "type": "string"
+          },
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "controller_key": {
+            "title": "Controller Key",
+            "type": "string"
+          },
+          "heartbeat_at": {
+            "default": "",
+            "title": "Heartbeat At",
+            "type": "string"
+          },
+          "last_action": {
+            "default": "",
+            "title": "Last Action",
+            "type": "string"
+          },
+          "last_owner": {
+            "default": "",
+            "title": "Last Owner",
+            "type": "string"
+          },
+          "last_phase": {
+            "default": "",
+            "title": "Last Phase",
+            "type": "string"
+          },
+          "last_pull_request_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Pull Request Number"
+          },
+          "last_record_id": {
+            "default": "",
+            "title": "Last Record Id",
+            "type": "string"
+          },
+          "last_transition_at": {
+            "default": "",
+            "title": "Last Transition At",
+            "type": "string"
+          },
+          "lease_acquired_at": {
+            "default": "",
+            "title": "Lease Acquired At",
+            "type": "string"
+          },
+          "lease_expires_at": {
+            "default": "",
+            "title": "Lease Expires At",
+            "type": "string"
+          },
+          "lease_owner": {
+            "default": "",
+            "title": "Lease Owner",
+            "type": "string"
+          },
+          "policy_key": {
+            "title": "Policy Key",
+            "type": "string"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "reconciliation_detail": {
+            "default": "",
+            "title": "Reconciliation Detail",
+            "type": "string"
+          },
+          "reconciliation_status": {
+            "default": "clean",
+            "enum": [
+              "clean",
+              "adopted",
+              "required"
+            ],
+            "title": "Reconciliation Status",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "default": "idle",
+            "enum": [
+              "idle",
+              "running",
+              "reconcile_required"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "step_payload": {
+            "additionalProperties": true,
+            "title": "Step Payload",
+            "type": "object"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "active_action",
+          "active_phase",
+          "active_pull_request_number",
+          "active_record_id",
+          "base_branch",
+          "controller_key",
+          "heartbeat_at",
+          "last_action",
+          "last_owner",
+          "last_phase",
+          "last_pull_request_number",
+          "last_record_id",
+          "last_transition_at",
+          "lease_acquired_at",
+          "lease_expires_at",
+          "lease_owner",
+          "policy_key",
+          "policy_sha256",
+          "reconciliation_detail",
+          "reconciliation_status",
+          "repository",
+          "schema_version",
+          "status",
+          "step_payload",
+          "updated_at"
+        ],
+        "title": "MergeTrainControllerStateRecord",
+        "type": "object"
+      },
       "MergeTrainControllerStatusReadModel": {
         "additionalProperties": false,
         "properties": {
@@ -6203,12 +6470,32 @@
             "title": "Base Branch",
             "type": "string"
           },
+          "controller_diagnostics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainControllerLeaseDiagnostics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "controller_records": {
             "items": {
               "$ref": "#/components/schemas/MergeTrainControllerRecordSummary"
             },
             "title": "Controller Records",
             "type": "array"
+          },
+          "controller_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainControllerStateRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "current_policy_key": {
             "default": "",
@@ -6257,7 +6544,9 @@
         "required": [
           "admission",
           "base_branch",
+          "controller_diagnostics",
           "controller_records",
+          "controller_state",
           "current_policy_key",
           "current_policy_sha256",
           "generated_at",

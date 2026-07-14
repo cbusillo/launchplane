@@ -66,6 +66,14 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchLandingPlanRecord,
 )
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerLeaseHeldError,
+    MergeTrainControllerLeaseLostError,
+    MergeTrainControllerStateRecord,
+    build_merge_train_controller_key,
+    build_merge_train_controller_resume_detail,
+    build_merge_train_controller_state_record,
+)
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
@@ -1334,6 +1342,42 @@ class LaunchplaneMergeTrainBatchCandidateRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneMergeTrainControllerStateRow(Base):
+    __tablename__ = "launchplane_merge_train_controller_states"
+    __table_args__ = (
+        Index(
+            "launchplane_merge_train_controller_states_repository_base_idx",
+            "repository",
+            "base_branch",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_merge_train_controller_states_status_idx",
+            "status",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_merge_train_controller_states_lease_idx",
+            "status",
+            "lease_expires_at",
+            desc("updated_at"),
+        ),
+    )
+
+    controller_key: Mapped[str] = mapped_column(String, primary_key=True)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    base_branch: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    policy_key: Mapped[str] = mapped_column(String, nullable=False)
+    policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String, nullable=False)
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    active_action: Mapped[str] = mapped_column(String, nullable=False)
+    active_phase: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneMergeTrainBatchLandingPlanRow(Base):
     __tablename__ = "launchplane_merge_train_batch_landing_plans"
     __table_args__ = (
@@ -2259,6 +2303,31 @@ class PostgresRecordStore(HumanSessionStore):
         if for_update and not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
         return statement
+
+    def _advisory_lock_merge_train_controller(self, session: Any, controller_key: str) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": controller_key},
+        )
+
+    def _sync_merge_train_controller_state_row(
+        self,
+        row: LaunchplaneMergeTrainControllerStateRow,
+        record: MergeTrainControllerStateRecord,
+    ) -> None:
+        row.repository = record.repository
+        row.base_branch = record.base_branch
+        row.status = record.status
+        row.policy_key = record.policy_key
+        row.policy_sha256 = record.policy_sha256
+        row.updated_at = record.updated_at
+        row.lease_owner = record.lease_owner
+        row.lease_expires_at = record.lease_expires_at
+        row.active_action = record.active_action
+        row.active_phase = record.active_phase
+        row.payload = self._payload_dict(record)
 
     def _read_model(
         self,
@@ -5859,6 +5928,231 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def write_merge_train_controller_state_record(
+        self, record: MergeTrainControllerStateRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneMergeTrainControllerStateRow(
+                controller_key=record.controller_key,
+                repository=record.repository,
+                base_branch=record.base_branch,
+                status=record.status,
+                policy_key=record.policy_key,
+                policy_sha256=record.policy_sha256,
+                updated_at=record.updated_at,
+                lease_owner=record.lease_owner,
+                lease_expires_at=record.lease_expires_at,
+                active_action=record.active_action,
+                active_phase=record.active_phase,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_merge_train_controller_state_record(
+        self, controller_key: str
+    ) -> MergeTrainControllerStateRecord:
+        return self._read_model(
+            model_type=MergeTrainControllerStateRecord,
+            orm_model=LaunchplaneMergeTrainControllerStateRow,
+            filters=(LaunchplaneMergeTrainControllerStateRow.controller_key == controller_key,),
+        )
+
+    def list_merge_train_controller_state_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        filters: list[object] = []
+        if repository:
+            filters.append(LaunchplaneMergeTrainControllerStateRow.repository == repository)
+        if base_branch:
+            filters.append(LaunchplaneMergeTrainControllerStateRow.base_branch == base_branch)
+        if status:
+            filters.append(LaunchplaneMergeTrainControllerStateRow.status == status)
+        return self._list_models(
+            model_type=MergeTrainControllerStateRecord,
+            orm_model=LaunchplaneMergeTrainControllerStateRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneMergeTrainControllerStateRow.updated_at.desc(),
+                LaunchplaneMergeTrainControllerStateRow.controller_key.desc(),
+            ),
+            limit=limit,
+        )
+
+    def acquire_merge_train_controller_state_record(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        policy_key: str,
+        policy_sha256: str,
+        lease_owner: str,
+        lease_seconds: int,
+    ) -> MergeTrainControllerStateRecord:
+        controller_key = build_merge_train_controller_key(
+            repository=repository,
+            base_branch=base_branch,
+        )
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._advisory_lock_merge_train_controller(session, controller_key)
+            observed_at = self._database_mutation_timestamp(session)
+            lease_expires_at = self._mutation_lease_expiry(
+                observed_at=observed_at,
+                lease_seconds=lease_seconds,
+            )
+            row = session.scalar(
+                select(LaunchplaneMergeTrainControllerStateRow)
+                .where(LaunchplaneMergeTrainControllerStateRow.controller_key == controller_key)
+                .with_for_update()
+            )
+            if row is None:
+                record = build_merge_train_controller_state_record(
+                    repository=repository,
+                    base_branch=base_branch,
+                    policy_key=policy_key,
+                    policy_sha256=policy_sha256,
+                    updated_at=observed_at,
+                )
+                leased_record = record.model_copy(
+                    update={
+                        "status": "running",
+                        "lease_owner": lease_owner,
+                        "lease_acquired_at": observed_at,
+                        "lease_expires_at": lease_expires_at,
+                        "heartbeat_at": observed_at,
+                        "active_action": "controller_run_once",
+                        "active_phase": "select_next_action",
+                    }
+                )
+                leased_record = MergeTrainControllerStateRecord.model_validate(
+                    leased_record.model_dump(mode="json")
+                )
+                session.add(
+                    LaunchplaneMergeTrainControllerStateRow(
+                        controller_key=leased_record.controller_key,
+                        repository=leased_record.repository,
+                        base_branch=leased_record.base_branch,
+                        status=leased_record.status,
+                        policy_key=leased_record.policy_key,
+                        policy_sha256=leased_record.policy_sha256,
+                        updated_at=leased_record.updated_at,
+                        lease_owner=leased_record.lease_owner,
+                        lease_expires_at=leased_record.lease_expires_at,
+                        active_action=leased_record.active_action,
+                        active_phase=leased_record.active_phase,
+                        payload=self._payload_dict(leased_record),
+                    )
+                )
+                session.commit()
+                return leased_record
+            current_record = self._read_payload(
+                model_type=MergeTrainControllerStateRecord,
+                payload=row.payload,
+            )
+            if (
+                current_record.status == "running"
+                and current_record.lease_expires_at
+                and current_record.lease_expires_at > observed_at
+            ):
+                raise MergeTrainControllerLeaseHeldError(
+                    "merge train controller lease is held by another owner"
+                )
+            adopting = current_record.status == "reconcile_required" or bool(
+                current_record.active_action and current_record.active_phase
+            )
+            leased_record = current_record.model_copy(
+                update={
+                    "policy_key": policy_key,
+                    "policy_sha256": policy_sha256,
+                    "status": "running",
+                    "updated_at": observed_at,
+                    "lease_owner": lease_owner,
+                    "lease_acquired_at": observed_at,
+                    "lease_expires_at": lease_expires_at,
+                    "heartbeat_at": observed_at,
+                    "active_action": current_record.active_action or "controller_run_once",
+                    "active_phase": current_record.active_phase or "select_next_action",
+                    "reconciliation_status": "adopted" if adopting else "clean",
+                    "reconciliation_detail": (
+                        build_merge_train_controller_resume_detail(current_record)
+                        if adopting
+                        else ""
+                    ),
+                }
+            )
+            leased_record = MergeTrainControllerStateRecord.model_validate(
+                leased_record.model_dump(mode="json")
+            )
+            self._sync_merge_train_controller_state_row(row, leased_record)
+            session.commit()
+            return leased_record
+
+    def compare_and_set_merge_train_controller_state_record(
+        self,
+        *,
+        record: MergeTrainControllerStateRecord,
+        expected_lease_owner: str,
+        expected_lease_acquired_at: str,
+        lease_seconds: int,
+    ) -> MergeTrainControllerStateRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._advisory_lock_merge_train_controller(session, record.controller_key)
+            observed_at = self._database_mutation_timestamp(session)
+            row = session.scalar(
+                select(LaunchplaneMergeTrainControllerStateRow)
+                .where(
+                    LaunchplaneMergeTrainControllerStateRow.controller_key == record.controller_key
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise MergeTrainControllerLeaseLostError("merge train controller state is missing")
+            current_record = self._read_payload(
+                model_type=MergeTrainControllerStateRecord,
+                payload=row.payload,
+            )
+            if current_record.lease_owner != expected_lease_owner:
+                raise MergeTrainControllerLeaseLostError(
+                    "merge train controller lease owner changed"
+                )
+            if current_record.lease_acquired_at != expected_lease_acquired_at:
+                raise MergeTrainControllerLeaseLostError(
+                    "merge train controller lease token changed"
+                )
+            if (
+                not current_record.lease_expires_at
+                or current_record.lease_expires_at <= observed_at
+            ):
+                raise MergeTrainControllerLeaseLostError("merge train controller lease expired")
+            persisted_record = record.model_copy(
+                update={
+                    "updated_at": observed_at,
+                    **(
+                        {
+                            "heartbeat_at": observed_at,
+                            "lease_expires_at": self._mutation_lease_expiry(
+                                observed_at=observed_at,
+                                lease_seconds=lease_seconds,
+                            ),
+                        }
+                        if record.status == "running"
+                        else {"last_transition_at": observed_at}
+                    ),
+                }
+            )
+            persisted_record = MergeTrainControllerStateRecord.model_validate(
+                persisted_record.model_dump(mode="json")
+            )
+            self._sync_merge_train_controller_state_row(row, persisted_record)
+            session.commit()
+            return persisted_record
+
     def list_merge_train_batch_candidate_records(
         self,
         *,
@@ -8095,6 +8389,7 @@ class PostgresRecordStore(HumanSessionStore):
             "agent_write_intents": 0,
             "merge_train_pr_feedback": 0,
             "merge_train_batch_candidates": 0,
+            "merge_train_controller_states": 0,
             "merge_train_batch_landing_plans": 0,
             "merge_train_stack_collapse_plans": 0,
             "merge_train_policies": 0,
@@ -8191,6 +8486,12 @@ class PostgresRecordStore(HumanSessionStore):
             for candidate_record in filesystem_store.list_merge_train_batch_candidate_records():
                 self.write_merge_train_batch_candidate_record(candidate_record)
                 counts["merge_train_batch_candidates"] += 1
+        if hasattr(filesystem_store, "list_merge_train_controller_state_records"):
+            for (
+                controller_state_record
+            ) in filesystem_store.list_merge_train_controller_state_records():
+                self.write_merge_train_controller_state_record(controller_state_record)
+                counts["merge_train_controller_states"] += 1
         if hasattr(filesystem_store, "list_merge_train_batch_landing_plan_records"):
             for plan_record in filesystem_store.list_merge_train_batch_landing_plan_records():
                 self.write_merge_train_batch_landing_plan_record(plan_record)

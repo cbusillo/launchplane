@@ -665,6 +665,20 @@ export type MergeTrainAdmissionDecision = {
     status: 'admitted' | 'deferred';
 };
 
+export type MergeTrainControllerLeaseDiagnostics = {
+    active_action: string;
+    active_phase: string;
+    active_pull_request_number: number | null;
+    active_record_id: string;
+    heartbeat_age_seconds: number | null;
+    lease_age_seconds: number | null;
+    lease_expires_at: string;
+    owner: string;
+    reconciliation_detail: string;
+    reconciliation_status: string;
+    status: string;
+};
+
 export type MergeTrainControllerRecordSummary = {
     batch_id: string;
     blocked_count: number;
@@ -685,10 +699,42 @@ export type MergeTrainControllerRecordSummary = {
     updated_at: string;
 };
 
+export type MergeTrainControllerStateRecord = {
+    active_action: string;
+    active_phase: string;
+    active_pull_request_number: number | null;
+    active_record_id: string;
+    base_branch: string;
+    controller_key: string;
+    heartbeat_at: string;
+    last_action: string;
+    last_owner: string;
+    last_phase: string;
+    last_pull_request_number: number | null;
+    last_record_id: string;
+    last_transition_at: string;
+    lease_acquired_at: string;
+    lease_expires_at: string;
+    lease_owner: string;
+    policy_key: string;
+    policy_sha256: string;
+    reconciliation_detail: string;
+    reconciliation_status: 'clean' | 'adopted' | 'required';
+    repository: string;
+    schema_version: number;
+    status: 'idle' | 'running' | 'reconcile_required';
+    step_payload: {
+        [key: string]: unknown;
+    };
+    updated_at: string;
+};
+
 export type MergeTrainControllerStatusReadModel = {
     admission: MergeTrainAdmissionDecision;
     base_branch: string;
+    controller_diagnostics: MergeTrainControllerLeaseDiagnostics | null;
     controller_records: Array<MergeTrainControllerRecordSummary>;
+    controller_state: MergeTrainControllerStateRecord | null;
     current_policy_key: string;
     current_policy_sha256: string;
     generated_at: string;

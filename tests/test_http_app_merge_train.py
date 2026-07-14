@@ -1,10 +1,14 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import patch
 
 from click import ClickException
 
+from control_plane.contracts.merge_train_controller_state import (
+    build_merge_train_controller_state_record,
+)
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
     parse_merge_train_policy_toml,
@@ -54,6 +58,7 @@ from tests.support.merge_train import (
     _FakeMergeTrainSnapshotReader,
     _FakeMovedRootStackedMergeTrainSnapshotReader,
     _FakeStackedMergeTrainSnapshotReader,
+    _UnavailableLandingMergeTrainGitHubClient,
     _mark_merge_train_batch_candidate_record_passed,
     _merge_train_policy_table,
     _merge_train_run_record,
@@ -1746,6 +1751,12 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             == payloads[4]["records"]["merge_train_batch_landing_plan_record_id"]
         )
         self.assertTrue(landed_record.source.startswith("service:controller:land:"))
+        self.assertTrue(
+            any(
+                record.source.startswith("service:controller:landing-progress:")
+                for record in landing_records
+            )
+        )
 
     async def test_stale_landing_returns_accepted_result_and_replays_idempotently(self) -> None:
         with (
@@ -2013,6 +2024,254 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(landed_record.landing_plan.entries[0].status, "merged")
 
+    async def test_cleanup_failure_is_resumed_from_controller_state(self) -> None:
+        _CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
+        _FakeMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                for _ in range(4):
+                    await _post_merge_train_controller_run_once(app, request_payload)
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _CleanupFailingMergeTrainGitHubClient,
+            ):
+                failed_response = await _post_merge_train_controller_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="controller-cleanup-failed",
+                )
+            failed_state = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                limit=1,
+            )[0]
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                dry_run_response = await _post_merge_train_controller_run_once(
+                    app,
+                    {**request_payload, "mutate": False},
+                    idempotency_key="controller-cleanup-dry-run",
+                )
+            dry_run_state = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                limit=1,
+            )[0]
+            dry_run_cleanup_calls = _FakeMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ):
+                recovered_response = await _post_merge_train_controller_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="controller-cleanup-recovered",
+                )
+            recovered_state = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                limit=1,
+            )[0]
+
+        self.assertEqual(failed_response.status_code, 202)
+        self.assertEqual(failed_state.status, "reconcile_required")
+        self.assertEqual(failed_state.active_phase, "cleanup_candidate_ref")
+        self.assertEqual(dry_run_response.status_code, 202)
+        self.assertEqual(
+            dry_run_response.json()["result"]["controller_action"],
+            "resume_reconciliation",
+        )
+        self.assertEqual(dry_run_state.status, "reconcile_required")
+        self.assertEqual(
+            dry_run_state.reconciliation_detail,
+            "retryable:candidate_ref_cleanup_failed",
+        )
+        self.assertEqual(dry_run_cleanup_calls, 0)
+        self.assertEqual(recovered_response.status_code, 202)
+        self.assertEqual(
+            recovered_response.json()["result"]["candidate_ref_cleanup_status"],
+            "deleted",
+        )
+        self.assertEqual(_CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls, 1)
+        self.assertEqual(_FakeMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls, 1)
+        self.assertEqual(recovered_state.status, "idle")
+        self.assertEqual(recovered_state.reconciliation_status, "clean")
+        self.assertEqual(recovered_state.last_phase, "cleanup_candidate_ref")
+
+    async def test_active_controller_lease_returns_conflict(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_merge_train_controller_state_record(
+                build_merge_train_controller_state_record(
+                    repository="cbusillo/sellyouroutboard",
+                    base_branch="main",
+                    policy_key="cbusillo/sellyouroutboard:main",
+                    policy_sha256="policy-sha",
+                    updated_at="2099-01-01T00:00:00Z",
+                ).model_copy(
+                    update={
+                        "status": "running",
+                        "lease_owner": "controller-a",
+                        "lease_acquired_at": "2099-01-01T00:00:00Z",
+                        "lease_expires_at": "2099-01-01T00:05:00Z",
+                        "heartbeat_at": "2099-01-01T00:00:00Z",
+                    }
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_merge_train_controller_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mutate": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "merge_train_controller_lease_held",
+        )
+
+    async def test_release_failure_does_not_mask_github_failure(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                for _ in range(4):
+                    await _post_merge_train_controller_run_once(app, request_payload)
+
+            original_compare_and_set = store.compare_and_set_merge_train_controller_state_record
+
+            def fail_reconciliation_release(**kwargs: object) -> object:
+                record = kwargs["record"]
+                if getattr(record, "status", "") == "reconcile_required":
+                    raise RuntimeError("controller release persistence unavailable")
+                return original_compare_and_set(**kwargs)  # type: ignore[arg-type]
+
+            with (
+                patch.object(
+                    store,
+                    "compare_and_set_merge_train_controller_state_record",
+                    side_effect=fail_reconciliation_release,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _UnavailableLandingMergeTrainGitHubClient,
+                ),
+            ):
+                response = await _post_merge_train_controller_run_once(
+                    app,
+                    request_payload,
+                    idempotency_key="controller-release-failure",
+                )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["error"]["code"], "github_request_failed")
+
+    async def test_failure_before_first_action_preserves_valid_reconciliation_state(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                _UnavailableMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_controller_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            controller_state = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                limit=1,
+            )[0]
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(controller_state.status, "reconcile_required")
+        self.assertEqual(controller_state.active_action, "controller_run_once")
+        self.assertEqual(controller_state.active_phase, "select_next_action")
+        self.assertEqual(controller_state.reconciliation_status, "required")
+
     async def test_invalid_controller_payload_uses_invalid_state_envelope(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2051,6 +2310,209 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
         self.assertEqual(request_schema["title"], "MergeTrainControllerRunOnceEnvelope")
         self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
+
+
+class FastApiMergeTrainMutationFenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_active_controller_lease_fences_all_legacy_mutation_routes(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            policy_record = _seed_merge_train_policy(state_dir)
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+            )
+            store.acquire_merge_train_controller_state_record(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                policy_key=repository_policy.policy_key,
+                policy_sha256=policy_record.policy_sha256,
+                lease_owner="controller-active",
+                lease_seconds=300,
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            route_requests = (
+                (
+                    _post_merge_train_batch_candidate_run_once,
+                    {
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                ),
+                (
+                    _post_merge_train_batch_landing_run_once,
+                    {
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                        "candidate_record_id": "candidate-record",
+                    },
+                ),
+                (
+                    _post_merge_train_stack_collapse_run_once,
+                    {
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "execute",
+                        "stack_collapse_plan_record_id": "collapse-record",
+                    },
+                ),
+                (
+                    _post_merge_train_run_once,
+                    {
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                ),
+            )
+
+            responses = [
+                await post_request(app, cast(dict[str, object], payload))
+                for post_request, payload in route_requests
+            ]
+
+        self.assertEqual([response.status_code for response in responses], [409] * 4)
+        self.assertEqual(
+            [response.json()["error"]["code"] for response in responses],
+            ["merge_train_controller_lease_held"] * 4,
+        )
+
+    async def test_legacy_candidate_mutation_heartbeats_and_records_idempotency_before_release(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            candidate_record = _seed_merge_train_batch_candidate_record(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            observed_phases: list[str] = []
+            idempotency_controller_statuses: list[str] = []
+            original_compare_and_set = store.compare_and_set_merge_train_controller_state_record
+            original_write_idempotency = store.write_idempotency_record
+
+            def capture_checkpoint(**kwargs: object) -> object:
+                record = kwargs["record"]
+                observed_phases.append(str(getattr(record, "active_phase", "")))
+                return original_compare_and_set(**kwargs)  # type: ignore[arg-type]
+
+            def capture_idempotency(record: object) -> object:
+                controller_state = store.list_merge_train_controller_state_records(
+                    repository="cbusillo/sellyouroutboard",
+                    base_branch="main",
+                    limit=1,
+                )[0]
+                idempotency_controller_statuses.append(controller_state.status)
+                return original_write_idempotency(record)  # type: ignore[arg-type]
+
+            with (
+                patch.object(
+                    store,
+                    "compare_and_set_merge_train_controller_state_record",
+                    side_effect=capture_checkpoint,
+                ),
+                patch.object(
+                    store,
+                    "write_idempotency_record",
+                    side_effect=capture_idempotency,
+                ),
+                patch(
+                    "control_plane.merge_train_batch_candidate.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                response = await _post_merge_train_batch_candidate_run_once(
+                    app,
+                    {
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "build",
+                        "candidate_record_id": candidate_record.record_id,
+                    },
+                    idempotency_key="legacy-candidate-heartbeat",
+                )
+            final_state = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                limit=1,
+            )[0]
+
+        self.assertEqual(response.status_code, 202)
+        self.assertIn("merge_candidate_entry", observed_phases)
+        self.assertIn("candidate_entry_merged", observed_phases)
+        self.assertEqual(idempotency_controller_statuses, ["running"])
+        self.assertEqual(final_state.status, "idle")
+
+    async def test_controller_records_idempotency_before_releasing_lease(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            controller_statuses: list[str] = []
+            original_write_idempotency = store.write_idempotency_record
+
+            def capture_idempotency(record: object) -> object:
+                controller_state = store.list_merge_train_controller_state_records(
+                    repository="cbusillo/sellyouroutboard",
+                    base_branch="main",
+                    limit=1,
+                )[0]
+                controller_statuses.append(controller_state.status)
+                return original_write_idempotency(record)  # type: ignore[arg-type]
+
+            with (
+                patch.object(
+                    store,
+                    "write_idempotency_record",
+                    side_effect=capture_idempotency,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+            ):
+                response = await _post_merge_train_controller_run_once(
+                    app,
+                    {
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                    idempotency_key="controller-idempotency-before-release",
+                )
+            final_state = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                limit=1,
+            )[0]
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(controller_statuses, ["running"])
+        self.assertEqual(final_state.status, "idle")
 
 
 class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCase):

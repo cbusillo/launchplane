@@ -110,6 +110,17 @@ def decide_merge_train_controller_record_action(
             stack_collapse_plan_record_id=waiting_collapse_record.record_id,
         )
 
+    collapsing_record = latest_merge_train_stack_collapse_plan_record(
+        stack_collapse_plan_records,
+        plan_status="collapsing",
+    )
+    if collapsing_record is not None:
+        return MergeTrainControllerDecision(
+            action="execute_stack_collapse",
+            reason="stack collapse plan has durable in-progress mutations to resume",
+            stack_collapse_plan_record_id=collapsing_record.record_id,
+        )
+
     planned_collapse_record = latest_merge_train_stack_collapse_plan_record(
         stack_collapse_plan_records,
         plan_status="planned",
@@ -155,7 +166,9 @@ def latest_merge_train_batch_landing_plan_record(
     latest_record = latest_merge_train_batch_landing_progress_record(records)
     if latest_record is None:
         return None
-    if not any(entry.status == "planned" for entry in latest_record.landing_plan.entries):
+    if not any(
+        entry.status in {"planned", "merging"} for entry in latest_record.landing_plan.entries
+    ):
         return None
     return latest_record
 
@@ -209,11 +222,22 @@ def latest_merge_train_batch_candidate_progress_record(
         "stale": 4,
         "blocked": 4,
     }
+    latest_batch_id = max(
+        {record.candidate.batch_id for record in records},
+        key=lambda batch_id: (
+            max(
+                (record.updated_at, record.record_id)
+                for record in records
+                if record.candidate.batch_id == batch_id
+            ),
+            batch_id,
+        ),
+    )
     return max(
-        records,
+        (record for record in records if record.candidate.batch_id == latest_batch_id),
         key=lambda record: (
-            record.updated_at,
             status_rank[record.candidate.status],
+            record.updated_at,
             record.record_id,
         ),
     )
@@ -224,14 +248,26 @@ def latest_merge_train_batch_landing_progress_record(
 ) -> MergeTrainBatchLandingPlanRecord | None:
     if not records:
         return None
+    latest_plan_id = max(
+        {record.landing_plan.plan_id for record in records},
+        key=lambda plan_id: (
+            max(
+                (record.updated_at, record.record_id)
+                for record in records
+                if record.landing_plan.plan_id == plan_id
+            ),
+            plan_id,
+        ),
+    )
     return max(
-        records,
+        (record for record in records if record.landing_plan.plan_id == latest_plan_id),
         key=lambda record: (
-            record.updated_at,
             max(
                 merge_train_batch_landing_entry_rank(entry.status)
                 for entry in record.landing_plan.entries
             ),
+            sum(entry.status == "merged" for entry in record.landing_plan.entries),
+            record.updated_at,
             record.record_id,
         ),
     )
@@ -250,9 +286,26 @@ def latest_merge_train_stack_collapse_progress_record(
         "blocked": 4,
         "stale": 4,
     }
+    latest_collapse_id = max(
+        {record.plan.collapse_id for record in records},
+        key=lambda collapse_id: (
+            max(
+                (record.updated_at, record.record_id)
+                for record in records
+                if record.plan.collapse_id == collapse_id
+            ),
+            collapse_id,
+        ),
+    )
     return max(
-        records,
-        key=lambda record: (record.updated_at, status_rank[record.plan.status], record.record_id),
+        (record for record in records if record.plan.collapse_id == latest_collapse_id),
+        key=lambda record: (
+            status_rank[record.plan.status],
+            sum(mutation.status == "mutated" for mutation in record.plan.mutations),
+            sum(disposition.status == "closed" for disposition in record.plan.child_dispositions),
+            record.updated_at,
+            record.record_id,
+        ),
     )
 
 

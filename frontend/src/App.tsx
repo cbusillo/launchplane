@@ -1695,6 +1695,8 @@ function fixtureMergeTrainControllerStatus(
           },
         ],
       },
+      controller_state: null,
+      controller_diagnostics: null,
       controller_records: [
         {
           record_id: "merge-train-batch-candidate-fixture",
