@@ -442,20 +442,20 @@ VeriReel exposes:
 These descriptors intentionally reference Launchplane routes, not runtime
 provider concepts, as the future GUI-facing action surface.
 
-Descriptor actions are also the source of truth for advertised driver route
-authorization metadata. `authz_action` must match the live service handler
-authorization string for the route's primary mutation or read behavior. If one
-route has multiple service modes with distinct authorization checks, declare the
-non-primary checks in `alternate_authz_actions` so policy tooling can discover
-them without parsing free-form descriptions. Some service callback routes, such
-as verification writeback routes, are declared with `operator_visible=false`;
-they remain in the driver route authorization map but are not surfaced as
-operator actions. Compatibility routes that should remain callable but not
-advertised as current driver actions require an issue-backed bridge and removal
-condition; descriptors no longer carry a separate route-alias catalog.
-Native FastAPI product-driver POST routes read authorization actions from
-descriptor route metadata, so new drivers do not need a second hardcoded
-authz-action entry.
+Descriptor actions are the runtime source of truth for native driver route
+method, primary authorization action, alternate authorization actions, and
+operator visibility. Native FastAPI handlers bind this metadata when the route
+is registered and read authorization actions from that binding instead of
+declaring route-local action strings. If one route has multiple service modes
+with distinct authorization checks, declare the non-primary checks in
+`alternate_authz_actions`; the ingress driver uses its single alternate action
+for dry-run requests and its primary action for apply requests. Some service
+callback routes, such as verification writeback routes, are declared with
+`operator_visible=false`; they remain in the driver route authorization map but
+are not surfaced as operator actions. Compatibility routes that should remain
+callable but not advertised as current driver actions require an issue-backed
+bridge and removal condition; descriptors no longer carry a separate
+route-alias catalog.
 Future OpenFGA mapping should consume this same descriptor metadata. The
 `authz_action` and `alternate_authz_actions` fields can map driver dispatch to
 generic relation checks, but descriptors must never contain live tuple
@@ -464,14 +464,15 @@ topology. OpenFGA does not make an advertised action executable by itself;
 backend handler registration, route dispatch, and fail-closed service
 authorization still have to agree.
 
-POST driver descriptor actions execute through native FastAPI routes. The
-service validates this at startup, so adding a writable descriptor route without
-registering a matching native FastAPI route fails closed instead of silently
-advertising an unimplemented action. This keeps descriptor metadata as the
-route/authz source of truth while preventing an advertised descriptor action
-from becoming executable without implementation. Descriptor route metadata and
-service compatibility policy also drive
-product-driver compatibility checks. A
+Driver descriptor actions execute through native FastAPI routes. Before serving,
+startup validation rejects noncanonical paths, unsupported methods, missing or
+duplicate authorization actions, duplicate descriptor paths, missing or
+duplicate FastAPI registrations, method drift, and handler metadata that no
+longer matches the descriptor's primary or alternate authorization actions.
+This keeps descriptor metadata as the route/authz source of truth while
+preventing an advertised descriptor action from becoming executable without a
+matching implementation. Descriptor route metadata and service compatibility
+policy also drive product-driver compatibility checks. A
 product whose descriptor names a `base_driver_id` can use the base driver's
 shared lifecycle routes when its profile owns the requested stable lane or
 preview context, which keeps reusable deploy, promotion, workflow-dispatch, and

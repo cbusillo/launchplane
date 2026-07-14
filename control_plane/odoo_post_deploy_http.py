@@ -26,9 +26,6 @@ from control_plane.workflows.odoo_post_deploy import (
 ODOO_POST_DEPLOY_ROUTE = "/v1/drivers/odoo/post-deploy"
 ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE = "/v1/drivers/odoo/config-parameter-override"
 ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE = "/v1/drivers/odoo/website-bootstrap-override"
-ODOO_POST_DEPLOY_ACTION = "odoo_post_deploy.execute"
-ODOO_CONFIG_PARAMETER_OVERRIDE_ACTION = "odoo_config_parameter_override.write"
-ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ACTION = "odoo_website_bootstrap_override.write"
 ODOO_DRIVER_ID = "odoo"
 
 

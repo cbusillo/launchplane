@@ -12,7 +12,6 @@ from control_plane.workflows.odoo_artifact_publish import (
 
 
 ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE = "/v1/drivers/odoo/artifact-publish-inputs"
-ODOO_ARTIFACT_PUBLISH_INPUTS_ACTION = "odoo_artifact_publish_inputs.read"
 ODOO_DRIVER_ID = "odoo"
 
 

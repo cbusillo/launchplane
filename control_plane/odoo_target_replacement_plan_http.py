@@ -21,7 +21,6 @@ from control_plane.odoo_product_driver_http import (
 
 
 ODOO_TARGET_REPLACEMENT_PLAN_ROUTE = "/v1/drivers/odoo/target-replacement-plan"
-ODOO_TARGET_REPLACEMENT_PLAN_ACTION = "odoo_target_replacement_plan.read"
 
 
 class OdooTargetReplacementPlanProductMismatchError(OdooProductMismatchError):

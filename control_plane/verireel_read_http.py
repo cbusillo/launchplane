@@ -75,14 +75,6 @@ VERIREEL_PREVIEW_INVENTORY_ROUTE = "/v1/drivers/verireel/preview-inventory"
 VERIREEL_PREVIEW_DESTROY_ROUTE = "/v1/drivers/verireel/preview-destroy"
 VERIREEL_PREVIEW_VERIFICATION_ROUTE = "/v1/drivers/verireel/preview-verification"
 
-VERIREEL_TESTING_VERIFICATION_ACTION = "deployment.write"
-VERIREEL_STABLE_ENVIRONMENT_ACTION = "verireel_stable_environment.read"
-VERIREEL_RUNTIME_VERIFICATION_ACTION = "verireel_stable_environment.read"
-VERIREEL_PREVIEW_REFRESH_ACTION = "verireel_preview_refresh.execute"
-VERIREEL_PREVIEW_INVENTORY_ACTION = "verireel_preview_inventory.read"
-VERIREEL_PREVIEW_DESTROY_ACTION = "verireel_preview_destroy.execute"
-VERIREEL_PREVIEW_VERIFICATION_ACTION = "preview_generation.write"
-
 
 class VeriReelRouteDependencyError(ValueError):
     pass

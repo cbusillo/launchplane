@@ -25,8 +25,6 @@ from control_plane.workflows.odoo_preview_runtime import (
 
 ODOO_PREVIEW_APPLY_ROUTE = "/v1/drivers/odoo/preview-apply"
 ODOO_PREVIEW_APPLY_INPUTS_ROUTE = "/v1/drivers/odoo/preview-apply-inputs"
-ODOO_PREVIEW_APPLY_ACTION = "odoo_preview_apply.execute"
-ODOO_PREVIEW_APPLY_INPUTS_ACTION = "odoo_preview_apply_inputs.read"
 ODOO_DRIVER_ID = "odoo"
 
 

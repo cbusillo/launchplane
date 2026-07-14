@@ -49,13 +49,17 @@ Service implementation ownership is split by runtime responsibility:
   validation, and PR-feedback handling.
 - `control_plane/http_app.py` owns HTTP route registration and injects the
   webhook callable into the unauthenticated GitHub route.
-- `control_plane/drivers/native_routes.py` owns native descriptor metadata and
-  FastAPI driver-route validation.
+- `control_plane/drivers/native_routes.py` owns native descriptor metadata,
+  handler authorization binding, and FastAPI driver-route validation.
 
-Startup validates native descriptor metadata before opening shared storage or
-seeding durable authorization policy. After storage opens, policy resolution,
-application construction, FastAPI route validation, Uvicorn startup, and all
-failure exits share one cleanup scope so the store is always closed.
+Startup validates native descriptor paths, methods, authorization actions, and
+route uniqueness before opening shared storage or seeding durable authorization
+policy. Native FastAPI registration binds the descriptor metadata to each driver
+handler, and the post-construction validation rejects missing or duplicate
+routes, method drift, and handler/descriptor authorization drift before Uvicorn
+starts. After storage opens, policy resolution, application construction,
+FastAPI route validation, Uvicorn startup, and all failure exits share one
+cleanup scope so the store is always closed.
 
 - CLI: `uv run launchplane service serve`
 - server runtime: FastAPI served directly by Uvicorn

@@ -20,7 +20,6 @@ from control_plane.workflows.odoo_artifact_publish import (
 
 
 ODOO_ARTIFACT_PUBLISH_ROUTE = "/v1/drivers/odoo/artifact-publish"
-ODOO_ARTIFACT_PUBLISH_ACTION = "odoo_artifact_publish.write"
 
 
 class OdooArtifactPublishProductMismatchError(OdooProductMismatchError):

@@ -296,7 +296,7 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
             ),
             patch.object(
                 native_routes,
-                "_validate_native_fastapi_driver_route_paths",
+                "_validate_native_fastapi_driver_routes",
                 side_effect=ValueError("route validation failed"),
             ),
             patch.object(service_bootstrap, "load_authz_policy", return_value=policy),
