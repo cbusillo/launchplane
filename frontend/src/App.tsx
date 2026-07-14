@@ -2,7 +2,13 @@ import { AlertTriangle, KeyRound, LoaderCircle, ShieldCheck } from "lucide-react
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AppShell } from "./AppShell";
+import { ProductActivityRoute } from "./ActivityRoute";
+import {
+  loadDevFixtures,
+  readDevFixtureMode,
+} from "./dev-fixture-loader";
 import { EngineeringOpsBoundary } from "./EngineeringOps";
+import { ProductEnvironmentRoute } from "./EnvironmentRoute";
 import {
   LaunchplaneApiError,
   listProducts,
@@ -21,6 +27,7 @@ import {
   AppLink,
   navigateTo,
   productIndexPath,
+  routeProductKey,
   useAppRoute,
 } from "./router";
 
@@ -45,9 +52,6 @@ type AuthState =
       error: string;
       traceId: string;
     };
-type DevFixtureMode = "products" | "empty" | "error" | "missing" | "";
-type DevFixturesModule = typeof import("./dev-fixtures");
-
 const THEME_STORAGE_KEY = "launchplane.theme";
 
 export function App() {
@@ -236,11 +240,12 @@ export function App() {
   }, [fixtureMode]);
 
   const selectedProduct = useMemo(() => {
-    if (route.kind !== "product-workspace" || !productsResource.data) {
+    const productKey = routeProductKey(route);
+    if (!productKey || !productsResource.data) {
       return null;
     }
     return (
-      productsResource.data.find((product) => product.product === route.product) ?? null
+      productsResource.data.find((product) => product.product === productKey) ?? null
     );
   }, [productsResource.data, route]);
 
@@ -273,7 +278,28 @@ export function App() {
       {route.kind === "product-workspace" ? (
         <ProductWorkspaceRoute
           fixtureResource={fixtureMode ? productsResource : null}
+          key={`workspace:${route.product}:${fixtureMode}`}
           productKey={route.product}
+          refreshToken={productRefreshToken}
+        />
+      ) : null}
+      {route.kind === "product-environment" ? (
+        <ProductEnvironmentRoute
+          environmentKey={route.environment}
+          fixtureMode={fixtureMode}
+          key={`environment:${route.product}:${route.environment}:${fixtureMode}`}
+          productKey={route.product}
+          productOverview={selectedProduct}
+          refreshToken={productRefreshToken}
+          view={route.view}
+        />
+      ) : null}
+      {route.kind === "product-activity" ? (
+        <ProductActivityRoute
+          fixtureMode={fixtureMode}
+          key={`activity:${route.product}:${fixtureMode}`}
+          productKey={route.product}
+          productOverview={selectedProduct}
           refreshToken={productRefreshToken}
         />
       ) : null}
@@ -364,25 +390,4 @@ function NotFoundRoute() {
       </AppLink>
     </section>
   );
-}
-
-function readDevFixtureMode(): DevFixtureMode {
-  if (!import.meta.env.DEV) {
-    return "";
-  }
-  const fixture = new URLSearchParams(window.location.search).get("fixture");
-  return fixture === "products" ||
-    fixture === "empty" ||
-    fixture === "error" ||
-    fixture === "missing"
-    ? fixture
-    : "";
-}
-
-async function loadDevFixtures(): Promise<DevFixturesModule> {
-  if (!import.meta.env.DEV) {
-    throw new Error("Development fixtures are unavailable in production builds.");
-  }
-  const fixtureModulePath = `${import.meta.env.BASE_URL}src/dev-fixtures.ts`;
-  return import(/* @vite-ignore */ fixtureModulePath) as Promise<DevFixturesModule>;
 }

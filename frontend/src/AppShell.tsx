@@ -16,11 +16,16 @@ import type {
 } from "./generated/openapi.ts";
 import type { ResourceState } from "./resource";
 import {
+  environmentLabel,
+  environmentViewLabel,
+} from "./ProductWorkspaceNav";
+import {
   AppLink,
   engineeringPath,
   navigateTo,
   productIndexPath,
   productPath,
+  routeProductKey,
   routeHref,
   type AppRoute,
 } from "./router";
@@ -55,22 +60,31 @@ export function AppShell({
   theme: Theme;
 }) {
   const products = productsResource.data ?? [];
-  const productArea =
-    route.kind === "product-index" || route.kind === "product-workspace";
+  const selectedProductKey = routeProductKey(route);
+  const productArea = route.kind === "product-index" || Boolean(selectedProductKey);
   const routeLabel =
     route.kind === "engineering"
       ? "Engineering Ops"
-      : route.kind === "product-workspace"
-        ? selectedProduct?.display_name ?? "Product workspace"
-        : route.kind === "product-index"
-          ? "Products"
-          : "Page not found";
+      : route.kind === "product-activity"
+        ? "Recent activity"
+        : route.kind === "product-environment"
+          ? `${environmentLabel(route.environment)} · ${environmentViewLabel(route.view)}`
+          : route.kind === "product-workspace"
+            ? selectedProduct?.display_name ?? "Product workspace"
+            : route.kind === "product-index"
+              ? "Products"
+              : "Page not found";
+  const documentLabel =
+    (route.kind === "product-environment" || route.kind === "product-activity") &&
+    selectedProduct
+      ? `${selectedProduct.display_name} · ${routeLabel}`
+      : routeLabel;
 
   useEffect(() => {
-    document.title = `${routeLabel} · Launchplane`;
+    document.title = `${documentLabel} · Launchplane`;
     const heading = document.querySelector<HTMLElement>("[data-route-heading]");
     heading?.focus({ preventScroll: true });
-  }, [routeLabel, route.kind]);
+  }, [documentLabel, routeLabel]);
 
   return (
     <div className="control-shell">
@@ -141,7 +155,7 @@ export function AppShell({
             <ul className="rail-product-list">
               {products.map((product) => {
                 const active =
-                  route.kind === "product-workspace" && route.product === product.product;
+                  selectedProductKey === product.product;
                 return (
                   <li key={product.product}>
                     <AppLink
@@ -175,10 +189,22 @@ export function AppShell({
         <header className="control-topbar">
           <div className="breadcrumb" aria-label="Breadcrumb">
             <span>{route.kind === "engineering" ? "Engineering Ops" : "Product Ops"}</span>
-            {route.kind === "product-workspace" ? (
+            {selectedProductKey ? (
               <>
                 <ChevronRight size={13} aria-hidden="true" />
                 <span>{selectedProduct?.display_name ?? "Product workspace"}</span>
+              </>
+            ) : null}
+            {route.kind === "product-environment" ? (
+              <>
+                <ChevronRight size={13} aria-hidden="true" />
+                <span>{environmentLabel(route.environment)}</span>
+              </>
+            ) : null}
+            {route.kind === "product-activity" ? (
+              <>
+                <ChevronRight size={13} aria-hidden="true" />
+                <span>Recent activity</span>
               </>
             ) : null}
           </div>
@@ -186,7 +212,7 @@ export function AppShell({
           <label className="mobile-product-picker">
             <span>Product</span>
             <select
-              value={route.kind === "product-workspace" ? route.product : ""}
+              value={selectedProductKey}
               onChange={(event) =>
                 navigateTo(
                   event.target.value
