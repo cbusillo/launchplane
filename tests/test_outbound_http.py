@@ -787,6 +787,7 @@ class PublicOutboundHttpTests(unittest.TestCase):
         self.assertEqual(events, ["timeout", "handshake", "timeout", "handshake"])
         self.assertEqual(connect_timeouts, [4.0, 4.0])
         self.assertEqual(handshake_timeouts, [1.0, 1.0])
+        self.assertEqual(tls_context.minimum_version, ssl.TLSVersion.TLSv1_2)
         for call in tls_context.wrap_socket.call_args_list:
             self.assertFalse(call.kwargs["do_handshake_on_connect"])
 

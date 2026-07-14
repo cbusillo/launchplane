@@ -525,7 +525,9 @@ the original domain for SNI and hostname verification. No redirect path exists
 for TLS observations, no second DNS lookup is allowed during connect, and each
 connect-plus-handshake phase recomputes its socket timeout from the same phase
 deadline. DNS and IP subject-alternative-name evidence are both represented
-truthfully when a route binding names a public host or public IP literal.
+truthfully when a route binding names a public host or public IP literal. Active
+probes require TLS 1.2 or newer; obsolete protocol versions are unsupported
+rather than silently weakening the client context.
 Deterministic TLS states are `valid`, `expiring`, `expired`,
 `hostname_mismatch`, `untrusted`, `self_signed`, `unreachable`, `unknown`, and
 `unsupported`. DNS failure and timeout map to `unreachable`; private or malformed

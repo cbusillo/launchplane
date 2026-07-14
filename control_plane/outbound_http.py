@@ -870,6 +870,7 @@ def _fetch_public_tls_certificate(
     )
     try:
         context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         with context.wrap_socket(
@@ -905,6 +906,7 @@ def _verify_public_tls_destination(
     )
     try:
         context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = True
         context.verify_mode = ssl.CERT_REQUIRED
         with context.wrap_socket(
