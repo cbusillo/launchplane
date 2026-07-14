@@ -3275,6 +3275,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Direct local DB mutation is restricted", result.output)
+        self.assertIn("secret writes", result.output)
         self.assertIn("--allow-direct-db-mutation", result.output)
         self.assertNotIn("secret-value", result.output)
 

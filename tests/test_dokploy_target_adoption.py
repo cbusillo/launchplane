@@ -18,6 +18,7 @@ from control_plane.workflows.dokploy_target_adoption import (
     create_dokploy_application_target,
     create_dokploy_compose_target,
 )
+from tests.support.cli import _allow_direct_db_mutation_argument
 
 
 CLI_MAIN = cast(Command, main)
@@ -27,13 +28,7 @@ def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
 
 
-def _allow_direct_db_mutation_argument() -> list[str]:
-    return ["--allow-direct-db-mutation"]
-
-
-def _assert_direct_db_mutation_rejected(
-    test_case: unittest.TestCase, result: Result
-) -> None:
+def _assert_direct_db_mutation_rejected(test_case: unittest.TestCase, result: Result) -> None:
     test_case.assertNotEqual(result.exit_code, 0)
     test_case.assertIn("Direct local DB mutation is restricted", result.output)
     test_case.assertIn("--allow-direct-db-mutation", result.output)
@@ -538,16 +533,19 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                 _write_dokploy_managed_secrets(store=store)
             store.close()
 
-            with patch(
-                "control_plane.cli.control_plane_dokploy.fetch_dokploy_target_payload",
-                return_value={
-                    "name": "discord-blue-lxc",
-                    "environment": {"project": {"name": "Discord Blue"}},
-                },
-            ), patch.object(
-                PostgresRecordStore,
-                "ensure_schema",
-                side_effect=AssertionError("dry-run must not ensure schema"),
+            with (
+                patch(
+                    "control_plane.cli.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "name": "discord-blue-lxc",
+                        "environment": {"project": {"name": "Discord Blue"}},
+                    },
+                ),
+                patch.object(
+                    PostgresRecordStore,
+                    "ensure_schema",
+                    side_effect=AssertionError("dry-run must not ensure schema"),
+                ),
             ):
                 with patch.dict(
                     "os.environ",
@@ -1206,17 +1204,20 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                 _write_dokploy_managed_secrets(store=store)
             store.close()
 
-            with patch.object(
-                PostgresRecordStore,
-                "ensure_schema",
-                side_effect=AssertionError("dry-run must not ensure schema"),
-            ), patch.dict(
-                "os.environ",
-                {
-                    "LAUNCHPLANE_DATABASE_URL": database_url,
-                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                },
-                clear=True,
+            with (
+                patch.object(
+                    PostgresRecordStore,
+                    "ensure_schema",
+                    side_effect=AssertionError("dry-run must not ensure schema"),
+                ),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    },
+                    clear=True,
+                ),
             ):
                 result = CliRunner().invoke(
                     CLI_MAIN,
@@ -1325,22 +1326,26 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                     return {"applicationId": "app-123"}
                 raise AssertionError(path)
 
-            with patch(
-                "control_plane.dokploy.dokploy_request",
-                side_effect=dokploy_request,
-            ), patch(
-                "control_plane.cli.control_plane_dokploy.fetch_dokploy_target_payload",
-                return_value={
-                    "name": "discord-blue-prod",
-                    "environment": {"project": {"name": "Discord Blue"}},
-                },
-            ), patch.dict(
-                "os.environ",
-                {
-                    "LAUNCHPLANE_DATABASE_URL": database_url,
-                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                },
-                clear=True,
+            with (
+                patch(
+                    "control_plane.dokploy.dokploy_request",
+                    side_effect=dokploy_request,
+                ),
+                patch(
+                    "control_plane.cli.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "name": "discord-blue-prod",
+                        "environment": {"project": {"name": "Discord Blue"}},
+                    },
+                ),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    },
+                    clear=True,
+                ),
             ):
                 result = CliRunner().invoke(
                     CLI_MAIN,
