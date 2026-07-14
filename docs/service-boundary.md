@@ -385,6 +385,13 @@ New or changed service route families must preserve the completed HTTP boundary:
 typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
+Read-only ingress and topology route families are registered from
+dependency-explicit modules under `control_plane.http_routes`. `http_app.py`
+remains the composition root: it passes frozen dependency objects and callables
+into the registrars, and each registrar calls the Launchplane FastAPI app's
+custom `add_api_route` directly so shared error-schema handling and route order
+remain centralized without an `APIRouter` compatibility layer.
+
 Frontend contract generation uses the same boundary. Run
 `uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`
 to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
