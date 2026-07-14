@@ -21,7 +21,6 @@ from control_plane.workflows.odoo_prod_rollback import (
 
 
 ODOO_PROD_ROLLBACK_ROUTE = "/v1/drivers/odoo/prod-rollback"
-ODOO_PROD_ROLLBACK_ACTION = "odoo_prod_rollback.execute"
 
 
 class OdooProdRollbackProductMismatchError(OdooProductMismatchError):

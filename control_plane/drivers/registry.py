@@ -28,6 +28,7 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.drivers.route_paths import INGRESS_ROUTE_APPLY_ROUTE
 
 
 PROVIDER_BOUNDARY_NOTE = (
@@ -927,7 +928,7 @@ INGRESS_DRIVER = DriverDescriptor(
             "Plan or apply a public ingress route through the configured ingress adapter; dry-run requests require ingress_route.plan.",
             safety="mutation",
             scope="context",
-            route_path="/v1/drivers/ingress/route-apply",
+            route_path=INGRESS_ROUTE_APPLY_ROUTE,
             authz_action="ingress_route.apply",
             alternate_authz_actions=("ingress_route.plan",),
         ),

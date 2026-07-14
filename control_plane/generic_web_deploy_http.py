@@ -25,10 +25,8 @@ from control_plane.workflows.generic_web_deploy_provider import (
 
 
 GENERIC_WEB_DEPLOY_ROUTE = _GENERIC_WEB_DEPLOY_ROUTE.route_path
-GENERIC_WEB_DEPLOY_ACTION = "generic_web_deploy.execute"
 
 __all__ = [
-    "GENERIC_WEB_DEPLOY_ACTION",
     "GENERIC_WEB_DEPLOY_ROUTE",
     "GenericWebDeployEnvelope",
     "GenericWebDeployProductMismatchError",

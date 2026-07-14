@@ -41,13 +41,9 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 GENERIC_WEB_PROD_PROMOTION_ROUTE = _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path
 GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE = _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path
-GENERIC_WEB_PROD_PROMOTION_ACTION = "generic_web_prod_promotion.execute"
-GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ACTION = "generic_web_prod_promotion.dispatch"
 
 __all__ = [
-    "GENERIC_WEB_PROD_PROMOTION_ACTION",
     "GENERIC_WEB_PROD_PROMOTION_ROUTE",
-    "GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ACTION",
     "GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE",
     "GenericWebProdPromotionEnvelope",
     "GenericWebProdPromotionResponse",

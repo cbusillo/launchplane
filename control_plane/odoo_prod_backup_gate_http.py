@@ -21,7 +21,6 @@ from control_plane.workflows.odoo_prod_backup_gate import (
 
 
 ODOO_PROD_BACKUP_GATE_ROUTE = "/v1/drivers/odoo/prod-backup-gate"
-ODOO_PROD_BACKUP_GATE_ACTION = "odoo_prod_backup_gate.execute"
 
 
 class OdooProdBackupGateProductMismatchError(OdooProductMismatchError):

@@ -28,7 +28,6 @@ from control_plane.odoo_product_driver_http import (
 
 
 ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = "/v1/drivers/odoo/target-replacement-apply"
-ODOO_TARGET_REPLACEMENT_APPLY_ACTION = "odoo_target_replacement_apply.execute"
 
 
 class OdooTargetReplacementApplyProductMismatchError(OdooProductMismatchError):
