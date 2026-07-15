@@ -1,4 +1,10 @@
-export type DevFixtureMode = "products" | "empty" | "error" | "missing" | "";
+export type DevFixtureMode =
+  | "products"
+  | "empty"
+  | "error"
+  | "missing"
+  | "denied"
+  | "";
 
 type DevFixturesModule = typeof import("./dev-fixtures");
 
@@ -10,7 +16,8 @@ export function readDevFixtureMode(): DevFixtureMode {
   return fixture === "products" ||
     fixture === "empty" ||
     fixture === "error" ||
-    fixture === "missing"
+    fixture === "missing" ||
+    fixture === "denied"
     ? fixture
     : "";
 }

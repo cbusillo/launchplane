@@ -94,6 +94,7 @@ class DocsContractsTests(TestCase):
         )
         frontend_types = Path("frontend/src/types.ts").read_text(encoding="utf-8")
         frontend_api = Path("frontend/src/api.ts").read_text(encoding="utf-8")
+        engineering_model = Path("frontend/src/engineering-model.ts").read_text(encoding="utf-8")
         browser_operation = Path("frontend/src/browser-operation.ts").read_text(encoding="utf-8")
         browser_write_contract = Path("frontend/src/browser-write-contract.ts").read_text(
             encoding="utf-8"
@@ -136,13 +137,10 @@ class DocsContractsTests(TestCase):
             "export type DriverListPayload = GeneratedDriverDescriptorsResponse",
             frontend_types,
         )
-        self.assertIn(
-            "export type WorkGraphSnapshotPayload = GeneratedWorkGraphSnapshotResponse",
-            frontend_types,
-        )
+        self.assertNotIn("WorkGraphSnapshotPayload", frontend_types)
         self.assertNotIn("ProductConfigApplyRequest", frontend_types)
         self.assertNotIn("GenericWebProdPromotionPayload", frontend_types)
-        self.assertIn("export interface GitHubIssueInboxReconcilePayload", frontend_types)
+        self.assertNotIn("GitHubIssueInboxReconcilePayload", frontend_types)
         self.assertNotIn(
             "/v1/work-graph/github/issues/reconcile",
             write_operations,
@@ -155,6 +153,10 @@ class DocsContractsTests(TestCase):
         ):
             self.assertIn(operation_data_type, frontend_api)
         self.assertNotIn("ReconcileWorkGraphIssueInboxData", frontend_api)
+        self.assertIn("WorkGraphSnapshotResponse", frontend_api)
+        self.assertIn("EveryCodeSummaryResponse", frontend_api)
+        self.assertIn("ISSUE_RECONCILIATION_BROWSER_BOUNDARY", engineering_model)
+        self.assertIn("MERGE_TRAIN_BROWSER_BOUNDARY", engineering_model)
         self.assertIn("requestGeneratedPost", frontend_api)
         self.assertIn('payload: ApplyProductConfigData["body"]', frontend_api)
         self.assertIn('headers: { "Idempotency-Key": options.idempotencyKey }', frontend_api)

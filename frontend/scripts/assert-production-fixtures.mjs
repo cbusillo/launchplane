@@ -13,6 +13,10 @@ const forbiddenNeedles = [
   "Atlas Commerce",
   "Demo Operator",
   "fixture product inventory is intentionally unavailable",
+  "Launchplane engineering fixture evidence",
+  "engineering fixture inventory is intentionally unavailable",
+  "engineering fixture refresh is intentionally unavailable",
+  "fixture-engineering-denied",
 ];
 
 for (const assetName of javascriptAssets) {

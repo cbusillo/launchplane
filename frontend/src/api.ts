@@ -1,18 +1,8 @@
 import type {
   ApiErrorPayload,
   AuthSessionPayload,
-  EveryCodeSummaryPayload,
-  EveryCodeWorkRequestListPayload,
-  GitHubIssueInboxPayload,
   LogoutPayload,
-  MergeTrainControllerStatusPayload,
-  MergeTrainPolicyTargetsPayload,
   ProductListPayload,
-  PreviewReadinessPayload,
-  RepoProductMappingPayload,
-  WorkGraphRankPayload,
-  WorkGraphSnapshot,
-  WorkGraphSnapshotPayload,
 } from "./types";
 import type {
   ApplyGenericWebProdPromotionData,
@@ -21,11 +11,18 @@ import type {
   ApplyProductConfigResponse,
   DispatchGenericWebProdPromotionWorkflowData,
   DispatchGenericWebProdPromotionWorkflowResponse,
+  EveryCodeSummaryResponse,
+  MergeTrainControllerStatusResponse,
+  MergeTrainPolicyTargetsResponse,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentResponse,
   ProductOverviewResponse,
   RankWorkGraphSnapshotData,
+  RankWorkGraphSnapshotResponse,
+  WorkGraphIssueInboxResponse,
+  WorkGraphSnapshot,
+  WorkGraphSnapshotResponse,
 } from "./generated/openapi.ts";
 import type { BrowserOperationOptions } from "./browser-operation";
 import {
@@ -237,42 +234,34 @@ export function readProductEnvironmentConfigStatus(
   );
 }
 
-export function listEveryCodeWorkRequests(
-  limit = 8,
-): Promise<EveryCodeWorkRequestListPayload> {
-  return requestJson<EveryCodeWorkRequestListPayload>(
-    `/v1/every-code/work-requests?limit=${encodeURIComponent(String(limit))}`,
-  );
-}
-
 export function readEveryCodeSummary(
   limit = 12,
-): Promise<EveryCodeSummaryPayload> {
-  return requestJson<EveryCodeSummaryPayload>(
+  signal?: AbortSignal,
+): Promise<EveryCodeSummaryResponse> {
+  return requestJson<EveryCodeSummaryResponse>(
     `/v1/every-code/summary?limit=${encodeURIComponent(String(limit))}`,
+    "GET",
+    undefined,
+    signal,
   );
 }
 
-export function readPreviewReadiness(
-  limit = 12,
-): Promise<PreviewReadinessPayload> {
-  return requestJson<PreviewReadinessPayload>(
-    `/v1/previews/readiness?limit=${encodeURIComponent(String(limit))}`,
+export function readWorkGraphSnapshot(
+  signal?: AbortSignal,
+): Promise<WorkGraphSnapshotResponse> {
+  return requestJson<WorkGraphSnapshotResponse>(
+    "/v1/work-graph/snapshot",
+    "GET",
+    undefined,
+    signal,
   );
-}
-
-export function readWorkGraphSnapshot(): Promise<WorkGraphSnapshotPayload> {
-  return requestJson<WorkGraphSnapshotPayload>("/v1/work-graph/snapshot");
-}
-
-export function readRepoProductMapping(): Promise<RepoProductMappingPayload> {
-  return requestJson<RepoProductMappingPayload>("/v1/repo-product-mapping");
 }
 
 export function rankWorkGraphSnapshot(
   snapshot: WorkGraphSnapshot,
   limit = 12,
-): Promise<WorkGraphRankPayload> {
+  signal?: AbortSignal,
+): Promise<RankWorkGraphSnapshotResponse> {
   const request: RankWorkGraphSnapshotData = {
     url: BROWSER_WRITE_ROUTES.workGraphRank,
     body: {
@@ -280,13 +269,13 @@ export function rankWorkGraphSnapshot(
       limit,
     },
   };
-  return requestGeneratedPost<WorkGraphRankPayload>(request);
+  return requestGeneratedPost<RankWorkGraphSnapshotResponse>(request, signal);
 }
 
 export function readGitHubIssueInbox(
   signal?: AbortSignal,
-): Promise<GitHubIssueInboxPayload> {
-  return requestJson<GitHubIssueInboxPayload>(
+): Promise<WorkGraphIssueInboxResponse> {
+  return requestJson<WorkGraphIssueInboxResponse>(
     "/v1/work-graph/github/issues",
     "GET",
     undefined,
@@ -298,12 +287,12 @@ export function readMergeTrainControllerStatus(
   repository: string,
   baseBranch: string,
   signal?: AbortSignal,
-): Promise<MergeTrainControllerStatusPayload> {
+): Promise<MergeTrainControllerStatusResponse> {
   const params = new URLSearchParams({
     repository,
     base_branch: baseBranch,
   });
-  return requestJson<MergeTrainControllerStatusPayload>(
+  return requestJson<MergeTrainControllerStatusResponse>(
     `/v1/work-graph/merge-train/controller/status?${params.toString()}`,
     "GET",
     undefined,
@@ -313,8 +302,8 @@ export function readMergeTrainControllerStatus(
 
 export function readMergeTrainPolicyTargets(
   signal?: AbortSignal,
-): Promise<MergeTrainPolicyTargetsPayload> {
-  return requestJson<MergeTrainPolicyTargetsPayload>(
+): Promise<MergeTrainPolicyTargetsResponse> {
+  return requestJson<MergeTrainPolicyTargetsResponse>(
     "/v1/work-graph/merge-train/policy-targets",
     "GET",
     undefined,

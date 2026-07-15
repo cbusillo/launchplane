@@ -22,6 +22,7 @@ import {
 import {
   AppLink,
   engineeringPath,
+  engineeringViewLabel,
   navigateTo,
   productIndexPath,
   productPath,
@@ -64,7 +65,7 @@ export function AppShell({
   const productArea = route.kind === "product-index" || Boolean(selectedProductKey);
   const routeLabel =
     route.kind === "engineering"
-      ? "Engineering Ops"
+      ? engineeringViewLabel(route.view)
       : route.kind === "product-activity"
         ? "Recent activity"
         : route.kind === "product-environment"
@@ -75,10 +76,12 @@ export function AppShell({
               ? "Products"
               : "Page not found";
   const documentLabel =
-    (route.kind === "product-environment" || route.kind === "product-activity") &&
-    selectedProduct
-      ? `${selectedProduct.display_name} · ${routeLabel}`
-      : routeLabel;
+    route.kind === "engineering" && route.view !== "hub"
+      ? `${routeLabel} · Engineering Ops`
+      : (route.kind === "product-environment" || route.kind === "product-activity") &&
+          selectedProduct
+        ? `${selectedProduct.display_name} · ${routeLabel}`
+        : routeLabel;
 
   useEffect(() => {
     document.title = `${documentLabel} · Launchplane`;
@@ -135,44 +138,45 @@ export function AppShell({
           </AppLink>
         </nav>
 
-        <section className="rail-products" aria-labelledby="rail-products-heading">
-          <div className="rail-section-head">
-            <p className="rail-label" id="rail-products-heading">
-              Products
-            </p>
-            {products.length ? <span>{products.length}</span> : null}
-          </div>
-          {productsResource.status === "loading" && !products.length ? (
-            <p className="rail-state">Loading product inventory…</p>
-          ) : null}
-          {productsResource.status === "error" && !products.length ? (
-            <p className="rail-state rail-state-error">Product index unavailable</p>
-          ) : null}
-          {productsResource.status === "ready" && !products.length ? (
-            <p className="rail-state">No products recorded</p>
-          ) : null}
-          {products.length ? (
-            <ul className="rail-product-list">
-              {products.map((product) => {
-                const active =
-                  selectedProductKey === product.product;
-                return (
-                  <li key={product.product}>
-                    <AppLink
-                      aria-current={active ? "page" : undefined}
-                      className="rail-product-link"
-                      data-active={active}
-                      to={productPath(product.product)}
-                    >
-                      <span>{product.display_name}</span>
-                      <ProductTrustDots product={product} />
-                    </AppLink>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : null}
-        </section>
+        {productArea ? (
+          <section className="rail-products" aria-labelledby="rail-products-heading">
+            <div className="rail-section-head">
+              <p className="rail-label" id="rail-products-heading">
+                Products
+              </p>
+              {products.length ? <span>{products.length}</span> : null}
+            </div>
+            {productsResource.status === "loading" && !products.length ? (
+              <p className="rail-state">Loading product inventory…</p>
+            ) : null}
+            {productsResource.status === "error" && !products.length ? (
+              <p className="rail-state rail-state-error">Product index unavailable</p>
+            ) : null}
+            {productsResource.status === "ready" && !products.length ? (
+              <p className="rail-state">No products recorded</p>
+            ) : null}
+            {products.length ? (
+              <ul className="rail-product-list">
+                {products.map((product) => {
+                  const active = selectedProductKey === product.product;
+                  return (
+                    <li key={product.product}>
+                      <AppLink
+                        aria-current={active ? "page" : undefined}
+                        className="rail-product-link"
+                        data-active={active}
+                        to={productPath(product.product)}
+                      >
+                        <span>{product.display_name}</span>
+                        <ProductTrustDots product={product} />
+                      </AppLink>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
+          </section>
+        ) : null}
 
         <div className="rail-identity">
           <span className="identity-avatar" aria-hidden="true">
@@ -189,6 +193,12 @@ export function AppShell({
         <header className="control-topbar">
           <div className="breadcrumb" aria-label="Breadcrumb">
             <span>{route.kind === "engineering" ? "Engineering Ops" : "Product Ops"}</span>
+            {route.kind === "engineering" && route.view !== "hub" ? (
+              <>
+                <ChevronRight size={13} aria-hidden="true" />
+                <span>{engineeringViewLabel(route.view)}</span>
+              </>
+            ) : null}
             {selectedProductKey ? (
               <>
                 <ChevronRight size={13} aria-hidden="true" />
@@ -209,41 +219,45 @@ export function AppShell({
             ) : null}
           </div>
 
-          <label className="mobile-product-picker">
-            <span>Product</span>
-            <select
-              value={selectedProductKey}
-              onChange={(event) =>
-                navigateTo(
-                  event.target.value
-                    ? productPath(event.target.value)
-                    : productIndexPath(),
-                )
-              }
-            >
-              <option value="">All products</option>
-              {products.map((product) => (
-                <option key={product.product} value={product.product}>
-                  {product.display_name}
-                </option>
-              ))}
-            </select>
-          </label>
+          {productArea ? (
+            <label className="mobile-product-picker">
+              <span>Product</span>
+              <select
+                value={selectedProductKey}
+                onChange={(event) =>
+                  navigateTo(
+                    event.target.value
+                      ? productPath(event.target.value)
+                      : productIndexPath(),
+                  )
+                }
+              >
+                <option value="">All products</option>
+                {products.map((product) => (
+                  <option key={product.product} value={product.product}>
+                    {product.display_name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
 
           <div className="topbar-actions">
-            <button
-              aria-label="Refresh current evidence"
-              className="icon-button"
-              disabled={productsResource.status === "loading"}
-              onClick={onRefresh}
-              type="button"
-            >
-              <RefreshCw
-                className={productsResource.status === "loading" ? "spin" : ""}
-                size={16}
-                aria-hidden="true"
-              />
-            </button>
+            {productArea ? (
+              <button
+                aria-label="Refresh current evidence"
+                className="icon-button"
+                disabled={productsResource.status === "loading"}
+                onClick={onRefresh}
+                type="button"
+              >
+                <RefreshCw
+                  className={productsResource.status === "loading" ? "spin" : ""}
+                  size={16}
+                  aria-hidden="true"
+                />
+              </button>
+            ) : null}
             <button
               aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
               className="icon-button"

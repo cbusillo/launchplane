@@ -458,6 +458,19 @@ replace an uncertain operation with a new key. The direct generic-web promotion
 binding always rewrites the generated request to `dry_run=true`; live promotion
 remains the separate product-owned workflow-dispatch path.
 
+The Engineering Ops browser routes consume the generated work-graph snapshot,
+issue-inbox, Every Code summary, merge-train policy-target, and merge-train
+controller-status read models directly. Work-graph ranking is the only
+Engineering Ops POST in the generated browser write contract; it is stateless
+and accepts the current generated snapshot. Issue reconciliation remains
+read-only in the browser: the UI explains the native GitHub Actions OIDC or
+trusted owner-agent write identity boundary and renders no Dry Run or Apply
+button. Merge-train UI is also status-only: target selection comes exclusively
+from `GET /v1/work-graph/merge-train/policy-targets`, while controller and
+legacy worker POST routes are never derived from data or invoked dynamically.
+Each route aborts superseded reads, distinguishes denied and empty responses,
+and marks retained data as cached when a refresh fails or is cancelled.
+
 Launchplane converts FastAPI request-validation failures into the standard
 `400` Launchplane error envelope, so canonical and generated contracts omit the
 framework's unreachable `422` response. Product-config request generation keeps

@@ -1,6 +1,9 @@
 import type {
   DataProvenance,
+  EveryCodeSummaryResponse,
   GitHubHumanIdentityResponse,
+  MergeTrainControllerStatusResponse,
+  MergeTrainPolicyTargetsResponse,
   ProductActionAvailability,
   ProductActivityReadModel,
   ProductEnvironmentConfigStatus,
@@ -8,9 +11,14 @@ import type {
   ProductEnvironmentSummary,
   ProductSiteOverview,
   RuntimeIdentity,
+  WorkGraphIssueInboxResponse,
+  WorkGraphQueue,
+  WorkGraphSnapshotResponse,
 } from "./generated/openapi.ts";
 
 type TrustState = ProductSiteOverview["trust_state"];
+type DataFixtureMode = "products" | "empty" | "error" | "missing" | "denied";
+type EngineeringLoadReason = "initial" | "refresh";
 
 const OBSERVED_AT = "2026-07-14T14:32:00Z";
 const STALE_AFTER = "2026-07-14T15:02:00Z";
@@ -26,8 +34,47 @@ export const fixtureIdentity: GitHubHumanIdentityResponse = {
   role: "admin",
 };
 
+export function assertEngineeringRefreshAvailable(
+  reason: EngineeringLoadReason,
+): void {
+  if (
+    reason === "refresh" &&
+    new URLSearchParams(window.location.search).get("refresh") === "error"
+  ) {
+    throw Object.assign(
+      new Error("The engineering fixture refresh is intentionally unavailable."),
+      {
+        statusCode: 503,
+        traceId: "fixture-engineering-refresh-error",
+      },
+    );
+  }
+}
+
+export async function waitForEngineeringFixture(
+  signal: AbortSignal,
+): Promise<void> {
+  if (new URLSearchParams(window.location.search).get("delay") !== "slow") {
+    return;
+  }
+  if (signal.aborted) {
+    throw new DOMException("Engineering fixture request cancelled.", "AbortError");
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      window.clearTimeout(timeout);
+      reject(new DOMException("Engineering fixture request cancelled.", "AbortError"));
+    };
+    const timeout = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, 1800);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export function productsForFixture(
-  fixture: "products" | "empty" | "error" | "missing",
+  fixture: DataFixtureMode,
 ): ProductSiteOverview[] {
   if (fixture === "error") {
     throw new Error("The fixture product inventory is intentionally unavailable.");
@@ -42,7 +89,7 @@ export function productsForFixture(
 }
 
 export function environmentForFixture(
-  fixture: "products" | "empty" | "error" | "missing",
+  fixture: DataFixtureMode,
   product: string,
   environment: string,
 ): ProductEnvironmentDetail | null {
@@ -144,7 +191,7 @@ export function environmentForFixture(
 }
 
 export function configStatusForFixture(
-  fixture: "products" | "empty" | "error" | "missing",
+  fixture: DataFixtureMode,
   product: string,
   environment: string,
 ): ProductEnvironmentConfigStatus | null {
@@ -210,7 +257,7 @@ export function configStatusForFixture(
 }
 
 export function activityForFixture(
-  fixture: "products" | "empty" | "error" | "missing",
+  fixture: DataFixtureMode,
   product: string,
 ): ProductActivityReadModel | null {
   assertFixtureAvailable(fixture);
@@ -281,6 +328,606 @@ export function activityForFixture(
         records: [{ record_type: "authz_policy", record_id: "policy-example" }],
       },
     ],
+  };
+}
+
+export function workGraphForFixture(fixture: DataFixtureMode): {
+  queue: WorkGraphQueue;
+  rankTraceId: string;
+  snapshotResponse: WorkGraphSnapshotResponse;
+} {
+  assertEngineeringFixtureAvailable(fixture);
+  const snapshotResponse = engineeringWorkGraphSnapshot();
+  if (fixture === "empty") {
+    snapshotResponse.snapshot.issues = [];
+    return {
+      snapshotResponse,
+      rankTraceId: "",
+      queue: {
+        generated_at: OBSERVED_AT,
+        hidden_count: 0,
+        items: [],
+        schema_version: 1,
+      },
+    };
+  }
+  const missingEvidence = fixture === "missing";
+  return {
+    snapshotResponse,
+    rankTraceId: "fixture-work-graph-rank",
+    queue: {
+      generated_at: OBSERVED_AT,
+      hidden_count: missingEvidence ? 1 : 0,
+      items: missingEvidence
+        ? [
+            engineeringWorkGraphItem({
+              evidenceState: "missing",
+              number: 308,
+              recommendation: "attention_needed",
+              safeToStart: false,
+              state: "blocked",
+              title: "Restore missing dependency evidence",
+            }),
+          ]
+        : [
+            engineeringWorkGraphItem({
+              evidenceState: "verified",
+              number: 308,
+              recommendation: "quick_win",
+              safeToStart: true,
+              state: "ready",
+              title: "Finish the operator evidence route",
+            }),
+            engineeringWorkGraphItem({
+              evidenceState: "recorded",
+              number: 311,
+              recommendation: "deep_work",
+              safeToStart: true,
+              state: "ready",
+              title: "Split controller orchestration boundaries",
+            }),
+            engineeringWorkGraphItem({
+              evidenceState: "stale",
+              number: 319,
+              recommendation: "watch",
+              safeToStart: false,
+              state: "waiting",
+              title: "Refresh external check evidence",
+            }),
+          ],
+      schema_version: 1,
+    },
+  };
+}
+
+export function issueInboxForFixture(
+  fixture: DataFixtureMode,
+): WorkGraphIssueInboxResponse {
+  assertEngineeringFixtureAvailable(fixture);
+  if (fixture === "empty") {
+    return {
+      configured: true,
+      inbox: {
+        generated_at: OBSERVED_AT,
+        issue_count: 0,
+        project_configured: true,
+        repositories: [
+          {
+            issue_count: 0,
+            issues: [],
+            missing_from_project_count: 0,
+            present_in_project_count: 0,
+            repository: "example/control-plane",
+          },
+        ],
+        repository_count: 1,
+        schema_version: 1,
+        stale_project_item_count: 0,
+      },
+      status: "ok",
+      trace_id: "fixture-issue-inbox-empty",
+    };
+  }
+  const projectConfigured = fixture !== "missing";
+  const issues = [
+    {
+      author: "platform-operator",
+      created_at: "2026-07-13T08:00:00Z",
+      key: "example/control-plane#308",
+      labels: ["plan:active", "frontend"],
+      number: 308,
+      present_in_project: projectConfigured ? true : null,
+      project_status: projectConfigured ? ("present" as const) : ("unconfigured" as const),
+      repository: "example/control-plane",
+      state: "open",
+      title: "Finish the operator evidence route",
+      updated_at: OBSERVED_AT,
+      url: "https://example.invalid/example/control-plane/issues/308",
+    },
+    {
+      author: "release-operator",
+      created_at: "2026-07-12T09:15:00Z",
+      key: "example/control-plane#319",
+      labels: ["plan:next"],
+      number: 319,
+      present_in_project: projectConfigured ? false : null,
+      project_status: projectConfigured ? ("missing" as const) : ("unconfigured" as const),
+      repository: "example/control-plane",
+      state: "open",
+      title: "Refresh external check evidence",
+      updated_at: "2026-07-14T10:10:00Z",
+      url: "https://example.invalid/example/control-plane/issues/319",
+    },
+  ];
+  return {
+    configured: true,
+    inbox: {
+      generated_at: OBSERVED_AT,
+      issue_count: issues.length,
+      project_configured: projectConfigured,
+      repositories: [
+        {
+          issue_count: issues.length,
+          issues,
+          missing_from_project_count: projectConfigured ? 1 : 0,
+          present_in_project_count: projectConfigured ? 1 : 0,
+          repository: "example/control-plane",
+        },
+      ],
+      repository_count: 1,
+      schema_version: 1,
+      stale_project_item_count: 0,
+    },
+    status: "ok",
+    trace_id: "fixture-issue-inbox",
+  };
+}
+
+export function everyCodeForFixture(
+  fixture: DataFixtureMode,
+): EveryCodeSummaryResponse {
+  assertEngineeringFixtureAvailable(fixture);
+  const summaries =
+    fixture === "empty"
+      ? []
+      : fixture === "missing"
+        ? [
+            engineeringEveryCodeSummary({
+              freshness: "missing",
+              issueNumber: 319,
+              state: "blocked",
+              summaryStatus: "stuck",
+              title: "Refresh external check evidence",
+            }),
+          ]
+        : [
+            engineeringEveryCodeSummary({
+              freshness: "verified",
+              issueNumber: 308,
+              state: "running",
+              summaryStatus: "active",
+              title: "Finish the operator evidence route",
+            }),
+            engineeringEveryCodeSummary({
+              freshness: "recorded",
+              issueNumber: 302,
+              state: "done",
+              summaryStatus: "complete",
+              title: "Publish generated API contracts",
+            }),
+          ];
+  return {
+    status: "ok",
+    summary: {
+      generated_at: OBSERVED_AT,
+      issue_number: null,
+      repository: "",
+      schema_version: 1,
+      state_filter: "",
+      summaries,
+    },
+    trace_id: "fixture-every-code-summary",
+  };
+}
+
+export function mergeTrainTargetsForFixture(
+  fixture: DataFixtureMode,
+): MergeTrainPolicyTargetsResponse {
+  assertEngineeringFixtureAvailable(fixture);
+  return {
+    policy: {
+      policy_sha256: "fixture-policy-sha256",
+      record_id: "fixture-merge-train-policy",
+      updated_at: OBSERVED_AT,
+    },
+    status: "ok",
+    targets:
+      fixture === "empty"
+        ? []
+        : [
+            {
+              base_branch: "main",
+              policy_key: "example/control-plane:main",
+              repository: "example/control-plane",
+              scheduler: {
+                enabled: true,
+                mutate: false,
+                runner_mode: "controller",
+              },
+              service_authz: {
+                action: "merge_train.run_once",
+                context: "launchplane",
+                product: "launchplane",
+              },
+            },
+            {
+              base_branch: "main",
+              policy_key: "example/runtime-site:main",
+              repository: "example/runtime-site",
+              scheduler: {
+                enabled: false,
+                mutate: false,
+                runner_mode: "level1",
+              },
+              service_authz: {
+                action: "merge_train.run_once",
+                context: "launchplane",
+                product: "launchplane",
+              },
+            },
+          ],
+    trace_id: "fixture-merge-train-targets",
+  };
+}
+
+export function mergeTrainStatusForFixture(
+  fixture: DataFixtureMode,
+  repository: string,
+  baseBranch: string,
+): MergeTrainControllerStatusResponse {
+  assertEngineeringFixtureAvailable(fixture);
+  const reconciliationRequired = fixture === "missing";
+  return {
+    controller_status: {
+      admission: {
+        base_branch: baseBranch,
+        controller_action: reconciliationRequired
+          ? "reconcile_required"
+          : "observe_candidate",
+        controller_candidate_record_id: "fixture-candidate-record",
+        controller_landing_plan_record_id: "",
+        controller_reason: reconciliationRequired
+          ? "Stored controller evidence requires operator reconciliation."
+          : "Candidate checks remain pending.",
+        controller_stack_collapse_plan_record_id: "",
+        detail: reconciliationRequired
+          ? "The expected candidate SHA no longer matches provider evidence."
+          : "Waiting for the required checks on the current candidate.",
+        latest_run_id: "fixture-run-27",
+        latest_run_recorded_at: OBSERVED_AT,
+        latest_run_status: "waiting",
+        next_allowed_at: "2026-07-14T14:34:00Z",
+        reason_code: "poll_interval_pending",
+        repository,
+        requested_at: OBSERVED_AT,
+        schema_version: 1,
+        status: "deferred",
+      },
+      base_branch: baseBranch,
+      controller_diagnostics: {
+        active_action: reconciliationRequired ? "reconcile_required" : "observe_candidate",
+        active_phase: reconciliationRequired ? "candidate_reconcile" : "candidate_observe",
+        active_pull_request_number: 418,
+        active_record_id: "fixture-candidate-record",
+        heartbeat_age_seconds: reconciliationRequired ? 900 : 24,
+        lease_age_seconds: reconciliationRequired ? 1200 : 80,
+        lease_expires_at: "2026-07-14T14:37:00Z",
+        owner: reconciliationRequired ? "" : "controller-fixture",
+        reconciliation_detail: reconciliationRequired
+          ? "operator_required: expected candidate SHA changed"
+          : "",
+        reconciliation_status: reconciliationRequired ? "required" : "clean",
+        status: reconciliationRequired ? "expired" : "active",
+      },
+      controller_records: [
+        {
+          batch_id: "fixture-batch-27",
+          blocked_count: reconciliationRequired ? 1 : 0,
+          candidate_sha: "fixture-candidate-sha",
+          merged_count: 0,
+          planned_count: 2,
+          policy_key: `${repository}:${baseBranch}`,
+          policy_sha256: "fixture-policy-sha256",
+          policy_status: reconciliationRequired ? "stale" : "current",
+          pull_request_numbers: [418, 421],
+          record_id: "fixture-candidate-record",
+          record_type: "batch_candidate",
+          required_checks_status: reconciliationRequired ? "unknown" : "pending",
+          skipped_count: 0,
+          stale_count: reconciliationRequired ? 1 : 0,
+          stale_reason: reconciliationRequired
+            ? "Candidate evidence no longer matches the active policy."
+            : "",
+          status: reconciliationRequired ? "reconcile_required" : "waiting",
+          updated_at: OBSERVED_AT,
+        },
+      ],
+      controller_state: {
+        active_action: reconciliationRequired ? "reconcile_required" : "observe_candidate",
+        active_phase: reconciliationRequired ? "candidate_reconcile" : "candidate_observe",
+        active_pull_request_number: 418,
+        active_record_id: "fixture-candidate-record",
+        base_branch: baseBranch,
+        controller_key: `${repository}:${baseBranch}`,
+        heartbeat_at: OBSERVED_AT,
+        last_action: "build_candidate",
+        last_owner: "controller-fixture",
+        last_phase: "candidate_build",
+        last_pull_request_number: 418,
+        last_record_id: "fixture-candidate-record",
+        last_transition_at: OBSERVED_AT,
+        lease_acquired_at: "2026-07-14T14:30:40Z",
+        lease_expires_at: "2026-07-14T14:37:00Z",
+        lease_owner: reconciliationRequired ? "" : "controller-fixture",
+        policy_key: `${repository}:${baseBranch}`,
+        policy_sha256: "fixture-policy-sha256",
+        reconciliation_detail: reconciliationRequired
+          ? "operator_required: expected candidate SHA changed"
+          : "",
+        reconciliation_status: reconciliationRequired ? "required" : "clean",
+        repository,
+        schema_version: 1,
+        status: reconciliationRequired ? "reconcile_required" : "running",
+        step_payload: {},
+        updated_at: OBSERVED_AT,
+      },
+      current_policy_key: `${repository}:${baseBranch}`,
+      current_policy_sha256: "fixture-policy-sha256",
+      generated_at: OBSERVED_AT,
+      latest_dry_run: {
+        eligible_count: 1,
+        intended_next_action: reconciliationRequired
+          ? "reconcile_required"
+          : "observe_candidate",
+        next_action_detail: reconciliationRequired
+          ? "Repair repository or policy evidence before retrying."
+          : "Observe required checks for the current candidate.",
+        queue_count: 2,
+        queue_entries: [
+          {
+            eligible: true,
+            ineligible_reasons: [],
+            mergeable: "mergeable",
+            pull_request_number: 418,
+            required_checks_status: "pending",
+            title: "Finish the operator evidence route",
+            url: "https://example.invalid/example/control-plane/pull/418",
+          },
+          {
+            eligible: false,
+            ineligible_reasons: ["required checks are pending"],
+            mergeable: "unknown",
+            pull_request_number: 421,
+            required_checks_status: "pending",
+            title: "Split controller orchestration boundaries",
+            url: "https://example.invalid/example/control-plane/pull/421",
+          },
+        ],
+        selected_pr_number: 418,
+      },
+      latest_run: {
+        base_branch: baseBranch,
+        dry_run_result: {},
+        intended_next_action: "observe_candidate",
+        mode: "dry_run",
+        policy_key: `${repository}:${baseBranch}`,
+        policy_sha256: "fixture-policy-sha256",
+        poll_required: true,
+        recorded_at: OBSERVED_AT,
+        repository,
+        reread_required: true,
+        run_id: "fixture-run-27",
+        schema_version: 1,
+        selected_head_sha: "fixture-head-sha",
+        selected_mergeable: "mergeable",
+        selected_pr_number: 418,
+        selected_required_checks_status: "pending",
+        snapshot: {},
+        status: "waiting",
+        trace_id: "fixture-merge-train-run",
+        worker_step_result: null,
+      },
+      repository,
+      schema_version: 1,
+    },
+    status: "ok",
+    trace_id: "fixture-merge-train-status",
+  };
+}
+
+function engineeringWorkGraphSnapshot(): WorkGraphSnapshotResponse {
+  return {
+    snapshot: {
+      generated_at: OBSERVED_AT,
+      issues: [
+        engineeringIssueSnapshot(308, "Finish the operator evidence route", "Now"),
+        engineeringIssueSnapshot(311, "Split controller orchestration boundaries", "Next"),
+        engineeringIssueSnapshot(319, "Refresh external check evidence", "Waiting"),
+      ],
+      repos: [
+        {
+          classification: "managed_runtime",
+          display_name: "Example Control Plane",
+          product: "example-control-plane",
+          repository: "example/control-plane",
+        },
+      ],
+      schema_version: 1,
+    },
+    source: {
+      every_code_requests: 2,
+      planning_facts: 3,
+      product_repositories: 1,
+      project_configured: true,
+    },
+    status: "ok",
+    trace_id: "fixture-work-graph-snapshot",
+  };
+}
+
+function engineeringIssueSnapshot(
+  number: number,
+  title: string,
+  focus: "Now" | "Next" | "Waiting",
+) {
+  return {
+    blocked_by: focus === "Waiting" ? 1 : 0,
+    blocking: 0,
+    check_state: focus === "Waiting" ? ("unknown" as const) : ("success" as const),
+    deploy_state: "unknown" as const,
+    finish_line: "The route has independent evidence, refresh, and failure states.",
+    focus,
+    is_pull_request: false,
+    labels: [`plan:${focus.toLowerCase()}`],
+    manager: "Code",
+    number,
+    repository: "example/control-plane",
+    state: "open" as const,
+    subissues_completed: 0,
+    subissues_total: 0,
+    title,
+    updated_at: OBSERVED_AT,
+    url: `https://example.invalid/example/control-plane/issues/${number}`,
+  };
+}
+
+function engineeringWorkGraphItem({
+  evidenceState,
+  number,
+  recommendation,
+  safeToStart,
+  state,
+  title,
+}: {
+  evidenceState: "verified" | "recorded" | "stale" | "missing";
+  number: number;
+  recommendation: "quick_win" | "deep_work" | "attention_needed" | "watch";
+  safeToStart: boolean;
+  state: "ready" | "waiting" | "blocked";
+  title: string;
+}) {
+  return {
+    blocked_by_count: state === "blocked" ? 1 : 0,
+    evidence: [
+      {
+        code: "project_status",
+        detail: "Launchplane engineering fixture evidence from compact planning facts.",
+        source_url: `https://example.invalid/example/control-plane/issues/${number}`,
+        state: evidenceState,
+      },
+    ],
+    finish_line: "The route has independent evidence, refresh, and failure states.",
+    focus: state === "waiting" ? ("Waiting" as const) : ("Now" as const),
+    handoff_url: `https://example.invalid/example/control-plane/issues/${number}`,
+    manager: "Code",
+    next_action: safeToStart
+      ? "Open the source issue and continue the scoped implementation."
+      : "Inspect the blocker and refresh source evidence.",
+    number,
+    product: "example-control-plane",
+    product_display_name: "Example Control Plane",
+    reasons: [
+      {
+        code: recommendation,
+        detail: safeToStart
+          ? "The issue is active and has no recorded blocker."
+          : "The issue needs fresh dependency or check evidence.",
+      },
+    ],
+    recommendation,
+    repo_classification: "managed_runtime" as const,
+    repository: "example/control-plane",
+    safe_to_start: safeToStart,
+    score: safeToStart ? 88 : 41,
+    source_of_truth_url: `https://example.invalid/example/control-plane/issues/${number}`,
+    state,
+    title,
+    updated_at: OBSERVED_AT,
+    url: `https://example.invalid/example/control-plane/issues/${number}`,
+    why_now: safeToStart
+      ? "This work is in the active lane and its compact evidence is current."
+      : "The item remains visible because stale or missing evidence needs attention.",
+  };
+}
+
+function engineeringEveryCodeSummary({
+  freshness,
+  issueNumber,
+  state,
+  summaryStatus,
+  title,
+}: {
+  freshness: "verified" | "recorded" | "missing";
+  issueNumber: number;
+  state: "running" | "done" | "blocked";
+  summaryStatus: "active" | "complete" | "stuck";
+  title: string;
+}) {
+  const hasEvidence = freshness !== "missing";
+  return {
+    claimed_at: hasEvidence ? "2026-07-14T14:15:00Z" : "",
+    claimed_by_host: hasEvidence ? "every-code-fixture" : "",
+    evidence: [
+      {
+        code: "work_request_state",
+        detail: hasEvidence
+          ? "The durable work-request state was recorded by Launchplane."
+          : "No current worker evidence is available.",
+        recorded_at: hasEvidence ? OBSERVED_AT : "",
+        sensitivity: "internal" as const,
+        source_url: `https://example.invalid/example/control-plane/issues/${issueNumber}`,
+        state: freshness,
+      },
+    ],
+    finished_at: state === "done" ? OBSERVED_AT : "",
+    issue_number: issueNumber,
+    issue_title: title,
+    issue_url: `https://example.invalid/example/control-plane/issues/${issueNumber}`,
+    next_action:
+      state === "blocked"
+        ? "Restore worker evidence before rerunning."
+        : state === "done"
+          ? "Review the result pull request."
+          : "Wait for the current worker attempt to finish.",
+    provenance: {
+      detail: hasEvidence
+        ? "Durable Every Code work-request summary."
+        : "Every Code worker evidence is missing.",
+      freshness_status: freshness,
+      recorded_at: hasEvidence ? OBSERVED_AT : "",
+      refreshed_at: hasEvidence ? OBSERVED_AT : "",
+      sensitivity: "internal" as const,
+      source_kind: hasEvidence ? ("record" as const) : ("unsupported" as const),
+      source_record_id: hasEvidence ? `fixture-request-${issueNumber}` : "",
+      source_url: `https://example.invalid/example/control-plane/issues/${issueNumber}`,
+      stale_after: hasEvidence ? STALE_AFTER : "",
+    },
+    queued_at: "2026-07-14T14:00:00Z",
+    repository: "example/control-plane",
+    request_id: `fixture-request-${issueNumber}`,
+    result_pr_url:
+      state === "done"
+        ? `https://example.invalid/example/control-plane/pull/${issueNumber + 100}`
+        : "",
+    result_summary: state === "done" ? "The scoped change completed successfully." : "",
+    safe_to_rerun: state === "blocked" && hasEvidence,
+    source: "github_issue_label",
+    started_at: hasEvidence ? "2026-07-14T14:17:00Z" : "",
+    state,
+    summary_status: summaryStatus,
+    trigger_actor: "platform-operator",
+    trigger_label: "every-code",
+    updated_at: OBSERVED_AT,
   };
 }
 
@@ -762,10 +1409,29 @@ function runtimeIdentity(
   };
 }
 
-function assertFixtureAvailable(
-  fixture: "products" | "empty" | "error" | "missing",
-): void {
+function assertFixtureAvailable(fixture: DataFixtureMode): void {
   if (fixture === "error") {
     throw new Error("The fixture product inventory is intentionally unavailable.");
+  }
+}
+
+function assertEngineeringFixtureAvailable(fixture: DataFixtureMode): void {
+  if (fixture === "denied") {
+    throw Object.assign(
+      new Error("This fixture browser session is denied Engineering Ops evidence."),
+      {
+        statusCode: 403,
+        traceId: "fixture-engineering-denied",
+      },
+    );
+  }
+  if (fixture === "error") {
+    throw Object.assign(
+      new Error("The engineering fixture inventory is intentionally unavailable."),
+      {
+        statusCode: 503,
+        traceId: "fixture-engineering-error",
+      },
+    );
   }
 }
