@@ -1,24 +1,13 @@
 import type {
   ApiErrorPayload,
   AuthSessionPayload,
-  DriverListPayload,
-  DriverViewPayload,
   EveryCodeSummaryPayload,
   EveryCodeWorkRequestListPayload,
-  GenericWebProdPromotionPayload,
-  GenericWebProdPromotionRequest,
-  GenericWebPromotionWorkflowPayload,
-  GenericWebPromotionWorkflowRequest,
   GitHubIssueInboxPayload,
   LogoutPayload,
   MergeTrainControllerStatusPayload,
   MergeTrainPolicyTargetsPayload,
-  ProductConfigApplyPayload,
-  ProductConfigApplyRequest,
-  ProductConfigApplyResponsePayload,
-  ProductEnvironmentConfigStatusPayload,
   ProductListPayload,
-  ProductProfileListPayload,
   PreviewReadinessPayload,
   RepoProductMappingPayload,
   WorkGraphRankPayload,
@@ -27,21 +16,32 @@ import type {
 } from "./types";
 import type {
   ApplyGenericWebProdPromotionData,
+  ApplyGenericWebProdPromotionResponse,
   ApplyProductConfigData,
+  ApplyProductConfigResponse,
   DispatchGenericWebProdPromotionWorkflowData,
+  DispatchGenericWebProdPromotionWorkflowResponse,
   ProductActivityResponse,
+  ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentResponse,
   ProductOverviewResponse,
   RankWorkGraphSnapshotData,
 } from "./generated/openapi.ts";
+import type { BrowserOperationOptions } from "./browser-operation";
+import {
+  BROWSER_WRITE_ROUTES,
+  type BrowserWriteRoute,
+} from "./browser-write-contract";
 
 export class LaunchplaneApiError extends Error {
+  code: string;
   statusCode: number;
   traceId: string;
 
-  constructor(message: string, statusCode: number, traceId = "") {
+  constructor(message: string, statusCode: number, traceId = "", code = "") {
     super(message);
     this.name = "LaunchplaneApiError";
+    this.code = code;
     this.statusCode = statusCode;
     this.traceId = traceId;
   }
@@ -54,6 +54,8 @@ async function requestJson<T>(
   method: "GET" | "POST" = "GET",
   body?: unknown,
   signal?: AbortSignal,
+  idempotencyKey = "",
+  onDispatch?: () => void,
 ): Promise<T> {
   if (method === "GET") {
     return performJsonRequest<T>(path, method, body, signal);
@@ -65,12 +67,14 @@ async function requestJson<T>(
       undefined,
       signal,
     );
+    onDispatch?.();
     return performJsonRequest<T>(
       path,
       method,
       body,
       signal,
       session.csrf_token,
+      idempotencyKey,
     );
   });
   browserMutationQueue = queuedRequest.then(
@@ -86,6 +90,7 @@ async function performJsonRequest<T>(
   body?: unknown,
   signal?: AbortSignal,
   csrfToken = "",
+  idempotencyKey = "",
 ): Promise<T> {
   const headers: HeadersInit = {
     Accept: "application/json",
@@ -95,6 +100,9 @@ async function performJsonRequest<T>(
   }
   if (csrfToken) {
     headers["X-CSRF-Token"] = csrfToken;
+  }
+  if (idempotencyKey) {
+    headers["Idempotency-Key"] = idempotencyKey;
   }
   const response = await fetch(path, {
     method,
@@ -114,10 +122,15 @@ async function performJsonRequest<T>(
       "trace_id" in errorPayload && typeof errorPayload.trace_id === "string"
         ? errorPayload.trace_id
         : "";
+    const errorCode =
+      "error" in errorPayload && errorPayload.error
+        ? errorPayload.error.code ?? ""
+        : "";
     throw new LaunchplaneApiError(
       errorMessage,
       response.status,
       traceId,
+      errorCode,
     );
   }
   return payload as T;
@@ -125,12 +138,36 @@ async function performJsonRequest<T>(
 
 function requestGeneratedPost<
   T,
-  TRequest extends { body: unknown; url: string } = { body: unknown; url: string },
+  TRequest extends {
+    body: unknown;
+    headers?: object;
+    url: BrowserWriteRoute;
+  } = {
+    body: unknown;
+    headers?: object;
+    url: BrowserWriteRoute;
+  },
 >(
   request: TRequest,
   signal?: AbortSignal,
+  onDispatch?: () => void,
 ): Promise<T> {
-  return requestJson<T>(request.url, "POST", request.body, signal);
+  return requestJson<T>(
+    request.url,
+    "POST",
+    request.body,
+    signal,
+    generatedIdempotencyKey(request.headers),
+    onDispatch,
+  );
+}
+
+function generatedIdempotencyKey(headers?: object): string {
+  if (!headers) {
+    return "";
+  }
+  const value = (headers as Record<string, unknown>)["Idempotency-Key"];
+  return typeof value === "string" ? value.trim() : "";
 }
 
 export function readAuthSession(signal?: AbortSignal): Promise<AuthSessionPayload> {
@@ -144,32 +181,6 @@ export function readAuthSession(signal?: AbortSignal): Promise<AuthSessionPayloa
 
 export function logout(): Promise<LogoutPayload> {
   return requestJson<LogoutPayload>("/auth/logout", "POST");
-}
-
-export function listDrivers(): Promise<DriverListPayload> {
-  return requestJson<DriverListPayload>("/v1/drivers");
-}
-
-export function readDriverView(
-  context: string,
-  instance: string,
-): Promise<DriverViewPayload> {
-  const encodedContext = encodeURIComponent(context);
-  if (!instance) {
-    return requestJson<DriverViewPayload>(
-      `/v1/contexts/${encodedContext}/driver-view`,
-    );
-  }
-  return requestJson<DriverViewPayload>(
-    `/v1/contexts/${encodedContext}/instances/${encodeURIComponent(instance)}/driver-view`,
-  );
-}
-
-export function listProductProfiles(
-  driverId = "",
-): Promise<ProductProfileListPayload> {
-  const query = driverId ? `?driver_id=${encodeURIComponent(driverId)}` : "";
-  return requestJson<ProductProfileListPayload>(`/v1/product-profiles${query}`);
 }
 
 export function listProducts(signal?: AbortSignal): Promise<ProductListPayload> {
@@ -217,8 +228,8 @@ export function readProductEnvironmentConfigStatus(
   product: string,
   environment: string,
   signal?: AbortSignal,
-): Promise<ProductEnvironmentConfigStatusPayload> {
-  return requestJson<ProductEnvironmentConfigStatusPayload>(
+): Promise<ProductEnvironmentConfigStatusResponse> {
+  return requestJson<ProductEnvironmentConfigStatusResponse>(
     `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/config-status`,
     "GET",
     undefined,
@@ -263,7 +274,7 @@ export function rankWorkGraphSnapshot(
   limit = 12,
 ): Promise<WorkGraphRankPayload> {
   const request: RankWorkGraphSnapshotData = {
-    url: "/v1/work-graph/rank",
+    url: BROWSER_WRITE_ROUTES.workGraphRank,
     body: {
       snapshot,
       limit,
@@ -312,34 +323,55 @@ export function readMergeTrainPolicyTargets(
 }
 
 export function applyProductConfig(
-  payload: ProductConfigApplyRequest,
-  signal?: AbortSignal,
-): Promise<ProductConfigApplyPayload> {
+  payload: ApplyProductConfigData["body"],
+  options: BrowserOperationOptions,
+): Promise<ApplyProductConfigResponse> {
   const request: ApplyProductConfigData = {
-    url: "/v1/product-config/apply",
+    url: BROWSER_WRITE_ROUTES.productConfigApply,
     body: payload,
+    headers: { "Idempotency-Key": options.idempotencyKey },
   };
-  return requestGeneratedPost<ProductConfigApplyResponsePayload>(request, signal).then(
-    (response) => response.result,
+  return requestGeneratedPost<ApplyProductConfigResponse>(
+    request,
+    options.signal,
+    options.onDispatch,
   );
 }
 
 export function dryRunGenericWebProdPromotion(
-  payload: GenericWebProdPromotionRequest,
-): Promise<GenericWebProdPromotionPayload> {
+  payload: ApplyGenericWebProdPromotionData["body"],
+  options: BrowserOperationOptions,
+): Promise<ApplyGenericWebProdPromotionResponse> {
   const request: ApplyGenericWebProdPromotionData = {
-    url: "/v1/drivers/generic-web/prod-promotion",
-    body: payload,
+    url: BROWSER_WRITE_ROUTES.genericWebPromotion,
+    body: {
+      ...payload,
+      promotion: {
+        ...payload.promotion,
+        dry_run: true,
+      },
+    },
+    headers: { "Idempotency-Key": options.idempotencyKey },
   };
-  return requestGeneratedPost<GenericWebProdPromotionPayload>(request);
+  return requestGeneratedPost<ApplyGenericWebProdPromotionResponse>(
+    request,
+    options.signal,
+    options.onDispatch,
+  );
 }
 
 export function dispatchGenericWebPromotionWorkflow(
-  payload: GenericWebPromotionWorkflowRequest,
-): Promise<GenericWebPromotionWorkflowPayload> {
+  payload: DispatchGenericWebProdPromotionWorkflowData["body"],
+  options: BrowserOperationOptions,
+): Promise<DispatchGenericWebProdPromotionWorkflowResponse> {
   const request: DispatchGenericWebProdPromotionWorkflowData = {
-    url: "/v1/drivers/generic-web/prod-promotion-workflow",
+    url: BROWSER_WRITE_ROUTES.genericWebPromotionWorkflow,
     body: payload,
+    headers: { "Idempotency-Key": options.idempotencyKey },
   };
-  return requestGeneratedPost<GenericWebPromotionWorkflowPayload>(request);
+  return requestGeneratedPost<DispatchGenericWebProdPromotionWorkflowResponse>(
+    request,
+    options.signal,
+    options.onDispatch,
+  );
 }

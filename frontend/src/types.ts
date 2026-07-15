@@ -1,12 +1,6 @@
 import type {
-  ApplyGenericWebProdPromotionData as GeneratedApplyGenericWebProdPromotionData,
-  ApplyGenericWebProdPromotionResponse as GeneratedApplyGenericWebProdPromotionResponse,
-  ApplyProductConfigData as GeneratedApplyProductConfigData,
-  ApplyProductConfigResponse as GeneratedApplyProductConfigResponse,
   AuthSessionResponse as GeneratedAuthSessionResponse,
   DataProvenance as GeneratedDataProvenance,
-  DispatchGenericWebProdPromotionWorkflowData as GeneratedDispatchGenericWebProdPromotionWorkflowData,
-  DispatchGenericWebProdPromotionWorkflowResponse as GeneratedDispatchGenericWebProdPromotionWorkflowResponse,
   DriverContextViewResponse as GeneratedDriverContextViewResponse,
   DriverDescriptorsResponse as GeneratedDriverDescriptorsResponse,
   EveryCodeSummaryResponse as GeneratedEveryCodeSummaryResponse,
@@ -17,14 +11,10 @@ import type {
   MergeTrainPolicyTargetsResponse as GeneratedMergeTrainPolicyTargetsResponse,
   MergeTrainRunRecord as GeneratedMergeTrainRunRecord,
   ProductActionAvailability as GeneratedProductActionAvailability,
-  ProductEnvironmentConfigStatus as GeneratedProductEnvironmentConfigStatus,
-  ProductEnvironmentConfigStatusResponse as GeneratedProductEnvironmentConfigStatusResponse,
   ProductEnvironmentListResponse as GeneratedProductEnvironmentListResponse,
   ProductEnvironmentSummary as GeneratedProductEnvironmentSummary,
   ProductPreviewSummary as GeneratedProductPreviewSummary,
-  ProductProfileListResponse as GeneratedProductProfileListResponse,
   ProductSiteOverview as GeneratedProductSiteOverview,
-  ProductConfigRuntimeInput as GeneratedProductConfigRuntimeInput,
   PreviewReadinessResponse as GeneratedPreviewReadinessResponse,
   RankWorkGraphSnapshotResponse as GeneratedRankWorkGraphSnapshotResponse,
   RepoProductMappingResponse as GeneratedRepoProductMappingResponse,
@@ -300,51 +290,6 @@ export interface LogoutPayload {
 
 export type ApiErrorPayload = GeneratedLaunchplaneErrorResponse;
 
-export type ProductConfigApplyRequest = GeneratedApplyProductConfigData["body"];
-export type ProductConfigMode = ProductConfigApplyRequest["mode"];
-export type ProductConfigRuntimeInput = GeneratedProductConfigRuntimeInput;
-export type ProductConfigRuntimeScope = NonNullable<
-  ProductConfigRuntimeInput["scope"]
->;
-export type ProductConfigSecretInput = NonNullable<
-  ProductConfigApplyRequest["secrets"]
->[number];
-export type ProductConfigSecretScope = NonNullable<
-  ProductConfigSecretInput["scope"]
->;
-export type ProductConfigApplyResponsePayload = GeneratedApplyProductConfigResponse;
-export type ProductConfigApplyPayload = ProductConfigApplyResponsePayload["result"];
-
-export interface ProductProfileRecord {
-  schema_version: number;
-  product: string;
-  display_name: string;
-  repository: string;
-  driver_id: string;
-  health_path: string;
-  lanes: Array<{
-    instance: string;
-    context: string;
-    base_url: string;
-    health_url: string;
-  }>;
-  preview?: {
-    enabled: boolean;
-    context: string;
-    slug_template: string;
-    domain_certificate_type: "none" | "letsencrypt";
-  };
-  promotion_workflow: {
-    workflow_id: string;
-    ref: string;
-    dry_run_input: string;
-    bump_input: string;
-    default_bump: string;
-  };
-}
-
-export type ProductProfileListPayload = GeneratedProductProfileListResponse;
-
 export type ProductActionAvailability = GeneratedProductActionAvailability;
 
 export type ProductEnvironmentSummary = GeneratedProductEnvironmentSummary;
@@ -352,39 +297,6 @@ export type ProductEnvironmentSummary = GeneratedProductEnvironmentSummary;
 export type ProductPreviewOverview = GeneratedProductPreviewSummary;
 
 export type ProductSiteOverview = GeneratedProductSiteOverview;
-
-export type ProductConfigItemStatus =
-  | "configured"
-  | "missing"
-  | "disabled"
-  | "unvalidated"
-  | "stale"
-  | "unsupported";
-
-export interface ProductRuntimeConfigStatusItem {
-  key: string;
-  status: ProductConfigItemStatus;
-  context: string;
-  instance: string;
-  source_label: string;
-  updated_at: string;
-  trust_state: FreshnessStatus;
-}
-
-export interface ProductManagedSecretConfigStatusItem {
-  binding_key: string;
-  status: ProductConfigItemStatus;
-  integration: string;
-  context: string;
-  instance: string;
-  updated_at: string;
-  trust_state: FreshnessStatus | "disabled";
-}
-
-export type ProductEnvironmentConfigStatus = GeneratedProductEnvironmentConfigStatus;
-
-export type ProductEnvironmentConfigStatusPayload =
-  GeneratedProductEnvironmentConfigStatusResponse;
 
 export type ProductListPayload = GeneratedProductEnvironmentListResponse;
 
@@ -761,12 +673,3 @@ export interface MergeTrainPolicyTarget {
 }
 
 export type MergeTrainPolicyTargetsPayload = GeneratedMergeTrainPolicyTargetsResponse;
-
-export type GenericWebProdPromotionRequest =
-  GeneratedApplyGenericWebProdPromotionData["body"];
-export type GenericWebProdPromotionPayload =
-  GeneratedApplyGenericWebProdPromotionResponse;
-export type GenericWebPromotionWorkflowRequest =
-  GeneratedDispatchGenericWebProdPromotionWorkflowData["body"];
-export type GenericWebPromotionWorkflowPayload =
-  GeneratedDispatchGenericWebProdPromotionWorkflowResponse;

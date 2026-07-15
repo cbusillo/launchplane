@@ -62,6 +62,7 @@ export function EnvironmentViewNav({
 }) {
   const views: Array<{ label: string; view: EnvironmentView }> = [
     { label: "Environment", view: "overview" },
+    { label: "Actions", view: "actions" },
     { label: "Runtime settings", view: "runtime-settings" },
     { label: "Managed secrets", view: "managed-secrets" },
     { label: "Diagnostics", view: "diagnostics" },
@@ -93,6 +94,9 @@ export function environmentLabel(environment: string): string {
 }
 
 export function environmentViewLabel(view: EnvironmentView): string {
+  if (view === "actions") {
+    return "Actions";
+  }
   if (view === "runtime-settings") {
     return "Runtime settings";
   }

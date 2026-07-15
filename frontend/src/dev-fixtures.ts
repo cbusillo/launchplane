@@ -1,6 +1,7 @@
 import type {
   DataProvenance,
   GitHubHumanIdentityResponse,
+  ProductActionAvailability,
   ProductActivityReadModel,
   ProductEnvironmentConfigStatus,
   ProductEnvironmentDetail,
@@ -330,7 +331,7 @@ const atlasProduct: ProductSiteOverview = {
     "verified",
     "Product identity and stable lane summaries were refreshed from Launchplane evidence.",
   ),
-  available_actions: [],
+  available_actions: actionsForEnvironment("prod"),
 };
 
 const missingEvidenceProduct: ProductSiteOverview = {
@@ -407,7 +408,7 @@ function environmentFixture({
     trust_state: trustState,
     provenance: evidence,
     warnings: warning ? [ingressSummary] : [],
-    available_actions: [],
+    available_actions: actionsForEnvironment(environment),
     driver_extensions: { odoo: null },
     public_ingress: {
       status: ingressStatus,
@@ -531,6 +532,91 @@ function environmentFixture({
         trust_state: "verified",
       },
     },
+  };
+}
+
+function actionsForEnvironment(
+  environment: "testing" | "prod",
+): ProductActionAvailability[] {
+  return [
+    actionFixture({
+      actionId: "prod_promotion",
+      description:
+        "Promote a generic-web testing image to prod and record promotion health evidence.",
+      label: "Promote testing to prod",
+      routePath: "/v1/drivers/generic-web/prod-promotion",
+      safety: "mutation",
+    }),
+    actionFixture({
+      actionId: "prod_promotion_workflow",
+      description:
+        "Dispatch the product-owned GitHub workflow that promotes testing to prod.",
+      disabledReasons: ["Caller is not authorized for this action."],
+      enabled: false,
+      label: "Dispatch promote workflow",
+      routePath: "/v1/drivers/generic-web/prod-promotion-workflow",
+      safety: "mutation",
+    }),
+    actionFixture({
+      actionId: "stable_deploy",
+      description:
+        "Deploy an immutable container image to a configured generic-web product lane.",
+      label: `Deploy ${environment} lane`,
+      routePath: "/v1/drivers/generic-web/deploy",
+      safety: "mutation",
+    }),
+    actionFixture({
+      actionId: "preview_readiness",
+      description:
+        "Validate generic-web preview template settings before provider mutation.",
+      label: "Evaluate preview readiness",
+      routePath: "/v1/drivers/generic-web/preview-readiness",
+      safety: "read",
+      scope: "context",
+    }),
+    actionFixture({
+      actionId: "prod_rollback",
+      description:
+        "Revalidate and apply a generic-web rollback by deploying a previous immutable artifact.",
+      label: "Apply prod rollback",
+      routePath: "/v1/drivers/generic-web/prod-rollback",
+      safety: "destructive",
+    }),
+  ];
+}
+
+function actionFixture({
+  actionId,
+  description,
+  disabledReasons = [],
+  enabled = true,
+  label,
+  routePath,
+  safety,
+  scope = "instance",
+}: {
+  actionId: string;
+  description: string;
+  disabledReasons?: string[];
+  enabled?: boolean;
+  label: string;
+  routePath: string;
+  safety: string;
+  scope?: string;
+}): ProductActionAvailability {
+  return {
+    action_id: actionId,
+    alternate_authz_actions: [],
+    authz_action: `fixture.${actionId}`,
+    description,
+    disabled_reasons: disabledReasons,
+    enabled,
+    label,
+    method: "POST",
+    route_path: routePath,
+    safety,
+    scope,
+    trust_state: "recorded",
   };
 }
 

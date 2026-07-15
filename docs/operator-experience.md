@@ -147,6 +147,14 @@ No control may look enabled when it only prepares a request, copies a command,
 or has no execution handler. Disabled actions show exact prerequisite,
 authorization, evidence, or trust-state reasons.
 
+The environment `Actions` child route is the browser capability inventory. It
+classifies every advertised descriptor action through an explicit typed adapter
+registry and shows server blockers separately from browser implementation
+blockers. Descriptor `route_path` values are discovery evidence only and are
+never executed dynamically. Until an action-specific typed form owns its input,
+confirmation, idempotency, replay, and result states, the inventory remains
+non-executable even when the server reports the action as enabled.
+
 ## First-Run And Empty States
 
 Empty states are part of the product contract:
@@ -350,6 +358,10 @@ The clean-slate shell uses URL-owned product selection under the service-owned
   environment view. Runtime settings, managed secrets, and diagnostics are
   separate child routes under that environment so secret-binding state is not
   blurred into ordinary runtime configuration.
+- `/ui/products/{product}/environments/{environment}/actions` classifies the
+  server-advertised actions and renders exact server and browser blockers. It
+  does not execute descriptor paths; action-specific forms are enabled only
+  when a generated browser write operation is explicitly adapted.
 - `/ui/products/{product}/activity` is the operator timeline. It is labelled
   Recent activity because the current backend read model returns a bounded
   latest-event window rather than a paginated complete history.

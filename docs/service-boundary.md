@@ -446,6 +446,18 @@ browser client binding. Generated request, success, validation, and error
 bindings are the API boundary consumed by the UI. Handwritten frontend types
 remain only for UI view models and explicit normalization.
 
+The browser client keeps those four write paths in one generated-type-checked
+allowlist. The shared mutation transport serializes cookie-backed writes,
+refreshes the single-use CSRF token immediately before every attempt, and copies
+only the generated `Idempotency-Key` field into the request. Descriptor
+`route_path` strings and arbitrary generated authorization/cookie headers are
+not transport inputs. The browser operation state preserves a request
+fingerprint and idempotency key across definitive retries and uncertain network
+results, records `trace_id`, `original_trace_id`, and `replayed`, and refuses to
+replace an uncertain operation with a new key. The direct generic-web promotion
+binding always rewrites the generated request to `dry_run=true`; live promotion
+remains the separate product-owned workflow-dispatch path.
+
 Launchplane converts FastAPI request-validation failures into the standard
 `400` Launchplane error envelope, so canonical and generated contracts omit the
 framework's unreachable `422` response. Product-config request generation keeps
@@ -487,6 +499,13 @@ serialize writes and acquire the current token before each attempt. Existing
 signed sessions remain compatible: records written before this boundary begin
 at generation zero and receive a token through the normal session read instead
 of forcing a logout.
+
+Cancellation before the mutation request is dispatched ends that local attempt.
+Cancellation or a network failure after dispatch has an uncertain result: the
+operator UI may retry only with the same route, request fingerprint, and
+idempotency key so the service can replay or reconcile the original operation.
+It must not generate a replacement key merely because the browser stopped
+waiting.
 
 The cookie-capable mutation inventory is intentionally limited to:
 
