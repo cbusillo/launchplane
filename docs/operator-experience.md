@@ -264,9 +264,62 @@ ciphertext.
 
 ## Promotion Safety
 
-Browser sessions may dry-run generic-web promotion directly. Live promotion from
-the UI should dispatch the product-owned GitHub workflow rather than mutating
-prod directly from the browser session.
+The Actions view reads
+`GET /v1/products/{product}/environments/{environment}/promotion-status` before
+rendering generic-web promotion controls. That product-owned status derives the
+source artifact and revision from generated testing runtime identity evidence,
+binds them to current testing and production inventory, and reports freshness,
+health, runtime-identity, provider-target, storage, managed-GitHub-credential,
+and authz blockers. Missing, stale, mismatched, or unauthorized evidence keeps
+every control disabled.
+
+Browser sessions use only the product-owned
+`POST /v1/products/{product}/environments/{environment}/promotion/dry-run`
+route for direct promotion. The body contains an operator reason, reviewed
+evidence fingerprint, and bump mode; it never contains product context,
+artifact identity, source revision, provider identity, or a direct-live switch.
+Launchplane accepts workflow dry-run or live dispatch only after the same
+operator identity has an accepted direct dry-run matching the current evidence
+and bump mode.
+
+Live promotion is never executed directly from the browser. The UI dispatches
+`POST /v1/products/{product}/environments/{environment}/promotion/workflow-dispatch`
+with the exact server-provided confirmation. The confirmation names the product,
+source artifact, source revision, production lane, bump mode, and release/deploy
+side effects. The outbox response remains `pending`; the UI reads
+`.../promotion/workflow-deliveries/{delivery_id}` to distinguish dispatch state
+from the observed GitHub run state without claiming completion.
+
+Launchplane includes a unique `promotion_intent_id` workflow input backed by
+the persisted outbox delivery. The product workflow must pass that value in the
+raw live-promotion request and use it as the `Idempotency-Key`. Launchplane then
+re-checks the current evidence fingerprint, production target, source artifact,
+and source revision before executing. It resolves that reviewed provider target
+once, acquires a durable target-scoped mutation reservation, and passes the same
+snapshot into deployment; concurrent retries are rejected while the first call
+is running, and completed retries replay the original response. Trusted
+automation that intentionally bypasses product-owned review requires the separate
+`generic_web_prod_promotion.execute_unreviewed` grant; the normal execute grant
+alone cannot run raw live promotion. The escape hatch still requires database
+storage, an `Idempotency-Key`, the same target snapshot check, and the same
+durable provider-mutation reservation.
+
+Both testing and production inventory must be fresh, healthy, and bound to
+matching generated runtime identity. The source and
+destination artifacts must be digest-pinned `@sha256:` references and source
+revisions must be immutable commit IDs. Current production provider-target
+authority comes only from the explicit provider-target record; deployment
+history and provider-specific legacy records do not satisfy availability. The
+provider-target record is part of the reviewed evidence fingerprint, so target
+replacement requires a new direct dry-run.
+
+If a dispatched direct dry-run or workflow request becomes uncertain,
+Launchplane keeps its idempotency identity and exact request payload in session
+storage and permits only that exact-payload retry. Navigation or refresh must
+not silently create a replacement operation. After workflow dispatch is
+accepted, the browser also retains the accepted delivery receipt, resumes its
+status read after navigation, and keeps replacement dispatches locked until the
+outbox delivery reaches a terminal observed state.
 
 Before claiming UI promotion is ready, prove the signed-in browser path against
 Launchplane:
@@ -275,11 +328,14 @@ Launchplane:
 - workflow dispatch with `dry_run=true`
 - no GitHub release created during dry-run
 - no prod deployment during dry-run
+- workflow dispatch rejected when the reviewed evidence or bump changes
+- live dispatch rejected without the exact confirmation
+- replay evidence shows current trace, original trace, and replay state
 - visible action availability and failure reasons when authz or prerequisites
   are missing
 
-Do not run a live SellYourOutboard promotion with `dry_run=false` until the
-dry-run path and evidence are clean.
+Do not dispatch a live product promotion until the direct dry-run, workflow
+dry-run, blockers, and evidence are clean.
 
 ## Runtime Settings And Secrets
 

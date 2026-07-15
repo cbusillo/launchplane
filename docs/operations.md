@@ -185,13 +185,33 @@ invalid payloads and exhausted retries become terminal failures. Do not update
 outbox rows manually or clear provider markers to force a retry.
 
 Generic-web promotion workflow dispatches are queued by
-`POST /v1/drivers/generic-web/prod-promotion-workflow`; the HTTP response shows
-`dispatch_status=pending` and includes `records.outbox_delivery_id`. The worker
+the automation route `POST /v1/drivers/generic-web/prod-promotion-workflow` or
+the operator route
+`POST /v1/products/{product}/environments/{environment}/promotion/workflow-dispatch`;
+the HTTP response shows `dispatch_status=pending` and includes
+`records.outbox_delivery_id`. The worker
 resolves the managed GitHub token from Launchplane runtime records, sends the
 dispatch, then marks the outbox delivery delivered when the corresponding run is
-observed. The delivery dedupe key includes a hashed transition identity: replay
+observed. Operator clients read
+`GET /v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}`
+for outbox and observed-run state; dispatch acceptance is not workflow
+completion. The delivery dedupe key includes a hashed transition identity: replay
 of one request reuses its row, while a later dispatch with the same workflow
 inputs creates a new row instead of being suppressed forever.
+
+The workflow input set includes `promotion_intent_id`, equal to the persisted
+outbox delivery ID. Product workflows must pass it to the raw live promotion
+route and use it as that request's `Idempotency-Key`; the service revalidates
+the current evidence and target against the intent before execution. The
+separate `generic_web_prod_promotion.execute_unreviewed` authorization action is
+the only supported escape hatch for deliberately unreviewed automation.
+
+GitHub workflow dispatch does not provide a provider idempotency token. Its
+worker therefore persists the observation window and an in-doubt marker before
+the POST and never automatically repeats the POST after that marker exists. A
+crash or network ambiguity between marker persistence and run observation stays
+`reconcile_required` with `workflow_dispatch_in_doubt`; operators must not clear
+the marker to force a resend.
 
 Public-ingress monitor GitHub issue notifications are also queued when the
 record store supports the transactional outbox. Observation, incident, and
@@ -843,12 +863,23 @@ Current derived-state behavior:
   drivers can wrap this base path with stricter backup, migration, rollout, or
   tenant checks instead of reimplementing the shared promotion record flow.
 - Operators should promote generic web products through the product-owned GitHub
-  workflow bridge. The UI first calls the generic-web prod-promotion route with
-  `dry_run=true`, then dispatches
-  `POST /v1/drivers/generic-web/prod-promotion-workflow`. Launchplane resolves
-  the product repository/workflow from the DB-backed product profile and the
-  managed `GITHUB_TOKEN` from runtime records; the product workflow still owns
-  release/tag creation and any product-specific safeguards.
+  workflow bridge. The UI reads product-owned promotion status, calls the
+  product/environment direct dry-run route, then dispatches the matching
+  product/environment workflow route. Launchplane derives artifact and source
+  identity from generated testing runtime evidence, requires current
+  testing/production evidence and the selected bump to match the accepted
+  direct dry-run, resolves the repository/workflow from the DB-backed product
+  profile, and resolves the managed `GITHUB_TOKEN` from runtime records. The
+  product workflow receives reviewed `artifact_id` and `source_git_ref` inputs
+  and still owns release/tag creation and product-specific safeguards.
+- Promotion status requires digest-pinned testing and production artifacts,
+  immutable source commit IDs, fresh matching runtime identity/health evidence,
+  and an explicit current production provider-target record. Historical deploy
+  targets do not satisfy this gate.
+- Workflow dispatch is provider-free in the HTTP request. The outbox worker
+  captures the pre-dispatch GitHub run set and persists its provider marker
+  before sending. A marked delivery that cannot yet observe its run remains in
+  reconciliation and is never sent again.
 
 ## Core Rules
 

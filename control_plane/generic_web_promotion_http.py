@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from pathlib import Path
-from datetime import datetime
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +23,10 @@ from control_plane.drivers.generic_web_dispatch import (
     _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebDeployProvider,
+    GenericWebResolvedDeployTarget,
+)
 from control_plane.workflows.generic_web_promotion import (
     GenericWebPromotionStore,
     GenericWebProdPromotionResult,
@@ -31,11 +35,8 @@ from control_plane.workflows.generic_web_promotion import (
 )
 from control_plane.workflows.generic_web_promotion_workflow import (
     GenericWebPromotionWorkflowResult,
-    _github_timestamp_precision,
     _normalize_bump,
-    _workflow_dispatch_run_ids,
 )
-from control_plane.workflows.launchplane import resolve_launchplane_github_token
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -218,11 +219,21 @@ def execute_generic_web_prod_promotion_result(
     control_plane_root: Path,
     record_store: object,
     request: GenericWebProdPromotionEnvelope,
+    deploy_provider: GenericWebDeployProvider | None = None,
+    resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    provider_operation_title: str = "",
+    deployment_record_id: str = "",
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> tuple[GenericWebProdPromotionRecords, GenericWebProdPromotionResult]:
     driver_result = execute_generic_web_prod_promotion(
         control_plane_root=control_plane_root,
         record_store=cast(GenericWebPromotionStore, record_store),
         request=request.promotion,
+        deploy_provider=deploy_provider,
+        resolved_deploy_target=resolved_deploy_target,
+        provider_operation_title=provider_operation_title,
+        deployment_record_id=deployment_record_id,
+        provider_effect_checkpoint=provider_effect_checkpoint,
     )
     result = GenericWebProdPromotionResult.model_validate(
         _scrub_retired_target_type_alias(driver_result.model_dump(mode="json"))
@@ -234,13 +245,11 @@ def execute_generic_web_prod_promotion_result(
 
 def dispatch_generic_web_promotion_workflow_result(
     *,
-    control_plane_root: Path,
     request: GenericWebPromotionWorkflowEnvelope,
     profile: LaunchplaneProductProfileRecord,
     delivery_key: str,
 ) -> tuple[dict[str, str], GenericWebPromotionWorkflowResult, OutboxDeliveryRecord]:
     delivery = build_generic_web_promotion_workflow_outbox_delivery(
-        control_plane_root=control_plane_root,
         request=request,
         profile=profile,
         delivery_key=delivery_key,
@@ -264,43 +273,18 @@ def dispatch_generic_web_promotion_workflow_result(
 
 def build_generic_web_promotion_workflow_outbox_delivery(
     *,
-    control_plane_root: Path,
     request: GenericWebPromotionWorkflowEnvelope,
     profile: LaunchplaneProductProfileRecord,
     delivery_key: str,
 ) -> OutboxDeliveryRecord:
-    owner, repo = _repository_parts(profile.repository)
+    _repository_parts(profile.repository)
     workflow = profile.promotion_workflow
     workflow_id = workflow.workflow_id.strip()
     ref = workflow.ref.strip()
     bump = _normalize_bump(
         request.workflow.bump if request.workflow.bump is not None else workflow.default_bump
     )
-    token = resolve_launchplane_github_token(
-        control_plane_root=control_plane_root,
-        context_name=request.workflow.context,
-    )
-    if not token:
-        raise GenericWebPromotionRouteDependencyError(
-            "Launchplane runtime records do not expose GITHUB_TOKEN for this context."
-        )
-    previous_run_ids = _workflow_dispatch_run_ids(
-        owner=owner,
-        repo=repo,
-        workflow_id=workflow_id,
-        ref=ref,
-        token=token,
-    )
     created_at = utc_now_timestamp()
-    dispatch_started_at = (
-        _github_timestamp_precision(datetime.fromisoformat(created_at.replace("Z", "+00:00")))
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
-    inputs = {
-        workflow.dry_run_input.strip(): str(request.workflow.dry_run).lower(),
-        workflow.bump_input.strip(): bump,
-    }
     dedupe_key = build_outbox_dedupe_key(
         kind="github_workflow_dispatch",
         parts=(
@@ -313,11 +297,27 @@ def build_generic_web_promotion_workflow_outbox_delivery(
             hashlib.sha256(delivery_key.strip().encode("utf-8")).hexdigest()[:20],
         ),
     )
-    return OutboxDeliveryRecord(
-        delivery_id=build_outbox_delivery_id(
-            kind="github_workflow_dispatch",
-            dedupe_key=dedupe_key,
+    delivery_id = build_outbox_delivery_id(
+        kind="github_workflow_dispatch",
+        dedupe_key=dedupe_key,
+    )
+    inputs = {
+        workflow.dry_run_input.strip(): str(request.workflow.dry_run).lower(),
+        workflow.bump_input.strip(): bump,
+        workflow.promotion_intent_input.strip(): delivery_id,
+        **(
+            {workflow.artifact_id_input.strip(): request.workflow.artifact_id}
+            if request.workflow.artifact_id
+            else {}
         ),
+        **(
+            {workflow.source_git_ref_input.strip(): request.workflow.source_git_ref}
+            if request.workflow.source_git_ref
+            else {}
+        ),
+    }
+    return OutboxDeliveryRecord(
+        delivery_id=delivery_id,
         kind="github_workflow_dispatch",
         aggregate_type="generic_web_promotion_workflow",
         aggregate_id=f"{profile.product}:{request.workflow.context}",
@@ -330,10 +330,9 @@ def build_generic_web_promotion_workflow_outbox_delivery(
             "workflow_id": workflow_id,
             "ref": ref,
             "inputs": inputs,
-            "previous_run_ids": sorted(previous_run_ids),
-            "dispatch_started_at": dispatch_started_at,
             "credential_context": request.workflow.context,
             "observe_timeout_seconds": request.workflow.observe_timeout_seconds,
+            "promotion_evidence_fingerprint": request.workflow.evidence_fingerprint,
         },
     )
 

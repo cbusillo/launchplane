@@ -412,12 +412,6 @@ export type EveryCodeWorkRequestSummary = {
     updated_at: string;
 };
 
-export type GenericWebProdPromotionEnvelope = {
-    product: string;
-    promotion: GenericWebProdPromotionRequest;
-    schema_version?: number;
-};
-
 export type GenericWebProdPromotionRecords = {
     backup_record_id: string;
     backup_status: string;
@@ -432,102 +426,6 @@ export type GenericWebProdPromotionRecords = {
     release_tag: string;
     release_url: string;
     source_health_status: string;
-};
-
-export type GenericWebProdPromotionRequest = {
-    artifact_id?: string;
-    backup_record_id?: string;
-    backup_required?: boolean;
-    dry_run?: boolean;
-    from_instance?: string;
-    health_timeout_seconds?: number;
-    no_cache?: boolean;
-    product: string;
-    release_tag?: string;
-    schema_version?: number;
-    source_git_ref?: string;
-    timeout_seconds?: number | null;
-    to_instance?: string;
-    verify_health?: boolean;
-    wait?: boolean;
-};
-
-export type GenericWebProdPromotionResponse = {
-    original_trace_id?: string | null;
-    records: GenericWebProdPromotionRecords;
-    replayed?: boolean | null;
-    result: GenericWebProdPromotionResponseResult;
-    status: 'accepted';
-    trace_id: string;
-};
-
-export type GenericWebProdPromotionResponseResult = {
-    artifact_id: string;
-    backup_record_id: string;
-    backup_status: 'pending' | 'pass' | 'fail' | 'skipped';
-    context: string;
-    deployment_record_id: string;
-    deployment_status: 'pending' | 'pass' | 'fail' | 'skipped';
-    destination_health_status: 'pending' | 'pass' | 'fail' | 'skipped';
-    dry_run: boolean;
-    error_message: string;
-    from_instance: string;
-    inventory_record_id: string;
-    product: string;
-    promotion_record_id: string;
-    promotion_status: 'pending' | 'pass' | 'fail';
-    provider_id: string;
-    provider_target_type: string;
-    release_status: 'pending' | 'pass' | 'fail' | 'skipped';
-    release_tag: string;
-    release_url: string;
-    source_git_ref: string;
-    source_health_status: 'pending' | 'pass' | 'fail' | 'skipped';
-    target_category: 'application' | 'compose' | 'container' | 'service' | 'static' | 'unknown';
-    target_id: string;
-    target_name: string;
-    to_instance: string;
-};
-
-export type GenericWebPromotionWorkflowEnvelope = {
-    product: string;
-    schema_version?: number;
-    workflow: GenericWebPromotionWorkflowRequest;
-};
-
-export type GenericWebPromotionWorkflowRequest = {
-    bump?: 'patch' | 'minor' | 'major' | null;
-    context: string;
-    dry_run?: boolean;
-    observe_timeout_seconds?: number;
-    product: string;
-    schema_version?: number;
-};
-
-export type GenericWebPromotionWorkflowResponse = {
-    original_trace_id?: string | null;
-    records: {
-        [key: string]: string;
-    };
-    replayed?: boolean | null;
-    result: GenericWebPromotionWorkflowResponseResult;
-    status: 'accepted';
-    trace_id: string;
-};
-
-export type GenericWebPromotionWorkflowResponseResult = {
-    bump: 'patch' | 'minor' | 'major';
-    context: string;
-    dispatch_status: 'pending' | 'dispatched';
-    dry_run: boolean;
-    product: string;
-    ref: string;
-    repository: string;
-    run_conclusion: string;
-    run_id: number;
-    run_status: string;
-    run_url: string;
-    workflow_id: string;
 };
 
 export type GitHubHumanIdentityResponse = {
@@ -1481,11 +1379,181 @@ export type ProductProfileListResponse = {
     trace_id: string;
 };
 
+export type ProductPromotionDryRunEnvelope = {
+    bump?: 'patch' | 'minor' | 'major';
+    evidence_fingerprint: string;
+    reason: string;
+    schema_version?: number;
+};
+
+export type ProductPromotionDryRunResponse = {
+    original_trace_id?: string | null;
+    records: GenericWebProdPromotionRecords;
+    replayed?: boolean | null;
+    result: ProductPromotionDryRunResult;
+    status: 'accepted';
+    trace_id: string;
+};
+
+export type ProductPromotionDryRunResult = {
+    artifact_id: string;
+    backup_record_id: string;
+    backup_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    bump: 'patch' | 'minor' | 'major';
+    context: string;
+    deployment_record_id: string;
+    deployment_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    destination_health_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    dry_run: boolean;
+    error_message: string;
+    evidence_fingerprint: string;
+    from_instance: string;
+    inventory_record_id: string;
+    product: string;
+    promotion_record_id: string;
+    promotion_status: 'pending' | 'pass' | 'fail';
+    provider_id: string;
+    provider_target_type: string;
+    release_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    release_tag: string;
+    release_url: string;
+    source_git_ref: string;
+    source_health_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    target_category: 'application' | 'compose' | 'container' | 'service' | 'static' | 'unknown';
+    target_id: string;
+    target_name: string;
+    to_instance: string;
+};
+
+export type ProductPromotionEvidence = {
+    artifact_id: string;
+    deployment_record_id: string;
+    deployment_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    environment: string;
+    health_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    inventory_stale_after: string;
+    inventory_updated_at: string;
+    runtime_identity_detail: string;
+    runtime_identity_status: 'unchecked' | 'match' | 'mismatch' | 'missing' | 'malformed' | 'unverifiable';
+    source_git_ref: string;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductPromotionLiveConfirmations = {
+    major: string;
+    minor: string;
+    patch: string;
+};
+
+export type ProductPromotionOperationAvailability = {
+    authz_action: string;
+    consequences: Array<string>;
+    disabled_reasons: Array<string>;
+    enabled: boolean;
+    operation: 'direct_dry_run' | 'workflow_dry_run' | 'workflow_live';
+    requires_confirmation: boolean;
+    requires_idempotency_key: boolean;
+    requires_matching_direct_dry_run: boolean;
+    requires_reason: boolean;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductPromotionStatus = {
+    base_driver_id: string;
+    bump_options: Array<'patch' | 'minor' | 'major'>;
+    context: string;
+    default_bump: 'patch' | 'minor' | 'major';
+    destination: ProductPromotionEvidence;
+    destination_environment: string;
+    direct_dry_run: ProductPromotionOperationAvailability;
+    display_name: string;
+    driver_id: string;
+    evidence_fingerprint: string;
+    live_confirmations: ProductPromotionLiveConfirmations;
+    product: string;
+    repository: string;
+    schema_version: number;
+    source: ProductPromotionEvidence;
+    source_environment: string;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+    workflow_dry_run: ProductPromotionOperationAvailability;
+    workflow_id: string;
+    workflow_live: ProductPromotionOperationAvailability;
+    workflow_ref: string;
+};
+
+export type ProductPromotionStatusResponse = {
+    promotion_status: ProductPromotionStatus;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type ProductPromotionWorkflowDeliveryStatus = {
+    delivery_id: string;
+    dispatch_status: 'pending' | 'dispatched' | 'failed' | 'reconcile_required';
+    error_code: string;
+    observed_at: string;
+    run_conclusion: string;
+    run_id: number;
+    run_observation_status: 'pending' | 'observed';
+    run_status: string;
+    run_url: string;
+    state: 'pending' | 'running' | 'delivered' | 'failed' | 'reconcile_required';
+};
+
+export type ProductPromotionWorkflowDeliveryStatusResponse = {
+    delivery: ProductPromotionWorkflowDeliveryStatus;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type ProductPromotionWorkflowDispatchEnvelope = {
+    bump?: 'patch' | 'minor' | 'major';
+    confirmation?: string;
+    dry_run?: boolean;
+    evidence_fingerprint: string;
+    reason: string;
+    schema_version?: number;
+};
+
+export type ProductPromotionWorkflowDispatchResponse = {
+    original_trace_id?: string | null;
+    records: {
+        [key: string]: string;
+    };
+    replayed?: boolean | null;
+    result: ProductPromotionWorkflowDispatchResult;
+    status: 'accepted';
+    trace_id: string;
+};
+
+export type ProductPromotionWorkflowDispatchResult = {
+    artifact_id: string;
+    bump: 'patch' | 'minor' | 'major';
+    context: string;
+    delivery_id: string;
+    dispatch_status: 'pending' | 'dispatched';
+    dry_run: boolean;
+    evidence_fingerprint: string;
+    product: string;
+    ref: string;
+    repository: string;
+    run_conclusion: string;
+    run_id: number;
+    run_status: string;
+    run_url: string;
+    source_git_ref: string;
+    workflow_id: string;
+};
+
 export type ProductPromotionWorkflowProfile = {
+    artifact_id_input: string;
     bump_input: string;
     default_bump: string;
     dry_run_input: string;
+    promotion_intent_input: string;
     ref: string;
+    source_git_ref_input: string;
     workflow_id: string;
 };
 
@@ -2303,6 +2371,64 @@ export type ReadProductEnvironmentConfigStatusResponses = {
 
 export type ReadProductEnvironmentConfigStatusResponse = ReadProductEnvironmentConfigStatusResponses[keyof ReadProductEnvironmentConfigStatusResponses];
 
+export type ReadProductPromotionStatusData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        environment: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/environments/{environment}/promotion-status';
+};
+
+export type ReadProductPromotionStatusErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+};
+
+export type ReadProductPromotionStatusError = ReadProductPromotionStatusErrors[keyof ReadProductPromotionStatusErrors];
+
+export type ReadProductPromotionStatusResponses = {
+    200: ProductPromotionStatusResponse;
+};
+
+export type ReadProductPromotionStatusResponse = ReadProductPromotionStatusResponses[keyof ReadProductPromotionStatusResponses];
+
+export type ReadProductPromotionWorkflowDeliveryData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        environment: string;
+        delivery_id: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}';
+};
+
+export type ReadProductPromotionWorkflowDeliveryErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductPromotionWorkflowDeliveryError = ReadProductPromotionWorkflowDeliveryErrors[keyof ReadProductPromotionWorkflowDeliveryErrors];
+
+export type ReadProductPromotionWorkflowDeliveryResponses = {
+    200: ProductPromotionWorkflowDeliveryStatusResponse;
+};
+
+export type ReadProductPromotionWorkflowDeliveryResponse = ReadProductPromotionWorkflowDeliveryResponses[keyof ReadProductPromotionWorkflowDeliveryResponses];
+
 export type ReadRepoProductMappingData = {
     body?: never;
     headers?: {
@@ -2433,64 +2559,6 @@ export type ReadWorkGraphSnapshotResponses = {
 
 export type ReadWorkGraphSnapshotResponse = ReadWorkGraphSnapshotResponses[keyof ReadWorkGraphSnapshotResponses];
 
-export type ApplyGenericWebProdPromotionData = {
-    body: GenericWebProdPromotionEnvelope;
-    headers?: {
-        'Idempotency-Key'?: string;
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/drivers/generic-web/prod-promotion';
-};
-
-export type ApplyGenericWebProdPromotionErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    404: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ApplyGenericWebProdPromotionError = ApplyGenericWebProdPromotionErrors[keyof ApplyGenericWebProdPromotionErrors];
-
-export type ApplyGenericWebProdPromotionResponses = {
-    202: GenericWebProdPromotionResponse;
-};
-
-export type ApplyGenericWebProdPromotionResponse = ApplyGenericWebProdPromotionResponses[keyof ApplyGenericWebProdPromotionResponses];
-
-export type DispatchGenericWebProdPromotionWorkflowData = {
-    body: GenericWebPromotionWorkflowEnvelope;
-    headers?: {
-        'Idempotency-Key'?: string;
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/drivers/generic-web/prod-promotion-workflow';
-};
-
-export type DispatchGenericWebProdPromotionWorkflowErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    404: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type DispatchGenericWebProdPromotionWorkflowError = DispatchGenericWebProdPromotionWorkflowErrors[keyof DispatchGenericWebProdPromotionWorkflowErrors];
-
-export type DispatchGenericWebProdPromotionWorkflowResponses = {
-    202: GenericWebPromotionWorkflowResponse;
-};
-
-export type DispatchGenericWebProdPromotionWorkflowResponse = DispatchGenericWebProdPromotionWorkflowResponses[keyof DispatchGenericWebProdPromotionWorkflowResponses];
-
 export type ApplyProductEnvironmentConfigData = {
     body: {
         confirmation?: string;
@@ -2531,6 +2599,70 @@ export type ApplyProductEnvironmentConfigResponses = {
 };
 
 export type ApplyProductEnvironmentConfigResponse = ApplyProductEnvironmentConfigResponses[keyof ApplyProductEnvironmentConfigResponses];
+
+export type DryRunProductPromotionData = {
+    body: ProductPromotionDryRunEnvelope;
+    headers: {
+        'Idempotency-Key': string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        environment: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/environments/{environment}/promotion/dry-run';
+};
+
+export type DryRunProductPromotionErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type DryRunProductPromotionError = DryRunProductPromotionErrors[keyof DryRunProductPromotionErrors];
+
+export type DryRunProductPromotionResponses = {
+    202: ProductPromotionDryRunResponse;
+};
+
+export type DryRunProductPromotionResponse = DryRunProductPromotionResponses[keyof DryRunProductPromotionResponses];
+
+export type DispatchProductPromotionWorkflowData = {
+    body: ProductPromotionWorkflowDispatchEnvelope;
+    headers: {
+        'Idempotency-Key': string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        environment: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch';
+};
+
+export type DispatchProductPromotionWorkflowErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type DispatchProductPromotionWorkflowError = DispatchProductPromotionWorkflowErrors[keyof DispatchProductPromotionWorkflowErrors];
+
+export type DispatchProductPromotionWorkflowResponses = {
+    202: ProductPromotionWorkflowDispatchResponse;
+};
+
+export type DispatchProductPromotionWorkflowResponse = DispatchProductPromotionWorkflowResponses[keyof DispatchProductPromotionWorkflowResponses];
 
 export type RankWorkGraphSnapshotData = {
     body: WorkGraphRankEnvelope;

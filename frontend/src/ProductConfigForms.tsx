@@ -11,19 +11,7 @@ import {
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { applyProductEnvironmentConfig } from "./api";
-import {
-  beginBrowserOperation,
-  cancelBrowserOperation,
-  completeBrowserOperation,
-  createBrowserOperationState,
-  failBrowserOperation,
-  markBrowserOperationDispatched,
-  prepareBrowserOperation,
-  resetBrowserOperation,
-  retryBrowserOperation,
-  type BrowserOperationOptions,
-  type BrowserOperationState,
-} from "./browser-operation";
+import type { BrowserOperationState } from "./browser-operation";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import {
   clearManagedSecretInputs,
@@ -35,6 +23,10 @@ import {
   productConfigRuntimeDraftKey,
   productConfigSelectionKey,
 } from "./product-config-operation";
+import {
+  useBrowserOperationController,
+  type BrowserOperationController,
+} from "./use-browser-operation";
 
 import type {
   ApplyProductEnvironmentConfigData,
@@ -53,11 +45,10 @@ interface ProductConfigFormProps {
   onApplied: () => void;
 }
 
-interface ProductConfigOperationController {
-  reset: () => boolean;
-  run: (payload: EnvironmentConfigRequest) => Promise<ProductConfigApplyResponse | null>;
-  state: BrowserOperationState;
-}
+type ProductConfigOperationController = BrowserOperationController<
+  EnvironmentConfigRequest,
+  ProductConfigApplyResponse
+>;
 
 export function RuntimeSettingsChangePanel({
   config,
@@ -856,29 +847,9 @@ function useProductConfigOperation(
   environment: string,
   fixtureMode: DevFixtureMode,
 ): ProductConfigOperationController {
-  const [state, setState] = useState<BrowserOperationState>(createBrowserOperationState());
-  const stateRef = useRef(state);
-  const abortRef = useRef<AbortController | null>(null);
-  const mountedRef = useRef(true);
-
-  function updateState(next: BrowserOperationState) {
-    stateRef.current = next;
-    if (mountedRef.current) {
-      setState(next);
-    }
-  }
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      abortRef.current?.abort();
-    };
-  }, []);
-
   async function execute(
     payload: EnvironmentConfigRequest,
-    options: BrowserOperationOptions,
+    options: Parameters<typeof applyProductEnvironmentConfig>[3],
   ): Promise<ProductConfigApplyResponse> {
     if (fixtureMode) {
       const fixtures = await loadDevFixtures();
@@ -893,76 +864,12 @@ function useProductConfigOperation(
     }
     return applyProductEnvironmentConfig(product, environment, payload, options);
   }
-
-  async function run(payload: EnvironmentConfigRequest) {
-    let current = stateRef.current;
-    if (current.phase === "succeeded") {
-      current = resetBrowserOperation(current);
-    } else if (["failed", "uncertain", "cancelled"].includes(current.phase)) {
-      current = retryBrowserOperation(current);
-    }
-    try {
-      current = await prepareBrowserOperation(scope, payload, current);
-      current = beginBrowserOperation(current);
-      updateState(current);
-    } catch (error) {
-      updateState({
-        ...current,
-        failure: productConfigOperationFailure(error),
-        phase: current.requiresIdempotencyContinuity ? "uncertain" : "failed",
-      });
-      return null;
-    }
-
-    const controller = new AbortController();
-    abortRef.current?.abort();
-    abortRef.current = controller;
-    let dispatched = false;
-    try {
-      const response = await execute(payload, {
-        idempotencyKey: current.identity?.idempotencyKey ?? "",
-        signal: controller.signal,
-        onDispatch: () => {
-          dispatched = true;
-          current = markBrowserOperationDispatched(current);
-          updateState(current);
-        },
-      });
-      if (!dispatched) {
-        current = markBrowserOperationDispatched(current);
-      }
-      current = completeBrowserOperation(current, response);
-      updateState(current);
-      return response;
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        current = cancelBrowserOperation(current);
-      } else {
-        current = failBrowserOperation(
-          current,
-          productConfigOperationFailure(error),
-          productConfigFailureCertainty(error, dispatched),
-        );
-      }
-      updateState(current);
-      return null;
-    } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
-      }
-    }
-  }
-
-  function reset() {
-    try {
-      updateState(resetBrowserOperation(stateRef.current));
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  return { reset, run, state };
+  return useBrowserOperationController({
+    execute,
+    failureCertainty: productConfigFailureCertainty,
+    failureFor: productConfigOperationFailure,
+    scope,
+  });
 }
 
 function isOperationBusy(state: BrowserOperationState): boolean {

@@ -15,6 +15,7 @@ import {
   LaunchplaneApiError,
   readProductEnvironment,
   readProductEnvironmentConfigStatus,
+  readProductPromotionStatus,
 } from "./api";
 import {
   loadDevFixtures,
@@ -61,6 +62,7 @@ import type {
   ProductEnvironmentDetail,
   ProductObservedPlacement,
   ProductObservedTlsDomain,
+  ProductPromotionStatus,
   ProductSiteOverview,
   ProductTopologyWarning,
 } from "./generated/openapi.ts";
@@ -89,13 +91,18 @@ export function ProductEnvironmentRoute({
   const [configResource, setConfigResource] = useState<
     ResourceState<ProductEnvironmentConfigStatus>
   >(emptyResource());
+  const [promotionResource, setPromotionResource] = useState<
+    ResourceState<ProductPromotionStatus>
+  >(emptyResource());
   const detailLoadedKey = useRef("");
   const configLoadedKey = useRef("");
+  const promotionLoadedKey = useRef("");
   const resourceKey = `${productKey}:${environmentKey}`;
   const needsConfig =
     view === "runtime-settings" ||
     view === "managed-secrets" ||
     view === "diagnostics";
+  const needsPromotion = view === "actions" && environmentKey === "prod";
 
   useEffect(() => {
     let active = true;
@@ -230,6 +237,77 @@ export function ProductEnvironmentRoute({
     retryToken,
   ]);
 
+  useEffect(() => {
+    if (!needsPromotion) {
+      return;
+    }
+    let active = true;
+    const controller = new AbortController();
+    const sameEnvironment = promotionLoadedKey.current === resourceKey;
+    setPromotionResource((current) => ({
+      ...current,
+      status: "loading",
+      data: sameEnvironment ? current.data : null,
+      error: "",
+      traceId: "",
+      statusCode: 0,
+    }));
+
+    async function loadPromotion() {
+      try {
+        if (fixtureMode) {
+          const fixtures = await loadDevFixtures();
+          const status = fixtures.promotionStatusForFixture(
+            fixtureMode,
+            productKey,
+            environmentKey,
+          );
+          if (!active) {
+            return;
+          }
+          if (!status) {
+            setPromotionResource(notFoundResource("Promotion status"));
+            return;
+          }
+          promotionLoadedKey.current = resourceKey;
+          setPromotionResource(readyResource(status));
+          return;
+        }
+        const response = await readProductPromotionStatus(
+          productKey,
+          environmentKey,
+          controller.signal,
+        );
+        if (!active || controller.signal.aborted) {
+          return;
+        }
+        promotionLoadedKey.current = resourceKey;
+        setPromotionResource(readyResource(response.promotion_status));
+      } catch (error) {
+        if (!active || controller.signal.aborted) {
+          return;
+        }
+        setPromotionResource((current) =>
+          errorResource(sameEnvironment ? current.data : null, error),
+        );
+      }
+    }
+
+    void loadPromotion();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [
+    environmentKey,
+    fixtureMode,
+    needsPromotion,
+    productKey,
+    refreshToken,
+    resourceKey,
+    retryToken,
+  ]);
+
   if (
     (detailResource.status === "idle" || detailResource.status === "loading") &&
     !detailResource.data
@@ -282,6 +360,7 @@ export function ProductEnvironmentRoute({
       updating={detailResource.status === "loading"}
       fixtureMode={fixtureMode}
       onConfigApplied={() => setRetryToken((current) => current + 1)}
+      promotionResource={promotionResource}
       view={view}
     />
   );
@@ -297,6 +376,7 @@ function EnvironmentPage({
   updating,
   fixtureMode,
   onConfigApplied,
+  promotionResource,
   view,
 }: {
   configResource: ResourceState<ProductEnvironmentConfigStatus>;
@@ -308,6 +388,7 @@ function EnvironmentPage({
   updating: boolean;
   fixtureMode: DevFixtureMode;
   onConfigApplied: () => void;
+  promotionResource: ResourceState<ProductPromotionStatus>;
   view: EnvironmentView;
 }) {
   const externalUrl = safeExternalUrl(detail.base_url);
@@ -386,7 +467,14 @@ function EnvironmentPage({
       />
 
       {view === "overview" ? <EnvironmentOverview detail={detail} /> : null}
-      {view === "actions" ? <EnvironmentActionsView detail={detail} /> : null}
+      {view === "actions" ? (
+        <EnvironmentActionsView
+          detail={detail}
+          fixtureMode={fixtureMode}
+          onRefresh={onConfigApplied}
+          promotionResource={promotionResource}
+        />
+      ) : null}
       {view === "runtime-settings" ? (
         <RuntimeSettingsView
           key={`${detail.product}:${detail.environment}:runtime-settings`}

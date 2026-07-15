@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from collections.abc import Callable
 from typing import Literal, Protocol, cast
 from urllib.parse import quote
 
@@ -32,6 +33,10 @@ from control_plane.workflows.generic_web_deploy import (
     execute_generic_web_deploy,
     normalize_generic_web_artifact_id,
     product_profile_uses_generic_web_base,
+)
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebDeployProvider,
+    GenericWebResolvedDeployTarget,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.launchplane import (
@@ -82,6 +87,7 @@ class GenericWebProdPromotionRequest(BaseModel):
     dry_run: bool = False
     no_cache: bool = False
     release_tag: str = ""
+    promotion_intent_id: str = ""
 
     @model_validator(mode="after")
     def _validate_request(self) -> "GenericWebProdPromotionRequest":
@@ -92,6 +98,7 @@ class GenericWebProdPromotionRequest(BaseModel):
         self.to_instance = self.to_instance.strip().lower()
         self.backup_record_id = self.backup_record_id.strip()
         self.release_tag = self.release_tag.strip()
+        self.promotion_intent_id = self.promotion_intent_id.strip()
         if not self.product:
             raise ValueError("generic web prod promotion requires product")
         if self.from_instance == self.to_instance:
@@ -210,6 +217,11 @@ def execute_generic_web_prod_promotion(
     control_plane_root: Path,
     record_store: GenericWebPromotionStore,
     request: GenericWebProdPromotionRequest,
+    deploy_provider: GenericWebDeployProvider | None = None,
+    resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    provider_operation_title: str = "",
+    deployment_record_id: str = "",
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> GenericWebProdPromotionResult:
     profile, source_lane, destination_lane = resolve_generic_web_promotion_lanes(
         record_store=record_store,
@@ -310,6 +322,11 @@ def execute_generic_web_prod_promotion(
         ),
         profile=profile,
         lane=destination_lane,
+        deploy_provider=deploy_provider,
+        resolved_deploy_target=resolved_deploy_target,
+        provider_operation_title=provider_operation_title,
+        deployment_record_id=deployment_record_id,
+        provider_effect_checkpoint=provider_effect_checkpoint,
     )
     deployment_record = _read_deployment_record(
         record_store=record_store,

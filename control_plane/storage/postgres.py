@@ -2874,6 +2874,7 @@ class PostgresRecordStore(HumanSessionStore):
             updates={
                 "provider_operation_key": normalized_provider_operation_key,
                 "provider_id": provider_id.strip(),
+                "payload": record.payload,
                 "updated_at": updated_at.strip(),
             },
         )

@@ -158,6 +158,12 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/products/{product}/environments/{environment}/config-status": (
         "read_product_environment_config_status"
     ),
+    "/v1/products/{product}/environments/{environment}/promotion-status": (
+        "read_product_promotion_status"
+    ),
+    "/v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}": (
+        "read_product_promotion_workflow_delivery"
+    ),
     "/v1/every-code/summary": "read_every_code_summary",
     "/v1/every-code/work-requests": "list_every_code_work_requests",
     "/v1/previews/readiness": "read_preview_readiness",
@@ -174,8 +180,10 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/products/{product}/environments/{environment}/config/apply": (
         "apply_product_environment_config"
     ),
-    "/v1/drivers/generic-web/prod-promotion": "apply_generic_web_prod_promotion",
-    "/v1/drivers/generic-web/prod-promotion-workflow": (
-        "dispatch_generic_web_prod_promotion_workflow"
+    "/v1/products/{product}/environments/{environment}/promotion/dry-run": (
+        "dry_run_product_promotion"
+    ),
+    "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": (
+        "dispatch_product_promotion_workflow"
     ),
 }

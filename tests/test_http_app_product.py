@@ -1425,6 +1425,16 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                 "GenericWebPromotionWorkflowResponse",
                 ("400", "401", "403", "404", "409", "503"),
             ),
+            "/v1/products/{product}/environments/{environment}/promotion/dry-run": (
+                "dry_run_product_promotion",
+                "ProductPromotionDryRunResponse",
+                ("400", "401", "403", "404", "409", "503"),
+            ),
+            "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": (
+                "dispatch_product_promotion_workflow",
+                "ProductPromotionWorkflowDispatchResponse",
+                ("400", "401", "403", "404", "409", "503"),
+            ),
         }
         for path, (
             operation_id,

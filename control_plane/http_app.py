@@ -62,6 +62,7 @@ from control_plane.http_routes import (
     register_product_config_status_read_routes,
     register_product_context_audit_read_routes,
     register_product_environment_read_routes,
+    register_product_promotion_status_read_routes,
     register_product_profile_read_routes,
     register_protected_artifact_read_routes,
     register_topology_read_routes,
@@ -235,6 +236,27 @@ from control_plane.generic_web_promotion_http import (
     resolve_generic_web_promotion_workflow_lane,
     should_store_generic_web_promotion_idempotency,
     validate_generic_web_prod_promotion_lanes,
+)
+from control_plane.product_promotion_http import (
+    PRODUCT_PROMOTION_DRY_RUN_MARKER_ROUTE as _PRODUCT_PROMOTION_DRY_RUN_MARKER_ROUTE,
+    PRODUCT_PROMOTION_DRY_RUN_ROUTE as _PRODUCT_PROMOTION_DRY_RUN_ROUTE,
+    PRODUCT_PROMOTION_WORKFLOW_ROUTE as _PRODUCT_PROMOTION_WORKFLOW_ROUTE,
+    ProductPromotionDryRunEnvelope,
+    ProductPromotionDryRunResponse,
+    ProductPromotionDryRunResult,
+    ProductPromotionStatus,
+    ProductPromotionWorkflowDispatchEnvelope,
+    ProductPromotionWorkflowDispatchResponse,
+    ProductPromotionWorkflowDispatchResult,
+    build_product_promotion_status,
+    product_promotion_confirmation,
+    product_promotion_continuity_payload,
+    product_promotion_direct_request,
+    product_promotion_dry_run_key,
+    product_promotion_intent_matches,
+    product_promotion_request_payload,
+    product_promotion_workflow_request,
+    resolve_product_promotion_target,
 )
 from control_plane.generic_web_verification_http import (
     GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE as _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
@@ -630,6 +652,7 @@ from control_plane.workflows.generic_web_preview import (
 )
 from control_plane.workflows.launchplane_self_deploy import execute_launchplane_self_deploy
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.workflows.launchplane import resolve_launchplane_github_token
 from control_plane.work_graph_issue_inbox import (
     GitHubIssueInboxReconcileRequest,
 )
@@ -1676,6 +1699,110 @@ class _GenericWebDeployProviderMutationAdapter:
                 result=result,
             ),
             durable=should_store_generic_web_deploy_idempotency(result),
+            provider_effect_performed=provider_effect_attempted,
+        )
+
+
+class _GenericWebProdPromotionProviderMutationAdapter:
+    def __init__(
+        self,
+        *,
+        control_plane_root: FilePath,
+        record_store: object,
+        promotion_request: GenericWebProdPromotionEnvelope,
+        profile: LaunchplaneProductProfileRecord,
+        lane: ProductLaneProfile,
+        trace_id: str,
+        validate_before_effect: Callable[[GenericWebResolvedDeployTarget], None],
+    ) -> None:
+        self._control_plane_root = control_plane_root
+        self._record_store = record_store
+        self._promotion_request = promotion_request
+        self._profile = profile
+        self._lane = lane
+        self._trace_id = trace_id
+        self._validate_before_effect = validate_before_effect
+        self._deploy_provider: GenericWebDeployProvider = default_generic_web_deploy_provider()
+        self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
+
+    def resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
+        if self._resolved_deploy_target is None:
+            promotion = self._promotion_request.promotion
+            self._resolved_deploy_target = self._deploy_provider.resolve_deploy_target(
+                control_plane_root=self._control_plane_root,
+                request_artifact_id=promotion.artifact_id,
+                request_source_git_ref=promotion.source_git_ref,
+                request_timeout_seconds=promotion.timeout_seconds,
+                request_no_cache=promotion.no_cache,
+                record_store=self._record_store,
+                profile=self._profile,
+                lane=self._lane,
+                normalized_artifact_id=normalize_generic_web_artifact_id(
+                    profile=self._profile,
+                    artifact_id=promotion.artifact_id,
+                ),
+                fallback_target_name=f"{self._profile.product}-{self._lane.instance}",
+            )
+        return self._resolved_deploy_target
+
+    def reconciliation_key(self) -> str:
+        return build_generic_web_provider_reconciliation_key(self.resolve_deploy_target())
+
+    def target_key(self) -> str:
+        return build_generic_web_provider_target_key(self.resolve_deploy_target())
+
+    def observe(
+        self,
+        provider_operation_key: str,
+        provider_effect_phase: str,
+        reconciliation_key: str,
+    ) -> ProviderObservation:
+        del provider_operation_key, provider_effect_phase, reconciliation_key
+        return ProviderObservation(outcome="unknown")
+
+    def _deployment_record_id(self, provider_operation_key: str) -> str:
+        operation_digest = hashlib.sha256(provider_operation_key.encode("utf-8")).hexdigest()[:24]
+        return (
+            f"deployment-provider-operation-{operation_digest}-"
+            f"{self._lane.context}-{self._lane.instance}"
+        )
+
+    def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        provider_effect_attempted = False
+
+        def checkpoint_provider_effect(phase: str) -> None:
+            nonlocal provider_effect_attempted
+            lease.checkpoint_effect(phase)
+            provider_effect_attempted = True
+
+        try:
+            self._validate_before_effect(self.resolve_deploy_target())
+            records, result = execute_generic_web_prod_promotion_result(
+                control_plane_root=self._control_plane_root,
+                record_store=self._record_store,
+                request=self._promotion_request,
+                deploy_provider=self._deploy_provider,
+                resolved_deploy_target=self.resolve_deploy_target(),
+                provider_operation_title=provider_operation_title(provider_operation_key),
+                deployment_record_id=self._deployment_record_id(provider_operation_key),
+                provider_effect_checkpoint=checkpoint_provider_effect,
+            )
+        except StarletteHTTPException as error:
+            raise ProviderMutationRejectedError(error) from error
+        except (FileNotFoundError, ValueError, click.ClickException) as error:
+            if provider_effect_attempted:
+                raise ProviderMutationUnknownError(str(error)) from error
+            raise ProviderMutationRejectedError(error) from error
+        return ProviderMutationOutcome(
+            response_status_code=202,
+            response_payload=_provider_operation_response_payload(
+                trace_id=self._trace_id,
+                records=records.model_dump(mode="json"),
+                result=result.model_dump(mode="json"),
+            ),
+            durable=should_store_generic_web_promotion_idempotency(result),
             provider_effect_performed=provider_effect_attempted,
         )
 
@@ -3107,6 +3234,85 @@ def store_product_config_dry_run_record(
         raise
 
 
+def product_promotion_dry_run_record(
+    *,
+    record_store: object,
+    identity: LaunchplaneIdentity,
+    status: ProductPromotionStatus,
+    bump: Literal["patch", "minor", "major"],
+) -> LaunchplaneIdempotencyRecord | None:
+    idempotency_store = idempotency_capable_store(record_store)
+    if idempotency_store is None:
+        return None
+    continuity_payload = product_promotion_continuity_payload(status=status, bump=bump)
+    continuity_fingerprint = request_fingerprint(continuity_payload)
+    stored_record = idempotency_store.read_idempotency_record(
+        scope=idempotency_scope(identity),
+        route_path=_PRODUCT_PROMOTION_DRY_RUN_MARKER_ROUTE,
+        idempotency_key=product_promotion_dry_run_key(status=status, bump=bump),
+    )
+    if stored_record is None or stored_record.request_fingerprint != continuity_fingerprint:
+        return None
+    return stored_record
+
+
+def store_product_promotion_dry_run_record(
+    *,
+    record_store: object,
+    identity: LaunchplaneIdentity,
+    status: ProductPromotionStatus,
+    bump: Literal["patch", "minor", "major"],
+    trace_id: str,
+    response: BaseModel,
+) -> None:
+    idempotency_store = idempotency_capable_store(record_store)
+    if idempotency_store is None:
+        return
+    if (
+        product_promotion_dry_run_record(
+            record_store=record_store,
+            identity=identity,
+            status=status,
+            bump=bump,
+        )
+        is not None
+    ):
+        return
+    continuity_payload = product_promotion_continuity_payload(status=status, bump=bump)
+    continuity_fingerprint = request_fingerprint(continuity_payload)
+    dry_run_key = product_promotion_dry_run_key(status=status, bump=bump)
+    marker_trace_id = f"{trace_id}-product-promotion-dry-run"
+    try:
+        idempotency_store.write_idempotency_record(
+            LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_idempotency_record_id(
+                    response_trace_id=marker_trace_id
+                ),
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_PROMOTION_DRY_RUN_MARKER_ROUTE,
+                idempotency_key=dry_run_key,
+                request_fingerprint=continuity_fingerprint,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                recorded_at=utc_now_timestamp(),
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+            )
+        )
+    except Exception as write_error:
+        try:
+            stored_record = product_promotion_dry_run_record(
+                record_store=record_store,
+                identity=identity,
+                status=status,
+                bump=bump,
+            )
+        except Exception as read_error:
+            raise write_error from read_error
+        if stored_record is not None:
+            return
+        raise
+
+
 def parse_utc_timestamp(value: str) -> datetime:
     normalized = value.strip()
     if normalized.endswith("Z"):
@@ -3935,6 +4141,12 @@ def create_launchplane_fastapi_app(
         common=read_route_dependencies,
         read_product_profile_list_identity=read_product_profile_list_identity,
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
+        workflow_credentials_ready=lambda context: bool(
+            resolve_launchplane_github_token(
+                control_plane_root=resolved_control_plane_root,
+                context_name=context,
+            )
+        ),
     )
     driver_read_route_dependencies = DriverReadRouteDependencies(
         common=read_route_dependencies,
@@ -9833,6 +10045,59 @@ def create_launchplane_fastapi_app(
             )
         )
 
+    def replay_stored_apply_idempotency(
+        *,
+        record_store: object,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint_value: str,
+        trace_id: str,
+        idempotency_scope_override: str = "",
+    ) -> AcceptedEvidenceResponse | None:
+        idempotency_store = idempotency_capable_store(record_store)
+        if idempotency_store is None or not idempotency_key:
+            return None
+        stored_record = idempotency_store.read_idempotency_record(
+            scope=idempotency_scope_override.strip() or idempotency_scope(identity),
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+        )
+        if stored_record is None:
+            return None
+        if stored_record.request_fingerprint != request_fingerprint_value:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message=(
+                    "Idempotency-Key was already used for a different "
+                    "Launchplane request payload on this route."
+                ),
+            )
+        if stored_record.state == "running":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_in_progress",
+                message=(
+                    "A matching Launchplane mutation is already running. "
+                    "Retry with the same Idempotency-Key."
+                ),
+            )
+        if stored_record.state == "reconcile_required":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_reconciliation_required",
+                message=("The prior Launchplane mutation requires reconciliation before retry."),
+            )
+        return replay_idempotent_response(
+            trace_id=trace_id,
+            stored_record=stored_record,
+            route_path=route_path,
+        )
+
     async def replay_apply_idempotency(
         *,
         request: Request,
@@ -9843,60 +10108,26 @@ def create_launchplane_fastapi_app(
         trace_id: str,
         check_replay: bool,
         request_payload: dict[str, object] | None = None,
+        idempotency_scope_override: str = "",
     ) -> tuple[str, str, AcceptedEvidenceResponse | None]:
         normalized_idempotency_key = idempotency_key.strip()
-        normalized_scope = idempotency_scope(identity)
         raw_payload = request_payload if request_payload is not None else await request.json()
         payload_fingerprint = idempotency_request_fingerprint(
             route_path=route_path,
             payload=cast(dict[str, object], raw_payload),
         )
-        idempotency_store = idempotency_capable_store(record_store)
-        if idempotency_store is not None and normalized_idempotency_key and check_replay:
-            stored_record = idempotency_store.read_idempotency_record(
-                scope=normalized_scope,
+        if normalized_idempotency_key and check_replay:
+            replay_response = replay_stored_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
                 route_path=route_path,
                 idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                idempotency_scope_override=idempotency_scope_override,
             )
-            if stored_record is not None:
-                if stored_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                if stored_record.state == "running":
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="mutation_in_progress",
-                        message=(
-                            "A matching Launchplane mutation is already running. "
-                            "Retry with the same Idempotency-Key."
-                        ),
-                    )
-                if stored_record.state == "reconcile_required":
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="mutation_reconciliation_required",
-                        message=(
-                            "The prior Launchplane mutation requires reconciliation before retry."
-                        ),
-                    )
-                return (
-                    normalized_idempotency_key,
-                    payload_fingerprint,
-                    replay_idempotent_response(
-                        trace_id=trace_id,
-                        stored_record=stored_record,
-                        route_path=route_path,
-                    ),
-                )
+            if replay_response is not None:
+                return normalized_idempotency_key, payload_fingerprint, replay_response
         return normalized_idempotency_key, payload_fingerprint, None
 
     def build_apply_idempotency_record(
@@ -10058,6 +10289,7 @@ def create_launchplane_fastapi_app(
         adapter: DurableProviderMutationAdapter,
         in_progress_message: str,
         reconcile_message: str,
+        reservation_scope: str = "",
     ) -> AcceptedEvidenceResponse:
         reservation_store = require_provider_operation_store(
             record_store=record_store,
@@ -10067,7 +10299,7 @@ def create_launchplane_fastapi_app(
         def execute() -> DurableProviderOperationResult:
             return run_durable_provider_operation(
                 store=reservation_store,
-                scope=idempotency_scope(identity),
+                scope=reservation_scope.strip() or idempotency_scope(identity),
                 route_path=route_path,
                 idempotency_key=idempotency_key,
                 request_fingerprint=request_fingerprint,
@@ -10466,6 +10698,534 @@ def create_launchplane_fastapi_app(
                 environment=lane.instance,
             ),
         )
+
+    def require_product_promotion_operator(
+        *,
+        identity: LaunchplaneIdentity,
+        trace_id: str,
+    ) -> None:
+        if not isinstance(
+            identity, GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Product promotion browser routes require an operator identity.",
+            )
+
+    def resolve_authorized_product_promotion_target(
+        *,
+        record_store: object,
+        identity: LaunchplaneIdentity,
+        product: str,
+        environment: str,
+        action: str,
+        trace_id: str,
+    ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile]:
+        try:
+            profile, lane = resolve_product_promotion_target(
+                record_store=record_store,
+                product=product,
+                destination_environment=environment,
+            )
+        except (AttributeError, FileNotFoundError) as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion target was not found.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=profile.product,
+            context=lane.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion target was not found.",
+            )
+        return profile, lane
+
+    def current_product_promotion_status(
+        *,
+        record_store: object,
+        identity: LaunchplaneIdentity,
+        product: str,
+        environment: str,
+        trace_id: str,
+    ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile, ProductPromotionStatus]:
+        try:
+            return build_product_promotion_status(
+                record_store=record_store,
+                product=product,
+                destination_environment=environment,
+                action_allowed=lambda action, requested_product, context: (
+                    resolved_authz_policy_runtime.policy.allows(
+                        identity=identity,
+                        action=action,
+                        product=requested_product,
+                        context=context,
+                    )
+                ),
+                workflow_credentials_ready=lambda context: bool(
+                    resolve_launchplane_github_token(
+                        control_plane_root=resolved_control_plane_root,
+                        context_name=context,
+                    )
+                ),
+            )
+        except (AttributeError, FileNotFoundError) as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion target was not found.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_evidence_invalid",
+                message="Current product promotion evidence is invalid.",
+            ) from error
+
+    def require_product_promotion_intent(
+        *,
+        record_store: object,
+        profile: LaunchplaneProductProfileRecord,
+        lane: ProductLaneProfile,
+        promotion_request: GenericWebProdPromotionEnvelope,
+        idempotency_key: str,
+        trace_id: str,
+    ) -> None:
+        intent_id = promotion_request.promotion.promotion_intent_id.strip()
+        if not isinstance(record_store, PostgresRecordStore) or not intent_id:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_intent_required",
+                message="Live generic-web promotion requires a product-owned promotion intent.",
+            )
+        if idempotency_key.strip() != intent_id:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_intent_idempotency_mismatch",
+                message="Live promotion must use its promotion intent as Idempotency-Key.",
+            )
+        try:
+            intent_record = record_store.read_outbox_delivery_record(intent_id)
+            current_profile, current_lane, status = build_product_promotion_status(
+                record_store=record_store,
+                product=profile.product,
+                destination_environment=lane.instance,
+                action_allowed=lambda _action, _product, _context: True,
+                workflow_credentials_ready=lambda _context: True,
+            )
+        except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_intent_invalid",
+                message="Product-owned promotion intent is unavailable or stale.",
+            ) from error
+        if (
+            current_profile != profile
+            or current_lane != lane
+            or not status.workflow_live.enabled
+            or not product_promotion_intent_matches(
+                record=intent_record,
+                profile=current_profile,
+                status=status,
+                request=promotion_request.promotion,
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_intent_invalid",
+                message="Product-owned promotion intent does not match current evidence.",
+            )
+
+    def require_product_promotion_target_snapshot(
+        *,
+        record_store: object,
+        lane: ProductLaneProfile,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+        trace_id: str,
+    ) -> None:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Live generic-web promotion requires Launchplane database storage.",
+            )
+        try:
+            current_target = record_store.read_provider_target_record(
+                context_name=lane.context,
+                instance_name=lane.instance,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_target_changed",
+                message="The reviewed production provider target is no longer available.",
+            ) from error
+        expected_target = resolved_deploy_target.deployed_target
+        resolved_target = resolved_deploy_target.resolved_target
+        if (
+            expected_target is None
+            or current_target.to_deployed_target_reference() != expected_target
+            or resolved_target.target_id != expected_target.target_id
+            or resolved_target.target_name != expected_target.display_name
+            or resolved_target.target_type
+            != (expected_target.provider_target_type or expected_target.target_category)
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_target_changed",
+                message="The production provider target changed before promotion execution.",
+            )
+
+    async def dry_run_product_promotion(
+        product: str,
+        environment: str,
+        request: Request,
+        promotion_request: ProductPromotionDryRunEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> ProductPromotionDryRunResponse:
+        trace_id = next_trace_id()
+        require_product_promotion_operator(identity=identity, trace_id=trace_id)
+        profile, lane = resolve_authorized_product_promotion_target(
+            record_store=record_store,
+            identity=identity,
+            product=product,
+            environment=environment,
+            action="generic_web_prod_promotion.execute",
+            trace_id=trace_id,
+        )
+        normalized_key = idempotency_key.strip()
+        if not normalized_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Product promotion dry-run requires an Idempotency-Key header.",
+            )
+        request_payload = product_promotion_request_payload(
+            product=profile.product,
+            destination_environment=lane.instance,
+            request=promotion_request,
+        )
+        normalized_key, payload_fingerprint, replay_response = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PRODUCT_PROMOTION_DRY_RUN_ROUTE,
+            idempotency_key=normalized_key,
+            trace_id=trace_id,
+            check_replay=True,
+            request_payload=request_payload,
+        )
+        if replay_response is not None:
+            replayed = ProductPromotionDryRunResponse.model_validate(
+                replay_response.model_dump(mode="json")
+            )
+            try:
+                _, _, replay_status = current_product_promotion_status(
+                    record_store=record_store,
+                    identity=identity,
+                    product=profile.product,
+                    environment=lane.instance,
+                    trace_id=trace_id,
+                )
+            except HTTPException:
+                return replayed
+            if (
+                promotion_request.evidence_fingerprint == replay_status.evidence_fingerprint
+                and replay_status.direct_dry_run.enabled
+            ):
+                store_product_promotion_dry_run_record(
+                    record_store=record_store,
+                    identity=identity,
+                    status=replay_status,
+                    bump=promotion_request.bump,
+                    trace_id=replayed.original_trace_id or replayed.trace_id,
+                    response=replayed,
+                )
+            return replayed
+        profile, _, promotion_status = current_product_promotion_status(
+            record_store=record_store,
+            identity=identity,
+            product=profile.product,
+            environment=lane.instance,
+            trace_id=trace_id,
+        )
+        if promotion_request.evidence_fingerprint != promotion_status.evidence_fingerprint:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_evidence_changed",
+                message="Product promotion evidence changed. Refresh and review the current evidence.",
+            )
+        if not promotion_status.direct_dry_run.enabled:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_unavailable",
+                message="Product promotion dry-run is blocked by current server evidence.",
+            )
+        try:
+            records, result = execute_generic_web_prod_promotion_result(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=product_promotion_direct_request(
+                    profile=profile,
+                    status=promotion_status,
+                ),
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion route was not found.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_dry_run_failed",
+                message="Product promotion dry-run could not validate the reviewed evidence.",
+            ) from error
+        response = ProductPromotionDryRunResponse(
+            trace_id=trace_id,
+            records=records,
+            result=ProductPromotionDryRunResult.model_validate(
+                {
+                    **result.model_dump(mode="json"),
+                    "evidence_fingerprint": promotion_status.evidence_fingerprint,
+                    "bump": promotion_request.bump,
+                }
+            ),
+        )
+        try:
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_PRODUCT_PROMOTION_DRY_RUN_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        except Exception as write_error:
+            try:
+                replay_response = replay_stored_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_PRODUCT_PROMOTION_DRY_RUN_ROUTE,
+                    idempotency_key=normalized_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                )
+            except HTTPException:
+                raise
+            except Exception as read_error:
+                raise write_error from read_error
+            if replay_response is None:
+                raise
+            response = ProductPromotionDryRunResponse.model_validate(
+                replay_response.model_dump(mode="json")
+            )
+        store_product_promotion_dry_run_record(
+            record_store=record_store,
+            identity=identity,
+            status=promotion_status,
+            bump=promotion_request.bump,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def dispatch_product_promotion_workflow(
+        product: str,
+        environment: str,
+        request: Request,
+        workflow_request: ProductPromotionWorkflowDispatchEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> ProductPromotionWorkflowDispatchResponse:
+        trace_id = next_trace_id()
+        require_product_promotion_operator(identity=identity, trace_id=trace_id)
+        profile, lane = resolve_authorized_product_promotion_target(
+            record_store=record_store,
+            identity=identity,
+            product=product,
+            environment=environment,
+            action="generic_web_prod_promotion.dispatch",
+            trace_id=trace_id,
+        )
+        normalized_key = idempotency_key.strip()
+        if not normalized_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Product promotion workflow dispatch requires an Idempotency-Key header.",
+            )
+        request_payload = product_promotion_request_payload(
+            product=profile.product,
+            destination_environment=lane.instance,
+            request=workflow_request,
+        )
+        normalized_key, payload_fingerprint, replay_response = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PRODUCT_PROMOTION_WORKFLOW_ROUTE,
+            idempotency_key=normalized_key,
+            trace_id=trace_id,
+            check_replay=True,
+            request_payload=request_payload,
+        )
+        if replay_response is not None:
+            return ProductPromotionWorkflowDispatchResponse.model_validate(
+                replay_response.model_dump(mode="json")
+            )
+        profile, _, promotion_status = current_product_promotion_status(
+            record_store=record_store,
+            identity=identity,
+            product=profile.product,
+            environment=lane.instance,
+            trace_id=trace_id,
+        )
+        if workflow_request.evidence_fingerprint != promotion_status.evidence_fingerprint:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_evidence_changed",
+                message="Product promotion evidence changed. Refresh and repeat the direct dry-run.",
+            )
+        availability = (
+            promotion_status.workflow_dry_run
+            if workflow_request.dry_run
+            else promotion_status.workflow_live
+        )
+        if not availability.enabled:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_unavailable",
+                message="Product promotion workflow dispatch is blocked by current server evidence.",
+            )
+        direct_dry_run = product_promotion_dry_run_record(
+            record_store=record_store,
+            identity=identity,
+            status=promotion_status,
+            bump=workflow_request.bump,
+        )
+        if direct_dry_run is None:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="matching_dry_run_required",
+                message="Run and accept the matching direct promotion dry-run before dispatch.",
+            )
+        if (
+            not workflow_request.dry_run
+            and workflow_request.confirmation
+            != product_promotion_confirmation(status=promotion_status, bump=workflow_request.bump)
+        ):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="confirmation_required",
+                message="Live product promotion requires the exact reviewed confirmation.",
+            )
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Product promotion workflow dispatch requires PostgreSQL storage.",
+            )
+        try:
+            records, result, outbox_delivery = dispatch_generic_web_promotion_workflow_result(
+                request=product_promotion_workflow_request(
+                    profile=profile,
+                    status=promotion_status,
+                    request=workflow_request,
+                ),
+                profile=profile,
+                delivery_key=f"{idempotency_scope(identity)}:{normalized_key}",
+            )
+        except (FileNotFoundError, ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="promotion_workflow_dispatch_failed",
+                message="Product promotion workflow dispatch could not be prepared.",
+            ) from error
+        delivery_id = records.get("outbox_delivery_id", "")
+        response = ProductPromotionWorkflowDispatchResponse(
+            trace_id=trace_id,
+            records=records,
+            result=ProductPromotionWorkflowDispatchResult.model_validate(
+                {
+                    **result.model_dump(mode="json"),
+                    "evidence_fingerprint": promotion_status.evidence_fingerprint,
+                    "delivery_id": delivery_id,
+                    "artifact_id": promotion_status.source.artifact_id,
+                    "source_git_ref": promotion_status.source.source_git_ref,
+                }
+            ),
+        )
+        idempotency_record = build_apply_idempotency_record(
+            identity=identity,
+            route_path=_PRODUCT_PROMOTION_WORKFLOW_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        try:
+            record_store.enqueue_outbox_delivery_with_idempotency(
+                OutboxWithIdempotencyRequest(
+                    delivery=outbox_delivery,
+                    idempotency_record=idempotency_record,
+                )
+            )
+        except Exception as write_error:
+            try:
+                replay_response = replay_stored_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_PRODUCT_PROMOTION_WORKFLOW_ROUTE,
+                    idempotency_key=normalized_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                )
+            except HTTPException:
+                raise
+            except Exception as read_error:
+                raise write_error from read_error
+            if replay_response is None:
+                raise
+            return ProductPromotionWorkflowDispatchResponse.model_validate(
+                replay_response.model_dump(mode="json")
+            )
+        return response
 
     async def reencrypt_managed_secrets(
         request: Request,
@@ -13418,7 +14178,10 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if isinstance(identity, GitHubHumanIdentity) and not promotion_request.promotion.dry_run:
+        if (
+            isinstance(identity, GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity)
+            and not promotion_request.promotion.dry_run
+        ):
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -13442,6 +14205,38 @@ def create_launchplane_fastapi_app(
                     " for the requested product/context."
                 ),
             )
+        live_promotion = not promotion_request.promotion.dry_run
+        promotion_intent_id = promotion_request.promotion.promotion_intent_id.strip()
+        if live_promotion:
+            if not promotion_intent_id and not (
+                resolved_authz_policy_runtime.policy.allows(
+                    identity=identity,
+                    action="generic_web_prod_promotion.execute_unreviewed",
+                    product=profile.product,
+                    context=lane.context.strip(),
+                )
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="promotion_intent_required",
+                    message=(
+                        "Live generic-web promotion requires a product-owned intent or an "
+                        "explicit unreviewed-automation grant."
+                    ),
+                )
+            if not idempotency_key.strip():
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="idempotency_key_required",
+                    message="Live generic-web promotion requires an Idempotency-Key header.",
+                )
+        reservation_scope = (
+            f"promotion-intent:{promotion_intent_id}"
+            if live_promotion and promotion_intent_id
+            else ""
+        )
         (
             normalized_key,
             payload_fingerprint,
@@ -13454,10 +14249,76 @@ def create_launchplane_fastapi_app(
             idempotency_key=idempotency_key,
             trace_id=trace_id,
             check_replay=bool(idempotency_key.strip()),
+            idempotency_scope_override=reservation_scope,
         )
         if replayed_response is not None:
             return GenericWebProdPromotionResponse.model_validate(
                 replayed_response.model_dump(mode="json")
+            )
+        if live_promotion:
+
+            def validate_live_promotion(
+                resolved_deploy_target: GenericWebResolvedDeployTarget,
+            ) -> None:
+                require_product_promotion_target_snapshot(
+                    record_store=record_store,
+                    lane=lane,
+                    resolved_deploy_target=resolved_deploy_target,
+                    trace_id=trace_id,
+                )
+                if promotion_intent_id:
+                    require_product_promotion_intent(
+                        record_store=record_store,
+                        profile=profile,
+                        lane=lane,
+                        promotion_request=promotion_request,
+                        idempotency_key=idempotency_key,
+                        trace_id=trace_id,
+                    )
+
+            adapter = _GenericWebProdPromotionProviderMutationAdapter(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                promotion_request=promotion_request,
+                profile=profile,
+                lane=lane,
+                trace_id=trace_id,
+                validate_before_effect=validate_live_promotion,
+            )
+            try:
+                durable_response = await run_provider_mutation(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                    idempotency_key=normalized_key,
+                    request_fingerprint=payload_fingerprint,
+                    trace_id=trace_id,
+                    adapter=adapter,
+                    in_progress_message=(
+                        "A matching generic web prod promotion is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                    reconcile_message=(
+                        "The generic web prod promotion requires reconciliation before retry."
+                    ),
+                    reservation_scope=reservation_scope,
+                )
+            except FileNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message=f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_ROUTE}.",
+                ) from error
+            except (ValueError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_request",
+                    message="Request could not be completed.",
+                ) from error
+            return GenericWebProdPromotionResponse.model_validate(
+                durable_response.model_dump(mode="json")
             )
         try:
             records, result = execute_generic_web_prod_promotion_result(
@@ -13512,6 +14373,15 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Terminal agent credentials can only read redacted Launchplane context.",
+            )
+        if isinstance(identity, GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Operator workflow dispatches must use the product-owned promotion route."
+                ),
             )
         try:
             profile, lane = resolve_generic_web_promotion_workflow_lane(
@@ -13574,7 +14444,6 @@ def create_launchplane_fastapi_app(
             )
         try:
             records, result, outbox_delivery = dispatch_generic_web_promotion_workflow_result(
-                control_plane_root=resolved_control_plane_root,
                 request=workflow_request,
                 profile=profile,
                 delivery_key=(
@@ -18513,6 +19382,44 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _PRODUCT_PROMOTION_DRY_RUN_ROUTE,
+        dry_run_product_promotion,
+        methods=["POST"],
+        status_code=202,
+        response_model=ProductPromotionDryRunResponse,
+        response_model_exclude_none=True,
+        operation_id="dry_run_product_promotion",
+        summary="Dry-run product promotion from current runtime evidence",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_PROMOTION_WORKFLOW_ROUTE,
+        dispatch_product_promotion_workflow,
+        methods=["POST"],
+        status_code=202,
+        response_model=ProductPromotionWorkflowDispatchResponse,
+        response_model_exclude_none=True,
+        operation_id="dispatch_product_promotion_workflow",
+        summary="Dispatch the reviewed product promotion workflow",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _SECRET_REENCRYPT_ROUTE,
         reencrypt_managed_secrets,
         methods=["POST"],
@@ -19128,6 +20035,10 @@ def create_launchplane_fastapi_app(
         return response
 
     register_product_config_status_read_routes(
+        app,
+        dependencies=product_read_route_dependencies,
+    )
+    register_product_promotion_status_read_routes(
         app,
         dependencies=product_read_route_dependencies,
     )

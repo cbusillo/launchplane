@@ -9,11 +9,22 @@ import {
   createBrowserOperationState,
   failBrowserOperation,
   markBrowserOperationDispatched,
+  persistBrowserOperationState,
   prepareBrowserOperation,
+  recoverBrowserOperationState,
   resetBrowserOperation,
   retryBrowserOperation,
   stableRequestFingerprint,
 } from "../src/browser-operation.ts";
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    removeItem: (key) => values.delete(key),
+    setItem: (key, value) => values.set(key, value),
+  };
+}
 
 test("stable fingerprints ignore object key order", async () => {
   assert.equal(
@@ -43,6 +54,37 @@ test("operation identity survives retries but changes with scope or payload", as
   assert.equal(retry.idempotencyKey, first.idempotencyKey);
   assert.notEqual(changedPayload.idempotencyKey, first.idempotencyKey);
   assert.notEqual(changedScope.idempotencyKey, first.idempotencyKey);
+});
+
+test("dispatched operation identity survives navigation as uncertain continuity", async () => {
+  const storage = memoryStorage();
+  const prepared = await prepareBrowserOperation(
+    "promotion:workflow",
+    { product: "demo", dry_run: false },
+    createBrowserOperationState(),
+  );
+  const submitting = markBrowserOperationDispatched(beginBrowserOperation(prepared));
+
+  persistBrowserOperationState("promotion:workflow", submitting, storage);
+  const recovered = recoverBrowserOperationState("promotion:workflow", storage);
+
+  assert.equal(recovered.phase, "uncertain");
+  assert.equal(recovered.requiresIdempotencyContinuity, true);
+  assert.equal(
+    recovered.identity?.idempotencyKey,
+    submitting.identity?.idempotencyKey,
+  );
+  assert.equal(recovered.failure?.code, "request_interrupted");
+
+  persistBrowserOperationState(
+    "promotion:workflow",
+    completeBrowserOperation(submitting, { trace_id: "trace-complete" }),
+    storage,
+  );
+  assert.equal(
+    recoverBrowserOperationState("promotion:workflow", storage).phase,
+    "idle",
+  );
 });
 
 test("uncertain cancellation can only retry with the existing key", async () => {

@@ -16,9 +16,15 @@ import {
   type BrowserActionPresentation,
 } from "./action-model";
 import type { BrowserActionKind } from "./browser-operation";
+import type { DevFixtureMode } from "./dev-fixture-loader";
+import { ProductPromotionFlow } from "./ProductPromotionFlow";
 import { EvidenceBadge, MissingEvidenceState, humanize } from "./ProductOps";
+import type { ResourceState } from "./resource";
 
-import type { ProductEnvironmentDetail } from "./generated/openapi.ts";
+import type {
+  ProductEnvironmentDetail,
+  ProductPromotionStatus,
+} from "./generated/openapi.ts";
 
 const ACTION_KINDS: BrowserActionKind[] = [
   "inspect",
@@ -31,8 +37,14 @@ const ACTION_KINDS: BrowserActionKind[] = [
 
 export function EnvironmentActionsView({
   detail,
+  fixtureMode,
+  onRefresh,
+  promotionResource,
 }: {
   detail: ProductEnvironmentDetail;
+  fixtureMode: DevFixtureMode;
+  onRefresh: () => void;
+  promotionResource: ResourceState<ProductPromotionStatus>;
 }) {
   const actions = detail.available_actions
     .map((action) => browserActionPresentation(detail.driver_id, action))
@@ -45,6 +57,14 @@ export function EnvironmentActionsView({
 
   return (
     <section className="environment-actions-view">
+      {detail.environment === "prod" ? (
+        <ProductPromotionFlow
+          detail={detail}
+          fixtureMode={fixtureMode}
+          onRefresh={onRefresh}
+          statusResource={promotionResource}
+        />
+      ) : null}
       <header className="environment-actions-header">
         <span aria-hidden="true">
           <PlayCircle />
@@ -191,7 +211,11 @@ function EnvironmentActionCard({
         ) : (
           <Ban size={14} aria-hidden="true" />
         )}
-        {canExecute ? "Executable" : "Not executable"}
+        {browserSupport === "diagnostic"
+          ? "Diagnostics only"
+          : canExecute
+            ? "Executable"
+            : "Not executable"}
       </span>
     </li>
   );
@@ -224,6 +248,9 @@ function browserSupportLabel(
 ): string {
   if (support === "implemented") {
     return "Typed flow installed";
+  }
+  if (support === "diagnostic") {
+    return "Product-owned flow above";
   }
   if (support === "planned") {
     return "Typed flow planned";

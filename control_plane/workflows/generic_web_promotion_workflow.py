@@ -29,12 +29,18 @@ class GenericWebPromotionWorkflowRequest(BaseModel):
     context: str
     dry_run: bool = True
     bump: BumpLevel | None = None
+    artifact_id: str = ""
+    source_git_ref: str = ""
+    evidence_fingerprint: str = ""
     observe_timeout_seconds: int = Field(default=12, ge=0, le=60)
 
     @model_validator(mode="after")
     def _validate_request(self) -> "GenericWebPromotionWorkflowRequest":
         self.product = self.product.strip()
         self.context = self.context.strip()
+        self.artifact_id = self.artifact_id.strip()
+        self.source_git_ref = self.source_git_ref.strip()
+        self.evidence_fingerprint = self.evidence_fingerprint.strip()
         if not self.product:
             raise ValueError("generic web promotion workflow requires product")
         if not self.context:
@@ -107,6 +113,16 @@ def dispatch_generic_web_promotion_workflow(
             "inputs": {
                 workflow.dry_run_input.strip(): str(request.dry_run).lower(),
                 workflow.bump_input.strip(): bump,
+                **(
+                    {workflow.artifact_id_input.strip(): request.artifact_id}
+                    if request.artifact_id
+                    else {}
+                ),
+                **(
+                    {workflow.source_git_ref_input.strip(): request.source_git_ref}
+                    if request.source_git_ref
+                    else {}
+                ),
             },
         },
     )
@@ -139,26 +155,44 @@ def dispatch_generic_web_promotion_workflow_delivery(
     *,
     record: OutboxDeliveryRecord,
     control_plane_root: Path,
-    mark_provider_started: Callable[[str, str], None],
+    mark_provider_started: Callable[[OutboxDeliveryRecord, str, str], None],
 ) -> OutboxDeliveryRecord:
     delivery_record = record
-    payload = record.payload
+    payload = dict(record.payload)
     try:
         owner, repo = _repository_parts(_required_payload_text(payload, "repository"))
         workflow_id = _required_payload_text(payload, "workflow_id")
         ref = _required_payload_text(payload, "ref")
         credential_context = _required_payload_text(payload, "credential_context")
         inputs = _string_dict(payload.get("inputs"))
-        previous_run_ids = _int_set(payload.get("previous_run_ids"))
-        min_created_at = _datetime_value(payload.get("dispatch_started_at"))
-        if min_created_at is None:
-            min_created_at = datetime.now(UTC)
         token = resolve_launchplane_github_token(
             control_plane_root=control_plane_root,
             context_name=credential_context,
         )
         if not token:
             return _failed_outbox_delivery(record, "missing_managed_github_token")
+        reconciling_existing_marker = bool(record.provider_operation_key)
+        previous_run_ids = _int_set(payload.get("previous_run_ids"))
+        min_created_at = _datetime_value(payload.get("dispatch_started_at"))
+        if not reconciling_existing_marker:
+            if "previous_run_ids" not in payload:
+                previous_run_ids = _workflow_dispatch_run_ids(
+                    owner=owner,
+                    repo=repo,
+                    workflow_id=workflow_id,
+                    ref=ref,
+                    token=token,
+                )
+            if min_created_at is None:
+                min_created_at = _github_timestamp_precision(datetime.now(UTC))
+            payload.update(
+                {
+                    "previous_run_ids": sorted(previous_run_ids),
+                    "dispatch_started_at": min_created_at.isoformat().replace("+00:00", "Z"),
+                }
+            )
+        elif min_created_at is None:
+            min_created_at = _datetime_value(record.created_at) or datetime.now(UTC)
         provider_operation_key = _workflow_provider_operation_key(
             repository=f"{owner}/{repo}",
             workflow_id=workflow_id,
@@ -177,11 +211,11 @@ def dispatch_generic_web_promotion_workflow_delivery(
             update={
                 "provider_operation_key": provider_operation_key,
                 "provider_id": "github",
+                "payload": payload,
             }
         )
-        reconciling_existing_marker = bool(record.provider_operation_key)
         if not reconciling_existing_marker:
-            mark_provider_started(provider_operation_key, "github")
+            mark_provider_started(delivery_record, provider_operation_key, "github")
         else:
             existing_run = _latest_workflow_dispatch_run(
                 owner=owner,
@@ -194,6 +228,13 @@ def dispatch_generic_web_promotion_workflow_delivery(
             )
             if existing_run:
                 return _delivered_workflow_outbox_delivery(delivery_record, existing_run)
+            return delivery_record.model_copy(
+                update={
+                    "state": "reconcile_required",
+                    "action": "workflow_dispatch_in_doubt",
+                    "error_code": "workflow_run_not_observed",
+                }
+            )
         github_api_request(
             path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
             token=token,
@@ -404,6 +445,11 @@ def _delivered_workflow_outbox_delivery(
     record: OutboxDeliveryRecord,
     run: dict[str, object],
 ) -> OutboxDeliveryRecord:
+    payload = {
+        **record.payload,
+        "run_status": _string_value(run.get("status")) or "pending",
+        "run_conclusion": _string_value(run.get("conclusion")),
+    }
     return record.model_copy(
         update={
             "state": "delivered",
@@ -412,6 +458,7 @@ def _delivered_workflow_outbox_delivery(
             "external_url": _string_value(run.get("html_url")),
             "action": "dispatched_workflow",
             "error_code": "",
+            "payload": payload,
             "lease_owner": "",
             "lease_expires_at": "",
         }

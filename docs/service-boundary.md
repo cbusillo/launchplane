@@ -1809,15 +1809,27 @@ records remain visible as provider-specific execution/history metadata and as
 audit/backfill comparison material; they no longer synthesize current
 provider-target authority when an explicit row is missing.
 
-Generic web prod promotion uses native FastAPI. It can be exercised directly
-with `POST /v1/drivers/generic-web/prod-promotion`; browser sessions may only
-use this route with `dry_run=true`. The operator UI then uses the native
-`POST /v1/drivers/generic-web/prod-promotion-workflow` route to queue a
-transactional outbox dispatch for the product-owned GitHub workflow configured
-by the DB-backed product profile. The HTTP response reports
+Generic web prod promotion uses native FastAPI. Trusted automation can exercise
+the descriptor routes `POST /v1/drivers/generic-web/prod-promotion` and
+`POST /v1/drivers/generic-web/prod-promotion-workflow`; direct browser calls to
+the raw promotion route remain dry-run only, and operator identities are
+rejected on the raw workflow-dispatch route. The generated operator UI instead
+uses product/environment routes for promotion status, direct dry-run, workflow
+dispatch, and workflow-delivery status. Those routes derive product, context,
+testing/prod lanes, immutable artifact, source revision, provider target,
+repository, and workflow identity from DB-backed records. Client bodies cannot
+select those values.
+
+The product-owned workflow route requires an accepted direct dry-run marker
+matching current testing and production evidence plus bump mode. Live dispatch
+also requires the exact server-provided confirmation. The workflow outbox input
+includes the reviewed artifact and revision so the raw generic-web promotion
+route can reject inventory drift at workflow execution time. The HTTP response reports
 `dispatch_status=pending` and `records.outbox_delivery_id`; Launchplane outbox
-workers later resolve the managed `GITHUB_TOKEN`, reconcile any prior dispatch
-marker, send the workflow dispatch, and record the observed workflow run. That
+workers later resolve the managed `GITHUB_TOKEN`, capture the pre-dispatch run
+set, persist the provider marker, send the workflow dispatch, and record the
+observed workflow run. Once a provider marker exists, reconciliation may only
+observe that dispatch; it never sends the workflow again. That
 workflow remains responsible for product release/tag behavior while Launchplane
 supplies authz, managed token lookup, dispatch inputs, and workflow-run
 observation. Native FastAPI owns both paths while descriptor discovery remains
@@ -1896,6 +1908,10 @@ are present. The descriptor routes remain discoverable.
   human-session callers)
 - `GET /v1/products/{product}/environments/{environment}` (native FastAPI for
   bearer-token and human-session callers)
+- `GET /v1/products/{product}/environments/{environment}/promotion-status`
+  (native FastAPI for bearer-token and human-session callers)
+- `GET /v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}`
+  (native FastAPI for bearer-token and human-session callers)
 - `GET /v1/previews/{preview_id}` (native FastAPI for bearer-token and
   human-session callers)
 - `GET /v1/previews/{preview_id}/history` (native FastAPI for bearer-token and
@@ -2068,6 +2084,38 @@ environment records and managed secret binding metadata. Expected keys describe
 product intent; status is derived from records. The response exposes configured,
 missing, or disabled status plus key/source metadata only; managed secret IDs
 remain out of this readiness view.
+
+`GET /v1/products/{product}/environments/{environment}/promotion-status` is the
+product-owned browser authority for generic-web production promotion. It exposes
+only generated runtime identity, inventory freshness, health, target readiness,
+workflow configuration, authz availability, and deterministic confirmation
+text. The corresponding direct dry-run and workflow-dispatch POST routes accept
+reason, evidence fingerprint, bump, and confirmation fields only. The workflow
+delivery read validates that the outbox aggregate belongs to the requested
+product/context before returning dispatch and observed-run state.
+
+Product-owned workflow dispatch adds the persisted outbox delivery ID as the
+configured `promotion_intent_id` workflow input. A later raw live driver call
+must present that ID in the request and as `Idempotency-Key`; Launchplane binds
+the outbox record to the current product evidence and provider-target
+fingerprint before any promotion effect. The reviewed provider target is
+resolved once and carried into execution under a durable target-scoped mutation
+reservation, so target-record changes cannot redirect an accepted intent and
+concurrent uses of the same intent cannot both reach the provider. Completed
+requests remain replayable before current evidence is revalidated. Raw live
+automation without an intent is denied unless policy explicitly grants
+`generic_web_prod_promotion.execute_unreviewed` in addition to the normal
+execute action. That grant bypasses product review, not mutation safety: every
+live raw promotion requires database storage, a non-empty idempotency key, an
+exact current target snapshot, and the durable provider-operation runner.
+
+Promotion availability requires fresh matching testing and production
+inventories, digest-pinned artifacts, immutable source commit IDs, and the
+explicit current provider-target record for production. Historical deployment
+targets and provider-specific compatibility records are evidence only and do
+not enable promotion. The accepted direct dry-run fingerprint also binds the
+complete current production provider-target record, so target replacement
+invalidates workflow-dispatch continuity.
 
 Product activity reads are intentionally record-link oriented. They summarize
 deployments, promotions, rollbacks, backup gates, preview identity/lifecycle,

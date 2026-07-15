@@ -1,6 +1,8 @@
 import type {
-  DataProvenance,
   ApplyProductEnvironmentConfigData,
+  DataProvenance,
+  DispatchProductPromotionWorkflowData,
+  DryRunProductPromotionData,
   EveryCodeSummaryResponse,
   GitHubHumanIdentityResponse,
   MergeTrainControllerStatusResponse,
@@ -12,6 +14,11 @@ import type {
   ProductConfigWriteAvailability,
   ProductEnvironmentDetail,
   ProductEnvironmentSummary,
+  ProductPromotionDryRunResponse,
+  ProductPromotionOperationAvailability,
+  ProductPromotionStatus,
+  ProductPromotionWorkflowDeliveryStatusResponse,
+  ProductPromotionWorkflowDispatchResponse,
   ProductSiteOverview,
   RuntimeIdentity,
   WorkGraphIssueInboxResponse,
@@ -25,6 +32,7 @@ type EngineeringLoadReason = "initial" | "refresh";
 
 const OBSERVED_AT = "2026-07-14T14:32:00Z";
 const STALE_AFTER = "2026-07-14T15:02:00Z";
+const promotionDeliveries = new Map<string, number>();
 
 export const fixtureIdentity: GitHubHumanIdentityResponse = {
   provider: "github",
@@ -262,6 +270,330 @@ export function configStatusForFixture(
       },
     ],
   };
+}
+
+export function promotionStatusForFixture(
+  fixture: DataFixtureMode,
+  product: string,
+  environment: string,
+): ProductPromotionStatus | null {
+  assertFixtureAvailable(fixture);
+  const detail = environmentForFixture(fixture, product, environment);
+  if (!detail || environment !== "prod") {
+    return null;
+  }
+  const promotionMode = new URLSearchParams(window.location.search).get("promotion");
+  if (promotionMode === "error") {
+    throw Object.assign(new Error("Promotion authority is intentionally unavailable."), {
+      statusCode: 503,
+      traceId: "fixture-promotion-status-error",
+    });
+  }
+  const missingEvidence = detail.trust_state === "missing";
+  const staleEvidence = promotionMode === "stale";
+  const sourceArtifact = missingEvidence
+    ? ""
+    : `ghcr.io/example/atlas-commerce@sha256:${"a".repeat(64)}`;
+  const sourceGitRef = missingEvidence ? "" : "1".repeat(40);
+  const blockers = missingEvidence
+    ? [
+        "Current testing inventory is unavailable.",
+        "Testing inventory does not contain generated runtime identity evidence.",
+        "Current production inventory is unavailable.",
+        "Production provider target authority is unavailable.",
+      ]
+    : staleEvidence
+      ? ["Testing inventory evidence is stale."]
+      : [];
+  const direct = promotionAvailability(
+    "direct_dry_run",
+    "generic_web_prod_promotion.execute",
+    blockers,
+  );
+  const workflowDryRun = promotionAvailability(
+    "workflow_dry_run",
+    "generic_web_prod_promotion.dispatch",
+    blockers,
+    true,
+  );
+  const workflowLive = promotionAvailability(
+    "workflow_live",
+    "generic_web_prod_promotion.dispatch",
+    blockers,
+    true,
+    true,
+  );
+  const confirmation = (bump: "patch" | "minor" | "major") =>
+    `PROMOTE ${detail.product} ${sourceArtifact} ${sourceGitRef} TO prod BUMP ${bump} CREATE RELEASE TAG AND DEPLOY PRODUCTION`;
+  return {
+    schema_version: 1,
+    product: detail.product,
+    display_name: detail.display_name,
+    driver_id: detail.driver_id,
+    base_driver_id: detail.base_driver_id,
+    repository: detail.repository,
+    workflow_id: "promote-prod.yml",
+    workflow_ref: "main",
+    context: detail.context,
+    source_environment: "testing",
+    destination_environment: "prod",
+    source: {
+      environment: "testing",
+      artifact_id: sourceArtifact,
+      source_git_ref: sourceGitRef,
+      deployment_record_id: missingEvidence ? "" : "deployment-fixture-testing",
+      inventory_updated_at: missingEvidence ? "" : OBSERVED_AT,
+      inventory_stale_after: missingEvidence ? "" : STALE_AFTER,
+      deployment_status: missingEvidence ? "skipped" : "pass",
+      health_status: missingEvidence ? "skipped" : "pass",
+      runtime_identity_status: missingEvidence ? "missing" : "match",
+      runtime_identity_detail: missingEvidence
+        ? "Runtime identity is unavailable."
+        : "Runtime identity matches the recorded testing deployment.",
+      trust_state: missingEvidence ? "missing" : staleEvidence ? "stale" : "verified",
+    },
+    destination: {
+      environment: "prod",
+      artifact_id: missingEvidence
+        ? ""
+        : `ghcr.io/example/atlas-commerce@sha256:${"b".repeat(64)}`,
+      source_git_ref: missingEvidence ? "" : "2".repeat(40),
+      deployment_record_id: missingEvidence ? "" : "deployment-fixture-prod",
+      inventory_updated_at: missingEvidence ? "" : OBSERVED_AT,
+      inventory_stale_after: missingEvidence ? "" : STALE_AFTER,
+      deployment_status: missingEvidence ? "skipped" : "pass",
+      health_status: missingEvidence ? "skipped" : "pass",
+      runtime_identity_status: missingEvidence ? "missing" : "match",
+      runtime_identity_detail: missingEvidence
+        ? "Runtime identity is unavailable."
+        : "Runtime identity matches the recorded production deployment.",
+      trust_state: missingEvidence ? "missing" : "verified",
+    },
+    evidence_fingerprint: missingEvidence
+      ? "fixture-promotion-missing-evidence"
+      : staleEvidence
+        ? "fixture-promotion-stale-evidence"
+        : "fixture-promotion-current-evidence",
+    default_bump: "patch",
+    bump_options: ["patch", "minor", "major"],
+    direct_dry_run: direct,
+    workflow_dry_run: workflowDryRun,
+    workflow_live: workflowLive,
+    live_confirmations: {
+      patch: confirmation("patch"),
+      minor: confirmation("minor"),
+      major: confirmation("major"),
+    },
+    trust_state: missingEvidence ? "missing" : staleEvidence ? "stale" : "verified",
+  };
+}
+
+export async function dryRunProductPromotionForFixture(
+  fixture: DataFixtureMode,
+  product: string,
+  environment: string,
+  payload: DryRunProductPromotionData["body"],
+  signal?: AbortSignal,
+): Promise<ProductPromotionDryRunResponse> {
+  const status = promotionStatusForFixture(fixture, product, environment);
+  await waitForPromotionFixture(signal);
+  if (!status || !status.direct_dry_run.enabled) {
+    throw Object.assign(new Error("Current fixture evidence blocks promotion dry-run."), {
+      statusCode: 409,
+      traceId: "fixture-promotion-dry-run-blocked",
+    });
+  }
+  if (payload.evidence_fingerprint !== status.evidence_fingerprint) {
+    throw Object.assign(new Error("Promotion evidence changed."), {
+      statusCode: 409,
+      traceId: "fixture-promotion-evidence-changed",
+    });
+  }
+  return {
+    status: "accepted",
+    trace_id: "fixture-promotion-direct-dry-run",
+    records: {
+      backup_record_id: "",
+      backup_status: "skipped",
+      promotion_record_id: "promotion-fixture-dry-run",
+      deployment_record_id: "",
+      deployment_status: "skipped",
+      destination_health_status: "pending",
+      dry_run: "true",
+      inventory_record_id: "",
+      promotion_status: "pending",
+      release_status: "skipped",
+      release_tag: "",
+      release_url: "",
+      source_health_status: "pending",
+    },
+    replayed: false,
+    result: {
+      product: status.product,
+      context: status.context,
+      from_instance: status.source_environment,
+      to_instance: status.destination_environment,
+      artifact_id: status.source.artifact_id,
+      source_git_ref: status.source.source_git_ref,
+      backup_record_id: "",
+      promotion_record_id: "promotion-fixture-dry-run",
+      promotion_status: "pending",
+      deployment_status: "skipped",
+      backup_status: "skipped",
+      source_health_status: "pending",
+      destination_health_status: "pending",
+      release_status: "skipped",
+      release_tag: "",
+      release_url: "",
+      deployment_record_id: "",
+      inventory_record_id: "",
+      target_name: "",
+      target_category: "unknown",
+      provider_target_type: "",
+      provider_id: "",
+      target_id: "",
+      dry_run: true,
+      error_message: "",
+      evidence_fingerprint: status.evidence_fingerprint,
+      bump: payload.bump ?? status.default_bump,
+    },
+  };
+}
+
+export async function dispatchProductPromotionWorkflowForFixture(
+  fixture: DataFixtureMode,
+  product: string,
+  environment: string,
+  payload: DispatchProductPromotionWorkflowData["body"],
+  signal?: AbortSignal,
+): Promise<ProductPromotionWorkflowDispatchResponse> {
+  const status = promotionStatusForFixture(fixture, product, environment);
+  await waitForPromotionFixture(signal);
+  if (!status || payload.evidence_fingerprint !== status.evidence_fingerprint) {
+    throw Object.assign(new Error("Promotion evidence changed."), {
+      statusCode: 409,
+      traceId: "fixture-promotion-evidence-changed",
+    });
+  }
+  const bump = payload.bump ?? status.default_bump;
+  const dryRun = payload.dry_run ?? true;
+  if (!dryRun && payload.confirmation !== status.live_confirmations[bump]) {
+    throw Object.assign(new Error("Live confirmation did not match."), {
+      statusCode: 400,
+      traceId: "fixture-promotion-confirmation-required",
+    });
+  }
+  const deliveryId = `fixture-promotion-${dryRun ? "dry-run" : "live"}-${bump}`;
+  promotionDeliveries.set(deliveryId, 0);
+  return {
+    status: "accepted",
+    trace_id: `fixture-promotion-workflow-${dryRun ? "dry-run" : "live"}`,
+    records: { outbox_delivery_id: deliveryId },
+    replayed: false,
+    result: {
+      product: status.product,
+      context: status.context,
+      repository: status.repository,
+      workflow_id: status.workflow_id,
+      ref: status.workflow_ref,
+      dry_run: dryRun,
+      bump,
+      dispatch_status: "pending",
+      run_id: 0,
+      run_url: "",
+      run_status: "pending",
+      run_conclusion: "",
+      evidence_fingerprint: status.evidence_fingerprint,
+      delivery_id: deliveryId,
+      artifact_id: status.source.artifact_id,
+      source_git_ref: status.source.source_git_ref,
+    },
+  };
+}
+
+export async function readProductPromotionWorkflowDeliveryForFixture(
+  fixture: DataFixtureMode,
+  product: string,
+  environment: string,
+  deliveryId: string,
+): Promise<ProductPromotionWorkflowDeliveryStatusResponse> {
+  const status = promotionStatusForFixture(fixture, product, environment);
+  if (
+    status &&
+    !promotionDeliveries.has(deliveryId) &&
+    /^fixture-promotion-(dry-run|live)-(patch|minor|major)$/.test(deliveryId)
+  ) {
+    promotionDeliveries.set(deliveryId, 0);
+  }
+  if (!status || !promotionDeliveries.has(deliveryId)) {
+    throw Object.assign(new Error("Promotion workflow delivery was not found."), {
+      statusCode: 404,
+      traceId: "fixture-promotion-delivery-missing",
+    });
+  }
+  const observation = promotionDeliveries.get(deliveryId) ?? 0;
+  promotionDeliveries.set(deliveryId, observation + 1);
+  const observed = observation > 0;
+  return {
+    status: "ok",
+    trace_id: "fixture-promotion-delivery-status",
+    delivery: {
+      delivery_id: deliveryId,
+      state: observed ? "delivered" : "pending",
+      dispatch_status: observed ? "dispatched" : "pending",
+      run_id: observed ? 4242 : 0,
+      run_url: observed ? "https://github.com/example/atlas-commerce/actions/runs/4242" : "",
+      run_status: observed ? "queued" : "pending",
+      run_conclusion: "",
+      run_observation_status: observed ? "observed" : "pending",
+      error_code: "",
+      observed_at: OBSERVED_AT,
+    },
+  };
+}
+
+function promotionAvailability(
+  operation: ProductPromotionOperationAvailability["operation"],
+  authzAction: string,
+  blockers: string[],
+  requiresMatchingDirectDryRun = false,
+  requiresConfirmation = false,
+): ProductPromotionOperationAvailability {
+  return {
+    operation,
+    authz_action: authzAction,
+    enabled: blockers.length === 0,
+    disabled_reasons: blockers,
+    requires_reason: true,
+    requires_idempotency_key: true,
+    requires_matching_direct_dry_run: requiresMatchingDirectDryRun,
+    requires_confirmation: requiresConfirmation,
+    consequences:
+      operation === "direct_dry_run"
+        ? ["No production deployment or release is created."]
+        : ["Dispatch acceptance does not mean the GitHub run completed."],
+    trust_state: blockers.length ? "missing" : "verified",
+  };
+}
+
+async function waitForPromotionFixture(signal?: AbortSignal): Promise<void> {
+  if (new URLSearchParams(window.location.search).get("delay") !== "slow") {
+    return;
+  }
+  if (signal?.aborted) {
+    throw new DOMException("Promotion fixture request cancelled.", "AbortError");
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(resolve, 4000);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        window.clearTimeout(timeout);
+        reject(new DOMException("Promotion fixture request cancelled.", "AbortError"));
+      },
+      { once: true },
+    );
+  });
 }
 
 export async function applyProductEnvironmentConfigForFixture(

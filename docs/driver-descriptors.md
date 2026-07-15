@@ -179,6 +179,29 @@ lane from DB-backed product profile records. Both promotion routes keep
 descriptor discovery and authz metadata intact while native FastAPI owns
 execution.
 
+The descriptor routes remain the automation and diagnostics contract. The
+operator UI does not execute `route_path` dynamically. Its generated write
+slice uses the product/environment promotion facade instead: promotion status,
+direct dry-run, workflow dispatch, and workflow-delivery status routes derive
+their target from the URL and DB-backed product profile. The facade requires
+generated runtime identity to agree with inventory artifact, source revision,
+lane, and deployment-record identity before it advertises execution.
+Operator identities cannot dispatch the raw workflow descriptor route; that
+route remains automation/diagnostics-only so browser workflows cannot bypass
+the product facade's accepted dry-run and confirmation gates. Promotion status
+also requires digest-pinned artifacts, immutable source commits, fresh testing
+and production evidence, and the explicit production provider-target record.
+
+`ProductPromotionWorkflowProfile` also names the workflow inputs for
+`dry_run`, `bump`, `artifact_id`, `source_git_ref`, and
+`promotion_intent_id`. Product workflows must forward the reviewed artifact,
+revision, and intent to the reusable generic-web promotion workflow, with the
+intent also used as the raw live request's `Idempotency-Key`. The raw driver
+validates those values against current testing and production evidence, so
+evidence or target changes after browser review fail closed instead of
+promoting a different artifact. Intent-less raw live automation requires the
+separate `generic_web_prod_promotion.execute_unreviewed` grant.
+
 The `prod_rollback_plan` action routes to
 `POST /v1/drivers/generic-web/prod-rollback-plan`. It is a safe-write planner:
 Launchplane reads the product profile, destination lane, selected deployment

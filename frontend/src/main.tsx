@@ -4,6 +4,7 @@ import { App } from "./App";
 import "./styles.css";
 import "./environment.css";
 import "./engineering.css";
+import "./promotion.css";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
