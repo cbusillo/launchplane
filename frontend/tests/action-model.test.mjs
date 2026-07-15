@@ -27,27 +27,27 @@ function action(overrides = {}) {
 
 test("browser write routes are the generated UI write allowlist", () => {
   assert.deepEqual(new Set(Object.values(BROWSER_WRITE_ROUTES)), new Set([
-    "/v1/drivers/generic-web/prod-promotion",
-    "/v1/drivers/generic-web/prod-promotion-workflow",
     "/v1/products/{product}/environments/{environment}/config/apply",
+    "/v1/products/{product}/environments/{environment}/promotion/dry-run",
+    "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch",
     "/v1/work-graph/rank",
   ]));
 });
 
-test("generic-web promotion is classified as a planned dry run", () => {
+test("generic-web promotion descriptors stay diagnostics for the product-owned flow", () => {
   const presentation = browserActionPresentation(
     "generic-web",
     action({
       action_id: "prod_promotion",
-      route_path: BROWSER_WRITE_ROUTES.genericWebPromotion,
+      route_path: "/v1/drivers/generic-web/prod-promotion",
     }),
   );
 
   assert.equal(presentation.kind, "dry-run");
-  assert.equal(presentation.browserSupport, "planned");
+  assert.equal(presentation.browserSupport, "diagnostic");
   assert.equal(presentation.canExecute, false);
   assert.deepEqual(presentation.serverBlockers, []);
-  assert.match(presentation.browserBlockers[0], /not installed yet/);
+  assert.deepEqual(presentation.browserBlockers, []);
 });
 
 test("advertised route drift fails closed instead of executing route_path", () => {
@@ -75,7 +75,7 @@ test("advertised method, safety, or scope drift fails closed", () => {
       "generic-web",
       action({
         action_id: "prod_promotion",
-        route_path: BROWSER_WRITE_ROUTES.genericWebPromotion,
+        route_path: "/v1/drivers/generic-web/prod-promotion",
         ...drift,
       }),
     );
@@ -97,7 +97,7 @@ test("server blockers remain exact and separate from browser blockers", () => {
         "Product profile does not define a prod lane.",
       ],
       enabled: false,
-      route_path: BROWSER_WRITE_ROUTES.genericWebPromotionWorkflow,
+      route_path: "/v1/drivers/generic-web/prod-promotion-workflow",
     }),
   );
 
@@ -105,7 +105,7 @@ test("server blockers remain exact and separate from browser blockers", () => {
     "Caller is not authorized for this action.",
     "Product profile does not define a prod lane.",
   ]);
-  assert.match(presentation.browserBlockers[0], /not installed yet/);
+  assert.deepEqual(presentation.browserBlockers, []);
   assert.equal(presentation.canExecute, false);
 });
 
@@ -126,27 +126,32 @@ test("unsupported actions still disclose destructive and inspect behavior", () =
 });
 
 test("action ordering is deterministic across every support state", () => {
-  const planned = browserActionPresentation(
+  const diagnostic = browserActionPresentation(
     "generic-web",
     action({
       action_id: "prod_promotion",
-      route_path: BROWSER_WRITE_ROUTES.genericWebPromotion,
+      route_path: "/v1/drivers/generic-web/prod-promotion",
     }),
   );
   const unsupported = browserActionPresentation("generic-web", action());
   const implemented = {
-    ...planned,
-    browserBlockers: [],
+    ...diagnostic,
     browserSupport: "implemented",
     canExecute: true,
   };
+  const planned = {
+    ...diagnostic,
+    browserBlockers: ["Typed flow pending."],
+    browserSupport: "planned",
+    canExecute: false,
+  };
 
-  const sorted = [unsupported, planned, implemented].sort(
+  const sorted = [unsupported, planned, diagnostic, implemented].sort(
     compareBrowserActionPresentations,
   );
   assert.deepEqual(
     sorted.map(({ browserSupport }) => browserSupport),
-    ["implemented", "planned", "unsupported"],
+    ["implemented", "diagnostic", "planned", "unsupported"],
   );
   assert.equal(
     Math.sign(compareBrowserActionPresentations(planned, unsupported)),

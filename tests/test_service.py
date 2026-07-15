@@ -85,7 +85,6 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_app import idempotency_request_fingerprint
 from control_plane.generic_web_promotion_http import (
     GenericWebProdPromotionResponse,
-    GenericWebPromotionWorkflowResponse,
 )
 from control_plane.drivers import generic_web_preview_dispatch
 from control_plane.service_auth import (
@@ -2155,7 +2154,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
             )
-
             status_code, payload = _invoke_app(
                 app,
                 method="POST",
@@ -4599,7 +4597,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "token_labels": ["local-owner-read"],
                             "products": ["sellyouroutboard"],
                             "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["generic_web_prod_promotion.execute"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
                         }
                     ]
                 }
@@ -5973,6 +5974,124 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_generic_web_prod_promotion_live_requires_intent_or_unreviewed_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/sellyouroutboard",
+                                "workflow_refs": [
+                                    "cbusillo/sellyouroutboard/.github/workflows/"
+                                    "promote-prod.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["sellyouroutboard"],
+                                "contexts": ["sellyouroutboard-testing"],
+                                "actions": ["generic_web_prod_promotion.execute"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "promotion": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                        "source_git_ref": "abc123",
+                    },
+                },
+                headers={"Idempotency-Key": "generic-web-prod-promotion-reviewed-only"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "promotion_intent_required")
+
+    def test_generic_web_prod_promotion_unreviewed_live_requires_database(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            identity = _identity(
+                repository="cbusillo/sellyouroutboard",
+                workflow_ref=(
+                    "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml@refs/heads/main"
+                ),
+                event_name="workflow_dispatch",
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(identity),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/sellyouroutboard",
+                                "workflow_refs": [identity.workflow_ref],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["sellyouroutboard"],
+                                "contexts": ["sellyouroutboard-testing"],
+                                "actions": [
+                                    "generic_web_prod_promotion.execute",
+                                    "generic_web_prod_promotion.execute_unreviewed",
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "promotion": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                        "source_git_ref": "abc123",
+                    },
+                },
+                headers={"Idempotency-Key": "generic-web-prod-promotion-unreviewed"},
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
     def test_generic_web_prod_promotion_route_executes_for_authorized_product_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -5992,7 +6111,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["sellyouroutboard"],
                             "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["generic_web_prod_promotion.execute"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
                         }
                     ]
                 }
@@ -6048,6 +6170,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "product": "sellyouroutboard",
                             "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
                             "source_git_ref": "abc123",
+                            "dry_run": True,
                         },
                     },
                     headers={"Idempotency-Key": "generic-web-prod-promotion-syo"},
@@ -6086,7 +6209,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["sellyouroutboard"],
                             "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["generic_web_prod_promotion.execute"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
                         }
                     ]
                 }
@@ -6114,6 +6240,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "product": "sellyouroutboard",
                     "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
                     "source_git_ref": "abc123",
+                    "dry_run": True,
                 },
             }
 
@@ -6182,7 +6309,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["sellyouroutboard"],
                             "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["generic_web_prod_promotion.execute"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
                         }
                     ]
                 }
@@ -6275,7 +6405,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["sellyouroutboard"],
                             "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["generic_web_prod_promotion.execute"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
                         }
                     ]
                 }
@@ -6303,6 +6436,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "product": "sellyouroutboard",
                     "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
                     "source_git_ref": "abc123",
+                    "dry_run": True,
                 },
             }
 
@@ -6409,7 +6543,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["sellyouroutboard"],
                             "contexts": ["different-context"],
-                            "actions": ["generic_web_prod_promotion.execute"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
                         }
                     ]
                 }
@@ -6470,7 +6607,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["sellyouroutboard"],
                             "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["generic_web_prod_promotion.execute"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
                         }
                     ]
                 }
@@ -6526,6 +6666,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "product": "sellyouroutboard",
                             "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
                             "source_git_ref": "abc123",
+                            "dry_run": True,
                         },
                     },
                     headers={"Idempotency-Key": "generic-web-prod-promotion-odoo"},
@@ -6566,7 +6707,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["sellyouroutboard"],
                             "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["generic_web_prod_promotion.execute"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
                         }
                     ]
                 }
@@ -6622,6 +6766,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "product": "sellyouroutboard",
                             "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
                             "source_git_ref": "abc123",
+                            "dry_run": True,
                         },
                     },
                     headers={"Idempotency-Key": "generic-web-prod-promotion-syo-padded"},
@@ -6653,7 +6798,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "roles": ["admin"],
                             "products": ["sellyouroutboard"],
                             "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["generic_web_prod_promotion.execute"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
                         }
                     ]
                 }
@@ -6729,7 +6877,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "roles": ["admin"],
                             "products": ["sellyouroutboard"],
                             "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["generic_web_prod_promotion.execute"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
                         }
                     ]
                 }
@@ -6844,7 +6995,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
-    def test_human_session_can_dispatch_generic_web_promotion_workflow(self) -> None:
+    def test_human_session_must_use_product_owned_promotion_workflow_route(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
@@ -6878,55 +7029,33 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             cookie = _fastapi_signed_in_cookie(session_manager, role="admin")
 
-            with (
-                patch(
-                    "control_plane.generic_web_promotion_http.resolve_launchplane_github_token",
-                    return_value="github-token",
-                ) as token_mock,
-                patch(
-                    "control_plane.generic_web_promotion_http._workflow_dispatch_run_ids",
-                    return_value={25237186635},
-                ) as runs_mock,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/drivers/generic-web/prod-promotion-workflow",
-                    payload={
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion-workflow",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "workflow": {
                         "schema_version": 1,
                         "product": "sellyouroutboard",
-                        "workflow": {
-                            "schema_version": 1,
-                            "product": "sellyouroutboard",
-                            "context": "  sellyouroutboard-testing  ",
-                            "dry_run": False,
-                            "bump": "patch",
-                            "observe_timeout_seconds": 0,
-                        },
+                        "context": "  sellyouroutboard-testing  ",
+                        "dry_run": False,
+                        "bump": "patch",
+                        "observe_timeout_seconds": 0,
                     },
-                    authorization="",
-                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
-                )
+                },
+                authorization="",
+                headers=_fastapi_browser_mutation_headers(session_manager, cookie),
+            )
             outbox_rows = store.list_outbox_delivery_records(states=("pending",))
             store.close()
 
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["repository"], "cbusillo/sellyouroutboard")
-        self.assertEqual(payload["result"]["workflow_id"], "promote-prod.yml")
-        self.assertFalse(payload["result"]["dry_run"])
-        self.assertEqual(payload["result"]["dispatch_status"], "pending")
-        self.assertEqual(payload["result"]["run_id"], 0)
-        self.assertIn("outbox_delivery_id", payload["records"])
-        self.assertEqual(len(outbox_rows), 1)
-        self.assertEqual(outbox_rows[0].delivery_id, payload["records"]["outbox_delivery_id"])
-        self.assertEqual(outbox_rows[0].kind, "github_workflow_dispatch")
-        self.assertEqual(outbox_rows[0].payload["credential_context"], "sellyouroutboard-testing")
-        self.assertEqual(outbox_rows[0].payload["previous_run_ids"], [25237186635])
-        GenericWebPromotionWorkflowResponse.model_validate(payload)
-        token_mock.assert_called_once()
-        runs_mock.assert_called_once()
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(outbox_rows, ())
 
-    def test_human_session_dispatches_generic_web_promotion_workflow_with_padded_lane_context(
+    def test_human_session_cannot_bypass_product_route_with_padded_lane_context(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -6967,43 +7096,31 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             cookie = _fastapi_signed_in_cookie(session_manager, role="admin")
 
-            with (
-                patch(
-                    "control_plane.generic_web_promotion_http.resolve_launchplane_github_token",
-                    return_value="github-token",
-                ),
-                patch(
-                    "control_plane.generic_web_promotion_http._workflow_dispatch_run_ids",
-                    return_value={25237186635},
-                ),
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/drivers/generic-web/prod-promotion-workflow",
-                    payload={
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion-workflow",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "workflow": {
                         "schema_version": 1,
                         "product": "sellyouroutboard",
-                        "workflow": {
-                            "schema_version": 1,
-                            "product": "sellyouroutboard",
-                            "context": "sellyouroutboard-testing",
-                            "dry_run": False,
-                            "bump": "patch",
-                            "observe_timeout_seconds": 0,
-                        },
+                        "context": "sellyouroutboard-testing",
+                        "dry_run": False,
+                        "bump": "patch",
+                        "observe_timeout_seconds": 0,
                     },
-                    authorization="",
-                    headers=_fastapi_browser_mutation_headers(session_manager, cookie),
-                )
+                },
+                authorization="",
+                headers=_fastapi_browser_mutation_headers(session_manager, cookie),
+            )
             outbox_rows = store.list_outbox_delivery_records(states=("pending",))
             store.close()
 
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["dispatch_status"], "pending")
-        self.assertEqual(payload["result"]["run_id"], 0)
-        self.assertEqual(len(outbox_rows), 1)
-        self.assertEqual(outbox_rows[0].aggregate_id, "sellyouroutboard:sellyouroutboard-testing")
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(outbox_rows, ())
 
     def test_generic_web_promotion_workflow_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -7058,30 +7175,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             }
 
-            with (
-                patch(
-                    "control_plane.generic_web_promotion_http.resolve_launchplane_github_token",
-                    return_value="github-token",
-                ) as token_mock,
-                patch(
-                    "control_plane.generic_web_promotion_http._workflow_dispatch_run_ids",
-                    return_value={25237186635},
-                ) as runs_mock,
-            ):
-                first_status_code, first_payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/drivers/generic-web/prod-promotion-workflow",
-                    payload=request_payload,
-                    headers={"Idempotency-Key": "generic-web-promotion-workflow-replay"},
-                )
-                second_status_code, second_payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/drivers/generic-web/prod-promotion-workflow",
-                    payload=request_payload,
-                    headers={"Idempotency-Key": "generic-web-promotion-workflow-replay"},
-                )
+            first_status_code, first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion-workflow",
+                payload=request_payload,
+                headers={"Idempotency-Key": "generic-web-promotion-workflow-replay"},
+            )
+            second_status_code, second_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion-workflow",
+                payload=request_payload,
+                headers={"Idempotency-Key": "generic-web-promotion-workflow-replay"},
+            )
             outbox_rows = store.list_outbox_delivery_records(states=("pending",))
             store.close()
 
@@ -7091,10 +7198,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(second_payload["records"], first_payload["records"])
         self.assertEqual(len(outbox_rows), 1)
         self.assertEqual(outbox_rows[0].delivery_id, first_payload["records"]["outbox_delivery_id"])
+        self.assertNotIn("previous_run_ids", outbox_rows[0].payload)
+        self.assertNotIn("dispatch_started_at", outbox_rows[0].payload)
         self.assertTrue(second_payload["replayed"])
         self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
-        token_mock.assert_called_once()
-        runs_mock.assert_called_once()
 
     def test_generic_web_promotion_workflow_rejects_terminal_agent_bearer(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -7220,31 +7327,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            with (
-                patch(
-                    "control_plane.generic_web_promotion_http.resolve_launchplane_github_token",
-                    return_value="github-token",
-                ),
-                patch(
-                    "control_plane.generic_web_promotion_http._workflow_dispatch_run_ids",
-                    return_value={25237186635},
-                ),
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/drivers/generic-web/prod-promotion-workflow",
-                    payload={
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion-workflow",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "workflow": {
                         "schema_version": 1,
                         "product": "sellyouroutboard",
-                        "workflow": {
-                            "schema_version": 1,
-                            "product": "sellyouroutboard",
-                            "context": "sellyouroutboard-testing",
-                            "dry_run": False,
-                        },
+                        "context": "sellyouroutboard-testing",
+                        "dry_run": False,
                     },
-                )
+                },
+            )
             outbox_rows = store.list_outbox_delivery_records(states=("pending",))
             store.close()
 
@@ -7253,7 +7350,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(len(outbox_rows), 1)
         self.assertEqual(outbox_rows[0].aggregate_id, "sellyouroutboard:sellyouroutboard-testing")
 
-    def test_generic_web_promotion_workflow_rejects_unowned_context_before_authz(
+    def test_generic_web_promotion_workflow_rejects_human_before_context_resolution(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -7305,7 +7402,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_generic_web_promotion_workflow_rejects_token_unowned_context_before_authz(
         self,

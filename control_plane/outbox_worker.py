@@ -78,10 +78,10 @@ def run_outbox_worker_once(
         result = dispatch_generic_web_promotion_workflow_delivery(
             record=record,
             control_plane_root=control_plane_root,
-            mark_provider_started=lambda provider_operation_key, provider_id: (
+            mark_provider_started=lambda started_record, provider_operation_key, provider_id: (
                 _mark_provider_started(
                     record_store=record_store,
-                    record=record,
+                    record=started_record,
                     lease_owner=lease_owner,
                     provider_operation_key=provider_operation_key,
                     provider_id=provider_id,

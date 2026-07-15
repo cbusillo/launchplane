@@ -324,6 +324,9 @@ class ProductPromotionWorkflowProfile(BaseModel):
     ref: str = "main"
     dry_run_input: str = "dry_run"
     bump_input: str = "bump"
+    artifact_id_input: str = "artifact_id"
+    source_git_ref_input: str = "source_git_ref"
+    promotion_intent_input: str = "promotion_intent_id"
     default_bump: str = "patch"
 
     @model_validator(mode="after")
@@ -336,6 +339,21 @@ class ProductPromotionWorkflowProfile(BaseModel):
             raise ValueError("product promotion workflow requires dry_run_input")
         if not self.bump_input.strip():
             raise ValueError("product promotion workflow requires bump_input")
+        if not self.artifact_id_input.strip():
+            raise ValueError("product promotion workflow requires artifact_id_input")
+        if not self.source_git_ref_input.strip():
+            raise ValueError("product promotion workflow requires source_git_ref_input")
+        if not self.promotion_intent_input.strip():
+            raise ValueError("product promotion workflow requires promotion_intent_input")
+        input_names = (
+            self.dry_run_input.strip(),
+            self.bump_input.strip(),
+            self.artifact_id_input.strip(),
+            self.source_git_ref_input.strip(),
+            self.promotion_intent_input.strip(),
+        )
+        if len(set(input_names)) != len(input_names):
+            raise ValueError("product promotion workflow input names must be unique")
         if self.default_bump.strip() not in {"patch", "minor", "major"}:
             raise ValueError(
                 "product promotion workflow default_bump must be patch, minor, or major"

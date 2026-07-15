@@ -146,9 +146,9 @@ class DocsContractsTests(TestCase):
             write_operations,
         )
         for operation_data_type in (
-            "ApplyGenericWebProdPromotionData",
             "ApplyProductEnvironmentConfigData",
-            "DispatchGenericWebProdPromotionWorkflowData",
+            "DispatchProductPromotionWorkflowData",
+            "DryRunProductPromotionData",
             "RankWorkGraphSnapshotData",
         ):
             self.assertIn(operation_data_type, frontend_api)
@@ -171,7 +171,9 @@ class DocsContractsTests(TestCase):
         self.assertIn("originalTraceId", browser_operation)
         self.assertIn("previous result is uncertain", browser_operation)
         self.assertIn("requiresIdempotencyContinuity", browser_operation)
-        self.assertIn("dry_run: true", frontend_api)
+        self.assertIn("dryRunProductPromotion", frontend_api)
+        self.assertIn("dispatchProductPromotionWorkflow", frontend_api)
+        self.assertNotIn("dryRunGenericWebProdPromotion", frontend_api)
         self.assertIn("browserActionPresentation", action_model)
         self.assertIn("No generated browser operation is registered", action_model)
         self.assertIn("pnpm test", frontend_package["scripts"]["validate"])

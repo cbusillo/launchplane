@@ -1365,6 +1365,211 @@
         "summary": "Read Product Environment Config Status"
       }
     },
+    "/v1/products/{product}/environments/{environment}/promotion-status": {
+      "get": {
+        "operationId": "read_product_promotion_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductPromotionStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          }
+        },
+        "summary": "Read Product Promotion Status"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}": {
+      "get": {
+        "operationId": "read_product_promotion_workflow_delivery",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "delivery_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Delivery Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductPromotionWorkflowDeliveryStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Product Promotion Workflow Delivery"
+      }
+    },
     "/v1/repo-product-mapping": {
       "get": {
         "operationId": "read_repo_product_mapping",
@@ -1755,290 +1960,6 @@
         "summary": "Read Launchplane work graph snapshot"
       }
     },
-    "/v1/drivers/generic-web/prod-promotion": {
-      "post": {
-        "operationId": "apply_generic_web_prod_promotion",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Idempotency-Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GenericWebProdPromotionEnvelope",
-                "additionalProperties": false,
-                "properties": {
-                  "product": {
-                    "title": "Product",
-                    "type": "string"
-                  },
-                  "promotion": {
-                    "$ref": "#/components/schemas/GenericWebProdPromotionRequest"
-                  },
-                  "schema_version": {
-                    "default": 1,
-                    "minimum": 1,
-                    "title": "Schema Version",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "product",
-                  "promotion"
-                ],
-                "title": "GenericWebProdPromotionEnvelope",
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericWebProdPromotionResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Not Found"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Execute generic web prod promotion"
-      }
-    },
-    "/v1/drivers/generic-web/prod-promotion-workflow": {
-      "post": {
-        "operationId": "dispatch_generic_web_prod_promotion_workflow",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Idempotency-Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GenericWebPromotionWorkflowEnvelope",
-                "additionalProperties": false,
-                "properties": {
-                  "product": {
-                    "title": "Product",
-                    "type": "string"
-                  },
-                  "schema_version": {
-                    "default": 1,
-                    "minimum": 1,
-                    "title": "Schema Version",
-                    "type": "integer"
-                  },
-                  "workflow": {
-                    "$ref": "#/components/schemas/GenericWebPromotionWorkflowRequest"
-                  }
-                },
-                "required": [
-                  "product",
-                  "workflow"
-                ],
-                "title": "GenericWebPromotionWorkflowEnvelope",
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericWebPromotionWorkflowResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Not Found"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Dispatch generic web prod promotion workflow"
-      }
-    },
     "/v1/products/{product}/environments/{environment}/config/apply": {
       "post": {
         "operationId": "apply_product_environment_config",
@@ -2233,6 +2154,280 @@
           }
         },
         "summary": "Plan or apply product environment config"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/promotion/dry-run": {
+      "post": {
+        "operationId": "dry_run_product_promotion",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductPromotionDryRunEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductPromotionDryRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run product promotion from current runtime evidence"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": {
+      "post": {
+        "operationId": "dispatch_product_promotion_workflow",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductPromotionWorkflowDispatchEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductPromotionWorkflowDispatchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dispatch the reviewed product promotion workflow"
       }
     },
     "/v1/work-graph/rank": {
@@ -4539,30 +4734,6 @@
         "title": "EveryCodeWorkRequestSummary",
         "type": "object"
       },
-      "GenericWebProdPromotionEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "product": {
-            "title": "Product",
-            "type": "string"
-          },
-          "promotion": {
-            "$ref": "#/components/schemas/GenericWebProdPromotionRequest"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "product",
-          "promotion"
-        ],
-        "title": "GenericWebProdPromotionEnvelope",
-        "type": "object"
-      },
       "GenericWebProdPromotionRecords": {
         "additionalProperties": false,
         "properties": {
@@ -4648,578 +4819,6 @@
           "release_tag",
           "release_url",
           "source_health_status"
-        ]
-      },
-      "GenericWebProdPromotionRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "artifact_id": {
-            "default": "",
-            "title": "Artifact Id",
-            "type": "string"
-          },
-          "backup_record_id": {
-            "default": "",
-            "title": "Backup Record Id",
-            "type": "string"
-          },
-          "backup_required": {
-            "default": false,
-            "title": "Backup Required",
-            "type": "boolean"
-          },
-          "dry_run": {
-            "default": false,
-            "title": "Dry Run",
-            "type": "boolean"
-          },
-          "from_instance": {
-            "default": "testing",
-            "title": "From Instance",
-            "type": "string"
-          },
-          "health_timeout_seconds": {
-            "default": 60,
-            "minimum": 1,
-            "title": "Health Timeout Seconds",
-            "type": "integer"
-          },
-          "no_cache": {
-            "default": false,
-            "title": "No Cache",
-            "type": "boolean"
-          },
-          "product": {
-            "title": "Product",
-            "type": "string"
-          },
-          "release_tag": {
-            "default": "",
-            "title": "Release Tag",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "source_git_ref": {
-            "default": "",
-            "title": "Source Git Ref",
-            "type": "string"
-          },
-          "timeout_seconds": {
-            "anyOf": [
-              {
-                "minimum": 1,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Timeout Seconds"
-          },
-          "to_instance": {
-            "default": "prod",
-            "title": "To Instance",
-            "type": "string"
-          },
-          "verify_health": {
-            "default": true,
-            "title": "Verify Health",
-            "type": "boolean"
-          },
-          "wait": {
-            "default": true,
-            "title": "Wait",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "product"
-        ],
-        "title": "GenericWebProdPromotionRequest",
-        "type": "object"
-      },
-      "GenericWebProdPromotionResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "original_trace_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Original Trace Id",
-            "x-launchplane-optional-response": true
-          },
-          "records": {
-            "$ref": "#/components/schemas/GenericWebProdPromotionRecords"
-          },
-          "replayed": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Replayed",
-            "x-launchplane-optional-response": true
-          },
-          "result": {
-            "$ref": "#/components/schemas/GenericWebProdPromotionResponseResult"
-          },
-          "status": {
-            "const": "accepted",
-            "default": "accepted",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "records",
-          "result",
-          "status",
-          "trace_id"
-        ],
-        "title": "GenericWebProdPromotionResponse",
-        "type": "object"
-      },
-      "GenericWebProdPromotionResponseResult": {
-        "additionalProperties": false,
-        "properties": {
-          "artifact_id": {
-            "default": "",
-            "title": "Artifact Id",
-            "type": "string"
-          },
-          "backup_record_id": {
-            "default": "",
-            "title": "Backup Record Id",
-            "type": "string"
-          },
-          "backup_status": {
-            "default": "skipped",
-            "enum": [
-              "pending",
-              "pass",
-              "fail",
-              "skipped"
-            ],
-            "title": "Backup Status",
-            "type": "string"
-          },
-          "context": {
-            "default": "",
-            "title": "Context",
-            "type": "string"
-          },
-          "deployment_record_id": {
-            "default": "",
-            "title": "Deployment Record Id",
-            "type": "string"
-          },
-          "deployment_status": {
-            "default": "skipped",
-            "enum": [
-              "pending",
-              "pass",
-              "fail",
-              "skipped"
-            ],
-            "title": "Deployment Status",
-            "type": "string"
-          },
-          "destination_health_status": {
-            "default": "skipped",
-            "enum": [
-              "pending",
-              "pass",
-              "fail",
-              "skipped"
-            ],
-            "title": "Destination Health Status",
-            "type": "string"
-          },
-          "dry_run": {
-            "default": false,
-            "title": "Dry Run",
-            "type": "boolean"
-          },
-          "error_message": {
-            "default": "",
-            "title": "Error Message",
-            "type": "string"
-          },
-          "from_instance": {
-            "default": "",
-            "title": "From Instance",
-            "type": "string"
-          },
-          "inventory_record_id": {
-            "default": "",
-            "title": "Inventory Record Id",
-            "type": "string"
-          },
-          "product": {
-            "default": "",
-            "title": "Product",
-            "type": "string"
-          },
-          "promotion_record_id": {
-            "default": "",
-            "title": "Promotion Record Id",
-            "type": "string"
-          },
-          "promotion_status": {
-            "default": "pending",
-            "enum": [
-              "pending",
-              "pass",
-              "fail"
-            ],
-            "title": "Promotion Status",
-            "type": "string"
-          },
-          "provider_id": {
-            "default": "",
-            "title": "Provider Id",
-            "type": "string"
-          },
-          "provider_target_type": {
-            "default": "",
-            "title": "Provider Target Type",
-            "type": "string"
-          },
-          "release_status": {
-            "default": "skipped",
-            "enum": [
-              "pending",
-              "pass",
-              "fail",
-              "skipped"
-            ],
-            "title": "Release Status",
-            "type": "string"
-          },
-          "release_tag": {
-            "default": "",
-            "title": "Release Tag",
-            "type": "string"
-          },
-          "release_url": {
-            "default": "",
-            "title": "Release Url",
-            "type": "string"
-          },
-          "source_git_ref": {
-            "default": "",
-            "title": "Source Git Ref",
-            "type": "string"
-          },
-          "source_health_status": {
-            "default": "skipped",
-            "enum": [
-              "pending",
-              "pass",
-              "fail",
-              "skipped"
-            ],
-            "title": "Source Health Status",
-            "type": "string"
-          },
-          "target_category": {
-            "default": "unknown",
-            "enum": [
-              "application",
-              "compose",
-              "container",
-              "service",
-              "static",
-              "unknown"
-            ],
-            "title": "Target Category",
-            "type": "string"
-          },
-          "target_id": {
-            "default": "",
-            "title": "Target Id",
-            "type": "string"
-          },
-          "target_name": {
-            "default": "",
-            "title": "Target Name",
-            "type": "string"
-          },
-          "to_instance": {
-            "default": "",
-            "title": "To Instance",
-            "type": "string"
-          }
-        },
-        "title": "GenericWebProdPromotionResponseResult",
-        "type": "object",
-        "required": [
-          "artifact_id",
-          "backup_record_id",
-          "backup_status",
-          "context",
-          "deployment_record_id",
-          "deployment_status",
-          "destination_health_status",
-          "dry_run",
-          "error_message",
-          "from_instance",
-          "inventory_record_id",
-          "product",
-          "promotion_record_id",
-          "promotion_status",
-          "provider_id",
-          "provider_target_type",
-          "release_status",
-          "release_tag",
-          "release_url",
-          "source_git_ref",
-          "source_health_status",
-          "target_category",
-          "target_id",
-          "target_name",
-          "to_instance"
-        ]
-      },
-      "GenericWebPromotionWorkflowEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "product": {
-            "title": "Product",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/GenericWebPromotionWorkflowRequest"
-          }
-        },
-        "required": [
-          "product",
-          "workflow"
-        ],
-        "title": "GenericWebPromotionWorkflowEnvelope",
-        "type": "object"
-      },
-      "GenericWebPromotionWorkflowRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "bump": {
-            "anyOf": [
-              {
-                "enum": [
-                  "patch",
-                  "minor",
-                  "major"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Bump"
-          },
-          "context": {
-            "title": "Context",
-            "type": "string"
-          },
-          "dry_run": {
-            "default": true,
-            "title": "Dry Run",
-            "type": "boolean"
-          },
-          "observe_timeout_seconds": {
-            "default": 12,
-            "maximum": 60,
-            "minimum": 0,
-            "title": "Observe Timeout Seconds",
-            "type": "integer"
-          },
-          "product": {
-            "title": "Product",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "product",
-          "context"
-        ],
-        "title": "GenericWebPromotionWorkflowRequest",
-        "type": "object"
-      },
-      "GenericWebPromotionWorkflowResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "original_trace_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Original Trace Id",
-            "x-launchplane-optional-response": true
-          },
-          "records": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Records",
-            "type": "object"
-          },
-          "replayed": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Replayed",
-            "x-launchplane-optional-response": true
-          },
-          "result": {
-            "$ref": "#/components/schemas/GenericWebPromotionWorkflowResponseResult"
-          },
-          "status": {
-            "const": "accepted",
-            "default": "accepted",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "records",
-          "result",
-          "status",
-          "trace_id"
-        ],
-        "title": "GenericWebPromotionWorkflowResponse",
-        "type": "object"
-      },
-      "GenericWebPromotionWorkflowResponseResult": {
-        "additionalProperties": false,
-        "properties": {
-          "bump": {
-            "default": "patch",
-            "enum": [
-              "patch",
-              "minor",
-              "major"
-            ],
-            "title": "Bump",
-            "type": "string"
-          },
-          "context": {
-            "default": "",
-            "title": "Context",
-            "type": "string"
-          },
-          "dispatch_status": {
-            "default": "pending",
-            "enum": [
-              "pending",
-              "dispatched"
-            ],
-            "title": "Dispatch Status",
-            "type": "string"
-          },
-          "dry_run": {
-            "default": false,
-            "title": "Dry Run",
-            "type": "boolean"
-          },
-          "product": {
-            "default": "",
-            "title": "Product",
-            "type": "string"
-          },
-          "ref": {
-            "default": "",
-            "title": "Ref",
-            "type": "string"
-          },
-          "repository": {
-            "default": "",
-            "title": "Repository",
-            "type": "string"
-          },
-          "run_conclusion": {
-            "default": "",
-            "title": "Run Conclusion",
-            "type": "string"
-          },
-          "run_id": {
-            "default": 0,
-            "title": "Run Id",
-            "type": "integer"
-          },
-          "run_status": {
-            "default": "pending",
-            "title": "Run Status",
-            "type": "string"
-          },
-          "run_url": {
-            "default": "",
-            "title": "Run Url",
-            "type": "string"
-          },
-          "workflow_id": {
-            "default": "",
-            "title": "Workflow Id",
-            "type": "string"
-          }
-        },
-        "title": "GenericWebPromotionWorkflowResponseResult",
-        "type": "object",
-        "required": [
-          "bump",
-          "context",
-          "dispatch_status",
-          "dry_run",
-          "product",
-          "ref",
-          "repository",
-          "run_conclusion",
-          "run_id",
-          "run_status",
-          "run_url",
-          "workflow_id"
         ]
       },
       "GitHubHumanIdentityResponse": {
@@ -10573,9 +10172,1011 @@
         "title": "ProductProfileListResponse",
         "type": "object"
       },
+      "ProductPromotionDryRunEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "bump": {
+            "default": "patch",
+            "enum": [
+              "patch",
+              "minor",
+              "major"
+            ],
+            "title": "Bump",
+            "type": "string"
+          },
+          "evidence_fingerprint": {
+            "title": "Evidence Fingerprint",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reason",
+          "evidence_fingerprint"
+        ],
+        "title": "ProductPromotionDryRunEnvelope",
+        "type": "object"
+      },
+      "ProductPromotionDryRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id",
+            "x-launchplane-optional-response": true
+          },
+          "records": {
+            "$ref": "#/components/schemas/GenericWebProdPromotionRecords"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed",
+            "x-launchplane-optional-response": true
+          },
+          "result": {
+            "$ref": "#/components/schemas/ProductPromotionDryRunResult"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "records",
+          "result",
+          "status",
+          "trace_id"
+        ],
+        "title": "ProductPromotionDryRunResponse",
+        "type": "object"
+      },
+      "ProductPromotionDryRunResult": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "default": "",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "backup_record_id": {
+            "default": "",
+            "title": "Backup Record Id",
+            "type": "string"
+          },
+          "backup_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Backup Status",
+            "type": "string"
+          },
+          "bump": {
+            "enum": [
+              "patch",
+              "minor",
+              "major"
+            ],
+            "title": "Bump",
+            "type": "string"
+          },
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "default": "",
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "deployment_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Deployment Status",
+            "type": "string"
+          },
+          "destination_health_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Destination Health Status",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "error_message": {
+            "default": "",
+            "title": "Error Message",
+            "type": "string"
+          },
+          "evidence_fingerprint": {
+            "title": "Evidence Fingerprint",
+            "type": "string"
+          },
+          "from_instance": {
+            "default": "",
+            "title": "From Instance",
+            "type": "string"
+          },
+          "inventory_record_id": {
+            "default": "",
+            "title": "Inventory Record Id",
+            "type": "string"
+          },
+          "product": {
+            "default": "",
+            "title": "Product",
+            "type": "string"
+          },
+          "promotion_record_id": {
+            "default": "",
+            "title": "Promotion Record Id",
+            "type": "string"
+          },
+          "promotion_status": {
+            "default": "pending",
+            "enum": [
+              "pending",
+              "pass",
+              "fail"
+            ],
+            "title": "Promotion Status",
+            "type": "string"
+          },
+          "provider_id": {
+            "default": "",
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "provider_target_type": {
+            "default": "",
+            "title": "Provider Target Type",
+            "type": "string"
+          },
+          "release_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Release Status",
+            "type": "string"
+          },
+          "release_tag": {
+            "default": "",
+            "title": "Release Tag",
+            "type": "string"
+          },
+          "release_url": {
+            "default": "",
+            "title": "Release Url",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "default": "",
+            "title": "Source Git Ref",
+            "type": "string"
+          },
+          "source_health_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Source Health Status",
+            "type": "string"
+          },
+          "target_category": {
+            "default": "unknown",
+            "enum": [
+              "application",
+              "compose",
+              "container",
+              "service",
+              "static",
+              "unknown"
+            ],
+            "title": "Target Category",
+            "type": "string"
+          },
+          "target_id": {
+            "default": "",
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_name": {
+            "default": "",
+            "title": "Target Name",
+            "type": "string"
+          },
+          "to_instance": {
+            "default": "",
+            "title": "To Instance",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "backup_record_id",
+          "backup_status",
+          "bump",
+          "context",
+          "deployment_record_id",
+          "deployment_status",
+          "destination_health_status",
+          "dry_run",
+          "error_message",
+          "evidence_fingerprint",
+          "from_instance",
+          "inventory_record_id",
+          "product",
+          "promotion_record_id",
+          "promotion_status",
+          "provider_id",
+          "provider_target_type",
+          "release_status",
+          "release_tag",
+          "release_url",
+          "source_git_ref",
+          "source_health_status",
+          "target_category",
+          "target_id",
+          "target_name",
+          "to_instance"
+        ],
+        "title": "ProductPromotionDryRunResult",
+        "type": "object"
+      },
+      "ProductPromotionEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "default": "",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "default": "",
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "deployment_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Deployment Status",
+            "type": "string"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "health_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Health Status",
+            "type": "string"
+          },
+          "inventory_stale_after": {
+            "default": "",
+            "title": "Inventory Stale After",
+            "type": "string"
+          },
+          "inventory_updated_at": {
+            "default": "",
+            "title": "Inventory Updated At",
+            "type": "string"
+          },
+          "runtime_identity_detail": {
+            "default": "",
+            "title": "Runtime Identity Detail",
+            "type": "string"
+          },
+          "runtime_identity_status": {
+            "default": "unchecked",
+            "enum": [
+              "unchecked",
+              "match",
+              "mismatch",
+              "missing",
+              "malformed",
+              "unverifiable"
+            ],
+            "title": "Runtime Identity Status",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "default": "",
+            "title": "Source Git Ref",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "deployment_record_id",
+          "deployment_status",
+          "environment",
+          "health_status",
+          "inventory_stale_after",
+          "inventory_updated_at",
+          "runtime_identity_detail",
+          "runtime_identity_status",
+          "source_git_ref",
+          "trust_state"
+        ],
+        "title": "ProductPromotionEvidence",
+        "type": "object"
+      },
+      "ProductPromotionLiveConfirmations": {
+        "additionalProperties": false,
+        "properties": {
+          "major": {
+            "title": "Major",
+            "type": "string"
+          },
+          "minor": {
+            "title": "Minor",
+            "type": "string"
+          },
+          "patch": {
+            "title": "Patch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "major",
+          "minor",
+          "patch"
+        ],
+        "title": "ProductPromotionLiveConfirmations",
+        "type": "object"
+      },
+      "ProductPromotionOperationAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "authz_action": {
+            "title": "Authz Action",
+            "type": "string"
+          },
+          "consequences": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Consequences",
+            "type": "array"
+          },
+          "disabled_reasons": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Disabled Reasons",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "operation": {
+            "enum": [
+              "direct_dry_run",
+              "workflow_dry_run",
+              "workflow_live"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "requires_confirmation": {
+            "default": false,
+            "title": "Requires Confirmation",
+            "type": "boolean"
+          },
+          "requires_idempotency_key": {
+            "default": true,
+            "title": "Requires Idempotency Key",
+            "type": "boolean"
+          },
+          "requires_matching_direct_dry_run": {
+            "default": false,
+            "title": "Requires Matching Direct Dry Run",
+            "type": "boolean"
+          },
+          "requires_reason": {
+            "default": true,
+            "title": "Requires Reason",
+            "type": "boolean"
+          },
+          "trust_state": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authz_action",
+          "consequences",
+          "disabled_reasons",
+          "enabled",
+          "operation",
+          "requires_confirmation",
+          "requires_idempotency_key",
+          "requires_matching_direct_dry_run",
+          "requires_reason",
+          "trust_state"
+        ],
+        "title": "ProductPromotionOperationAvailability",
+        "type": "object"
+      },
+      "ProductPromotionStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "base_driver_id": {
+            "default": "",
+            "title": "Base Driver Id",
+            "type": "string"
+          },
+          "bump_options": {
+            "default": [
+              "patch",
+              "minor",
+              "major"
+            ],
+            "items": {
+              "enum": [
+                "patch",
+                "minor",
+                "major"
+              ],
+              "type": "string"
+            },
+            "title": "Bump Options",
+            "type": "array"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "default_bump": {
+            "enum": [
+              "patch",
+              "minor",
+              "major"
+            ],
+            "title": "Default Bump",
+            "type": "string"
+          },
+          "destination": {
+            "$ref": "#/components/schemas/ProductPromotionEvidence"
+          },
+          "destination_environment": {
+            "default": "prod",
+            "title": "Destination Environment",
+            "type": "string"
+          },
+          "direct_dry_run": {
+            "$ref": "#/components/schemas/ProductPromotionOperationAvailability"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "evidence_fingerprint": {
+            "title": "Evidence Fingerprint",
+            "type": "string"
+          },
+          "live_confirmations": {
+            "$ref": "#/components/schemas/ProductPromotionLiveConfirmations"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ProductPromotionEvidence"
+          },
+          "source_environment": {
+            "default": "testing",
+            "title": "Source Environment",
+            "type": "string"
+          },
+          "trust_state": {
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          },
+          "workflow_dry_run": {
+            "$ref": "#/components/schemas/ProductPromotionOperationAvailability"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          },
+          "workflow_live": {
+            "$ref": "#/components/schemas/ProductPromotionOperationAvailability"
+          },
+          "workflow_ref": {
+            "title": "Workflow Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_driver_id",
+          "bump_options",
+          "context",
+          "default_bump",
+          "destination",
+          "destination_environment",
+          "direct_dry_run",
+          "display_name",
+          "driver_id",
+          "evidence_fingerprint",
+          "live_confirmations",
+          "product",
+          "repository",
+          "schema_version",
+          "source",
+          "source_environment",
+          "trust_state",
+          "workflow_dry_run",
+          "workflow_id",
+          "workflow_live",
+          "workflow_ref"
+        ],
+        "title": "ProductPromotionStatus",
+        "type": "object"
+      },
+      "ProductPromotionStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "promotion_status": {
+            "$ref": "#/components/schemas/ProductPromotionStatus"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "promotion_status",
+          "status",
+          "trace_id"
+        ],
+        "title": "ProductPromotionStatusResponse",
+        "type": "object"
+      },
+      "ProductPromotionWorkflowDeliveryStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_id": {
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "dispatch_status": {
+            "enum": [
+              "pending",
+              "dispatched",
+              "failed",
+              "reconcile_required"
+            ],
+            "title": "Dispatch Status",
+            "type": "string"
+          },
+          "error_code": {
+            "default": "",
+            "title": "Error Code",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "run_conclusion": {
+            "default": "",
+            "title": "Run Conclusion",
+            "type": "string"
+          },
+          "run_id": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "run_observation_status": {
+            "default": "pending",
+            "enum": [
+              "pending",
+              "observed"
+            ],
+            "title": "Run Observation Status",
+            "type": "string"
+          },
+          "run_status": {
+            "default": "pending",
+            "title": "Run Status",
+            "type": "string"
+          },
+          "run_url": {
+            "default": "",
+            "title": "Run Url",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "delivered",
+              "failed",
+              "reconcile_required"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery_id",
+          "dispatch_status",
+          "error_code",
+          "observed_at",
+          "run_conclusion",
+          "run_id",
+          "run_observation_status",
+          "run_status",
+          "run_url",
+          "state"
+        ],
+        "title": "ProductPromotionWorkflowDeliveryStatus",
+        "type": "object"
+      },
+      "ProductPromotionWorkflowDeliveryStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "$ref": "#/components/schemas/ProductPromotionWorkflowDeliveryStatus"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery",
+          "status",
+          "trace_id"
+        ],
+        "title": "ProductPromotionWorkflowDeliveryStatusResponse",
+        "type": "object"
+      },
+      "ProductPromotionWorkflowDispatchEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "bump": {
+            "default": "patch",
+            "enum": [
+              "patch",
+              "minor",
+              "major"
+            ],
+            "title": "Bump",
+            "type": "string"
+          },
+          "confirmation": {
+            "default": "",
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": true,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "evidence_fingerprint": {
+            "title": "Evidence Fingerprint",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reason",
+          "evidence_fingerprint"
+        ],
+        "title": "ProductPromotionWorkflowDispatchEnvelope",
+        "type": "object"
+      },
+      "ProductPromotionWorkflowDispatchResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id",
+            "x-launchplane-optional-response": true
+          },
+          "records": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed",
+            "x-launchplane-optional-response": true
+          },
+          "result": {
+            "$ref": "#/components/schemas/ProductPromotionWorkflowDispatchResult"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "records",
+          "result",
+          "status",
+          "trace_id"
+        ],
+        "title": "ProductPromotionWorkflowDispatchResponse",
+        "type": "object"
+      },
+      "ProductPromotionWorkflowDispatchResult": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "bump": {
+            "default": "patch",
+            "enum": [
+              "patch",
+              "minor",
+              "major"
+            ],
+            "title": "Bump",
+            "type": "string"
+          },
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "delivery_id": {
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "dispatch_status": {
+            "default": "pending",
+            "enum": [
+              "pending",
+              "dispatched"
+            ],
+            "title": "Dispatch Status",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "evidence_fingerprint": {
+            "title": "Evidence Fingerprint",
+            "type": "string"
+          },
+          "product": {
+            "default": "",
+            "title": "Product",
+            "type": "string"
+          },
+          "ref": {
+            "default": "",
+            "title": "Ref",
+            "type": "string"
+          },
+          "repository": {
+            "default": "",
+            "title": "Repository",
+            "type": "string"
+          },
+          "run_conclusion": {
+            "default": "",
+            "title": "Run Conclusion",
+            "type": "string"
+          },
+          "run_id": {
+            "default": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "run_status": {
+            "default": "pending",
+            "title": "Run Status",
+            "type": "string"
+          },
+          "run_url": {
+            "default": "",
+            "title": "Run Url",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "title": "Source Git Ref",
+            "type": "string"
+          },
+          "workflow_id": {
+            "default": "",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "bump",
+          "context",
+          "delivery_id",
+          "dispatch_status",
+          "dry_run",
+          "evidence_fingerprint",
+          "product",
+          "ref",
+          "repository",
+          "run_conclusion",
+          "run_id",
+          "run_status",
+          "run_url",
+          "source_git_ref",
+          "workflow_id"
+        ],
+        "title": "ProductPromotionWorkflowDispatchResult",
+        "type": "object"
+      },
       "ProductPromotionWorkflowProfile": {
         "additionalProperties": false,
         "properties": {
+          "artifact_id_input": {
+            "default": "artifact_id",
+            "title": "Artifact Id Input",
+            "type": "string"
+          },
           "bump_input": {
             "default": "bump",
             "title": "Bump Input",
@@ -10591,9 +11192,19 @@
             "title": "Dry Run Input",
             "type": "string"
           },
+          "promotion_intent_input": {
+            "default": "promotion_intent_id",
+            "title": "Promotion Intent Input",
+            "type": "string"
+          },
           "ref": {
             "default": "main",
             "title": "Ref",
+            "type": "string"
+          },
+          "source_git_ref_input": {
+            "default": "source_git_ref",
+            "title": "Source Git Ref Input",
             "type": "string"
           },
           "workflow_id": {
@@ -10605,10 +11216,13 @@
         "title": "ProductPromotionWorkflowProfile",
         "type": "object",
         "required": [
+          "artifact_id_input",
           "bump_input",
           "default_bump",
           "dry_run_input",
+          "promotion_intent_input",
           "ref",
+          "source_git_ref_input",
           "workflow_id"
         ]
       },

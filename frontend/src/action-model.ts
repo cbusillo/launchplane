@@ -2,7 +2,11 @@ import type { ProductActionAvailability } from "./generated/openapi.ts";
 import type { BrowserActionKind } from "./browser-operation";
 import { BROWSER_WRITE_ROUTES } from "./browser-write-contract";
 
-export type BrowserActionSupport = "implemented" | "planned" | "unsupported";
+export type BrowserActionSupport =
+  | "implemented"
+  | "diagnostic"
+  | "planned"
+  | "unsupported";
 
 export interface BrowserActionPresentation {
   action: ProductActionAvailability;
@@ -16,10 +20,11 @@ export interface BrowserActionPresentation {
 interface BrowserActionAdapter {
   actionId: string;
   blocker: string;
+  browserRoutePath: string;
+  diagnosticRoutePath: string;
   driverId: string;
   kind: BrowserActionKind;
   method: "POST";
-  routePath: string;
   safety: "mutation";
   scope: "instance";
   support: BrowserActionSupport;
@@ -28,25 +33,27 @@ interface BrowserActionAdapter {
 const BROWSER_ACTION_ADAPTERS: BrowserActionAdapter[] = [
   {
     actionId: "prod_promotion",
-    blocker: "The typed browser promotion dry-run is not installed yet.",
+    blocker: "The product-owned promotion dry-run is unavailable.",
+    browserRoutePath: BROWSER_WRITE_ROUTES.productPromotionDryRun,
+    diagnosticRoutePath: "/v1/drivers/generic-web/prod-promotion",
     driverId: "generic-web",
     kind: "dry-run",
     method: "POST",
-    routePath: BROWSER_WRITE_ROUTES.genericWebPromotion,
     safety: "mutation",
     scope: "instance",
-    support: "planned",
+    support: "diagnostic",
   },
   {
     actionId: "prod_promotion_workflow",
-    blocker: "The typed browser workflow-dispatch control is not installed yet.",
+    blocker: "The product-owned promotion workflow control is unavailable.",
+    browserRoutePath: BROWSER_WRITE_ROUTES.productPromotionWorkflowDispatch,
+    diagnosticRoutePath: "/v1/drivers/generic-web/prod-promotion-workflow",
     driverId: "generic-web",
     kind: "workflow-dispatch",
     method: "POST",
-    routePath: BROWSER_WRITE_ROUTES.genericWebPromotionWorkflow,
     safety: "mutation",
     scope: "instance",
-    support: "planned",
+    support: "diagnostic",
   },
 ];
 
@@ -88,7 +95,7 @@ export function browserActionPresentation(
     };
   }
   if (
-    adapter.routePath !== action.route_path ||
+    adapter.diagnosticRoutePath !== action.route_path ||
     adapter.method !== action.method ||
     adapter.safety !== action.safety ||
     adapter.scope !== action.scope
@@ -110,7 +117,10 @@ export function browserActionPresentation(
       `Action availability evidence is ${action.trust_state}; current recorded evidence is required.`,
     );
   }
-  if (adapter.support !== "implemented") {
+  if (!adapter.browserRoutePath) {
+    browserBlockers.push("The typed browser operation has no fixed product-owned route.");
+  }
+  if (adapter.support === "planned" || adapter.support === "unsupported") {
     browserBlockers.push(adapter.blocker);
   }
   const canExecute =
@@ -133,7 +143,12 @@ export function compareBrowserActionPresentations(
   right: BrowserActionPresentation,
 ): number {
   if (left.browserSupport !== right.browserSupport) {
-    const supportOrder = { implemented: 0, planned: 1, unsupported: 2 } as const;
+    const supportOrder = {
+      implemented: 0,
+      diagnostic: 1,
+      planned: 2,
+      unsupported: 3,
+    } as const;
     return supportOrder[left.browserSupport] - supportOrder[right.browserSupport];
   }
   if (left.action.enabled !== right.action.enabled) {

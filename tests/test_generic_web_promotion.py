@@ -866,6 +866,16 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
 
 class GenericWebPromotionWorkflowTests(unittest.TestCase):
+    def test_workflow_profile_rejects_colliding_input_names(self) -> None:
+        with self.assertRaisesRegex(
+            ValidationError,
+            "product promotion workflow input names must be unique",
+        ):
+            ProductPromotionWorkflowProfile(
+                dry_run_input=" operation ",
+                artifact_id_input="operation",
+            )
+
     def test_outbox_delivery_deduplicates_one_transition_not_all_future_dispatches(
         self,
     ) -> None:
@@ -880,40 +890,29 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
                 observe_timeout_seconds=0,
             ),
         )
-        with (
-            patch(
-                "control_plane.generic_web_promotion_http.resolve_launchplane_github_token",
-                return_value="github-token",
-            ),
-            patch(
-                "control_plane.generic_web_promotion_http._workflow_dispatch_run_ids",
-                return_value={25237186635},
-            ),
-        ):
-            first = build_generic_web_promotion_workflow_outbox_delivery(
-                control_plane_root=Path("."),
-                request=request,
-                profile=profile,
-                delivery_key="dispatch-request-one",
-            )
-            replay = build_generic_web_promotion_workflow_outbox_delivery(
-                control_plane_root=Path("."),
-                request=request,
-                profile=profile,
-                delivery_key="dispatch-request-one",
-            )
-            later_dispatch = build_generic_web_promotion_workflow_outbox_delivery(
-                control_plane_root=Path("."),
-                request=request,
-                profile=profile,
-                delivery_key="dispatch-request-two",
-            )
+        first = build_generic_web_promotion_workflow_outbox_delivery(
+            request=request,
+            profile=profile,
+            delivery_key="dispatch-request-one",
+        )
+        replay = build_generic_web_promotion_workflow_outbox_delivery(
+            request=request,
+            profile=profile,
+            delivery_key="dispatch-request-one",
+        )
+        later_dispatch = build_generic_web_promotion_workflow_outbox_delivery(
+            request=request,
+            profile=profile,
+            delivery_key="dispatch-request-two",
+        )
 
         self.assertEqual(first.delivery_id, replay.delivery_id)
         self.assertEqual(first.dedupe_key, replay.dedupe_key)
         self.assertNotEqual(first.delivery_id, later_dispatch.delivery_id)
         self.assertNotEqual(first.dedupe_key, later_dispatch.dedupe_key)
         self.assertNotIn("dispatch-request-one", first.dedupe_key)
+        self.assertNotIn("previous_run_ids", first.payload)
+        self.assertNotIn("dispatch_started_at", first.payload)
 
     def test_dispatch_accepts_based_driver_product_profile(self) -> None:
         with (

@@ -48,6 +48,12 @@ export interface BrowserOperationState {
   requiresIdempotencyContinuity: boolean;
 }
 
+export interface BrowserOperationStorage {
+  getItem: (key: string) => string | null;
+  removeItem: (key: string) => void;
+  setItem: (key: string, value: string) => void;
+}
+
 export interface BrowserOperationEnvelope {
   original_trace_id?: string | null;
   replayed?: boolean | null;
@@ -62,6 +68,85 @@ export function createBrowserOperationState(): BrowserOperationState {
     receipt: null,
     requiresIdempotencyContinuity: false,
   };
+}
+
+export function recoverBrowserOperationState(
+  scope: string,
+  storage: BrowserOperationStorage | null = browserOperationSessionStorage(),
+): BrowserOperationState {
+  if (!storage) {
+    return createBrowserOperationState();
+  }
+  const key = browserOperationStorageKey(scope);
+  try {
+    const value = storage.getItem(key);
+    if (!value) {
+      return createBrowserOperationState();
+    }
+    const candidate = JSON.parse(value) as Partial<BrowserOperationState>;
+    const identity = candidate.identity;
+    if (
+      !identity ||
+      typeof identity.idempotencyKey !== "string" ||
+      !identity.idempotencyKey ||
+      typeof identity.requestFingerprint !== "string" ||
+      !identity.requestFingerprint
+    ) {
+      storage.removeItem(key);
+      return createBrowserOperationState();
+    }
+    if (candidate.phase !== "submitting" && candidate.phase !== "uncertain") {
+      storage.removeItem(key);
+      return createBrowserOperationState();
+    }
+    return {
+      failure:
+        candidate.phase === "uncertain" && candidate.failure
+          ? candidate.failure
+          : {
+              code: "request_interrupted",
+              message:
+                "The browser stopped before the dispatched operation settled. Retry only with the existing idempotency key.",
+              statusCode: 0,
+              traceId: "",
+            },
+      identity,
+      phase: "uncertain",
+      receipt: null,
+      requiresIdempotencyContinuity: true,
+    };
+  } catch {
+    storage.removeItem(key);
+    return createBrowserOperationState();
+  }
+}
+
+export function persistBrowserOperationState(
+  scope: string,
+  state: BrowserOperationState,
+  storage: BrowserOperationStorage | null = browserOperationSessionStorage(),
+): void {
+  if (!storage) {
+    return;
+  }
+  const key = browserOperationStorageKey(scope);
+  try {
+    if (
+      state.identity &&
+      (state.phase === "submitting" || state.requiresIdempotencyContinuity)
+    ) {
+      storage.setItem(key, JSON.stringify(state));
+    } else {
+      storage.removeItem(key);
+    }
+  } catch {
+    return;
+  }
+}
+
+export function browserOperationStorageKey(scope: string): string {
+  const normalizedScope = scope.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return `launchplane.browser-operation.${normalizedScope || "operation"}`;
 }
 
 export async function browserOperationIdentity(
@@ -297,4 +382,15 @@ function normalizeRequestValue(value: unknown): unknown {
     return Object.fromEntries(entries);
   }
   return value;
+}
+
+function browserOperationSessionStorage(): BrowserOperationStorage | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
 }

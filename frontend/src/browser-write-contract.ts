@@ -1,17 +1,17 @@
 import type {
-  ApplyGenericWebProdPromotionData,
   ApplyProductEnvironmentConfigData,
-  DispatchGenericWebProdPromotionWorkflowData,
+  DispatchProductPromotionWorkflowData,
+  DryRunProductPromotionData,
   RankWorkGraphSnapshotData,
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
-  genericWebPromotion:
-    "/v1/drivers/generic-web/prod-promotion" satisfies ApplyGenericWebProdPromotionData["url"],
-  genericWebPromotionWorkflow:
-    "/v1/drivers/generic-web/prod-promotion-workflow" satisfies DispatchGenericWebProdPromotionWorkflowData["url"],
   productEnvironmentConfigApply:
     "/v1/products/{product}/environments/{environment}/config/apply" satisfies ApplyProductEnvironmentConfigData["url"],
+  productPromotionDryRun:
+    "/v1/products/{product}/environments/{environment}/promotion/dry-run" satisfies DryRunProductPromotionData["url"],
+  productPromotionWorkflowDispatch:
+    "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch" satisfies DispatchProductPromotionWorkflowData["url"],
   workGraphRank:
     "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
 } as const;

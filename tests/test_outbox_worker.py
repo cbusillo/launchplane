@@ -255,6 +255,82 @@ class OutboxWorkerTests(unittest.TestCase):
         self.assertEqual(loaded.state, "delivered")
         self.assertEqual(loaded.provider_id, "github")
         self.assertEqual(loaded.external_id, "101")
+        self.assertEqual(loaded.payload["run_status"], "queued")
+        self.assertEqual(loaded.payload["run_conclusion"], "")
+        self.assertEqual([method for method, _path in requests], ["GET"])
+
+    def test_provider_marker_without_visible_run_never_resends_dispatch(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            delivery = _workflow_delivery()
+            store.write_outbox_delivery_record(delivery)
+            claimed = store.claim_next_outbox_delivery_record(
+                lease_owner="worker-a",
+                now="2026-07-13T00:00:01Z",
+            )
+            assert claimed.record is not None
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                return_value="2026-07-13T00:00:02Z",
+            ):
+                store.mark_outbox_delivery_provider_started(
+                    record=claimed.record,
+                    lease_owner="worker-a",
+                    provider_operation_key=(
+                        "github_workflow_dispatch:example/repo:deploy.yml:main:"
+                        "2026-07-13T00:00:00Z:bump=patch|dry_run=false"
+                    ),
+                    provider_id="github",
+                    updated_at="2026-07-13T00:00:01Z",
+                )
+            requests: list[tuple[str, str]] = []
+
+            def github_request(
+                *,
+                path: str,
+                token: str,
+                method: str = "GET",
+                body: dict[str, object] | None = None,
+            ) -> dict[str, Any] | None:
+                del token, body
+                requests.append((method, path))
+                if method == "POST":
+                    self.fail("a persisted provider marker must never resend workflow_dispatch")
+                return {"workflow_runs": []}
+
+            with (
+                patch.object(
+                    store,
+                    "_database_mutation_timestamp",
+                    side_effect=lambda _session: "2026-07-13T00:10:00Z",
+                ),
+                patch(
+                    "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                    side_effect=github_request,
+                ),
+            ):
+                worker_result = run_outbox_worker_once(
+                    record_store=store,
+                    control_plane_root=Path("."),
+                    lease_owner="worker-b",
+                )
+            loaded = store.read_outbox_delivery_record(delivery.delivery_id)
+            store.close()
+
+        self.assertEqual(worker_result.status, "reconcile_required")
+        self.assertEqual(loaded.state, "reconcile_required")
+        self.assertEqual(loaded.action, "workflow_dispatch_in_doubt")
+        self.assertEqual(loaded.error_code, "workflow_run_not_observed")
         self.assertEqual([method for method, _path in requests], ["GET"])
 
 

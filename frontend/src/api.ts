@@ -5,12 +5,12 @@ import type {
   ProductListPayload,
 } from "./types";
 import type {
-  ApplyGenericWebProdPromotionData,
-  ApplyGenericWebProdPromotionResponse,
   ApplyProductEnvironmentConfigData,
   ApplyProductEnvironmentConfigResponse,
-  DispatchGenericWebProdPromotionWorkflowData,
-  DispatchGenericWebProdPromotionWorkflowResponse,
+  DispatchProductPromotionWorkflowData,
+  DispatchProductPromotionWorkflowResponse,
+  DryRunProductPromotionData,
+  DryRunProductPromotionResponse,
   EveryCodeSummaryResponse,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
@@ -18,6 +18,8 @@ import type {
   ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentResponse,
   ProductOverviewResponse,
+  ProductPromotionStatusResponse,
+  ProductPromotionWorkflowDeliveryStatusResponse,
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
   WorkGraphIssueInboxResponse,
@@ -234,6 +236,33 @@ export function readProductEnvironmentConfigStatus(
   );
 }
 
+export function readProductPromotionStatus(
+  product: string,
+  environment: string,
+  signal?: AbortSignal,
+): Promise<ProductPromotionStatusResponse> {
+  return requestJson<ProductPromotionStatusResponse>(
+    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/promotion-status`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readProductPromotionWorkflowDelivery(
+  product: string,
+  environment: string,
+  deliveryId: string,
+  signal?: AbortSignal,
+): Promise<ProductPromotionWorkflowDeliveryStatusResponse> {
+  return requestJson<ProductPromotionWorkflowDeliveryStatusResponse>(
+    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/promotion/workflow-deliveries/${encodeURIComponent(deliveryId)}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
 export function readEveryCodeSummary(
   limit = 12,
   signal?: AbortSignal,
@@ -333,40 +362,46 @@ export function applyProductEnvironmentConfig(
   );
 }
 
-export function dryRunGenericWebProdPromotion(
-  payload: ApplyGenericWebProdPromotionData["body"],
+export function dryRunProductPromotion(
+  product: string,
+  environment: string,
+  payload: DryRunProductPromotionData["body"],
   options: BrowserOperationOptions,
-): Promise<ApplyGenericWebProdPromotionResponse> {
-  const request: ApplyGenericWebProdPromotionData = {
-    url: BROWSER_WRITE_ROUTES.genericWebPromotion,
-    body: {
-      ...payload,
-      promotion: {
-        ...payload.promotion,
-        dry_run: true,
-      },
-    },
+): Promise<DryRunProductPromotionResponse> {
+  const request: DryRunProductPromotionData = {
+    url: BROWSER_WRITE_ROUTES.productPromotionDryRun,
+    path: { product, environment },
+    body: payload,
     headers: { "Idempotency-Key": options.idempotencyKey },
   };
-  return requestGeneratedPost<ApplyGenericWebProdPromotionResponse>(
-    request,
+  return requestJson<DryRunProductPromotionResponse>(
+    `/v1/products/${encodeURIComponent(request.path.product)}/environments/${encodeURIComponent(request.path.environment)}/promotion/dry-run`,
+    "POST",
+    request.body,
     options.signal,
+    generatedIdempotencyKey(request.headers),
     options.onDispatch,
   );
 }
 
-export function dispatchGenericWebPromotionWorkflow(
-  payload: DispatchGenericWebProdPromotionWorkflowData["body"],
+export function dispatchProductPromotionWorkflow(
+  product: string,
+  environment: string,
+  payload: DispatchProductPromotionWorkflowData["body"],
   options: BrowserOperationOptions,
-): Promise<DispatchGenericWebProdPromotionWorkflowResponse> {
-  const request: DispatchGenericWebProdPromotionWorkflowData = {
-    url: BROWSER_WRITE_ROUTES.genericWebPromotionWorkflow,
+): Promise<DispatchProductPromotionWorkflowResponse> {
+  const request: DispatchProductPromotionWorkflowData = {
+    url: BROWSER_WRITE_ROUTES.productPromotionWorkflowDispatch,
+    path: { product, environment },
     body: payload,
     headers: { "Idempotency-Key": options.idempotencyKey },
   };
-  return requestGeneratedPost<DispatchGenericWebProdPromotionWorkflowResponse>(
-    request,
+  return requestJson<DispatchProductPromotionWorkflowResponse>(
+    `/v1/products/${encodeURIComponent(request.path.product)}/environments/${encodeURIComponent(request.path.environment)}/promotion/workflow-dispatch`,
+    "POST",
+    request.body,
     options.signal,
+    generatedIdempotencyKey(request.headers),
     options.onDispatch,
   );
 }

@@ -3,7 +3,8 @@ import { afterEach, test } from "node:test";
 
 import {
   applyProductEnvironmentConfig,
-  dryRunGenericWebProdPromotion,
+  dispatchProductPromotionWorkflow,
+  dryRunProductPromotion,
   LaunchplaneApiError,
 } from "../src/api.ts";
 
@@ -70,7 +71,7 @@ test("generated mutation sends only the shared CSRF and idempotency headers", as
   assert.equal("product" in JSON.parse(calls[1].init.body), false);
 });
 
-test("promotion dry-run transport overrides false and omitted input", async () => {
+test("product promotion mutations keep target and runtime identity out of the body", async () => {
   const calls = [];
   globalThis.fetch = async (input, init = {}) => {
     calls.push({ input: String(input), init });
@@ -80,23 +81,49 @@ test("promotion dry-run transport overrides false and omitted input", async () =
     return jsonResponse(acceptedResponse("trace-dry-run"), 202);
   };
 
-  await dryRunGenericWebProdPromotion(
+  await dryRunProductPromotion(
+    "demo-product",
+    "prod",
     {
-      product: "demo-product",
-      promotion: { dry_run: false, product: "demo-product" },
+      reason: "Review production promotion.",
+      evidence_fingerprint: "evidence-1",
+      bump: "minor",
     },
     { idempotencyKey: "promotion-dry-run" },
   );
-  await dryRunGenericWebProdPromotion(
+  await dispatchProductPromotionWorkflow(
+    "demo-product",
+    "prod",
     {
-      product: "demo-product",
-      promotion: { product: "demo-product" },
+      reason: "Dispatch reviewed production promotion.",
+      evidence_fingerprint: "evidence-1",
+      dry_run: false,
+      bump: "minor",
+      confirmation: "PROMOTE demo-product reviewed-artifact reviewed-ref TO prod BUMP minor",
     },
-    { idempotencyKey: "promotion-dry-run-omitted" },
+    { idempotencyKey: "promotion-workflow" },
   );
 
-  assert.equal(JSON.parse(calls[1].init.body).promotion.dry_run, true);
-  assert.equal(JSON.parse(calls[3].init.body).promotion.dry_run, true);
+  assert.equal(
+    calls[1].input,
+    "/v1/products/demo-product/environments/prod/promotion/dry-run",
+  );
+  assert.equal(
+    calls[3].input,
+    "/v1/products/demo-product/environments/prod/promotion/workflow-dispatch",
+  );
+  const dryRunBody = JSON.parse(calls[1].init.body);
+  const workflowBody = JSON.parse(calls[3].init.body);
+  for (const body of [dryRunBody, workflowBody]) {
+    assert.equal("product" in body, false);
+    assert.equal("environment" in body, false);
+    assert.equal("context" in body, false);
+    assert.equal("artifact_id" in body, false);
+    assert.equal("source_git_ref" in body, false);
+    assert.equal("provider_id" in body, false);
+  }
+  assert.equal(dryRunBody.dry_run, undefined);
+  assert.equal(workflowBody.dry_run, false);
 });
 
 test("browser mutations serialize and refresh CSRF before every attempt", async () => {

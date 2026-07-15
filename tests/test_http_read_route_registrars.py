@@ -408,12 +408,20 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            route_keys[-4:],
+            route_keys[-6:],
             [
                 ("GET", "/"),
                 ("GET", "/ui"),
                 ("GET", "/ui/{path:path}"),
                 ("GET", "/v1/products/{product}/environments/{environment}/config-status"),
+                (
+                    "GET",
+                    "/v1/products/{product}/environments/{environment}/promotion-status",
+                ),
+                (
+                    "GET",
+                    "/v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}",
+                ),
             ],
         )
 

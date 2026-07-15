@@ -35,6 +35,15 @@ from control_plane.http_routes.support import (
     ReadRouteDependencies,
 )
 from control_plane.service_auth import LaunchplaneIdentity, TerminalAgentIdentity
+from control_plane.product_promotion_http import (
+    PRODUCT_PROMOTION_STATUS_ROUTE,
+    PRODUCT_PROMOTION_WORKFLOW_STATUS_ROUTE,
+    ProductPromotionStatus,
+    ProductPromotionWorkflowDeliveryStatusResponse,
+    build_product_promotion_status,
+    product_promotion_delivery_status,
+    resolve_product_promotion_target,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.work_graph_service import (
     WorkGraphPlanningFactsProvider,
@@ -48,6 +57,7 @@ class ProductReadRouteDependencies:
     common: ReadRouteDependencies
     read_product_profile_list_identity: Callable[..., LaunchplaneIdentity | None]
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None
+    workflow_credentials_ready: Callable[[str], bool]
 
 
 class ProductEnvironmentConfigStatusResponse(BaseModel):
@@ -56,6 +66,14 @@ class ProductEnvironmentConfigStatusResponse(BaseModel):
     status: str = "ok"
     trace_id: str
     config_status: ProductEnvironmentConfigStatus
+
+
+class ProductPromotionStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    promotion_status: ProductPromotionStatus
 
 
 class ProductEnvironmentListResponse(BaseModel):
@@ -1138,6 +1156,168 @@ def register_product_config_status_read_routes(
         response_model=ProductEnvironmentConfigStatusResponse,
         responses={
             400: {"model": common.error_response_model},
+            401: {"model": common.error_response_model},
+            403: {"model": common.error_response_model},
+            404: {"model": common.error_response_model},
+            503: {"model": common.error_response_model},
+        },
+    )
+
+
+def register_product_promotion_status_read_routes(
+    app: ApiRouteRegistrar,
+    *,
+    dependencies: ProductReadRouteDependencies,
+) -> None:
+    common = dependencies.common
+
+    def read_product_promotion_status(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> ProductPromotionStatusResponse:
+        trace_id = common.next_trace_id()
+
+        try:
+            profile, lane = resolve_product_promotion_target(
+                record_store=record_store,
+                product=product,
+                destination_environment=environment,
+            )
+        except (AttributeError, FileNotFoundError) as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion status was not found.",
+            ) from error
+        if not common.authorization_allows(
+            identity=identity,
+            action="product_environment.read",
+            product=profile.product,
+            context=lane.context,
+        ):
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion status was not found.",
+            )
+
+        def action_allowed(action: str, requested_product: str, context: str) -> bool:
+            return common.authorization_allows(
+                identity=identity,
+                action=action,
+                product=requested_product,
+                context=context,
+            )
+
+        try:
+            _, _, promotion_status = build_product_promotion_status(
+                record_store=record_store,
+                product=profile.product,
+                destination_environment=lane.instance,
+                action_allowed=action_allowed,
+                workflow_credentials_ready=dependencies.workflow_credentials_ready,
+            )
+        except (AttributeError, FileNotFoundError) as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion status was not found.",
+            ) from error
+        return ProductPromotionStatusResponse(
+            trace_id=trace_id,
+            promotion_status=promotion_status,
+        )
+
+    app.add_api_route(
+        PRODUCT_PROMOTION_STATUS_ROUTE,
+        read_product_promotion_status,
+        methods=["GET"],
+        operation_id="read_product_promotion_status",
+        response_model=ProductPromotionStatusResponse,
+        responses={
+            401: {"model": common.error_response_model},
+            403: {"model": common.error_response_model},
+            404: {"model": common.error_response_model},
+        },
+    )
+
+    def read_product_promotion_workflow_delivery(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        delivery_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> ProductPromotionWorkflowDeliveryStatusResponse:
+        trace_id = common.next_trace_id()
+        try:
+            profile, lane = resolve_product_promotion_target(
+                record_store=record_store,
+                product=product,
+                destination_environment=environment,
+            )
+        except (AttributeError, FileNotFoundError) as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion workflow delivery was not found.",
+            ) from error
+        if not common.authorization_allows(
+            identity=identity,
+            action="product_environment.read",
+            product=profile.product,
+            context=lane.context,
+        ):
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion workflow delivery was not found.",
+            )
+        if not isinstance(record_store, PostgresRecordStore):
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Product promotion workflow status requires PostgreSQL storage.",
+            )
+        try:
+            delivery = record_store.read_outbox_delivery_record(delivery_id.strip())
+        except FileNotFoundError as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion workflow delivery was not found.",
+            ) from error
+        if (
+            delivery.kind != "github_workflow_dispatch"
+            or delivery.aggregate_type != "generic_web_promotion_workflow"
+            or delivery.aggregate_id != f"{profile.product}:{lane.context}"
+        ):
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product promotion workflow delivery was not found.",
+            )
+        return ProductPromotionWorkflowDeliveryStatusResponse(
+            trace_id=trace_id,
+            delivery=product_promotion_delivery_status(delivery),
+        )
+
+    app.add_api_route(
+        PRODUCT_PROMOTION_WORKFLOW_STATUS_ROUTE,
+        read_product_promotion_workflow_delivery,
+        methods=["GET"],
+        operation_id="read_product_promotion_workflow_delivery",
+        response_model=ProductPromotionWorkflowDeliveryStatusResponse,
+        responses={
             401: {"model": common.error_response_model},
             403: {"model": common.error_response_model},
             404: {"model": common.error_response_model},
