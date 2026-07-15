@@ -368,6 +368,22 @@ The clean-slate shell uses URL-owned product selection under the service-owned
 - `/ui/engineering` is a separate Engineering Ops boundary. Product routes do
   not load work-graph, issue-reconciliation, Every Code, merge-train, or platform
   maintenance data.
+- `/ui/engineering/work-graph` reads the Launchplane-assembled snapshot and uses
+  the generated browser-supported rank operation. Recommendation reasons,
+  compact source evidence, repository identities, and safe-to-start state remain
+  Engineering Ops evidence; the route does not load or select a product route.
+- `/ui/engineering/issue-inbox` reads the explicit repository inventory and
+  Code Plans membership. Browser reconciliation is visibly unsupported because
+  the reconcile POST requires the native GitHub Actions OIDC or trusted
+  owner-agent write identity boundary and is not in the generated browser write
+  contract. The page renders no dead Dry Run or Apply control.
+- `/ui/engineering/every-code` reads a bounded summary window and labels it as a
+  recent operator snapshot rather than complete history. Rerun and worker
+  transitions remain outside the browser surface.
+- `/ui/engineering/merge-train` selects only DB-backed policy targets and reads
+  controller status, policy digest, lease, reconciliation, latest run, and
+  durable record evidence. It does not infer targets from products or work graph
+  items and does not dynamically call worker routes.
 
 Product list and product detail reads have independent loading, empty, denied,
 missing, and failure states. A failed read must not become an empty product list,
@@ -378,3 +394,8 @@ views and supported controls exist. Environment diagnosis uses desired,
 provider-recorded, and observed topology as distinct evidence; a verified read
 is not presented as healthy when the recorded ingress, TLS, or runtime identity
 condition is failing.
+
+Each Engineering Ops child route owns an abortable request lifecycle. Initial
+loading, denied, empty, unavailable, and cancelled states are distinct. A failed
+or cancelled refresh may retain the last accepted response only when the page
+marks it as cached evidence and preserves the service trace where available.

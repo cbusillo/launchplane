@@ -7,7 +7,7 @@ import {
   loadDevFixtures,
   readDevFixtureMode,
 } from "./dev-fixture-loader";
-import { EngineeringOpsBoundary } from "./EngineeringOps";
+import { EngineeringOpsRoute } from "./EngineeringOps";
 import { ProductEnvironmentRoute } from "./EnvironmentRoute";
 import {
   LaunchplaneApiError,
@@ -153,7 +153,7 @@ export function App() {
   }, [authRefreshToken, fixtureMode]);
 
   useEffect(() => {
-    if (authState.status !== "signed_in") {
+    if (authState.status !== "signed_in" || route.kind === "engineering") {
       setProductsResource(emptyResource());
       return;
     }
@@ -207,7 +207,7 @@ export function App() {
       active = false;
       controller.abort();
     };
-  }, [authState.status, fixtureMode, productRefreshToken]);
+  }, [authState.status, fixtureMode, productRefreshToken, route.kind]);
 
   const refreshProducts = useCallback(() => {
     setProductRefreshToken((current) => current + 1);
@@ -303,7 +303,13 @@ export function App() {
           refreshToken={productRefreshToken}
         />
       ) : null}
-      {route.kind === "engineering" ? <EngineeringOpsBoundary /> : null}
+      {route.kind === "engineering" ? (
+        <EngineeringOpsRoute
+          fixtureMode={fixtureMode}
+          key={`engineering:${route.view}:${fixtureMode}`}
+          view={route.view}
+        />
+      ) : null}
       {route.kind === "not-found" ? <NotFoundRoute /> : null}
     </AppShell>
   );

@@ -1,74 +1,117 @@
-import { Boxes, GitPullRequestArrow, Network, Wrench } from "lucide-react";
+import {
+  ArrowRight,
+  Boxes,
+  GitPullRequestArrow,
+  Network,
+  Wrench,
+} from "lucide-react";
 
-import { AppLink, productIndexPath } from "./router";
+import { EngineeringEveryCodeRoute } from "./EngineeringEveryCodeRoute";
+import { EngineeringIssueInboxRoute } from "./EngineeringIssueInboxRoute";
+import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
+import { EngineeringRouteFrame } from "./EngineeringRouteUi";
+import { EngineeringWorkGraphRoute } from "./EngineeringWorkGraphRoute";
+import {
+  AppLink,
+  engineeringPath,
+  type EngineeringView,
+} from "./router";
+
+import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
   {
+    detail:
+      "Rank the current Launchplane-assembled snapshot and inspect recommendation evidence.",
     icon: Network,
+    label: "Read + rank",
     title: "Work graph",
-    detail: "Prioritization, dependency state, and safe-to-start evidence.",
+    view: "work-graph" as const,
   },
   {
+    detail:
+      "Inspect explicit repository inventory and Code Plans membership without browser reconciliation.",
     icon: GitPullRequestArrow,
-    title: "Issue reconciliation",
-    detail: "GitHub issue authority and project consistency checks.",
+    label: "Read only",
+    title: "Issue inbox",
+    view: "issue-inbox" as const,
   },
   {
+    detail:
+      "Review bounded work-request summaries, provenance, active claims, and completion evidence.",
     icon: Boxes,
+    label: "Read only",
     title: "Every Code",
-    detail: "Agent work requests, claims, and completion evidence.",
+    view: "every-code" as const,
   },
   {
+    detail:
+      "Read policy targets, controller state, lease diagnostics, and durable train records.",
     icon: Wrench,
-    title: "Merge train and platform maintenance",
-    detail: "Repository delivery controls and Launchplane maintenance.",
+    label: "Status only",
+    title: "Merge train",
+    view: "merge-train" as const,
   },
 ];
 
-export function EngineeringOpsBoundary() {
-  return (
-    <section className="engineering-boundary">
-      <div className="route-heading">
-        <div>
-          <p className="eyebrow">Engineering Ops</p>
-          <h1 data-route-heading tabIndex={-1}>
-            Platform delivery systems
-          </h1>
-          <p>
-            Engineering work is intentionally separated from product operation so
-            fleet queues and delivery controls do not obscure product health.
-          </p>
-        </div>
-        <span className="boundary-mark" aria-hidden="true">
-          <Wrench />
-        </span>
-      </div>
+export function EngineeringOpsRoute({
+  fixtureMode,
+  view,
+}: {
+  fixtureMode: DevFixtureMode;
+  view: EngineeringView;
+}) {
+  if (view === "work-graph") {
+    return <EngineeringWorkGraphRoute fixtureMode={fixtureMode} />;
+  }
+  if (view === "issue-inbox") {
+    return <EngineeringIssueInboxRoute fixtureMode={fixtureMode} />;
+  }
+  if (view === "every-code") {
+    return <EngineeringEveryCodeRoute fixtureMode={fixtureMode} />;
+  }
+  if (view === "merge-train") {
+    return <EngineeringMergeTrainRoute fixtureMode={fixtureMode} />;
+  }
+  return <EngineeringOpsHub />;
+}
 
-      <div className="boundary-callout">
-        <strong>Workspace boundary established</strong>
+function EngineeringOpsHub() {
+  return (
+    <EngineeringRouteFrame
+      description="Platform delivery evidence is separated from product health so operators can investigate queues, automation, and repository control without obscuring live products."
+      icon={Wrench}
+      title="Platform delivery systems"
+      view="hub"
+    >
+      <div className="engineering-hub-intro">
+        <strong>Four independent evidence routes</strong>
         <p>
-          These surfaces remain unavailable in the new shell until their supported
-          controls and evidence states are rebuilt here. Product Ops does not load
-          or infer engineering queue state.
+          Each surface owns its own request lifecycle, direct link, stale-data
+          disclosure, refresh failure, and cancellation state. Browser controls
+          appear only where the generated UI contract supports them.
         </p>
       </div>
-
-      <ul className="engineering-surface-list">
-        {ENGINEERING_SURFACES.map(({ icon: Icon, title, detail }) => (
-          <li key={title}>
-            <Icon size={18} aria-hidden="true" />
-            <span>
-              <strong>{title}</strong>
-              <small>{detail}</small>
+      <div className="engineering-hub-grid">
+        {ENGINEERING_SURFACES.map(({ detail, icon: Icon, label, title, view }) => (
+          <AppLink
+            className="engineering-hub-card"
+            key={view}
+            to={engineeringPath(view)}
+          >
+            <span className="engineering-hub-icon">
+              <Icon size={21} aria-hidden="true" />
             </span>
-            <em>Not yet available</em>
-          </li>
+            <span className="engineering-kicker">{label}</span>
+            <strong>{title}</strong>
+            <p>{detail}</p>
+            <span className="engineering-hub-link">
+              Open evidence
+              <ArrowRight size={15} aria-hidden="true" />
+            </span>
+          </AppLink>
         ))}
-      </ul>
-
-      <AppLink className="button" to={productIndexPath()}>
-        Return to Product Ops
-      </AppLink>
-    </section>
+      </div>
+    </EngineeringRouteFrame>
   );
 }

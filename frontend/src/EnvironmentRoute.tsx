@@ -34,7 +34,6 @@ import {
   evidenceTimestamp,
   formatEvidenceTime,
   humanize,
-  safeExternalUrl,
   trustLabel,
   type TrustState,
 } from "./ProductOps";
@@ -55,6 +54,7 @@ import {
   type AppRoute,
   type EnvironmentView,
 } from "./router";
+import { safeExternalUrl } from "./url";
 
 import type {
   ProductEnvironmentConfigStatus,

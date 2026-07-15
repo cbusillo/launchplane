@@ -1037,9 +1037,7 @@ h3 {
 .lane-board,
 .next-inspection,
 .summary-panel,
-.diagnostics-panel,
-.boundary-callout,
-.engineering-surface-list {
+.diagnostics-panel {
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--surface);
@@ -1172,7 +1170,6 @@ h3 {
 
 .inspection-icon,
 .summary-panel-icon,
-.boundary-mark,
 .state-page-icon,
 .session-icon {
   display: grid;
@@ -1257,8 +1254,7 @@ h3 {
 }
 
 .warning-list,
-.diagnostic-action-list,
-.engineering-surface-list {
+.diagnostic-action-list {
   margin: 14px 0 0;
   padding: 0;
   list-style: none;
@@ -1404,66 +1400,6 @@ h3 {
   margin-top: 3px;
   color: var(--muted);
   font-size: 12px;
-}
-
-.engineering-boundary {
-  max-width: 950px;
-}
-
-.boundary-mark {
-  width: 54px;
-  height: 54px;
-  flex: 0 0 54px;
-  border-radius: 10px;
-  color: var(--accent);
-}
-
-.boundary-callout {
-  display: grid;
-  gap: 5px;
-  border-left: 3px solid var(--accent);
-  padding: 18px 20px;
-}
-
-.boundary-callout p {
-  color: var(--muted);
-}
-
-.engineering-surface-list {
-  display: grid;
-  margin: 16px 0;
-  overflow: hidden;
-}
-
-.engineering-surface-list li {
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 13px;
-  border-bottom: 1px solid var(--border-soft);
-  padding: 16px 18px;
-}
-
-.engineering-surface-list li:last-child {
-  border-bottom: 0;
-}
-
-.engineering-surface-list svg {
-  color: var(--muted);
-}
-
-.engineering-surface-list li > span {
-  display: grid;
-}
-
-.engineering-surface-list small {
-  color: var(--muted);
-}
-
-.engineering-surface-list em {
-  color: var(--faint);
-  font-size: 11px;
-  font-style: normal;
 }
 
 .state-page {
@@ -1913,13 +1849,6 @@ h3 {
     padding: 8px 0;
   }
 
-  .engineering-surface-list li {
-    grid-template-columns: 24px minmax(0, 1fr);
-  }
-
-  .engineering-surface-list em {
-    grid-column: 2;
-  }
 }
 
 @media (max-width: 480px) {

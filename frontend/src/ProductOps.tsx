@@ -26,6 +26,7 @@ import {
   productPath,
   type AppRoute,
 } from "./router";
+import { safeExternalUrl } from "./url";
 
 import type {
   DataProvenance,
@@ -1119,18 +1120,6 @@ function domainForEnvironment(environment: ProductEnvironmentSummary): string {
   }
   const url = safeExternalUrl(environment.base_url);
   return url?.hostname || "No domain evidence";
-}
-
-export function safeExternalUrl(value: string): URL | null {
-  if (!value.trim()) {
-    return null;
-  }
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:" ? url : null;
-  } catch {
-    return null;
-  }
 }
 
 export function evidenceTimestamp(provenance: DataProvenance): string {
