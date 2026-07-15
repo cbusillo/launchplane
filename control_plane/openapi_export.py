@@ -171,7 +171,9 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/rank": "rank_work_graph_snapshot",
-    "/v1/product-config/apply": "apply_product_config",
+    "/v1/products/{product}/environments/{environment}/config/apply": (
+        "apply_product_environment_config"
+    ),
     "/v1/drivers/generic-web/prod-promotion": "apply_generic_web_prod_promotion",
     "/v1/drivers/generic-web/prod-promotion-workflow": (
         "dispatch_generic_web_prod_promotion_workflow"

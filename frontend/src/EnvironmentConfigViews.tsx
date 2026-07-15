@@ -15,6 +15,11 @@ import {
   humanize,
   trustLabel,
 } from "./ProductOps";
+import {
+  ManagedSecretsChangePanel,
+  RuntimeSettingsChangePanel,
+} from "./ProductConfigForms";
+import type { DevFixtureMode } from "./dev-fixture-loader";
 import type { ResourceState } from "./resource";
 
 import type {
@@ -35,9 +40,13 @@ type ConfigStatus =
 export function RuntimeSettingsView({
   configResource,
   detail,
+  fixtureMode,
+  onApplied,
 }: {
   configResource: ResourceState<ProductEnvironmentConfigStatus>;
   detail: ProductEnvironmentDetail;
+  fixtureMode: DevFixtureMode;
+  onApplied: () => void;
 }) {
   const settings = configResource.data?.runtime_settings ?? [];
   return (
@@ -55,6 +64,16 @@ export function RuntimeSettingsView({
       ) : null}
       {configResource.data ? (
         <ConfigReadEvidence config={configResource.data} />
+      ) : null}
+      {configResource.status === "ready" && configResource.data ? (
+        <RuntimeSettingsChangePanel
+          config={configResource.data}
+          fixtureMode={fixtureMode}
+          onApplied={onApplied}
+        />
+      ) : null}
+      {configResource.data && configResource.status !== "ready" ? (
+        <ConfigWriteAuthorityUnavailable />
       ) : null}
       {configResource.data ? <ConfigStatusSummary items={settings} /> : null}
       {(configResource.status === "idle" || configResource.status === "loading") &&
@@ -85,9 +104,13 @@ export function RuntimeSettingsView({
 export function ManagedSecretsView({
   configResource,
   detail,
+  fixtureMode,
+  onApplied,
 }: {
   configResource: ResourceState<ProductEnvironmentConfigStatus>;
   detail: ProductEnvironmentDetail;
+  fixtureMode: DevFixtureMode;
+  onApplied: () => void;
 }) {
   const secrets = configResource.data?.managed_secrets ?? [];
   return (
@@ -115,6 +138,16 @@ export function ManagedSecretsView({
       ) : null}
       {configResource.data ? (
         <ConfigReadEvidence config={configResource.data} />
+      ) : null}
+      {configResource.status === "ready" && configResource.data ? (
+        <ManagedSecretsChangePanel
+          config={configResource.data}
+          fixtureMode={fixtureMode}
+          onApplied={onApplied}
+        />
+      ) : null}
+      {configResource.data && configResource.status !== "ready" ? (
+        <ConfigWriteAuthorityUnavailable />
       ) : null}
       {configResource.data ? <ConfigStatusSummary items={secrets} /> : null}
       {(configResource.status === "idle" || configResource.status === "loading") &&
@@ -160,6 +193,21 @@ function ConfigViewHeader({
         <p>{detail}</p>
       </div>
     </header>
+  );
+}
+
+function ConfigWriteAuthorityUnavailable() {
+  return (
+    <div className="product-config-blockers" role="status">
+      <AlertTriangle aria-hidden="true" />
+      <div>
+        <strong>Configuration writes are paused</strong>
+        <p>
+          Launchplane must refresh current authorization and prerequisite evidence before
+          planning or applying changes.
+        </p>
+      </div>
+    </div>
   );
 }
 

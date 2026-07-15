@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -139,6 +140,7 @@ def _scope_rank(scope: str) -> int:
 class KeyRing:
     active_key_id: str
     keys: Mapping[str, Fernet]
+    active_hmac_key: bytes
     legacy_compatibility_key_loaded: bool = False
 
 
@@ -218,6 +220,7 @@ def _get_key_ring() -> KeyRing:
         return KeyRing(
             active_key_id=active_key_id,
             keys={key_id: Fernet(encoded) for key_id, encoded in encoded_keys.items()},
+            active_hmac_key=_derived_hmac_key(encoded_keys[active_key_id]),
             legacy_compatibility_key_loaded=legacy_compatibility_key_loaded,
         )
 
@@ -228,6 +231,7 @@ def _get_key_ring() -> KeyRing:
             return KeyRing(
                 active_key_id=LEGACY_SECRET_KEY_ID,
                 keys={LEGACY_SECRET_KEY_ID: fernet},
+                active_hmac_key=_derived_hmac_key(_master_fernet_key(configured_value)),
                 legacy_compatibility_key_loaded=True,
             )
 
@@ -255,6 +259,28 @@ def _master_fernet_key(raw_key: str) -> bytes:
     except (ValueError, TypeError):
         digest = hashlib.sha256(encoded).digest()
         return base64.urlsafe_b64encode(digest)
+
+
+def _derived_hmac_key(encoded_fernet_key: bytes) -> bytes:
+    key_material = base64.urlsafe_b64decode(encoded_fernet_key)
+    return hmac.new(
+        key_material,
+        b"launchplane-secret-payload-fingerprint-v1",
+        hashlib.sha256,
+    ).digest()
+
+
+def keyed_secret_payload_fingerprint(payload: str, *, purpose: str) -> str:
+    normalized_purpose = purpose.strip()
+    if not normalized_purpose:
+        raise ValueError("Secret payload fingerprint purpose must be non-empty.")
+    key_ring = _get_key_ring()
+    digest = hmac.new(
+        key_ring.active_hmac_key,
+        b"launchplane\x00" + normalized_purpose.encode("utf-8") + b"\x00" + payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"hmac-sha256:{key_ring.active_key_id}:{digest}"
 
 
 def validate_secret_key_configuration() -> None:

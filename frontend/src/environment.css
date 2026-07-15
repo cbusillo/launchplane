@@ -624,6 +624,421 @@
   font-size: 11px;
 }
 
+.product-config-panel {
+  display: grid;
+  gap: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 58%, transparent), transparent 38%),
+    var(--surface);
+  padding: 18px;
+}
+
+.product-config-panel-header {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+}
+
+.product-config-panel-header > span:first-child,
+.product-config-evidence > header > span:first-child {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.product-config-panel-header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.product-config-panel-header h2,
+.product-config-confirmation h3,
+.product-config-evidence h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 16px;
+}
+
+.product-config-panel-header p:not(.eyebrow) {
+  max-width: 760px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.availability-state {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  padding: 5px 8px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.availability-state[data-enabled="true"] {
+  border-color: color-mix(in srgb, var(--prod) 35%, var(--border));
+  background: var(--prod-soft);
+  color: var(--prod);
+}
+
+.product-config-panel fieldset {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.product-config-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.product-config-field {
+  display: grid;
+  gap: 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  padding: 12px;
+}
+
+.product-config-field[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.product-config-field > label:not(.product-config-select),
+.product-config-reason {
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.product-config-select {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.product-config-select input,
+.confirmation-check input {
+  width: 15px;
+  height: 15px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.product-config-select span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.product-config-select strong {
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.product-config-select small,
+.product-config-reason small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.product-config-field input[type="text"],
+.product-config-field input[type="password"],
+.product-config-reason textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-strong);
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.product-config-field input:focus,
+.product-config-reason textarea:focus {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  outline-offset: 1px;
+}
+
+.product-config-field input:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.product-config-reason textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.product-config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.product-config-actions .button,
+.product-config-confirmation .button {
+  min-height: 36px;
+}
+
+.product-config-actions svg,
+.product-config-confirmation .button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.product-config-blockers,
+.operation-notice,
+.product-config-inline-error,
+.secret-entry-rule,
+.secret-reentry-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border-radius: 8px;
+  padding: 11px 12px;
+}
+
+.product-config-blockers,
+.operation-notice,
+.product-config-inline-error {
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.product-config-blockers > div,
+.operation-notice > div {
+  display: grid;
+  gap: 4px;
+}
+
+.product-config-blockers ul,
+.confirmation-consequences {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 17px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.operation-notice p,
+.secret-entry-rule p,
+.secret-reentry-note p {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.operation-notice code,
+.operation-notice small {
+  width: fit-content;
+  font-size: 10px;
+}
+
+.operation-notice[data-phase="uncertain"] {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.secret-entry-rule,
+.secret-reentry-note {
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.product-config-confirmation,
+.product-config-evidence {
+  display: grid;
+  gap: 13px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-raised);
+  padding: 14px;
+}
+
+.product-config-confirmation {
+  border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+
+.confirmation-heading,
+.product-config-evidence > header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.confirmation-heading > div,
+.product-config-evidence > header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.confirmation-heading > svg {
+  color: var(--warning);
+}
+
+.product-config-confirmation dl,
+.product-config-evidence dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--border-soft);
+}
+
+.product-config-confirmation dl > div,
+.product-config-evidence dl > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  background: var(--surface);
+  padding: 9px 10px;
+}
+
+.product-config-confirmation dt,
+.product-config-evidence dt {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.product-config-confirmation dd,
+.product-config-evidence dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  font-size: 11px;
+}
+
+.confirmation-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.product-config-evidence > header {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+}
+
+.evidence-outcome {
+  border-radius: 999px;
+  background: var(--prod-soft);
+  color: var(--prod);
+  padding: 5px 8px;
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.evidence-key-list,
+.inspect-only-actions {
+  display: grid;
+  gap: 7px;
+}
+
+.evidence-key-list > strong,
+.inspect-only-actions > strong {
+  color: var(--text);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.evidence-key-list ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.evidence-key-list li {
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 5px 7px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.inspect-only-actions > div {
+  display: grid;
+  gap: 5px;
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.inspect-only-actions span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--warning);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.inspect-only-actions p,
+.inspect-only-actions code {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.product-config-evidence footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .config-summary-strip {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -1582,6 +1997,15 @@
   .action-kind-legend ul {
     justify-content: flex-start;
   }
+
+  .product-config-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .product-config-confirmation dl,
+  .product-config-evidence dl {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 560px) {
@@ -1695,5 +2119,31 @@
 
   .environment-action-facts {
     grid-template-columns: 1fr;
+  }
+
+  .product-config-panel {
+    padding: 14px;
+  }
+
+  .product-config-panel-header,
+  .product-config-evidence > header {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .availability-state,
+  .evidence-outcome {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .product-config-confirmation dl,
+  .product-config-evidence dl {
+    grid-template-columns: 1fr;
+  }
+
+  .product-config-actions,
+  .product-config-actions .button,
+  .product-config-confirmation .button {
+    width: 100%;
   }
 }

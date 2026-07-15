@@ -34,7 +34,7 @@ from control_plane.http_routes.support import (
     ApiRouteRegistrar,
     ReadRouteDependencies,
 )
-from control_plane.service_auth import LaunchplaneIdentity
+from control_plane.service_auth import LaunchplaneIdentity, TerminalAgentIdentity
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.work_graph_service import (
     WorkGraphPlanningFactsProvider,
@@ -326,6 +326,10 @@ def _build_product_environment_read_result(
         requested_product: str,
         requested_context: str,
     ) -> bool:
+        if requested_action.startswith("product_config.") and isinstance(
+            identity, TerminalAgentIdentity
+        ):
+            return False
         return dependencies.authorization_allows(
             identity=identity,
             action=requested_action,

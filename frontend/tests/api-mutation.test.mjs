@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import {
-  applyProductConfig,
+  applyProductEnvironmentConfig,
   dryRunGenericWebProdPromotion,
   LaunchplaneApiError,
 } from "../src/api.ts";
@@ -41,8 +41,10 @@ test("generated mutation sends only the shared CSRF and idempotency headers", as
     return jsonResponse(acceptedResponse("trace-apply"), 202);
   };
 
-  await applyProductConfig(
-    { mode: "dry-run", product: "demo-product" },
+  await applyProductEnvironmentConfig(
+    "demo-product",
+    "prod",
+    { mode: "dry-run", runtime_settings: { PUBLIC_ORIGIN: "https://example.invalid" } },
     {
       idempotencyKey: " stable-operation-key ",
       onDispatch: () => {
@@ -61,6 +63,11 @@ test("generated mutation sends only the shared CSRF and idempotency headers", as
   assert.equal(headers.get("Authorization"), null);
   assert.equal(headers.get("Cookie"), null);
   assert.equal(dispatched, true);
+  assert.equal(
+    calls[1].input,
+    "/v1/products/demo-product/environments/prod/config/apply",
+  );
+  assert.equal("product" in JSON.parse(calls[1].init.body), false);
 });
 
 test("promotion dry-run transport overrides false and omitted input", async () => {
@@ -120,20 +127,27 @@ test("browser mutations serialize and refresh CSRF before every attempt", async 
     return jsonResponse(acceptedResponse(`trace-${postCount}`), 202);
   };
 
-  const first = applyProductConfig(
-    { mode: "dry-run", product: "first-product" },
+  const first = applyProductEnvironmentConfig(
+    "first-product",
+    "prod",
+    { mode: "dry-run", runtime_settings: { PUBLIC_ORIGIN: "first" } },
     { idempotencyKey: "operation-first" },
   );
   await firstPostStarted;
-  const second = applyProductConfig(
-    { mode: "dry-run", product: "second-product" },
+  const second = applyProductEnvironmentConfig(
+    "second-product",
+    "testing",
+    { mode: "dry-run", runtime_settings: { PUBLIC_ORIGIN: "second" } },
     { idempotencyKey: "operation-second" },
   );
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.deepEqual(
     calls.map(({ path, init }) => `${init.method}:${path}`),
-    ["GET:/v1/auth/session", "POST:/v1/product-config/apply"],
+    [
+      "GET:/v1/auth/session",
+      "POST:/v1/products/first-product/environments/prod/config/apply",
+    ],
   );
 
   releaseFirstPost();
@@ -143,9 +157,9 @@ test("browser mutations serialize and refresh CSRF before every attempt", async 
     calls.map(({ path, init }) => `${init.method}:${path}`),
     [
       "GET:/v1/auth/session",
-      "POST:/v1/product-config/apply",
+      "POST:/v1/products/first-product/environments/prod/config/apply",
       "GET:/v1/auth/session",
-      "POST:/v1/product-config/apply",
+      "POST:/v1/products/second-product/environments/testing/config/apply",
     ],
   );
   assert.equal(
@@ -165,8 +179,10 @@ test("pre-dispatch cancellation does not send the mutation", async () => {
   };
 
   await assert.rejects(
-    applyProductConfig(
-      { mode: "dry-run", product: "cancelled-product" },
+    applyProductEnvironmentConfig(
+      "cancelled-product",
+      "prod",
+      { mode: "dry-run", runtime_settings: { PUBLIC_ORIGIN: "cancelled" } },
       {
         idempotencyKey: "operation-cancelled",
         onDispatch: () => {
@@ -200,8 +216,10 @@ test("Launchplane errors retain code, trace, and status", async () => {
   };
 
   await assert.rejects(
-    applyProductConfig(
-      { mode: "dry-run", product: "conflict-product" },
+    applyProductEnvironmentConfig(
+      "conflict-product",
+      "prod",
+      { mode: "dry-run", runtime_settings: { PUBLIC_ORIGIN: "conflict" } },
       { idempotencyKey: "operation-conflict" },
     ),
     (error) => {

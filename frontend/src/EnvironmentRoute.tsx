@@ -280,6 +280,8 @@ export function ProductEnvironmentRoute({
       route={route}
       traceId={detailResource.status === "error" ? detailResource.traceId : ""}
       updating={detailResource.status === "loading"}
+      fixtureMode={fixtureMode}
+      onConfigApplied={() => setRetryToken((current) => current + 1)}
       view={view}
     />
   );
@@ -293,6 +295,8 @@ function EnvironmentPage({
   route,
   traceId,
   updating,
+  fixtureMode,
+  onConfigApplied,
   view,
 }: {
   configResource: ResourceState<ProductEnvironmentConfigStatus>;
@@ -302,6 +306,8 @@ function EnvironmentPage({
   route: AppRoute;
   traceId: string;
   updating: boolean;
+  fixtureMode: DevFixtureMode;
+  onConfigApplied: () => void;
   view: EnvironmentView;
 }) {
   const externalUrl = safeExternalUrl(detail.base_url);
@@ -382,10 +388,22 @@ function EnvironmentPage({
       {view === "overview" ? <EnvironmentOverview detail={detail} /> : null}
       {view === "actions" ? <EnvironmentActionsView detail={detail} /> : null}
       {view === "runtime-settings" ? (
-        <RuntimeSettingsView configResource={configResource} detail={detail} />
+        <RuntimeSettingsView
+          key={`${detail.product}:${detail.environment}:runtime-settings`}
+          configResource={configResource}
+          detail={detail}
+          fixtureMode={fixtureMode}
+          onApplied={onConfigApplied}
+        />
       ) : null}
       {view === "managed-secrets" ? (
-        <ManagedSecretsView configResource={configResource} detail={detail} />
+        <ManagedSecretsView
+          key={`${detail.product}:${detail.environment}:managed-secrets`}
+          configResource={configResource}
+          detail={detail}
+          fixtureMode={fixtureMode}
+          onApplied={onConfigApplied}
+        />
       ) : null}
       {view === "diagnostics" ? (
         <EnvironmentDiagnostics configResource={configResource} detail={detail} />

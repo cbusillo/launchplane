@@ -173,6 +173,24 @@ environment, or applying a runtime payload after authorization and runtime
 key-safety checks pass. Routine service, CLI, workflow, UI, and agent responses
 return metadata only.
 
+The product/environment managed-secret form keeps plaintext only in uncontrolled
+password inputs and the immediate request local variable. It clears every value
+before dispatch and again on secret-input validation failure, HTTP failure,
+route change, and unmount. A successful dry-run retains only redacted plan
+evidence, the operation fingerprint/idempotency identity, and trace metadata;
+the operator must re-enter the same values for apply. Persisted product-config
+continuity and idempotency fingerprints that cover secret input use a
+server-keyed, purpose-separated HMAC derived from the active managed-secret
+root, never an unkeyed secret verifier. Secret values must not enter React state,
+URLs, browser storage, operation receipts, rendered errors, console or telemetry
+events, fixtures, or live-target next-action evidence.
+
+Product-config dry-run does not decrypt an existing secret to compare equality.
+Submitting a binding that already exists plans and applies a new encrypted
+version as an explicit rotation. This keeps dry-run free of plaintext resolution
+and avoids retaining or auditing a value comparison solely to report
+`unchanged`.
+
 Any plaintext resolution or reveal attempt must append redacted audit evidence.
 Audit payloads may include actor or subject type, reason, trace id, operation or
 intent id, binding id, secret id, version id, encryption key id, destination

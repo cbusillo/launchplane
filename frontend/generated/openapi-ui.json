@@ -2039,10 +2039,28 @@
         "summary": "Dispatch generic web prod promotion workflow"
       }
     },
-    "/v1/product-config/apply": {
+    "/v1/products/{product}/environments/{environment}/config/apply": {
       "post": {
-        "operationId": "apply_product_config",
+        "operationId": "apply_product_environment_config",
         "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
           {
             "in": "header",
             "name": "Idempotency-Key",
@@ -2080,15 +2098,17 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
-                  "context": {
+                  "confirmation": {
                     "default": "",
-                    "title": "Context",
+                    "title": "Confirmation",
                     "type": "string"
                   },
-                  "instance": {
-                    "default": "",
-                    "title": "Instance",
-                    "type": "string"
+                  "managed_secrets": {
+                    "items": {
+                      "$ref": "#/components/schemas/ProductEnvironmentManagedSecretInput"
+                    },
+                    "title": "Managed Secrets",
+                    "type": "array"
                   },
                   "mode": {
                     "enum": [
@@ -2098,99 +2118,42 @@
                     "title": "Mode",
                     "type": "string"
                   },
-                  "product": {
-                    "title": "Product",
-                    "type": "string"
-                  },
                   "reason": {
                     "default": "",
                     "title": "Reason",
                     "type": "string"
                   },
-                  "runtime_env": {
-                    "anyOf": [
-                      {
-                        "additionalProperties": {
-                          "anyOf": [
-                            {
-                              "type": "string"
-                            },
-                            {
-                              "type": "integer"
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            }
-                          ]
+                  "runtime_settings": {
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string"
                         },
-                        "type": "object"
-                      },
-                      {
-                        "$ref": "#/components/schemas/ProductConfigRuntimeInput"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ],
-                    "title": "Runtime Env"
-                  },
-                  "runtime_environment": {
-                    "anyOf": [
-                      {
-                        "additionalProperties": {
-                          "anyOf": [
-                            {
-                              "type": "string"
-                            },
-                            {
-                              "type": "integer"
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            }
-                          ]
+                        {
+                          "type": "integer"
                         },
-                        "type": "object"
-                      },
-                      {
-                        "$ref": "#/components/schemas/ProductConfigRuntimeInput"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ],
-                    "title": "Runtime Environment"
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        }
+                      ]
+                    },
+                    "title": "Runtime Settings",
+                    "type": "object"
                   },
                   "schema_version": {
                     "default": 1,
                     "minimum": 1,
                     "title": "Schema Version",
                     "type": "integer"
-                  },
-                  "secrets": {
-                    "items": {
-                      "$ref": "#/components/schemas/ProductConfigSecretInput"
-                    },
-                    "title": "Secrets",
-                    "type": "array"
-                  },
-                  "source_label": {
-                    "default": "product-config-api",
-                    "title": "Source Label",
-                    "type": "string"
                   }
                 },
                 "required": [
-                  "mode",
-                  "product"
+                  "mode"
                 ],
-                "title": "ProductConfigApplyEnvelope",
+                "title": "ProductEnvironmentConfigApplyEnvelope",
                 "type": "object"
               }
             }
@@ -2238,6 +2201,16 @@
             },
             "description": "Forbidden"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -2259,7 +2232,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Plan or apply product config"
+        "summary": "Plan or apply product environment config"
       }
     },
     "/v1/work-graph/rank": {
@@ -8321,6 +8294,11 @@
             "title": "Product",
             "type": "string"
           },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
           "runtime_environment": {
             "$ref": "#/components/schemas/ProductConfigRuntimeEnvironmentResult"
           },
@@ -8357,6 +8335,7 @@
           "mode",
           "next_actions",
           "product",
+          "reason",
           "runtime_environment",
           "runtime_key_safety",
           "secrets",
@@ -8386,6 +8365,41 @@
           "secret_change_count"
         ],
         "title": "ProductConfigApplySummary",
+        "type": "object"
+      },
+      "ProductConfigInputWriteAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "$ref": "#/components/schemas/ProductConfigOperationAvailability"
+          },
+          "consequences": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Consequences",
+            "type": "array"
+          },
+          "input_kind": {
+            "enum": [
+              "runtime_settings",
+              "managed_secrets"
+            ],
+            "title": "Input Kind",
+            "type": "string"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/ProductConfigOperationAvailability"
+          }
+        },
+        "required": [
+          "apply",
+          "consequences",
+          "input_kind",
+          "plan"
+        ],
+        "title": "ProductConfigInputWriteAvailability",
         "type": "object"
       },
       "ProductConfigLiveTarget": {
@@ -8495,6 +8509,92 @@
           "mode"
         ],
         "title": "ProductConfigLiveTargetRuntimeOperation",
+        "type": "object"
+      },
+      "ProductConfigOperationAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "authz_action": {
+            "title": "Authz Action",
+            "type": "string"
+          },
+          "confirmation_text": {
+            "default": "",
+            "title": "Confirmation Text",
+            "type": "string"
+          },
+          "disabled_reasons": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Disabled Reasons",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "method": {
+            "const": "POST",
+            "default": "POST",
+            "title": "Method",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "requires_idempotency_key": {
+            "default": true,
+            "title": "Requires Idempotency Key",
+            "type": "boolean"
+          },
+          "requires_matching_dry_run": {
+            "default": false,
+            "title": "Requires Matching Dry Run",
+            "type": "boolean"
+          },
+          "requires_reason": {
+            "default": true,
+            "title": "Requires Reason",
+            "type": "boolean"
+          },
+          "route_path": {
+            "title": "Route Path",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authz_action",
+          "confirmation_text",
+          "disabled_reasons",
+          "enabled",
+          "method",
+          "mode",
+          "requires_idempotency_key",
+          "requires_matching_dry_run",
+          "requires_reason",
+          "route_path",
+          "trust_state"
+        ],
+        "title": "ProductConfigOperationAvailability",
         "type": "object"
       },
       "ProductConfigRuntimeEnvironmentRecordSummary": {
@@ -8631,71 +8731,6 @@
         "title": "ProductConfigRuntimeEnvironmentResult",
         "type": "object"
       },
-      "ProductConfigRuntimeInput": {
-        "additionalProperties": true,
-        "properties": {
-          "context": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Context"
-          },
-          "env": {
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                }
-              ]
-            },
-            "title": "Env",
-            "type": "object"
-          },
-          "instance": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Instance"
-          },
-          "scope": {
-            "anyOf": [
-              {
-                "enum": [
-                  "global",
-                  "context",
-                  "instance"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Scope"
-          }
-        },
-        "title": "ProductConfigRuntimeInput",
-        "type": "object"
-      },
       "ProductConfigRuntimeKeySafetyResult": {
         "additionalProperties": false,
         "properties": {
@@ -8758,96 +8793,6 @@
         "title": "ProductConfigRuntimeKeySafetyResult",
         "type": "object"
       },
-      "ProductConfigSecretInput": {
-        "additionalProperties": true,
-        "properties": {
-          "binding_key": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Binding Key"
-          },
-          "context": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Context"
-          },
-          "description": {
-            "default": "",
-            "title": "Description",
-            "type": "string"
-          },
-          "instance": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Instance"
-          },
-          "integration": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Integration"
-          },
-          "name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name"
-          },
-          "scope": {
-            "anyOf": [
-              {
-                "enum": [
-                  "global",
-                  "context",
-                  "context_instance"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Scope"
-          },
-          "value": {
-            "title": "Value",
-            "type": "string"
-          }
-        },
-        "required": [
-          "value"
-        ],
-        "title": "ProductConfigSecretInput",
-        "type": "object"
-      },
       "ProductConfigSecretResult": {
         "additionalProperties": false,
         "properties": {
@@ -8906,6 +8851,23 @@
           "secret_id"
         ],
         "title": "ProductConfigSecretResult",
+        "type": "object"
+      },
+      "ProductConfigWriteAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_secrets": {
+            "$ref": "#/components/schemas/ProductConfigInputWriteAvailability"
+          },
+          "runtime_settings": {
+            "$ref": "#/components/schemas/ProductConfigInputWriteAvailability"
+          }
+        },
+        "required": [
+          "managed_secrets",
+          "runtime_settings"
+        ],
+        "title": "ProductConfigWriteAvailability",
         "type": "object"
       },
       "ProductDesiredTopology": {
@@ -9030,6 +8992,9 @@
             },
             "title": "Warnings",
             "type": "array"
+          },
+          "write_availability": {
+            "$ref": "#/components/schemas/ProductConfigWriteAvailability"
           }
         },
         "required": [
@@ -9045,7 +9010,8 @@
           "runtime_settings",
           "schema_version",
           "trust_state",
-          "warnings"
+          "warnings",
+          "write_availability"
         ],
         "title": "ProductEnvironmentConfigStatus",
         "type": "object"
@@ -9253,6 +9219,30 @@
           "trace_id"
         ],
         "title": "ProductEnvironmentListResponse",
+        "type": "object"
+      },
+      "ProductEnvironmentManagedSecretInput": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_key",
+          "integration",
+          "value"
+        ],
+        "title": "ProductEnvironmentManagedSecretInput",
         "type": "object"
       },
       "ProductEnvironmentResponse": {

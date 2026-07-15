@@ -147,7 +147,7 @@ class DocsContractsTests(TestCase):
         )
         for operation_data_type in (
             "ApplyGenericWebProdPromotionData",
-            "ApplyProductConfigData",
+            "ApplyProductEnvironmentConfigData",
             "DispatchGenericWebProdPromotionWorkflowData",
             "RankWorkGraphSnapshotData",
         ):
@@ -158,7 +158,8 @@ class DocsContractsTests(TestCase):
         self.assertIn("ISSUE_RECONCILIATION_BROWSER_BOUNDARY", engineering_model)
         self.assertIn("MERGE_TRAIN_BROWSER_BOUNDARY", engineering_model)
         self.assertIn("requestGeneratedPost", frontend_api)
-        self.assertIn('payload: ApplyProductConfigData["body"]', frontend_api)
+        self.assertIn('payload: ApplyProductEnvironmentConfigData["body"]', frontend_api)
+        self.assertNotIn("ApplyProductConfigData", frontend_api)
         self.assertIn('headers: { "Idempotency-Key": options.idempotencyKey }', frontend_api)
         self.assertIn("errorPayload.error.code", frontend_api)
         self.assertIn("BrowserOperationOptions", frontend_api)

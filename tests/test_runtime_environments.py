@@ -401,6 +401,57 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
         self.assertEqual(store.secret_audit_events[0].actor, "operator@example.com")
 
+    def test_product_config_dry_run_does_not_decrypt_existing_secret(self) -> None:
+        class _NoSecretVersionReadStore(_FakeProductConfigStore):
+            def read_secret_version(self, version_id: str) -> SecretVersion:
+                raise AssertionError(f"dry-run must not read secret version {version_id}")
+
+        store = _NoSecretVersionReadStore()
+        store.write_secret_record(
+            SecretRecord(
+                secret_id="secret-runtime-environment-smtp-password-sellyouroutboard-prod",
+                scope="context_instance",
+                integration="runtime_environment",
+                name="SMTP_PASSWORD",
+                context="sellyouroutboard",
+                instance="prod",
+                current_version_id="existing-secret-version",
+                created_at="2026-05-01T00:00:00Z",
+                updated_at="2026-05-01T00:00:00Z",
+            )
+        )
+
+        with patch.dict(
+            os.environ,
+            {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+            clear=True,
+        ):
+            result, bundle = control_plane_product_config.plan_product_config_authority_bundle(
+                record_store=store,
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard",
+                    "instance": "prod",
+                    "secrets": [
+                        {
+                            "name": "SMTP_PASSWORD",
+                            "binding_key": "SMTP_PASSWORD",
+                            "value": "replacement-secret-value",
+                        }
+                    ],
+                },
+                mode="dry-run",
+                actor="operator@example.com",
+                source_label="no-plaintext-read-test",
+            )
+
+        secret_results = cast("list[dict[str, object]]", result["secrets"])
+        self.assertEqual(secret_results[0]["action"], "rotated")
+        self.assertEqual(bundle.secret_versions, ())
+        self.assertEqual(bundle.secret_records, ())
+        self.assertEqual(bundle.secret_audit_events, ())
+
     def test_product_config_apply_retires_disabled_runtime_secret_placeholder(self) -> None:
         store = _FakeProductConfigStore()
         store.runtime_key_safety_policy_records = (
