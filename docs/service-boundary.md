@@ -47,10 +47,11 @@ Service implementation ownership is split by runtime responsibility:
   webhook store protocol, signature verification boundary, payload parsing,
   actor trust, deduplication, issue and pull-request closure, preview
   validation, and PR-feedback handling.
-- `control_plane/http_app.py` owns FastAPI composition, core and mutation route
-  registration, read-route dependency injection, and the webhook callable used
+- `control_plane/http_app.py` owns FastAPI composition, dependency injection,
+  remaining core and mutation route registration, and the webhook callable used
   by the unauthenticated GitHub route. Domain modules under
-  `control_plane/http_routes/` own extracted read handlers and registrations.
+  `control_plane/http_routes/` own extracted read handlers and registrations,
+  plus the dependency-explicit evidence-ingress write registrar.
 - `control_plane/drivers/native_routes.py` owns native descriptor metadata,
   handler authorization binding, and FastAPI driver-route validation.
 
@@ -414,18 +415,24 @@ typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
 Read-only ingress, topology, operational-record, managed-secret, product,
-driver, preview, work-graph, merge-train, and Every Code route families are
-registered from dependency-explicit modules under `control_plane.http_routes`.
+driver, preview, work-graph, merge-train, and Every Code route families, plus
+the seven evidence-ingress write routes, are registered from
+dependency-explicit modules under `control_plane.http_routes`.
 `http_app.py` remains the composition root: it passes frozen dependency objects
 and callables into the registrars, and each registrar calls the Launchplane
 FastAPI app's custom `add_api_route` directly so shared error-schema handling and
 route order remain centralized without an `APIRouter` compatibility layer.
+`control_plane.http_routes.mutation_support` owns accepted-response
+serialization, caller idempotency scope, canonical request fingerprints, store
+capability detection, and the existing general replay serializer. Notification
+replay remains separate until a later behavior-focused change can prove a safe
+unification.
 Route families with intervening write or UI registrations expose multiple
 registrar entrypoints rather than being reordered; in particular, product
 environment config-status remains the final API route registered immediately
 before the exception handlers. Core auth, session, service-status, and mutation
-handlers remain in the composition root until their own domain boundary is
-proven.
+handlers not covered by a proven registrar remain in the composition root until
+their own domain boundary is proven.
 
 Frontend contract generation uses the same boundary. Run
 `uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`

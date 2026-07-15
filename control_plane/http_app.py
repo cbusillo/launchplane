@@ -38,15 +38,25 @@ from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane.http_routes import (
+    AcceptedEvidenceResponse as AcceptedEvidenceResponse,
+    BackupGateEvidenceRequest as BackupGateEvidenceRequest,
+    DeploymentEvidenceRequest as DeploymentEvidenceRequest,
     DriverReadRouteDependencies,
+    EVIDENCE_INGRESS_ROUTES as _EVIDENCE_INGRESS_ROUTES,
+    EvidenceWriteRouteDependencies,
     ProductReadRouteDependencies,
+    PromotionEvidenceRequest as PromotionEvidenceRequest,
     ReadRouteDependencies,
     WorkGraphReadRouteDependencies,
+    accepted_evidence_response,
+    idempotency_capable_store,
+    idempotency_scope as idempotency_scope,
     product_profile_context_cutover_contexts_allowed,
     register_agent_context_read_routes,
     register_deployment_promotion_read_routes,
     register_dokploy_target_inspect_read_routes,
     register_driver_descriptor_read_routes,
+    register_evidence_write_routes,
     register_every_code_feedback_read_routes,
     register_every_code_notification_attempt_read_routes,
     register_every_code_preview_gate_read_routes,
@@ -69,6 +79,8 @@ from control_plane.http_routes import (
     register_tracked_target_log_read_routes,
     register_work_graph_issue_inbox_read_routes,
     register_work_graph_snapshot_read_routes,
+    replay_idempotent_response,
+    request_fingerprint,
     require_product_profile_read_store,
 )
 from control_plane.contracts.authz_policy_record import (
@@ -86,8 +98,6 @@ from control_plane.contracts.agent_write_intent import (
     evaluate_agent_write_intent,
     secret_evidence_for_agent_write_intent,
 )
-from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import (
@@ -475,10 +485,6 @@ from control_plane.contracts.product_profile_record import (
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
 )
-from control_plane.contracts.preview_evidence import (
-    PreviewDestroyedEvidenceEnvelope,
-    PreviewGenerationEvidenceEnvelope,
-)
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
@@ -492,19 +498,10 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackRecord,
     PreviewPrFeedbackStatus,
 )
-from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     redacted_route_binding_record,
-)
-from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
-from control_plane.contracts.runner_host_hygiene_evidence import (
-    RunnerHostHygieneAuditEvidenceEnvelope,
-)
-from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
-from control_plane.contracts.runner_lane_registration_evidence import (
-    RunnerLaneRegistrationAuditEvidenceEnvelope,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
@@ -587,12 +584,6 @@ from control_plane.service_human_auth import (
     safe_oauth_return_to,
     validate_browser_mutation_request_headers,
 )
-from control_plane.launchplane_mutations import (
-    LaunchplaneDestroyPreviewStore,
-    LaunchplaneMutationStore,
-    apply_launchplane_destroy_preview,
-    apply_launchplane_generation_evidence,
-)
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
@@ -603,12 +594,6 @@ from control_plane.storage.postgres import (
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
     RouteBindingMutationResult,
-)
-from control_plane.workflows.evidence_ingestion import (
-    EvidenceIngestionStore,
-    PromotionEvidenceValidationError,
-    apply_deployment_evidence,
-    apply_promotion_evidence,
 )
 from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
 from control_plane.workflows.public_ingress_monitor import (
@@ -677,13 +662,6 @@ _LOGGER = logging.getLogger(__name__)
 
 
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
-_DEPLOYMENT_EVIDENCE_ROUTE = "/v1/evidence/deployments"
-_BACKUP_GATE_EVIDENCE_ROUTE = "/v1/evidence/backup-gates"
-_PROMOTION_EVIDENCE_ROUTE = "/v1/evidence/promotions"
-_PREVIEW_GENERATION_EVIDENCE_ROUTE = "/v1/evidence/previews/generations"
-_PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
-_RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
-_RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
 _PRODUCT_ENVIRONMENT_CONFIG_APPLY_ROUTE = (
@@ -694,17 +672,6 @@ _EVIDENCE_INGRESS_MAX_BODY_BYTES = 2 * 1024 * 1024
 _GITHUB_WEBHOOK_MAX_BODY_BYTES = 2 * 1024 * 1024
 _PRODUCT_CONFIG_MAX_BODY_BYTES = 2 * 1024 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
-_EVIDENCE_INGRESS_ROUTES = frozenset(
-    {
-        _DEPLOYMENT_EVIDENCE_ROUTE,
-        _BACKUP_GATE_EVIDENCE_ROUTE,
-        _PROMOTION_EVIDENCE_ROUTE,
-        _PREVIEW_GENERATION_EVIDENCE_ROUTE,
-        _PREVIEW_DESTROYED_EVIDENCE_ROUTE,
-        _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE,
-        _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE,
-    }
-)
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     **{
         route: ("Evidence ingress", _EVIDENCE_INGRESS_MAX_BODY_BYTES, True, False)
@@ -1344,83 +1311,6 @@ class EveryCodePrFeedbackStatusEnvelope(BaseModel):
         if not self.request_id.strip():
             raise ValueError("Every Code PR feedback status requires request_id")
         return self
-
-
-class DeploymentEvidenceRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    deployment: DeploymentRecord
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_target_reference_compatibility_input(cls, data: object) -> object:
-        if _mapping_path_contains_key(data, "deployment", "deploy", "target_reference"):
-            raise ValueError(
-                "deployment evidence ingress rejects target_reference compatibility input"
-            )
-        return data
-
-    def model_post_init(self, _context: object) -> None:
-        if not self.product.strip():
-            raise ValueError("deployment evidence requires product")
-
-
-def _mapping_path_contains_key(payload: object, *path: str) -> bool:
-    if not path or not isinstance(payload, Mapping):
-        return False
-    *parent_path, terminal_key = path
-    current: object = payload
-    for path_part in parent_path:
-        if not isinstance(current, Mapping):
-            return False
-        current = current.get(path_part)
-    return isinstance(current, Mapping) and terminal_key in current
-
-
-class BackupGateEvidenceRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    backup_gate: BackupGateRecord
-
-    def model_post_init(self, _context: object) -> None:
-        if not self.product.strip():
-            raise ValueError("backup gate evidence requires product")
-
-
-class PromotionEvidenceRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    promotion: PromotionRecord
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_target_reference_compatibility_input(cls, data: object) -> object:
-        if _mapping_path_contains_key(data, "promotion", "deploy", "target_reference"):
-            raise ValueError(
-                "promotion evidence ingress rejects target_reference compatibility input"
-            )
-        return data
-
-    def model_post_init(self, _context: object) -> None:
-        if not self.product.strip():
-            raise ValueError("promotion evidence requires product")
-
-
-class AcceptedEvidenceResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["accepted"] = "accepted"
-    trace_id: str
-    records: dict[str, object]
-    result: dict[str, object] | None = None
-    replayed: bool | None = None
-    original_trace_id: str | None = None
 
 
 def _provider_operation_response_payload(
@@ -2274,36 +2164,6 @@ class _NpmplusIngressClientFactory(Protocol):
     def __call__(self) -> NpmplusIngressClient: ...
 
 
-class _IdempotencyCapableStore(Protocol):
-    def read_idempotency_record(
-        self,
-        *,
-        scope: str,
-        route_path: str,
-        idempotency_key: str,
-    ) -> LaunchplaneIdempotencyRecord | None: ...
-
-    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object: ...
-
-
-class _BackupGateEvidenceStore(Protocol):
-    def write_backup_gate_record(self, record: BackupGateRecord) -> object: ...
-
-
-class _RunnerHostHygieneAuditEvidenceStore(Protocol):
-    def write_runner_host_hygiene_audit_record(
-        self,
-        record: RunnerHostHygieneApplyAuditRecord,
-    ) -> object: ...
-
-
-class _RunnerLaneRegistrationAuditEvidenceStore(Protocol):
-    def write_runner_lane_registration_audit_record(
-        self,
-        record: RunnerLaneRegistrationAuditRecord,
-    ) -> object: ...
-
-
 class _PublicIngressNotificationPolicyApplyStore(Protocol):
     def write_public_ingress_notification_policy_record(
         self,
@@ -2567,142 +2427,6 @@ class _EveryCodePreviewGateWriteStore(Protocol):
     def write_every_code_preview_gate_record(
         self, record: EveryCodePreviewGateRecord
     ) -> object: ...
-
-
-def require_deployment_evidence_store(record_store: object) -> EvidenceIngestionStore:
-    required_methods = (
-        "write_deployment_record",
-        "write_environment_inventory",
-    )
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            "Launchplane record store does not support deployment evidence writes: "
-            f"{missing_summary}"
-        )
-    return cast(EvidenceIngestionStore, record_store)
-
-
-def require_promotion_evidence_store(
-    record_store: object,
-    promotion_record: PromotionRecord,
-) -> EvidenceIngestionStore:
-    if promotion_record.deployment_record_id.strip():
-        required_methods = ["read_deployment_record", "write_promotion_evidence_records"]
-    else:
-        required_methods = ["write_promotion_record"]
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            "Launchplane record store does not support promotion evidence writes: "
-            f"{missing_summary}"
-        )
-    return cast(EvidenceIngestionStore, record_store)
-
-
-def require_preview_generation_evidence_store(record_store: object) -> LaunchplaneMutationStore:
-    required_methods = (
-        "list_preview_records",
-        "list_preview_generation_records",
-        "write_preview_record",
-        "write_preview_generation_record",
-        "write_preview_generation_evidence_records",
-    )
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            "Launchplane record store does not support preview generation evidence writes: "
-            f"{missing_summary}"
-        )
-    return cast(LaunchplaneMutationStore, record_store)
-
-
-def require_preview_destroyed_evidence_store(
-    record_store: object,
-) -> LaunchplaneDestroyPreviewStore:
-    required_methods = (
-        "list_preview_records",
-        "write_preview_record",
-    )
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            "Launchplane record store does not support preview destroyed evidence writes: "
-            f"{missing_summary}"
-        )
-    return cast(LaunchplaneDestroyPreviewStore, record_store)
-
-
-def require_backup_gate_evidence_store(record_store: object) -> _BackupGateEvidenceStore:
-    required_methods = ("write_backup_gate_record",)
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            "Launchplane record store does not support backup gate evidence writes: "
-            f"{missing_summary}"
-        )
-    return cast(_BackupGateEvidenceStore, record_store)
-
-
-def require_runner_host_hygiene_audit_evidence_store(
-    record_store: object,
-) -> _RunnerHostHygieneAuditEvidenceStore:
-    required_methods = ("write_runner_host_hygiene_audit_record",)
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            "Launchplane record store does not support runner host hygiene audit "
-            f"evidence writes: {missing_summary}"
-        )
-    return cast(_RunnerHostHygieneAuditEvidenceStore, record_store)
-
-
-def require_runner_lane_registration_audit_evidence_store(
-    record_store: object,
-) -> _RunnerLaneRegistrationAuditEvidenceStore:
-    required_methods = ("write_runner_lane_registration_audit_record",)
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            "Launchplane record store does not support runner lane registration audit "
-            f"evidence writes: {missing_summary}"
-        )
-    return cast(_RunnerLaneRegistrationAuditEvidenceStore, record_store)
 
 
 def require_product_profile_write_store(record_store: object) -> ProductProfileWriteStore:
@@ -3032,40 +2756,6 @@ def require_ingress_edge_endpoint_read_store(record_store: object) -> _IngressEd
             f"Launchplane record store does not support ingress edge endpoint reads: {missing_summary}"
         )
     return cast(_IngressEdgeEndpointReadStore, record_store)
-
-
-def idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
-    if callable(getattr(record_store, "read_idempotency_record", None)) and callable(
-        getattr(record_store, "write_idempotency_record", None)
-    ):
-        return cast(_IdempotencyCapableStore, record_store)
-    return None
-
-
-def idempotency_scope(identity: LaunchplaneIdentity) -> str:
-    if isinstance(identity, GitHubHumanIdentity):
-        return "|".join(("github-human", identity.login, str(identity.github_id)))
-    if isinstance(identity, LocalOperatorIdentity):
-        return "|".join(("local-operator", identity.subject, identity.token_label))
-    if isinstance(identity, LocalAdminIdentity):
-        return "|".join(("local-admin", identity.subject, identity.token_label))
-    if isinstance(identity, TerminalAgentIdentity):
-        return "|".join(("terminal-agent", identity.subject, identity.token_label))
-    if isinstance(identity, GitHubActionsIdentity):
-        workflow_ref = identity.workflow_ref or identity.job_workflow_ref or ""
-        return "|".join(
-            (
-                str(identity.repository).strip(),
-                str(workflow_ref).strip(),
-                str(identity.subject).strip(),
-            )
-        )
-    raise TypeError(f"Unsupported Launchplane identity type: {type(identity).__name__}")
-
-
-def request_fingerprint(payload: dict[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def canonical_request_payload_for_idempotency(
@@ -4136,6 +3826,15 @@ def create_launchplane_fastapi_app(
         authorization_allows=read_route_authorization_allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
+    )
+    evidence_write_route_dependencies = EvidenceWriteRouteDependencies(
+        read_write_identity=read_write_identity,
+        get_record_store=get_record_store,
+        next_trace_id=next_trace_id,
+        authorization_allows=read_route_authorization_allows,
+        http_error=_launchplane_http_error,
+        error_response_model=LaunchplaneErrorResponse,
+        control_plane_root=resolved_control_plane_root,
     )
     product_read_route_dependencies = ProductReadRouteDependencies(
         common=read_route_dependencies,
@@ -9753,54 +9452,6 @@ def create_launchplane_fastapi_app(
             result=result_plan.model_dump(mode="json"),
         )
         return response
-
-    def accepted_evidence_response(
-        *,
-        trace_id: str,
-        records: Mapping[str, object],
-        result: dict[str, object] | None = None,
-        replayed: bool = False,
-        original_trace_id: str = "",
-    ) -> AcceptedEvidenceResponse:
-        return AcceptedEvidenceResponse(
-            trace_id=trace_id,
-            records=dict(records),
-            result=result,
-            replayed=True if replayed else None,
-            original_trace_id=original_trace_id or None,
-        )
-
-    def replay_idempotent_response(
-        *,
-        trace_id: str,
-        stored_record: LaunchplaneIdempotencyRecord,
-        route_path: str = "",
-    ) -> AcceptedEvidenceResponse:
-        stored_records = {
-            str(key): value
-            if str(key).endswith("_preview_verification") and isinstance(value, dict)
-            else str(value)
-            for key, value in dict(stored_record.response_payload.get("records") or {}).items()
-        }
-        stored_result = stored_record.response_payload.get("result")
-        if route_path in {
-            _GENERIC_WEB_DEPLOY_ROUTE,
-            _GENERIC_WEB_PROD_PROMOTION_ROUTE,
-            _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
-            _VERIREEL_PROD_DEPLOY_ROUTE,
-            _VERIREEL_PROD_PROMOTION_ROUTE,
-            _VERIREEL_TESTING_DEPLOY_ROUTE,
-        } and isinstance(stored_result, dict):
-            stored_records.pop("target_type", None)
-            stored_result = {str(key): value for key, value in stored_result.items()}
-            stored_result.pop("target_type", None)
-        return accepted_evidence_response(
-            trace_id=trace_id,
-            records=stored_records,
-            result=stored_result if isinstance(stored_result, dict) else None,
-            replayed=True,
-            original_trace_id=stored_record.response_trace_id,
-        )
 
     def require_notification_policy_database_store(
         *, record_store: object, trace_id: str, label: str
@@ -16431,663 +16082,6 @@ def create_launchplane_fastapi_app(
             )
         return response
 
-    async def write_deployment_evidence(
-        request: Request,
-        deployment_request: DeploymentEvidenceRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="deployment.write",
-            product=deployment_request.product,
-            context=deployment_request.deployment.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot write deployment evidence for the requested product/context."
-                ),
-            )
-
-        idempotency_store = idempotency_capable_store(record_store)
-        normalized_idempotency_key = idempotency_key.strip()
-        normalized_scope = idempotency_scope(identity)
-        raw_payload = await request.json()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
-        if idempotency_store is not None and normalized_idempotency_key:
-            stored_record = idempotency_store.read_idempotency_record(
-                scope=normalized_scope,
-                route_path=_DEPLOYMENT_EVIDENCE_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            )
-            if stored_record is not None:
-                if stored_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=stored_record,
-                )
-
-        try:
-            evidence_store = require_deployment_evidence_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-        records = {
-            str(key): str(value)
-            for key, value in apply_deployment_evidence(
-                record_store=evidence_store,
-                deployment_record=deployment_request.deployment,
-            ).items()
-        }
-        response = accepted_evidence_response(trace_id=trace_id, records=records)
-        if idempotency_store is not None and normalized_idempotency_key:
-            idempotency_store.write_idempotency_record(
-                LaunchplaneIdempotencyRecord(
-                    record_id=build_launchplane_idempotency_record_id(
-                        response_trace_id=trace_id,
-                    ),
-                    scope=normalized_scope,
-                    route_path=_DEPLOYMENT_EVIDENCE_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint=payload_fingerprint,
-                    response_status_code=202,
-                    response_trace_id=trace_id,
-                    recorded_at=utc_now_timestamp(),
-                    response_payload=response.model_dump(mode="json", exclude_none=True),
-                )
-            )
-        return response
-
-    async def write_backup_gate_evidence(
-        request: Request,
-        backup_gate_request: BackupGateEvidenceRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="backup_gate.write",
-            product=backup_gate_request.product,
-            context=backup_gate_request.backup_gate.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot write backup gate evidence for the requested product/context."
-                ),
-            )
-
-        idempotency_store = idempotency_capable_store(record_store)
-        normalized_idempotency_key = idempotency_key.strip()
-        normalized_scope = idempotency_scope(identity)
-        raw_payload = await request.json()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
-        if idempotency_store is not None and normalized_idempotency_key:
-            stored_record = idempotency_store.read_idempotency_record(
-                scope=normalized_scope,
-                route_path=_BACKUP_GATE_EVIDENCE_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            )
-            if stored_record is not None:
-                if stored_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=stored_record,
-                )
-
-        try:
-            evidence_store = require_backup_gate_evidence_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-        evidence_store.write_backup_gate_record(backup_gate_request.backup_gate)
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={"backup_gate_record_id": backup_gate_request.backup_gate.record_id},
-        )
-        if idempotency_store is not None and normalized_idempotency_key:
-            idempotency_store.write_idempotency_record(
-                LaunchplaneIdempotencyRecord(
-                    record_id=build_launchplane_idempotency_record_id(
-                        response_trace_id=trace_id,
-                    ),
-                    scope=normalized_scope,
-                    route_path=_BACKUP_GATE_EVIDENCE_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint=payload_fingerprint,
-                    response_status_code=202,
-                    response_trace_id=trace_id,
-                    recorded_at=utc_now_timestamp(),
-                    response_payload=response.model_dump(mode="json", exclude_none=True),
-                )
-            )
-        return response
-
-    async def write_promotion_evidence(
-        request: Request,
-        promotion_request: PromotionEvidenceRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="promotion.write",
-            product=promotion_request.product,
-            context=promotion_request.promotion.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot write promotion evidence for the requested product/context."
-                ),
-            )
-
-        idempotency_store = idempotency_capable_store(record_store)
-        normalized_idempotency_key = idempotency_key.strip()
-        normalized_scope = idempotency_scope(identity)
-        raw_payload = await request.json()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
-        if idempotency_store is not None and normalized_idempotency_key:
-            stored_record = idempotency_store.read_idempotency_record(
-                scope=normalized_scope,
-                route_path=_PROMOTION_EVIDENCE_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            )
-            if stored_record is not None:
-                if stored_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=stored_record,
-                )
-
-        try:
-            evidence_store = require_promotion_evidence_store(
-                record_store,
-                promotion_request.promotion,
-            )
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-        try:
-            records = {
-                str(key): str(value)
-                for key, value in apply_promotion_evidence(
-                    record_store=evidence_store,
-                    promotion_record=promotion_request.promotion,
-                ).items()
-            }
-        except PromotionEvidenceValidationError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error).strip() or "Request could not be completed.",
-            ) from error
-
-        response = accepted_evidence_response(trace_id=trace_id, records=records)
-        if idempotency_store is not None and normalized_idempotency_key:
-            idempotency_store.write_idempotency_record(
-                LaunchplaneIdempotencyRecord(
-                    record_id=build_launchplane_idempotency_record_id(
-                        response_trace_id=trace_id,
-                    ),
-                    scope=normalized_scope,
-                    route_path=_PROMOTION_EVIDENCE_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint=payload_fingerprint,
-                    response_status_code=202,
-                    response_trace_id=trace_id,
-                    recorded_at=utc_now_timestamp(),
-                    response_payload=response.model_dump(mode="json", exclude_none=True),
-                )
-            )
-        return response
-
-    async def write_preview_generation_evidence(
-        request: Request,
-        preview_generation_request: PreviewGenerationEvidenceEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="preview_generation.write",
-            product=preview_generation_request.product,
-            context=preview_generation_request.preview.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot write preview generation evidence for the "
-                    "requested product/context."
-                ),
-            )
-
-        idempotency_store = idempotency_capable_store(record_store)
-        normalized_idempotency_key = idempotency_key.strip()
-        normalized_scope = idempotency_scope(identity)
-        raw_payload = await request.json()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
-        if idempotency_store is not None and normalized_idempotency_key:
-            stored_record = idempotency_store.read_idempotency_record(
-                scope=normalized_scope,
-                route_path=_PREVIEW_GENERATION_EVIDENCE_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            )
-            if stored_record is not None:
-                if stored_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=stored_record,
-                )
-
-        try:
-            evidence_store = require_preview_generation_evidence_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-        try:
-            records = {
-                str(key): str(value)
-                for key, value in apply_launchplane_generation_evidence(
-                    control_plane_root_path=resolved_control_plane_root,
-                    record_store=evidence_store,
-                    preview_request=preview_generation_request.preview,
-                    generation_request=preview_generation_request.generation,
-                ).items()
-            }
-        except click.ClickException as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error).strip() or "Request could not be completed.",
-            ) from error
-
-        response = accepted_evidence_response(trace_id=trace_id, records=records)
-        if idempotency_store is not None and normalized_idempotency_key:
-            idempotency_store.write_idempotency_record(
-                LaunchplaneIdempotencyRecord(
-                    record_id=build_launchplane_idempotency_record_id(
-                        response_trace_id=trace_id,
-                    ),
-                    scope=normalized_scope,
-                    route_path=_PREVIEW_GENERATION_EVIDENCE_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint=payload_fingerprint,
-                    response_status_code=202,
-                    response_trace_id=trace_id,
-                    recorded_at=utc_now_timestamp(),
-                    response_payload=response.model_dump(mode="json", exclude_none=True),
-                )
-            )
-        return response
-
-    async def write_preview_destroyed_evidence(
-        request: Request,
-        preview_destroyed_request: PreviewDestroyedEvidenceEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="preview_destroyed.write",
-            product=preview_destroyed_request.product,
-            context=preview_destroyed_request.destroy.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot write preview destroyed evidence for the "
-                    "requested product/context."
-                ),
-            )
-
-        idempotency_store = idempotency_capable_store(record_store)
-        normalized_idempotency_key = idempotency_key.strip()
-        normalized_scope = idempotency_scope(identity)
-        raw_payload = await request.json()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
-        if idempotency_store is not None and normalized_idempotency_key:
-            stored_record = idempotency_store.read_idempotency_record(
-                scope=normalized_scope,
-                route_path=_PREVIEW_DESTROYED_EVIDENCE_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            )
-            if stored_record is not None:
-                if stored_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=stored_record,
-                )
-
-        try:
-            evidence_store = require_preview_destroyed_evidence_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-        try:
-            records = {
-                str(key): str(value)
-                for key, value in apply_launchplane_destroy_preview(
-                    record_store=evidence_store,
-                    request=preview_destroyed_request.destroy,
-                ).items()
-            }
-        except click.ClickException as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error).strip() or "Request could not be completed.",
-            ) from error
-
-        response = accepted_evidence_response(trace_id=trace_id, records=records)
-        if idempotency_store is not None and normalized_idempotency_key:
-            idempotency_store.write_idempotency_record(
-                LaunchplaneIdempotencyRecord(
-                    record_id=build_launchplane_idempotency_record_id(
-                        response_trace_id=trace_id,
-                    ),
-                    scope=normalized_scope,
-                    route_path=_PREVIEW_DESTROYED_EVIDENCE_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint=payload_fingerprint,
-                    response_status_code=202,
-                    response_trace_id=trace_id,
-                    recorded_at=utc_now_timestamp(),
-                    response_payload=response.model_dump(mode="json", exclude_none=True),
-                )
-            )
-        return response
-
-    async def write_runner_host_hygiene_audit_evidence(
-        request: Request,
-        runner_host_hygiene_request: RunnerHostHygieneAuditEvidenceEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="runner_host_hygiene_audit.write",
-            product=runner_host_hygiene_request.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot write runner host hygiene audit evidence.",
-            )
-
-        idempotency_store = idempotency_capable_store(record_store)
-        normalized_idempotency_key = idempotency_key.strip()
-        normalized_scope = idempotency_scope(identity)
-        raw_payload = await request.json()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
-        if idempotency_store is not None and normalized_idempotency_key:
-            stored_record = idempotency_store.read_idempotency_record(
-                scope=normalized_scope,
-                route_path=_RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            )
-            if stored_record is not None:
-                if stored_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=stored_record,
-                )
-
-        try:
-            evidence_store = require_runner_host_hygiene_audit_evidence_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-        evidence_store.write_runner_host_hygiene_audit_record(runner_host_hygiene_request.audit)
-        records = {
-            "runner_host_hygiene_audit_record_key": (
-                runner_host_hygiene_request.audit.audit_record_key
-            ),
-        }
-        result: dict[str, object] = {
-            "runner_host_hygiene_audit_record_key": (
-                runner_host_hygiene_request.audit.audit_record_key
-            ),
-            "host_name": runner_host_hygiene_request.audit.request.host_name,
-            "audit_status": runner_host_hygiene_request.audit.status,
-            "mutate": runner_host_hygiene_request.audit.request.mutate,
-            "audit": runner_host_hygiene_request.audit.model_dump(mode="json"),
-        }
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=records,
-            result=result,
-        )
-        if idempotency_store is not None and normalized_idempotency_key:
-            idempotency_store.write_idempotency_record(
-                LaunchplaneIdempotencyRecord(
-                    record_id=build_launchplane_idempotency_record_id(
-                        response_trace_id=trace_id,
-                    ),
-                    scope=normalized_scope,
-                    route_path=_RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint=payload_fingerprint,
-                    response_status_code=202,
-                    response_trace_id=trace_id,
-                    recorded_at=utc_now_timestamp(),
-                    response_payload=response.model_dump(mode="json", exclude_none=True),
-                )
-            )
-        return response
-
-    async def write_runner_lane_registration_audit_evidence(
-        request: Request,
-        runner_lane_registration_request: RunnerLaneRegistrationAuditEvidenceEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="runner_lane_registration_audit.write",
-            product=runner_lane_registration_request.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot write runner lane registration audit evidence.",
-            )
-
-        idempotency_store = idempotency_capable_store(record_store)
-        normalized_idempotency_key = idempotency_key.strip()
-        normalized_scope = idempotency_scope(identity)
-        raw_payload = await request.json()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
-        if idempotency_store is not None and normalized_idempotency_key:
-            stored_record = idempotency_store.read_idempotency_record(
-                scope=normalized_scope,
-                route_path=_RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            )
-            if stored_record is not None:
-                if stored_record.request_fingerprint != payload_fingerprint:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=stored_record,
-                )
-
-        try:
-            evidence_store = require_runner_lane_registration_audit_evidence_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-        evidence_store.write_runner_lane_registration_audit_record(
-            runner_lane_registration_request.audit
-        )
-        records = {
-            "runner_lane_registration_audit_record_key": (
-                runner_lane_registration_request.audit.audit_record_key
-            ),
-        }
-        result: dict[str, object] = {
-            "runner_lane_registration_audit_record_key": (
-                runner_lane_registration_request.audit.audit_record_key
-            ),
-            "repository": runner_lane_registration_request.audit.request.repository,
-            "host_name": runner_lane_registration_request.audit.request.host_name,
-            "lane_name": runner_lane_registration_request.audit.request.lane_name,
-            "audit_status": runner_lane_registration_request.audit.status,
-            "mutate": runner_lane_registration_request.audit.request.mutate,
-            "audit": runner_lane_registration_request.audit.model_dump(mode="json"),
-        }
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=records,
-            result=result,
-        )
-        if idempotency_store is not None and normalized_idempotency_key:
-            idempotency_store.write_idempotency_record(
-                LaunchplaneIdempotencyRecord(
-                    record_id=build_launchplane_idempotency_record_id(
-                        response_trace_id=trace_id,
-                    ),
-                    scope=normalized_scope,
-                    route_path=_RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint=payload_fingerprint,
-                    response_status_code=202,
-                    response_trace_id=trace_id,
-                    recorded_at=utc_now_timestamp(),
-                    response_payload=response.model_dump(mode="json", exclude_none=True),
-                )
-            )
-        return response
-
     def read_health(record_store: Annotated[object, Depends(get_record_store)]) -> HealthResponse:
         return HealthResponse(
             trace_id=next_trace_id(),
@@ -18783,15 +17777,6 @@ def create_launchplane_fastapi_app(
         409: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
-    evidence_ingress_error_responses: dict[int | str, dict[str, object]] = {
-        400: {"model": LaunchplaneErrorResponse},
-        401: {"model": LaunchplaneErrorResponse},
-        403: {"model": LaunchplaneErrorResponse},
-        409: {"model": LaunchplaneErrorResponse},
-        413: {"model": LaunchplaneErrorResponse},
-        503: {"model": LaunchplaneErrorResponse},
-    }
-
     app.add_api_route(
         _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
         handle_every_code_github_webhook,
@@ -19797,88 +18782,9 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        _BACKUP_GATE_EVIDENCE_ROUTE,
-        write_backup_gate_evidence,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_backup_gate_evidence",
-        summary="Write backup gate evidence",
-        responses=evidence_ingress_error_responses,
-    )
-
-    app.add_api_route(
-        _PROMOTION_EVIDENCE_ROUTE,
-        write_promotion_evidence,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_promotion_evidence",
-        summary="Write promotion evidence",
-        responses=evidence_ingress_error_responses,
-    )
-
-    app.add_api_route(
-        _PREVIEW_GENERATION_EVIDENCE_ROUTE,
-        write_preview_generation_evidence,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_preview_generation_evidence",
-        summary="Write preview generation evidence",
-        responses=evidence_ingress_error_responses,
-    )
-
-    app.add_api_route(
-        _PREVIEW_DESTROYED_EVIDENCE_ROUTE,
-        write_preview_destroyed_evidence,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_preview_destroyed_evidence",
-        summary="Write preview destroyed evidence",
-        responses=evidence_ingress_error_responses,
-    )
-
-    app.add_api_route(
-        _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE,
-        write_runner_host_hygiene_audit_evidence,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_runner_host_hygiene_audit_evidence",
-        summary="Write runner host hygiene audit evidence",
-        responses=evidence_ingress_error_responses,
-    )
-
-    app.add_api_route(
-        _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE,
-        write_runner_lane_registration_audit_evidence,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_runner_lane_registration_audit_evidence",
-        summary="Write runner lane registration audit evidence",
-        responses=evidence_ingress_error_responses,
-    )
-
-    app.add_api_route(
-        _DEPLOYMENT_EVIDENCE_ROUTE,
-        write_deployment_evidence,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_deployment_evidence",
-        summary="Write deployment evidence",
-        responses=evidence_ingress_error_responses,
+    register_evidence_write_routes(
+        app,
+        dependencies=evidence_write_route_dependencies,
     )
 
     def read_operator_ui(path: str = "") -> Response:

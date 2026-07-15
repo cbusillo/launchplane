@@ -5,6 +5,14 @@ from control_plane.http_routes.drivers import (
     register_operation_status_read_routes,
     register_tracked_target_log_read_routes,
 )
+from control_plane.http_routes.evidence import (
+    EVIDENCE_INGRESS_ROUTES,
+    BackupGateEvidenceRequest,
+    DeploymentEvidenceRequest,
+    EvidenceWriteRouteDependencies,
+    PromotionEvidenceRequest,
+    register_evidence_write_routes,
+)
 from control_plane.http_routes.every_code import (
     register_every_code_feedback_read_routes,
     register_every_code_notification_attempt_read_routes,
@@ -13,6 +21,14 @@ from control_plane.http_routes.every_code import (
 )
 from control_plane.http_routes.ingress import register_ingress_read_routes
 from control_plane.http_routes.merge_train import register_merge_train_read_routes
+from control_plane.http_routes.mutation_support import (
+    AcceptedEvidenceResponse,
+    accepted_evidence_response,
+    idempotency_capable_store,
+    idempotency_scope,
+    replay_idempotent_response,
+    request_fingerprint,
+)
 from control_plane.http_routes.operational_records import (
     register_deployment_promotion_read_routes,
     register_inventory_operation_read_routes,
@@ -44,15 +60,25 @@ from control_plane.http_routes.work_graph import (
 )
 
 __all__ = (
+    "AcceptedEvidenceResponse",
+    "BackupGateEvidenceRequest",
+    "DeploymentEvidenceRequest",
     "DriverReadRouteDependencies",
+    "EVIDENCE_INGRESS_ROUTES",
+    "EvidenceWriteRouteDependencies",
     "ProductReadRouteDependencies",
+    "PromotionEvidenceRequest",
     "ReadRouteDependencies",
     "WorkGraphReadRouteDependencies",
+    "accepted_evidence_response",
+    "idempotency_capable_store",
+    "idempotency_scope",
     "product_profile_context_cutover_contexts_allowed",
     "register_agent_context_read_routes",
     "register_deployment_promotion_read_routes",
     "register_dokploy_target_inspect_read_routes",
     "register_driver_descriptor_read_routes",
+    "register_evidence_write_routes",
     "register_every_code_feedback_read_routes",
     "register_every_code_notification_attempt_read_routes",
     "register_every_code_preview_gate_read_routes",
@@ -75,5 +101,7 @@ __all__ = (
     "register_tracked_target_log_read_routes",
     "register_work_graph_issue_inbox_read_routes",
     "register_work_graph_snapshot_read_routes",
+    "replay_idempotent_response",
+    "request_fingerprint",
     "require_product_profile_read_store",
 )
