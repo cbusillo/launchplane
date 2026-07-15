@@ -292,6 +292,42 @@ Use operator language:
 Settings writes require dry-run first, show only key names/counts/status, and
 clear submitted secret values immediately on submit and on error.
 
+`GET /v1/products/{product}/environments/{environment}/config-status` is the
+browser authority for these controls. Its `write_availability` field separates
+runtime-setting and managed-secret plan/apply availability, exact authz and
+prerequisite blockers, matching-dry-run and idempotency requirements, the
+confirmation text, and generic irreversible or live-sync consequences. The UI
+must keep a form disabled when this authority is missing or blocked, and it
+must unmount write forms while a refresh is unresolved or failed rather than
+execute against cached authorization evidence.
+
+The browser writes through
+`POST /v1/products/{product}/environments/{environment}/config/apply`. The
+service resolves the stored product profile and lane from the path, accepts only
+profile-declared runtime keys or managed-secret bindings, and supplies the
+context, instance, scope, and source label itself. A managed-secret selection
+includes both its displayed integration and binding key so repeated binding-key
+names remain unambiguous; the server resolves that pair against the stored
+profile rather than trusting it as target authority. The browser does not send a
+raw context picker or checked-in product defaults.
+
+Runtime-setting and managed-secret forms remain separate. Both require a reason
+and a dry-run. Apply requires the exact server-advertised confirmation, the
+matching normalized payload, and a stable idempotency key. The confirmation
+surface shows product/lane scope, changed runtime and secret counts,
+irreversible consequences, and any separately required live-target sync before
+the operator can apply.
+
+Managed-secret values exist only in uncontrolled password inputs and the
+immediate request local variable. The UI clears those inputs before dispatch and
+again on secret-input validation failure, request failure, route change, and
+unmount. Apply requires the operator to re-enter the same values; retained
+browser operation state contains only a fingerprint, idempotency key, redacted
+result, trace, and failure evidence. An uncertain apply locks every editable
+draft field so the only mutation retry preserves the original operation key and
+payload. Live-target endpoints returned in `next_actions` are rendered as
+inspect-only evidence until they have a separate generated browser adapter.
+
 ## Cleanup Safety
 
 Legacy cleanup is an admin or maintenance action, not a primary product flow.

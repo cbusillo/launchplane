@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,6 +23,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
+    product_config_requirement_applies_to_lane,
 )
 from control_plane.contracts.product_topology_read_model import (
     ProductEnvironmentTopology,
@@ -52,6 +54,15 @@ ProductConfigItemStatus = Literal[
     "stale",
     "unsupported",
 ]
+ProductConfigInputKind = Literal["runtime_settings", "managed_secrets"]
+ProductConfigMode = Literal["dry-run", "apply"]
+
+
+@dataclass(frozen=True, slots=True)
+class ProductConfigWritePrerequisites:
+    storage_ready: bool = False
+    secret_key_ready: bool = False
+    runtime_key_safety_ready: bool = False
 
 
 class ProductReadModelStore(Protocol):
@@ -391,6 +402,38 @@ class ProductManagedSecretConfigStatusItem(BaseModel):
     trust_state: ProductSecretBindingTrustState | Literal["unsupported"] = "missing"
 
 
+class ProductConfigOperationAvailability(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: ProductConfigMode
+    authz_action: str
+    method: Literal["POST"] = "POST"
+    route_path: str
+    enabled: bool
+    disabled_reasons: tuple[str, ...] = ()
+    requires_reason: bool = True
+    requires_idempotency_key: bool = True
+    requires_matching_dry_run: bool = False
+    confirmation_text: str = ""
+    trust_state: FreshnessStatus = "recorded"
+
+
+class ProductConfigInputWriteAvailability(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_kind: ProductConfigInputKind
+    plan: ProductConfigOperationAvailability
+    apply: ProductConfigOperationAvailability
+    consequences: tuple[str, ...] = ()
+
+
+class ProductConfigWriteAvailability(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runtime_settings: ProductConfigInputWriteAvailability
+    managed_secrets: ProductConfigInputWriteAvailability
+
+
 class ProductEnvironmentConfigStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -404,6 +447,7 @@ class ProductEnvironmentConfigStatus(BaseModel):
     context: str
     runtime_settings: tuple[ProductRuntimeConfigStatusItem, ...] = ()
     managed_secrets: tuple[ProductManagedSecretConfigStatusItem, ...] = ()
+    write_availability: ProductConfigWriteAvailability
     warnings: tuple[str, ...] = ()
     trust_state: FreshnessStatus
     provenance: DataProvenance
@@ -582,6 +626,8 @@ def build_product_environment_config_status(
     record_store: ProductReadModelStore,
     product: str,
     environment: str,
+    action_allowed: ActionAllowed | None = None,
+    write_prerequisites: ProductConfigWritePrerequisites = ProductConfigWritePrerequisites(),
 ) -> ProductEnvironmentConfigStatus:
     profile = record_store.read_product_profile_record(product)
     lane = _find_lane(profile=profile, environment=environment)
@@ -622,9 +668,136 @@ def build_product_environment_config_status(
         context=lane.context,
         runtime_settings=runtime_settings,
         managed_secrets=managed_secrets,
+        write_availability=_product_config_write_availability(
+            profile=profile,
+            lane=lane,
+            runtime_settings=runtime_settings,
+            managed_secrets=managed_secrets,
+            action_allowed=action_allowed or _deny_action,
+            prerequisites=write_prerequisites,
+        ),
         warnings=warnings,
         trust_state=trust_state,
         provenance=provenance,
+    )
+
+
+def _deny_action(_action: str, _product: str, _context: str) -> bool:
+    return False
+
+
+def _product_config_write_availability(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    runtime_settings: tuple[ProductRuntimeConfigStatusItem, ...],
+    managed_secrets: tuple[ProductManagedSecretConfigStatusItem, ...],
+    action_allowed: ActionAllowed,
+    prerequisites: ProductConfigWritePrerequisites,
+) -> ProductConfigWriteAvailability:
+    route_path = "/v1/products/{product}/environments/{environment}/config/apply"
+    confirmation_text = f"APPLY {profile.product}/{lane.instance}"
+    runtime_reasons = _product_config_input_blockers(
+        input_kind="runtime_settings",
+        item_count=len(runtime_settings),
+        managed_secrets=managed_secrets,
+        prerequisites=prerequisites,
+    )
+    secret_reasons = _product_config_input_blockers(
+        input_kind="managed_secrets",
+        item_count=len(managed_secrets),
+        managed_secrets=managed_secrets,
+        prerequisites=prerequisites,
+    )
+    return ProductConfigWriteAvailability(
+        runtime_settings=_product_config_input_write_availability(
+            input_kind="runtime_settings",
+            product=profile.product,
+            context=lane.context,
+            route_path=route_path,
+            confirmation_text=confirmation_text,
+            base_blockers=runtime_reasons,
+            action_allowed=action_allowed,
+            consequences=(
+                "Dry-run and apply expose key names and counts, not runtime values.",
+                "Live target synchronization remains a separate inspect-only step when advertised.",
+            ),
+        ),
+        managed_secrets=_product_config_input_write_availability(
+            input_kind="managed_secrets",
+            product=profile.product,
+            context=lane.context,
+            route_path=route_path,
+            confirmation_text=confirmation_text,
+            base_blockers=secret_reasons,
+            action_allowed=action_allowed,
+            consequences=(
+                "Managed-secret creation or rotation cannot restore prior plaintext.",
+                "Live target synchronization remains a separate inspect-only step when advertised.",
+            ),
+        ),
+    )
+
+
+def _product_config_input_blockers(
+    *,
+    input_kind: ProductConfigInputKind,
+    item_count: int,
+    managed_secrets: tuple[ProductManagedSecretConfigStatusItem, ...],
+    prerequisites: ProductConfigWritePrerequisites,
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    if not prerequisites.storage_ready:
+        blockers.append("DB-backed product configuration storage is unavailable.")
+    if item_count == 0:
+        label = "runtime settings" if input_kind == "runtime_settings" else "managed secrets"
+        blockers.append(f"Product profile does not declare {label} for this environment.")
+    if input_kind == "managed_secrets":
+        if not prerequisites.secret_key_ready:
+            blockers.append("Managed-secret write encryption is unavailable.")
+        if any(secret.integration == "runtime_environment" for secret in managed_secrets) and not (
+            prerequisites.runtime_key_safety_ready
+        ):
+            blockers.append("Runtime key-safety policy is unavailable.")
+    return tuple(blockers)
+
+
+def _product_config_input_write_availability(
+    *,
+    input_kind: ProductConfigInputKind,
+    product: str,
+    context: str,
+    route_path: str,
+    confirmation_text: str,
+    base_blockers: tuple[str, ...],
+    action_allowed: ActionAllowed,
+    consequences: tuple[str, ...],
+) -> ProductConfigInputWriteAvailability:
+    plan_blockers = list(base_blockers)
+    apply_blockers = list(base_blockers)
+    if not action_allowed("product_config.plan", product, context):
+        plan_blockers.append("Caller is not authorized to plan product configuration.")
+    if not action_allowed("product_config.apply", product, context):
+        apply_blockers.append("Caller is not authorized to apply product configuration.")
+    return ProductConfigInputWriteAvailability(
+        input_kind=input_kind,
+        plan=ProductConfigOperationAvailability(
+            mode="dry-run",
+            authz_action="product_config.plan",
+            route_path=route_path,
+            enabled=not plan_blockers,
+            disabled_reasons=tuple(plan_blockers),
+        ),
+        apply=ProductConfigOperationAvailability(
+            mode="apply",
+            authz_action="product_config.apply",
+            route_path=route_path,
+            enabled=not apply_blockers,
+            disabled_reasons=tuple(apply_blockers),
+            requires_matching_dry_run=True,
+            confirmation_text=confirmation_text,
+        ),
+        consequences=consequences,
     )
 
 
@@ -1585,7 +1758,7 @@ def _runtime_config_status_items(
     applicable_requirements = tuple(
         requirement
         for requirement in requirements
-        if _config_requirement_applies(
+        if product_config_requirement_applies_to_lane(
             requirement_context=requirement.context,
             requirement_instance=requirement.instance,
             lane=lane,
@@ -1644,7 +1817,7 @@ def _managed_secret_config_status_items(
     applicable_requirements = tuple(
         requirement
         for requirement in requirements
-        if _config_requirement_applies(
+        if product_config_requirement_applies_to_lane(
             requirement_context=requirement.context,
             requirement_instance=requirement.instance,
             lane=lane,
@@ -1716,16 +1889,6 @@ def _config_item_freshness(status: ProductConfigItemStatus) -> FreshnessStatus:
     if status == "unsupported":
         return "unsupported"
     return "missing"
-
-
-def _config_requirement_applies(
-    *, requirement_context: str, requirement_instance: str, lane: ProductLaneProfile
-) -> bool:
-    if not requirement_context:
-        return True
-    if requirement_context != lane.context:
-        return False
-    return not requirement_instance or requirement_instance == lane.instance
 
 
 def _environment_driver_extensions(

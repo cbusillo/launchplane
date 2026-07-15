@@ -44,6 +44,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/drivers/generic-web/prod-promotion-workflow",
             "/v1/merge-train/policies/import",
             "/v1/product-config/apply",
+            "/v1/products/{product}/environments/{environment}/config/apply",
             "/v1/work-graph/rank",
         }
         browser_dependency_names = {

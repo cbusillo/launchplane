@@ -10,12 +10,14 @@ from unittest.mock import patch
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.http_app import (
     create_launchplane_fastapi_app,
     idempotency_request_fingerprint,
     idempotency_scope,
 )
+from control_plane.product_config_service import product_config_write_prerequisites
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubActionsIdentity,
@@ -93,7 +95,7 @@ from tests.support.profiles import (
     _generic_site_profile_payload,
     _product_profile_payload,
 )
-from tests.support.stores import _sqlite_database_url
+from tests.support.stores import _sqlite_database_url, _write_runtime_key_safety_policy
 from tests.support.work_graph import _work_graph_snapshot_payload
 
 
@@ -217,6 +219,138 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         )
         self.assertNotIn("https://internal.example-site.invalid", response_text)
         self.assertNotIn("super-secret-password", response_text)
+        self.assertFalse(config_status["write_availability"]["runtime_settings"]["plan"]["enabled"])
+        self.assertIn(
+            "Caller is not authorized to plan product configuration.",
+            config_status["write_availability"]["runtime_settings"]["plan"]["disabled_reasons"],
+        )
+
+    async def test_config_status_exposes_authoritative_product_config_availability(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="SMTP_PASSWORD",
+                        secret_class="prod_only",
+                        allowed_contexts=("example-site",),
+                        allowed_instances=("prod",),
+                    ),
+                    RuntimeSecretSafetyRule(
+                        binding_key="RESEND_API_KEY",
+                        secret_class="prod_only",
+                        allowed_contexts=("example-site",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            store.close()
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(
+                    context="example-site",
+                    actions=(
+                        "product_environment.read",
+                        "product_config.plan",
+                        "product_config.apply",
+                    ),
+                ),
+                record_store_factory=lambda: app_store,
+            )
+
+            with patch.dict(
+                "os.environ",
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                response = await _get_config_status(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        availability = response.json()["config_status"]["write_availability"]
+        for input_kind in ("runtime_settings", "managed_secrets"):
+            self.assertTrue(availability[input_kind]["plan"]["enabled"])
+            self.assertTrue(availability[input_kind]["apply"]["enabled"])
+            self.assertTrue(availability[input_kind]["apply"]["requires_matching_dry_run"])
+            self.assertTrue(availability[input_kind]["apply"]["requires_idempotency_key"])
+            self.assertEqual(
+                availability[input_kind]["apply"]["confirmation_text"],
+                "APPLY example-site/prod",
+            )
+        self.assertEqual(
+            availability["runtime_settings"]["plan"]["route_path"],
+            "/v1/products/{product}/environments/{environment}/config/apply",
+        )
+
+    def test_config_status_does_not_advertise_filesystem_writes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _generic_site_profile_payload()
+            )
+            lane = next(candidate for candidate in profile.lanes if candidate.instance == "prod")
+
+            with patch.dict(
+                "os.environ",
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                prerequisites = product_config_write_prerequisites(
+                    store,
+                    profile=profile,
+                    lane=lane,
+                )
+
+        self.assertFalse(prerequisites.storage_ready)
+
+    async def test_config_status_checks_every_runtime_secret_policy_rule(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                context_name="example-site",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(
+                    context="example-site",
+                    actions=(
+                        "product_environment.read",
+                        "product_config.plan",
+                        "product_config.apply",
+                    ),
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            with patch.dict(
+                "os.environ",
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                response = await _get_config_status(app)
+            store.close()
+
+        self.assertEqual(response.status_code, 200)
+        managed_secrets = response.json()["config_status"]["write_availability"]["managed_secrets"]
+        self.assertFalse(managed_secrets["plan"]["enabled"])
+        self.assertIn(
+            "Runtime key-safety policy is unavailable.",
+            managed_secrets["plan"]["disabled_reasons"],
+        )
 
     async def test_config_status_uses_lane_authorization(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

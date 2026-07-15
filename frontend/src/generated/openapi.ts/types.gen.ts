@@ -1077,6 +1077,7 @@ export type ProductConfigApplyResult = {
     mode: 'dry-run' | 'apply';
     next_actions: Array<ProductConfigLiveTargetRuntimeNextAction>;
     product: string;
+    reason: string;
     runtime_environment: ProductConfigRuntimeEnvironmentResult;
     runtime_key_safety: ProductConfigRuntimeKeySafetyResult;
     secrets: Array<ProductConfigSecretResult>;
@@ -1088,6 +1089,13 @@ export type ProductConfigApplyResult = {
 export type ProductConfigApplySummary = {
     runtime_changed_key_count: number;
     secret_change_count: number;
+};
+
+export type ProductConfigInputWriteAvailability = {
+    apply: ProductConfigOperationAvailability;
+    consequences: Array<string>;
+    input_kind: 'runtime_settings' | 'managed_secrets';
+    plan: ProductConfigOperationAvailability;
 };
 
 export type ProductConfigLiveTarget = {
@@ -1114,6 +1122,20 @@ export type ProductConfigLiveTargetRuntimeOperation = {
     mode: 'dry-run' | 'apply';
 };
 
+export type ProductConfigOperationAvailability = {
+    authz_action: string;
+    confirmation_text: string;
+    disabled_reasons: Array<string>;
+    enabled: boolean;
+    method: 'POST';
+    mode: 'dry-run' | 'apply';
+    requires_idempotency_key: boolean;
+    requires_matching_dry_run: boolean;
+    requires_reason: boolean;
+    route_path: string;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
 export type ProductConfigRuntimeEnvironmentRecordSummary = {
     context: string;
     env_keys: Array<string>;
@@ -1136,16 +1158,6 @@ export type ProductConfigRuntimeEnvironmentResult = {
     unchanged_keys: Array<string>;
 };
 
-export type ProductConfigRuntimeInput = {
-    context?: string | null;
-    env?: {
-        [key: string]: string | number | number | boolean;
-    };
-    instance?: string | null;
-    scope?: 'global' | 'context' | 'instance' | null;
-    [key: string]: unknown;
-};
-
 export type ProductConfigRuntimeKeySafetyResult = {
     checked_binding_keys: Array<string>;
     findings: Array<RuntimeKeySafetyFinding>;
@@ -1154,18 +1166,6 @@ export type ProductConfigRuntimeKeySafetyResult = {
     required: boolean;
     status: 'skipped' | 'pass';
     target?: RuntimeKeySafetyTarget | null;
-};
-
-export type ProductConfigSecretInput = {
-    binding_key?: string | null;
-    context?: string | null;
-    description?: string;
-    instance?: string | null;
-    integration?: string | null;
-    name?: string | null;
-    scope?: 'global' | 'context' | 'context_instance' | null;
-    value: string;
-    [key: string]: unknown;
 };
 
 export type ProductConfigSecretResult = {
@@ -1177,6 +1177,11 @@ export type ProductConfigSecretResult = {
     name: string;
     scope: 'global' | 'context' | 'context_instance';
     secret_id: string;
+};
+
+export type ProductConfigWriteAvailability = {
+    managed_secrets: ProductConfigInputWriteAvailability;
+    runtime_settings: ProductConfigInputWriteAvailability;
 };
 
 export type ProductDesiredTopology = {
@@ -1201,6 +1206,7 @@ export type ProductEnvironmentConfigStatus = {
     schema_version: number;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
     warnings: Array<string>;
+    write_availability: ProductConfigWriteAvailability;
 };
 
 export type ProductEnvironmentConfigStatusResponse = {
@@ -1240,6 +1246,12 @@ export type ProductEnvironmentListResponse = {
     products: Array<ProductSiteOverview>;
     status: 'ok';
     trace_id: string;
+};
+
+export type ProductEnvironmentManagedSecretInput = {
+    binding_key: string;
+    integration: string;
+    value: string;
 };
 
 export type ProductEnvironmentResponse = {
@@ -2479,48 +2491,46 @@ export type DispatchGenericWebProdPromotionWorkflowResponses = {
 
 export type DispatchGenericWebProdPromotionWorkflowResponse = DispatchGenericWebProdPromotionWorkflowResponses[keyof DispatchGenericWebProdPromotionWorkflowResponses];
 
-export type ApplyProductConfigData = {
+export type ApplyProductEnvironmentConfigData = {
     body: {
-        context?: string;
-        instance?: string;
+        confirmation?: string;
+        managed_secrets?: Array<ProductEnvironmentManagedSecretInput>;
         mode: 'dry-run' | 'apply';
-        product: string;
         reason?: string;
-        runtime_env?: {
+        runtime_settings?: {
             [key: string]: string | number | number | boolean;
-        } | ProductConfigRuntimeInput | null;
-        runtime_environment?: {
-            [key: string]: string | number | number | boolean;
-        } | ProductConfigRuntimeInput | null;
+        };
         schema_version?: number;
-        secrets?: Array<ProductConfigSecretInput>;
-        source_label?: string;
     };
     headers?: {
         'Idempotency-Key'?: string;
         Authorization?: string;
         Cookie?: string;
     };
-    path?: never;
+    path: {
+        product: string;
+        environment: string;
+    };
     query?: never;
-    url: '/v1/product-config/apply';
+    url: '/v1/products/{product}/environments/{environment}/config/apply';
 };
 
-export type ApplyProductConfigErrors = {
+export type ApplyProductEnvironmentConfigErrors = {
     400: LaunchplaneErrorResponse;
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
     409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
-export type ApplyProductConfigError = ApplyProductConfigErrors[keyof ApplyProductConfigErrors];
+export type ApplyProductEnvironmentConfigError = ApplyProductEnvironmentConfigErrors[keyof ApplyProductEnvironmentConfigErrors];
 
-export type ApplyProductConfigResponses = {
+export type ApplyProductEnvironmentConfigResponses = {
     202: ProductConfigApplyResponse;
 };
 
-export type ApplyProductConfigResponse = ApplyProductConfigResponses[keyof ApplyProductConfigResponses];
+export type ApplyProductEnvironmentConfigResponse = ApplyProductEnvironmentConfigResponses[keyof ApplyProductEnvironmentConfigResponses];
 
 export type RankWorkGraphSnapshotData = {
     body: WorkGraphRankEnvelope;

@@ -344,6 +344,41 @@ class LaunchplaneSecretsTests(unittest.TestCase):
             with self.assertRaisesRegex(click.ClickException, "could not decrypt"):
                 control_plane_secrets._decrypt_secret_value(tampered, "key-2")
 
+    def test_secret_payload_fingerprints_are_keyed_and_domain_separated(self) -> None:
+        payload = '{"value":"guessable-smtp-password"}'
+        with patch.dict(
+            os.environ,
+            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "first-master-key"},
+            clear=True,
+        ):
+            first = control_plane_secrets.keyed_secret_payload_fingerprint(
+                payload,
+                purpose="product-config-request",
+            )
+            repeated = control_plane_secrets.keyed_secret_payload_fingerprint(
+                payload,
+                purpose="product-config-request",
+            )
+            other_purpose = control_plane_secrets.keyed_secret_payload_fingerprint(
+                payload,
+                purpose="different-purpose",
+            )
+        with patch.dict(
+            os.environ,
+            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "second-master-key"},
+            clear=True,
+        ):
+            rotated = control_plane_secrets.keyed_secret_payload_fingerprint(
+                payload,
+                purpose="product-config-request",
+            )
+
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, other_purpose)
+        self.assertNotEqual(first, rotated)
+        self.assertTrue(first.startswith("hmac-sha256:"))
+        self.assertNotIn("guessable-smtp-password", first)
+
     def test_json_encryption_keys_reject_malformed_or_weak_configuration(self) -> None:
         invalid_configurations = (
             {"active_key_id": "bad key", "keys": {"bad key": _test_fernet_key(0)}},

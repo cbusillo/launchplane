@@ -7,8 +7,8 @@ import type {
 import type {
   ApplyGenericWebProdPromotionData,
   ApplyGenericWebProdPromotionResponse,
-  ApplyProductConfigData,
-  ApplyProductConfigResponse,
+  ApplyProductEnvironmentConfigData,
+  ApplyProductEnvironmentConfigResponse,
   DispatchGenericWebProdPromotionWorkflowData,
   DispatchGenericWebProdPromotionWorkflowResponse,
   EveryCodeSummaryResponse,
@@ -311,18 +311,24 @@ export function readMergeTrainPolicyTargets(
   );
 }
 
-export function applyProductConfig(
-  payload: ApplyProductConfigData["body"],
+export function applyProductEnvironmentConfig(
+  product: string,
+  environment: string,
+  payload: ApplyProductEnvironmentConfigData["body"],
   options: BrowserOperationOptions,
-): Promise<ApplyProductConfigResponse> {
-  const request: ApplyProductConfigData = {
-    url: BROWSER_WRITE_ROUTES.productConfigApply,
+): Promise<ApplyProductEnvironmentConfigResponse> {
+  const request: ApplyProductEnvironmentConfigData = {
+    url: BROWSER_WRITE_ROUTES.productEnvironmentConfigApply,
+    path: { product, environment },
     body: payload,
     headers: { "Idempotency-Key": options.idempotencyKey },
   };
-  return requestGeneratedPost<ApplyProductConfigResponse>(
-    request,
+  return requestJson<ApplyProductEnvironmentConfigResponse>(
+    `/v1/products/${encodeURIComponent(request.path.product)}/environments/${encodeURIComponent(request.path.environment)}/config/apply`,
+    "POST",
+    request.body,
     options.signal,
+    generatedIdempotencyKey(request.headers),
     options.onDispatch,
   );
 }

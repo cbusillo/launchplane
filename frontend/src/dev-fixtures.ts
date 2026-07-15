@@ -1,5 +1,6 @@
 import type {
   DataProvenance,
+  ApplyProductEnvironmentConfigData,
   EveryCodeSummaryResponse,
   GitHubHumanIdentityResponse,
   MergeTrainControllerStatusResponse,
@@ -7,6 +8,8 @@ import type {
   ProductActionAvailability,
   ProductActivityReadModel,
   ProductEnvironmentConfigStatus,
+  ProductConfigApplyResponse,
+  ProductConfigWriteAvailability,
   ProductEnvironmentDetail,
   ProductEnvironmentSummary,
   ProductSiteOverview,
@@ -213,6 +216,11 @@ export function configStatusForFixture(
     trust_state: detail.trust_state,
     provenance: detail.provenance,
     warnings: detail.warnings,
+    write_availability: productConfigWriteAvailabilityForFixture(
+      detail.product,
+      detail.environment,
+      !missingEvidence,
+    ),
     runtime_settings: [
       {
         key: "PUBLIC_ORIGIN",
@@ -253,6 +261,151 @@ export function configStatusForFixture(
         trust_state: "missing",
       },
     ],
+  };
+}
+
+export async function applyProductEnvironmentConfigForFixture(
+  fixture: DataFixtureMode,
+  product: string,
+  environment: string,
+  payload: ApplyProductEnvironmentConfigData["body"],
+  signal?: AbortSignal,
+): Promise<ProductConfigApplyResponse> {
+  assertFixtureAvailable(fixture);
+  if (signal?.aborted) {
+    throw new DOMException("Product config fixture request cancelled.", "AbortError");
+  }
+  const detail = environmentForFixture(fixture, product, environment);
+  if (!detail || detail.trust_state === "missing") {
+    throw Object.assign(
+      new Error("Product configuration writes are unavailable without recorded lane authority."),
+      { statusCode: 409, traceId: "fixture-product-config-blocked" },
+    );
+  }
+  const runtimeKeys = Object.keys(payload.runtime_settings ?? {}).sort();
+  const secretInputs = payload.managed_secrets ?? [];
+  const nextActions = runtimeKeys.length
+    ? [
+        {
+          kind: "live_target_runtime_apply" as const,
+          required: true,
+          status: "live_sync_required" as const,
+          target: {
+            context: detail.context,
+            instance: detail.environment,
+            target_type: "application",
+            target_name: `${detail.product}-${detail.environment}`,
+          },
+          changed_keys: runtimeKeys,
+          dry_run: {
+            method: "POST" as const,
+            endpoint: "/v1/live-target-runtime/apply",
+            mode: "dry-run" as const,
+          },
+          apply: {
+            method: "POST" as const,
+            endpoint: "/v1/live-target-runtime/apply",
+            mode: "apply" as const,
+          },
+          instruction:
+            "Inspect the separately typed live-target runtime operation before synchronization.",
+        },
+      ]
+    : [];
+  return {
+    status: "accepted",
+    trace_id: `fixture-product-config-${payload.mode}`,
+    records: {},
+    replayed: false,
+    result: {
+      status:
+        payload.mode === "apply" && nextActions.length
+          ? "records_applied_live_sync_required"
+          : "ok",
+      mode: payload.mode,
+      product: detail.product,
+      context: detail.context,
+      instance: detail.environment,
+      actor: "github:operator-demo",
+      source_label: "product-environment-api",
+      reason: payload.reason ?? "",
+      runtime_environment: {
+        action: runtimeKeys.length ? "updated" : "skipped",
+        scope: "instance",
+        context: detail.context,
+        instance: detail.environment,
+        keys: runtimeKeys,
+        changed_keys: runtimeKeys,
+        unchanged_keys: [],
+        env_value_count_after: runtimeKeys.length,
+      },
+      runtime_key_safety: {
+        required: secretInputs.length > 0,
+        status: secretInputs.length ? "pass" : "skipped",
+        policy_record_id: secretInputs.length ? "fixture-runtime-key-safety" : "",
+        policy_sha256: secretInputs.length ? "fixture-runtime-key-safety-sha256" : "",
+        checked_binding_keys: secretInputs.map((secret) => secret.binding_key),
+        findings: [],
+      },
+      secrets: secretInputs.map((secret) => ({
+        action: "rotated",
+        scope: "context_instance",
+        integration: "runtime_environment",
+        name: secret.binding_key,
+        binding_key: secret.binding_key,
+        context: detail.context,
+        instance: detail.environment,
+        secret_id: `fixture-${secret.binding_key.toLowerCase()}`,
+      })),
+      summary: {
+        runtime_changed_key_count: runtimeKeys.length,
+        secret_change_count: secretInputs.length,
+      },
+      next_actions: nextActions,
+    },
+  };
+}
+
+function productConfigWriteAvailabilityForFixture(
+  product: string,
+  environment: string,
+  enabled: boolean,
+): ProductConfigWriteAvailability {
+  const disabledReasons = enabled
+    ? []
+    : ["Recorded product environment authority is unavailable."];
+  const operation = (mode: "dry-run" | "apply") => ({
+    mode,
+    authz_action: mode === "dry-run" ? "product_config.plan" : "product_config.apply",
+    method: "POST" as const,
+    route_path: "/v1/products/{product}/environments/{environment}/config/apply",
+    enabled,
+    disabled_reasons: disabledReasons,
+    requires_reason: true,
+    requires_idempotency_key: true,
+    requires_matching_dry_run: mode === "apply",
+    confirmation_text: mode === "apply" ? `APPLY ${product}/${environment}` : "",
+    trust_state: enabled ? ("recorded" as const) : ("missing" as const),
+  });
+  return {
+    runtime_settings: {
+      input_kind: "runtime_settings",
+      plan: operation("dry-run"),
+      apply: operation("apply"),
+      consequences: [
+        "Dry-run and apply expose key names and counts, not runtime values.",
+        "Live target synchronization remains a separate inspect-only step when advertised.",
+      ],
+    },
+    managed_secrets: {
+      input_kind: "managed_secrets",
+      plan: operation("dry-run"),
+      apply: operation("apply"),
+      consequences: [
+        "Managed-secret creation or rotation cannot restore prior plaintext.",
+        "Live target synchronization remains a separate inspect-only step when advertised.",
+      ],
+    },
   };
 }
 

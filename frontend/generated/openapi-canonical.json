@@ -10586,6 +10586,11 @@
             "title": "Product",
             "type": "string"
           },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
           "runtime_environment": {
             "$ref": "#/components/schemas/ProductConfigRuntimeEnvironmentResult"
           },
@@ -10650,6 +10655,40 @@
           "secret_change_count"
         ],
         "title": "ProductConfigApplySummary",
+        "type": "object"
+      },
+      "ProductConfigInputWriteAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "$ref": "#/components/schemas/ProductConfigOperationAvailability"
+          },
+          "consequences": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Consequences",
+            "type": "array"
+          },
+          "input_kind": {
+            "enum": [
+              "runtime_settings",
+              "managed_secrets"
+            ],
+            "title": "Input Kind",
+            "type": "string"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/ProductConfigOperationAvailability"
+          }
+        },
+        "required": [
+          "input_kind",
+          "plan",
+          "apply"
+        ],
+        "title": "ProductConfigInputWriteAvailability",
         "type": "object"
       },
       "ProductConfigLiveTarget": {
@@ -10759,6 +10798,85 @@
           "mode"
         ],
         "title": "ProductConfigLiveTargetRuntimeOperation",
+        "type": "object"
+      },
+      "ProductConfigOperationAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "authz_action": {
+            "title": "Authz Action",
+            "type": "string"
+          },
+          "confirmation_text": {
+            "default": "",
+            "title": "Confirmation Text",
+            "type": "string"
+          },
+          "disabled_reasons": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Disabled Reasons",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "method": {
+            "const": "POST",
+            "default": "POST",
+            "title": "Method",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "requires_idempotency_key": {
+            "default": true,
+            "title": "Requires Idempotency Key",
+            "type": "boolean"
+          },
+          "requires_matching_dry_run": {
+            "default": false,
+            "title": "Requires Matching Dry Run",
+            "type": "boolean"
+          },
+          "requires_reason": {
+            "default": true,
+            "title": "Requires Reason",
+            "type": "boolean"
+          },
+          "route_path": {
+            "title": "Route Path",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "authz_action",
+          "route_path",
+          "enabled"
+        ],
+        "title": "ProductConfigOperationAvailability",
         "type": "object"
       },
       "ProductConfigRuntimeEnvironmentRecordSummary": {
@@ -11012,6 +11130,23 @@
         "title": "ProductConfigSecretResult",
         "type": "object"
       },
+      "ProductConfigWriteAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_secrets": {
+            "$ref": "#/components/schemas/ProductConfigInputWriteAvailability"
+          },
+          "runtime_settings": {
+            "$ref": "#/components/schemas/ProductConfigInputWriteAvailability"
+          }
+        },
+        "required": [
+          "runtime_settings",
+          "managed_secrets"
+        ],
+        "title": "ProductConfigWriteAvailability",
+        "type": "object"
+      },
       "ProductContextCutoverAuditResponse": {
         "additionalProperties": false,
         "properties": {
@@ -11153,6 +11288,9 @@
             },
             "title": "Warnings",
             "type": "array"
+          },
+          "write_availability": {
+            "$ref": "#/components/schemas/ProductConfigWriteAvailability"
           }
         },
         "required": [
@@ -11162,6 +11300,7 @@
           "driver_id",
           "environment",
           "context",
+          "write_availability",
           "trust_state",
           "provenance"
         ],
@@ -36613,6 +36752,11 @@
                 },
                 "additionalProperties": false,
                 "properties": {
+                  "confirmation": {
+                    "default": "",
+                    "title": "Confirmation",
+                    "type": "string"
+                  },
                   "context": {
                     "default": "",
                     "title": "Context",
@@ -39551,6 +39695,228 @@
           }
         },
         "summary": "Read Product Environment Config Status"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/config/apply": {
+      "post": {
+        "operationId": "apply_product_environment_config",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "ProductEnvironmentManagedSecretInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "binding_key": {
+                        "title": "Binding Key",
+                        "type": "string"
+                      },
+                      "integration": {
+                        "title": "Integration",
+                        "type": "string"
+                      },
+                      "value": {
+                        "title": "Value",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "binding_key",
+                      "integration",
+                      "value"
+                    ],
+                    "title": "ProductEnvironmentManagedSecretInput",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "confirmation": {
+                    "default": "",
+                    "title": "Confirmation",
+                    "type": "string"
+                  },
+                  "managed_secrets": {
+                    "items": {
+                      "$ref": "#/$defs/ProductEnvironmentManagedSecretInput"
+                    },
+                    "title": "Managed Secrets",
+                    "type": "array"
+                  },
+                  "mode": {
+                    "enum": [
+                      "dry-run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "default": "",
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "runtime_settings": {
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        }
+                      ]
+                    },
+                    "title": "Runtime Settings",
+                    "type": "object"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "title": "ProductEnvironmentConfigApplyEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductConfigApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan or apply product environment config"
       }
     },
     "/v1/promotions/{record_id}": {
@@ -42577,7 +42943,7 @@
   "x-launchplane-ui-write-operations": {
     "/v1/drivers/generic-web/prod-promotion": "apply_generic_web_prod_promotion",
     "/v1/drivers/generic-web/prod-promotion-workflow": "dispatch_generic_web_prod_promotion_workflow",
-    "/v1/product-config/apply": "apply_product_config",
+    "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/work-graph/rank": "rank_work_graph_snapshot"
   }
 }

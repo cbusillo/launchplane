@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
+from control_plane import product_config_service as control_plane_product_config_service
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductEnvironmentReadModelStore,
@@ -92,7 +93,7 @@ def build_product_environment_read_service_result(
     if not product:
         raise ValueError("Product environment read result requires product parameters.")
     try:
-        record_store.read_product_profile_record(product)
+        profile = record_store.read_product_profile_record(product)
     except FileNotFoundError as error:
         raise FileNotFoundError(f"Product '{product}' was not found.") from error
 
@@ -111,12 +112,23 @@ def build_product_environment_read_service_result(
     if params.get("config_status") == "true":
         environment = params["environment"]
         try:
+            lane = next(
+                candidate for candidate in profile.lanes if candidate.instance == environment
+            )
             config_status = build_product_environment_config_status(
                 record_store=record_store,
                 product=product,
                 environment=environment,
+                action_allowed=action_allowed,
+                write_prerequisites=(
+                    control_plane_product_config_service.product_config_write_prerequisites(
+                        record_store,
+                        profile=profile,
+                        lane=lane,
+                    )
+                ),
             )
-        except FileNotFoundError as error:
+        except (FileNotFoundError, StopIteration) as error:
             raise FileNotFoundError(
                 f"Product '{product}' has no environment '{environment}'."
             ) from error

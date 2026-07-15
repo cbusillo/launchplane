@@ -133,6 +133,34 @@ def summarize_runtime_environment_record(record: RuntimeEnvironmentRecord) -> di
     }
 
 
+def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, object]:
+    product, context_name, instance_name = product_context(payload)
+    runtime_input = _product_config_runtime_input(
+        payload,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    runtime_env = _normalize_product_config_runtime_env(runtime_input["env"])
+    secrets = _product_config_secret_inputs(
+        payload,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    return {
+        "schema_version": 1,
+        "product": product,
+        "context": context_name,
+        "instance": instance_name,
+        "runtime_env": {
+            "scope": runtime_input["scope"],
+            "context": runtime_input["context"],
+            "instance": runtime_input["instance"],
+            "env": runtime_env,
+        },
+        "secrets": [dict(secret) for secret in secrets],
+    }
+
+
 def apply_product_config_bundle(
     *,
     record_store: ProductConfigStore,
@@ -163,18 +191,13 @@ def plan_product_config_authority_bundle(
 ) -> tuple[dict[str, object], ProductAuthorityBundle]:
     if mode not in {"dry-run", "apply"}:
         raise ProductConfigError("Product config mode must be 'dry-run' or 'apply'.")
-    product, context_name, instance_name = product_context(payload)
-    runtime_input = _product_config_runtime_input(
-        payload,
-        context_name=context_name,
-        instance_name=instance_name,
-    )
-    runtime_env = _normalize_product_config_runtime_env(runtime_input["env"])
-    secrets = _product_config_secret_inputs(
-        payload,
-        context_name=context_name,
-        instance_name=instance_name,
-    )
+    normalized_payload = normalize_product_config_payload(payload)
+    product = str(normalized_payload["product"])
+    context_name = str(normalized_payload["context"])
+    instance_name = str(normalized_payload["instance"])
+    runtime_input = cast(dict[str, object], normalized_payload["runtime_env"])
+    runtime_env = cast(dict[str, ScalarValue], runtime_input["env"])
+    secrets = tuple(cast(list[dict[str, object]], normalized_payload["secrets"]))
     _require_product_config_master_key_if_needed(secrets)
 
     runtime_record, runtime_summary = _plan_product_config_runtime_environment(
@@ -516,11 +539,6 @@ def _product_config_secret_current_action(
     )
     if existing_record is None:
         return "created", ""
-    current_version = record_store.read_secret_version(existing_record.current_version_id)
-    if control_plane_secrets._decrypt_secret_value(
-        current_version.ciphertext, current_version.key_id
-    ) == str(secret["value"]):
-        return "unchanged", existing_record.secret_id
     return "rotated", existing_record.secret_id
 
 
@@ -572,25 +590,6 @@ def _plan_product_config_secret_write(
         created_at=created_at,
         updated_at=now,
     )
-    if existing_record is not None:
-        current_version = record_store.read_secret_version(existing_record.current_version_id)
-        if (
-            control_plane_secrets._decrypt_secret_value(
-                current_version.ciphertext,
-                current_version.key_id,
-            )
-            == plaintext_value
-        ):
-            return {
-                "secret_id": secret_id,
-                "action": "unchanged",
-                "updated_at": now,
-                "configured_binding": binding,
-                "secret_versions": [],
-                "secret_records": [],
-                "secret_bindings": [binding],
-                "secret_audit_events": [],
-            }
     action = "created" if existing_record is None else "rotated"
     version_id = control_plane_secrets._version_id(secret_id=secret_id)
     ciphertext, key_id = control_plane_secrets._encrypt_secret_value(plaintext_value)

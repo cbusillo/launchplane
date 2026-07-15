@@ -1516,13 +1516,39 @@ Product config writes use `POST /v1/product-config/apply`. The request carries
 runtime values, and write-only managed secret values. Dry-run requires the
 `product_config.plan` action; apply requires `product_config.apply`. The route
 accepts GitHub Actions OIDC callers, signed-in GitHub human sessions, and the
-dedicated local-operator bearer credential with a non-empty `reason`, but
-terminal-agent read bearer credentials remain read-only and cannot execute the
-mutation. Local-operator apply requests additionally require a previously
-recorded matching local-operator dry-run with the same payload after removing
-`mode` and `reason`, so operators can update the apply reason without changing
-the reviewed runtime/secret content. Normal `Idempotency-Key` replay/conflict
-uses the full request body and is checked before DB-backed mutation.
+dedicated local-operator bearer credential, but terminal-agent read bearer
+credentials remain read-only and cannot execute the mutation. Signed-in humans
+and local operator/admin identities require a non-empty `reason`; their apply
+requests also require an `Idempotency-Key` and a previously recorded matching
+dry-run. Matching uses the normalized target, runtime input, and managed-secret
+input after unifying legacy aliases and defaults, while excluding mode, reason,
+confirmation, and source label. This permits a different apply reason without
+changing the reviewed runtime or secret content. Idempotency replay is checked
+before the matching-dry-run marker so an already completed apply remains
+replayable.
+
+The signed-in browser uses the narrower product-owned operation
+`POST /v1/products/{product}/environments/{environment}/config/apply`, which is
+the only product-config operation in the generated UI write allowlist. It
+accepts signed-in GitHub human and configured local operator/admin identities;
+GitHub Actions automation continues to use the generic route. Its body contains
+mode, reason, exact apply confirmation, runtime settings, or managed secrets;
+runtime and secret inputs cannot be combined in one browser request.
+Launchplane resolves product, context, instance, scope, and source label from
+the stored product profile and lane. Managed-secret inputs identify a declared
+binding by both integration and binding key; Launchplane resolves that pair to
+the stored requirement and rejects keys or bindings not declared for that
+environment. Apply requires exact confirmation text
+`APPLY {product}/{environment}` in addition to the matching dry-run and stable
+idempotency key.
+
+The matching config read route exposes `write_availability` separately for
+runtime settings and managed secrets. It reports plan/apply authz, DB-backed
+storage readiness, managed-secret encryption readiness, runtime key-safety
+policy readiness for every applicable runtime binding and target, exact
+blockers, confirmation text, and dry-run/idempotency requirements. Only the
+DB-backed store accepted by the mutation route is reported as storage-ready.
+Browser forms fail closed when this authority is unavailable or stale.
 
 The route authorizes the top-level product/context/instance target and rejects
 nested runtime or secret targets that try to broaden or change that authorized
@@ -1536,6 +1562,12 @@ there is no active runtime key-safety policy that allows the requested managed
 secret binding for the target runtime class. Request bodies for this route must
 not be copied into logs, issues, docs, or workflow artifacts because they can
 contain plaintext secret values.
+
+Product-config dry-run continuity markers and idempotency request fingerprints
+covering secret input are persisted only as purpose-separated HMACs keyed from
+the active managed-secret root. Concurrent same-key applies that race after the
+initial replay lookup converge by re-reading the completed idempotency record
+after a transactional write conflict and returning the winner as a replay.
 
 `POST /v1/secrets/reencrypt` owns shared and production managed-secret root
 rotation. The route requires JSON with a bounded body, exact

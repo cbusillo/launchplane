@@ -29,7 +29,7 @@ test("browser write routes are the generated UI write allowlist", () => {
   assert.deepEqual(new Set(Object.values(BROWSER_WRITE_ROUTES)), new Set([
     "/v1/drivers/generic-web/prod-promotion",
     "/v1/drivers/generic-web/prod-promotion-workflow",
-    "/v1/product-config/apply",
+    "/v1/products/{product}/environments/{environment}/config/apply",
     "/v1/work-graph/rank",
   ]));
 });

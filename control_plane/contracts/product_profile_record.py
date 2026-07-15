@@ -385,6 +385,19 @@ class ProductSecretConfigRequirement(BaseModel):
         return self
 
 
+def product_config_requirement_applies_to_lane(
+    *,
+    requirement_context: str,
+    requirement_instance: str,
+    lane: ProductLaneProfile,
+) -> bool:
+    if not requirement_context:
+        return True
+    if requirement_context != lane.context:
+        return False
+    return not requirement_instance or requirement_instance == lane.instance
+
+
 class ProductExpectedConfigProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

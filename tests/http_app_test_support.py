@@ -344,6 +344,7 @@ def _product_environment_read_policy(
     context: str = "launchplane",
     contexts: tuple[str, ...] | None = None,
     products: tuple[str, ...] = ("example-site",),
+    actions: tuple[str, ...] = ("product_environment.read",),
 ) -> LaunchplaneAuthzPolicy:
     allowed_contexts = contexts if contexts is not None else (context,)
     return LaunchplaneAuthzPolicy.model_validate(
@@ -357,7 +358,7 @@ def _product_environment_read_policy(
                     "event_names": ["pull_request"],
                     "products": list(products),
                     "contexts": list(allowed_contexts),
-                    "actions": ["product_environment.read"],
+                    "actions": list(actions),
                 }
             ]
         }
@@ -2546,11 +2547,13 @@ def _product_config_policy(
 
 def _github_human_product_config_policy(
     *,
-    action: str,
+    action: str = "",
+    actions: tuple[str, ...] | None = None,
     product: str = "sellyouroutboard",
     context: str = "sellyouroutboard",
     role: str = "admin",
 ) -> LaunchplaneAuthzPolicy:
+    allowed_actions = actions if actions is not None else (action,)
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "github_humans": [
@@ -2559,7 +2562,7 @@ def _github_human_product_config_policy(
                     "roles": [role],
                     "products": [product],
                     "contexts": [context],
-                    "actions": [action],
+                    "actions": list(allowed_actions),
                 }
             ]
         }
@@ -2886,11 +2889,13 @@ def _browser_mutation_headers(
     session_manager: HumanSessionManager,
     session: LaunchplaneHumanSession,
 ) -> dict[str, str]:
+    cookie_header = session_manager.session_cookie_header(session)
+    current_session = session_manager.read_cookie(cookie_header) or session
     return {
-        "Cookie": session_manager.session_cookie_header(session),
+        "Cookie": cookie_header,
         **build_browser_mutation_request_headers(
             origin=session_manager.public_origin,
-            csrf_token=session_manager.csrf_token(session),
+            csrf_token=session_manager.csrf_token(current_session),
         ),
     }
 
@@ -4129,6 +4134,30 @@ async def _post_product_config_apply(
         headers=request_headers,
         payload=payload,
         raw_body=raw_body,
+    )
+
+
+async def _post_product_environment_config_apply(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    product: str = "example-site",
+    environment: str = "prod",
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        (f"/v1/products/{product}/environments/{environment}/config/apply"),
+        headers=request_headers,
+        payload=payload,
     )
 
 
