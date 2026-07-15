@@ -13,8 +13,9 @@
     "generate:openapi": "uv run launchplane service export-openapi --output generated/openapi-canonical.json && node scripts/build-openapi-ui-schema.mjs && node scripts/generate-openapi-types.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "check:openapi-drift": "node scripts/check-openapi-drift.mjs",
+    "test": "node --experimental-strip-types --import ./tests/register-typescript.mjs --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit",
-    "validate": "pnpm check:openapi-drift && pnpm build"
+    "validate": "pnpm test && pnpm check:openapi-drift && pnpm build"
   },
   "dependencies": {
     "lucide-react": "1.12.0",

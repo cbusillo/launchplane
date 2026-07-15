@@ -21,6 +21,7 @@ export type AppRoute =
 
 export type EnvironmentView =
   | "overview"
+  | "actions"
   | "runtime-settings"
   | "managed-secrets"
   | "diagnostics";
@@ -93,9 +94,13 @@ export function parseAppRoute(pathname: string): AppRoute {
       const view = routeSegments[3] as EnvironmentView;
       if (
         routeSegments.length === 4 &&
-        ["overview", "runtime-settings", "managed-secrets", "diagnostics"].includes(
-          view,
-        )
+        [
+          "overview",
+          "actions",
+          "runtime-settings",
+          "managed-secrets",
+          "diagnostics",
+        ].includes(view)
       ) {
         return { kind: "product-environment", product, environment, view };
       }

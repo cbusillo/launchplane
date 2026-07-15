@@ -20,6 +20,7 @@ import {
   loadDevFixtures,
   type DevFixtureMode,
 } from "./dev-fixture-loader";
+import { EnvironmentActionsView } from "./EnvironmentActions";
 import { EnvironmentDiagnostics } from "./EnvironmentDiagnostics";
 import {
   ManagedSecretsView,
@@ -91,7 +92,10 @@ export function ProductEnvironmentRoute({
   const detailLoadedKey = useRef("");
   const configLoadedKey = useRef("");
   const resourceKey = `${productKey}:${environmentKey}`;
-  const needsConfig = view !== "overview";
+  const needsConfig =
+    view === "runtime-settings" ||
+    view === "managed-secrets" ||
+    view === "diagnostics";
 
   useEffect(() => {
     let active = true;
@@ -337,8 +341,9 @@ function EnvironmentPage({
             />
           </div>
           <p>
-            Placement, public ingress, TLS, runtime identity, configuration, and
-            evidence for this lane.
+            {view === "actions"
+              ? "Server-advertised behavior, exact blockers, and the typed browser execution boundary for this lane."
+              : "Placement, public ingress, TLS, runtime identity, configuration, and evidence for this lane."}
           </p>
           <div className="environment-hero-meta">
             {externalUrl ? (
@@ -375,6 +380,7 @@ function EnvironmentPage({
       />
 
       {view === "overview" ? <EnvironmentOverview detail={detail} /> : null}
+      {view === "actions" ? <EnvironmentActionsView detail={detail} /> : null}
       {view === "runtime-settings" ? (
         <RuntimeSettingsView configResource={configResource} detail={detail} />
       ) : null}

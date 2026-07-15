@@ -94,6 +94,12 @@ class DocsContractsTests(TestCase):
         )
         frontend_types = Path("frontend/src/types.ts").read_text(encoding="utf-8")
         frontend_api = Path("frontend/src/api.ts").read_text(encoding="utf-8")
+        browser_operation = Path("frontend/src/browser-operation.ts").read_text(encoding="utf-8")
+        browser_write_contract = Path("frontend/src/browser-write-contract.ts").read_text(
+            encoding="utf-8"
+        )
+        action_model = Path("frontend/src/action-model.ts").read_text(encoding="utf-8")
+        frontend_package = json.loads(Path("frontend/package.json").read_text(encoding="utf-8"))
 
         self.assertEqual(
             "uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json",
@@ -134,18 +140,8 @@ class DocsContractsTests(TestCase):
             "export type WorkGraphSnapshotPayload = GeneratedWorkGraphSnapshotResponse",
             frontend_types,
         )
-        self.assertIn(
-            'export type ProductConfigApplyRequest = GeneratedApplyProductConfigData["body"]',
-            frontend_types,
-        )
-        self.assertIn(
-            "export type GenericWebProdPromotionPayload =",
-            frontend_types,
-        )
-        self.assertIn(
-            "GeneratedApplyGenericWebProdPromotionResponse",
-            frontend_types,
-        )
+        self.assertNotIn("ProductConfigApplyRequest", frontend_types)
+        self.assertNotIn("GenericWebProdPromotionPayload", frontend_types)
         self.assertIn("export interface GitHubIssueInboxReconcilePayload", frontend_types)
         self.assertNotIn(
             "/v1/work-graph/github/issues/reconcile",
@@ -160,6 +156,22 @@ class DocsContractsTests(TestCase):
             self.assertIn(operation_data_type, frontend_api)
         self.assertNotIn("ReconcileWorkGraphIssueInboxData", frontend_api)
         self.assertIn("requestGeneratedPost", frontend_api)
+        self.assertIn('payload: ApplyProductConfigData["body"]', frontend_api)
+        self.assertIn('headers: { "Idempotency-Key": options.idempotencyKey }', frontend_api)
+        self.assertIn("errorPayload.error.code", frontend_api)
+        self.assertIn("BrowserOperationOptions", frontend_api)
+        for route_path in write_operations:
+            self.assertIn(route_path, browser_write_contract)
+        self.assertIn("BrowserWriteRoute", browser_write_contract)
+        self.assertIn("BrowserOperationState", browser_operation)
+        self.assertIn("markBrowserOperationDispatched", browser_operation)
+        self.assertIn("originalTraceId", browser_operation)
+        self.assertIn("previous result is uncertain", browser_operation)
+        self.assertIn("requiresIdempotencyContinuity", browser_operation)
+        self.assertIn("dry_run: true", frontend_api)
+        self.assertIn("browserActionPresentation", action_model)
+        self.assertIn("No generated browser operation is registered", action_model)
+        self.assertIn("pnpm test", frontend_package["scripts"]["validate"])
 
     def test_post_v2_transition_plans_are_issue_backed(self) -> None:
         docs_index = Path("docs/README.md").read_text(encoding="utf-8")
