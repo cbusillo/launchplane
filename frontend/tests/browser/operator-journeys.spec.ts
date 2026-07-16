@@ -53,6 +53,7 @@ test.describe("operator journeys", () => {
       name: "Sign in to operate products",
     });
     await expect(heading).toBeVisible();
+    await expect(heading).toBeFocused();
     await expect(page.getByRole("main")).toBeVisible();
     await expect(page.locator('[aria-live="polite"]')).toBeVisible();
     const signIn = page.getByRole("link", { name: "Sign in with GitHub" });
@@ -67,6 +68,33 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("operator sees an honest empty product inventory", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/products?fixture=empty");
+
+    const heading = page.getByRole("heading", {
+      level: 1,
+      name: "No products are owned by Launchplane yet",
+    });
+    await expect(heading).toBeVisible();
+    await expect(heading).toBeFocused();
+    await expect(
+      page.getByText(
+        "This browser does not invent a sample product or infer provider state.",
+        { exact: false },
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Refresh product inventory" }),
+    ).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "product-inventory-empty");
+    diagnostics.assertClean();
+  });
+
   test("operator sees an honest product inventory error", async ({
     page,
   }, testInfo) => {
@@ -74,12 +102,12 @@ test.describe("operator journeys", () => {
 
     await page.goto("/ui/products?fixture=error");
 
-    await expect(
-      page.getByRole("heading", {
-        level: 1,
-        name: "Product inventory unavailable",
-      }),
-    ).toBeFocused();
+    const heading = page.getByRole("heading", {
+      level: 1,
+      name: "Product inventory unavailable",
+    });
+    await expect(heading).toBeVisible();
+    await expect(heading).toBeFocused();
     await expect(
       page.getByText(
         "The fixture product inventory is intentionally unavailable.",
@@ -117,8 +145,35 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByRole("link", { name: /Production/ }).first(),
     ).toBeVisible();
+    await expect(page.locator(".product-trust-dots").first()).toHaveAttribute(
+      "aria-label",
+      "Testing data trust: verified; Production data trust: verified",
+    );
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "product-workspace");
+    diagnostics.assertClean();
+  });
+
+  test("operator can review recent product activity", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/products/atlas-commerce/activity?fixture=products");
+
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Recent activity" }),
+    ).toBeFocused();
+    await expect(
+      page.getByRole("heading", {
+        name: "Production TLS verification failed",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("This is a recent window, not a complete audit export."),
+    ).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "product-activity");
     diagnostics.assertClean();
   });
 
@@ -158,6 +213,26 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByRole("heading", { level: 1, name: "Actions" }),
     ).toBeFocused();
+    const promotionControl = page.getByRole("region", {
+      name: "Review evidence, then dispatch the workflow",
+    });
+    const blockedWorkflow = promotionControl
+      .locator(".promotion-availability")
+      .filter({ hasText: "Workflow live" });
+    await expect(
+      blockedWorkflow.getByText("Blocked", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      blockedWorkflow.getByText("Caller is not authorized for this action.", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      promotionControl.getByRole("button", { name: "Dispatch workflow dry-run" }),
+    ).toBeDisabled();
+    await expect(
+      promotionControl.getByRole("button", { name: "Dispatch live promotion" }),
+    ).toBeDisabled();
     const blockedAction = page.getByRole("listitem").filter({
       has: page.getByRole("heading", { name: "Dispatch promote workflow" }),
     });
@@ -213,6 +288,10 @@ test.describe("operator journeys", () => {
     await expect(
       confirmation.getByRole("button", { name: "Apply reviewed change" }),
     ).toBeDisabled();
+    await confirmation.getByRole("checkbox").check();
+    await expect(
+      confirmation.getByRole("button", { name: "Apply reviewed change" }),
+    ).toBeEnabled();
     await expect(
       page.getByText("Dry-run evidence", { exact: true }),
     ).toBeVisible();
@@ -326,6 +405,12 @@ async function assertDocumentBasics(page: Page): Promise<void> {
       .sort();
   });
   expect(duplicateIds, "duplicate document IDs").toEqual([]);
+  const horizontalOverflow = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth >
+      document.documentElement.clientWidth,
+  );
+  expect(horizontalOverflow, "horizontal document overflow").toBe(false);
 }
 
 async function captureScreenshot(

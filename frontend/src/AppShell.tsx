@@ -27,7 +27,6 @@ import {
   productIndexPath,
   productPath,
   routeProductKey,
-  routeHref,
   type AppRoute,
 } from "./router";
 
@@ -315,17 +314,25 @@ function ProductTrustDots({ product }: { product: ProductSiteOverview }) {
   const production = product.environments.find(
     (environment) => environment.environment === "prod",
   );
+  const testingTrust = testing?.trust_state ?? "missing";
+  const productionTrust = production?.trust_state ?? "missing";
   return (
-    <span className="product-trust-dots" aria-label="Lane evidence states">
+    <span
+      aria-label={`Testing data trust: ${testingTrust}; Production data trust: ${productionTrust}`}
+      className="product-trust-dots"
+      role="img"
+    >
       <span
+        aria-hidden="true"
         data-lane="testing"
-        data-trust={testing?.trust_state ?? "missing"}
-        title={`Testing: ${testing?.trust_state ?? "missing"}`}
+        data-trust={testingTrust}
+        title={`Testing data trust: ${testingTrust}`}
       />
       <span
+        aria-hidden="true"
         data-lane="prod"
-        data-trust={production?.trust_state ?? "missing"}
-        title={`Production: ${production?.trust_state ?? "missing"}`}
+        data-trust={productionTrust}
+        title={`Production data trust: ${productionTrust}`}
       />
     </span>
   );

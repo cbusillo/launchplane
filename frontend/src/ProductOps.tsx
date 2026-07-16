@@ -2,7 +2,6 @@ import {
   AlertCircle,
   AlertTriangle,
   ArrowRight,
-  Boxes,
   CheckCircle2,
   ExternalLink,
   PackageOpen,
@@ -1140,7 +1139,7 @@ export function evidenceTimestamp(provenance: DataProvenance): string {
   return provenance.refreshed_at || provenance.recorded_at;
 }
 
-export function formatEvidenceTime(provenance: DataProvenance): string {
+function formatEvidenceTime(provenance: DataProvenance): string {
   const timestamp = evidenceTimestamp(provenance);
   return timestamp ? formatTime(timestamp) : "No timestamp";
 }

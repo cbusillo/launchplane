@@ -8,8 +8,10 @@ const screenshotDir = fileURLToPath(
 const projects = ["desktop", "narrow"];
 const journeys = [
   "anonymous-auth-prompt",
+  "product-inventory-empty",
   "product-inventory-error",
   "product-workspace",
+  "product-activity",
   "environment-diagnostics",
   "blocked-action",
   "safe-change-confirmation",

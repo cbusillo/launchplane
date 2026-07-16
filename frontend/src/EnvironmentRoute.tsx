@@ -9,7 +9,7 @@ import {
   ServerCog,
   ShieldCheck,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   LaunchplaneApiError,
@@ -33,7 +33,6 @@ import {
   MissingEvidenceState,
   RouteError,
   evidenceTimestamp,
-  formatEvidenceTime,
   humanize,
   trustLabel,
   type TrustState,
@@ -50,7 +49,6 @@ import {
 } from "./resource";
 import {
   AppLink,
-  productEnvironmentPath,
   productPath,
   type AppRoute,
   type EnvironmentView,
