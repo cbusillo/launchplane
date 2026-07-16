@@ -104,6 +104,13 @@ backfilled as `completed`; reservation-backed routes add promoted state, lease,
 attempt, owner, reconciliation-key, and timestamp columns while retaining the
 typed payload as the complete evidence envelope.
 
+The same table stores ready Odoo preview apply-inputs issuance evidence. The
+service derives a plan id from caller scope plus the inputs idempotency key,
+persists the normalized plan request, runtime plan, provider dry-run plan,
+fingerprint, and expiry under that id, and requires the id as the later apply
+key. This reuses completed-response storage rather than adding a second plan
+table; blocked plans are not issuance records.
+
 Reservation identity is `(scope, route_path, idempotency_key)` and remains
 unique in PostgreSQL. The typed lifecycle is:
 

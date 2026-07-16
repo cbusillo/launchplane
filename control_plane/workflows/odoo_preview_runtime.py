@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
@@ -237,6 +240,7 @@ def build_odoo_preview_apply_workflow_request(
     *,
     facts: OdooPreviewWorkflowRequestFacts,
     dry_run_plan_file: str,
+    plan_id: str,
     manifest_file: str = "",
     wait_for_deploy: bool = True,
     smoke_check: bool | None = None,
@@ -245,6 +249,7 @@ def build_odoo_preview_apply_workflow_request(
         dry_run_plan_file,
         "Odoo preview apply request requires dry_run_plan_file.",
     )
+    plan_id = _required_text(plan_id, "Odoo preview apply request requires plan_id.")
     if facts.operation == "refresh" and not manifest_file.strip():
         raise ValueError("Odoo preview refresh apply request requires manifest_file.")
     payload_json_files = {"apply.dry_run_plan": dry_run_plan_file}
@@ -264,11 +269,7 @@ def build_odoo_preview_apply_workflow_request(
             "apply": apply_payload,
         },
         payload_json_files=payload_json_files,
-        idempotency_key=(
-            "odoo-preview-apply:"
-            f"{facts.product}:{_preview_request_token(facts)}:{facts.operation}:"
-            f"run-{facts.run_id}-attempt-{facts.run_attempt}"
-        ),
+        idempotency_key=plan_id,
         fail_result_paths=("result.status",),
     )
 
@@ -324,6 +325,32 @@ class OdooPreviewApplyInputsRequest(BaseModel):
         return self
 
 
+class OdooPreviewApplyPlanProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    plan_id: str
+    plan_sha256: str
+    issued_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def _normalize_provenance(self) -> "OdooPreviewApplyPlanProvenance":
+        self.plan_id = _required_text(self.plan_id, "Odoo preview plan provenance requires plan_id")
+        self.plan_sha256 = self.plan_sha256.strip().lower()
+        if len(self.plan_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in self.plan_sha256
+        ):
+            raise ValueError("Odoo preview plan provenance requires a SHA-256 fingerprint")
+        if self.issued_at.tzinfo is None or self.expires_at.tzinfo is None:
+            raise ValueError("Odoo preview plan provenance timestamps require UTC offsets")
+        self.issued_at = self.issued_at.astimezone(timezone.utc)
+        self.expires_at = self.expires_at.astimezone(timezone.utc)
+        if self.expires_at <= self.issued_at:
+            raise ValueError("Odoo preview plan provenance must expire after issuance")
+        return self
+
+
 class OdooPreviewApplyInputsResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -335,8 +362,10 @@ class OdooPreviewApplyInputsResult(BaseModel):
     preview_slug: str
     preview_url: str
     repository: str
+    plan_request: OdooPreviewApplyInputsRequest
     runtime_plan: OdooPreviewRuntimePlan
     dry_run_plan: OdooPreviewDokployDryRunPlan
+    plan_provenance: OdooPreviewApplyPlanProvenance | None = None
     source: str
     error_message: str = ""
 
@@ -357,8 +386,24 @@ class OdooPreviewApplyInputsResult(BaseModel):
         self.repository = _required_text(
             self.repository, "Odoo preview apply inputs result requires repository"
         )
+        if self.plan_request.product != self.product:
+            raise ValueError("Odoo preview apply inputs result requires matching plan product")
+        if self.plan_request.operation != self.operation:
+            raise ValueError("Odoo preview apply inputs result requires matching plan operation")
+        if self.dry_run_plan.product != self.product:
+            raise ValueError("Odoo preview apply inputs result requires matching dry-run product")
+        if self.dry_run_plan.operation != self.operation:
+            raise ValueError("Odoo preview apply inputs result requires matching dry-run operation")
+        if self.status == "blocked" and self.plan_provenance is not None:
+            raise ValueError("Blocked Odoo preview plans cannot include apply provenance")
         self.error_message = self.error_message.strip()
         return self
+
+
+def odoo_preview_apply_plan_sha256(result: OdooPreviewApplyInputsResult) -> str:
+    payload = result.model_dump(mode="json", exclude={"plan_provenance"})
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def build_odoo_preview_apply_inputs(
@@ -491,6 +536,7 @@ def build_odoo_preview_apply_inputs(
         preview_slug=preview_slug,
         preview_url=preview_url,
         repository=profile.repository,
+        plan_request=request.model_copy(deep=True),
         runtime_plan=runtime_plan,
         dry_run_plan=dry_run_plan,
         source=request.source,

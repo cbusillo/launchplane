@@ -1259,7 +1259,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(workflow_text.count("          request-kind: preview-apply\n"), 2)
         self.assertIn("steps.publish_inputs_request.outputs.route-path", workflow_text)
         self.assertIn("steps.dry_run_request.outputs.payload-json-files", workflow_text)
-        self.assertIn("steps.launchplane_request.outputs.idempotency-key", workflow_text)
+        self.assertIn("idempotency-key: ${{ steps.dry_run.outputs.plan_id }}", workflow_text)
         self.assertIn("image_repository=result.image_repository", workflow_text)
         self.assertIn("preview_slug=result.preview_slug", workflow_text)
         self.assertIn("refresh_image_reference", workflow_text)
@@ -1311,6 +1311,12 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("odoo-preview-apply:", workflow_text)
         self.assertNotIn("odoo-preview-apply-inputs:", workflow_text)
         self.assertNotIn("odoo-artifact-publish-inputs:", workflow_text)
+        self.assertIn("plan-id: ${{ steps.dry_run.outputs.plan_id }}", workflow_text)
+        self.assertIn("plan_id=result.plan_provenance.plan_id", workflow_text)
+        self.assertEqual(
+            workflow_text.count("idempotency-key: ${{ steps.dry_run.outputs.plan_id }}"),
+            2,
+        )
         self.assertNotIn("disable_odoo_online", workflow_text)
         self.assertNotIn("devkit_repository:", workflow_text)
         self.assertNotIn("shared_addons_repository:", workflow_text)
@@ -1366,7 +1372,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("/v1/drivers/odoo/preview-apply-inputs", workflow_text)
         self.assertIn("/v1/drivers/odoo/preview-apply", workflow_text)
         self.assertIn("/v1/previews/pr-feedback", workflow_text)
-        self.assertIn("expected-status: 202,403,503", workflow_text)
+        self.assertIn("expected-status: 202,403,409,503", workflow_text)
         self.assertIn('expected-status: "202"', workflow_text)
         self.assertEqual(workflow_text.count('timeout-ms: "30000"'), 3)
         self.assertIn(

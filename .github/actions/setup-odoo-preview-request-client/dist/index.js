@@ -62,6 +62,7 @@ function requestOptions() {
     source: getInput("source"),
     manifestFile: getInput("manifest-file"),
     dryRunPlanFile: getInput("dry-run-plan-file"),
+    planId: getInput("plan-id"),
     waitForDeploy: getInput("wait-for-deploy"),
     smokeCheck: getInput("smoke-check"),
     runId: getInput("run-id", { defaultValue: process.env.GITHUB_RUN_ID ?? "" }),

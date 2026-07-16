@@ -54,6 +54,10 @@ inputs:
     description: Dry-run plan file path for preview apply requests.
     required: false
     default: ""
+  plan-id:
+    description: Service-issued plan ID used as the preview apply idempotency key.
+    required: false
+    default: ""
   wait-for-deploy:
     description: Whether preview apply should wait for deploy completion.
     required: false

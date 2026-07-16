@@ -488,6 +488,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         request = build_odoo_preview_apply_workflow_request(
             facts=_workflow_facts(),
             dry_run_plan_file="/tmp/dry-run.json",
+            plan_id="odoo-preview-plan-test",
             manifest_file="/tmp/preview-artifact.json",
         )
 
@@ -510,15 +511,13 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 "apply.manifest": "/tmp/preview-artifact.json",
             },
         )
-        self.assertEqual(
-            request.idempotency_key,
-            "odoo-preview-apply:odoo-tenant-cm-website:pr-42:refresh:run-456-attempt-2",
-        )
+        self.assertEqual(request.idempotency_key, "odoo-preview-plan-test")
 
     def test_preview_apply_workflow_request_accepts_manual_apply_overrides(self) -> None:
         request = build_odoo_preview_apply_workflow_request(
             facts=_workflow_facts(),
             dry_run_plan_file="/tmp/dry-run.json",
+            plan_id="odoo-preview-plan-test",
             manifest_file="/tmp/preview-artifact.json",
             wait_for_deploy=False,
             smoke_check=True,
@@ -533,6 +532,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         request = build_odoo_preview_apply_workflow_request(
             facts=_workflow_facts(),
             dry_run_plan_file="/tmp/dry-run.json",
+            plan_id="odoo-preview-plan-test",
             manifest_file="/tmp/preview-artifact.json",
             smoke_check=False,
         )
@@ -545,6 +545,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         request = build_odoo_preview_apply_workflow_request(
             facts=_workflow_facts(operation="destroy"),
             dry_run_plan_file="/tmp/destroy-dry-run.json",
+            plan_id="odoo-preview-plan-test",
         )
 
         self.assertEqual(
@@ -553,16 +554,14 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         apply = cast(dict[str, object], request.payload["apply"])
         self.assertIsInstance(apply, dict)
         self.assertNotIn("smoke_check", apply)
-        self.assertEqual(
-            request.idempotency_key,
-            "odoo-preview-apply:odoo-tenant-cm-website:pr-42:destroy:run-456-attempt-2",
-        )
+        self.assertEqual(request.idempotency_key, "odoo-preview-plan-test")
 
     def test_refresh_preview_apply_request_requires_manifest(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires manifest_file"):
             build_odoo_preview_apply_workflow_request(
                 facts=_workflow_facts(),
                 dry_run_plan_file="/tmp/dry-run.json",
+                plan_id="odoo-preview-plan-test",
             )
 
     def test_preview_apply_workflow_request_requires_dry_run_plan_file(self) -> None:
@@ -570,6 +569,16 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             build_odoo_preview_apply_workflow_request(
                 facts=_workflow_facts(),
                 dry_run_plan_file=" ",
+                plan_id="odoo-preview-plan-test",
+                manifest_file="/tmp/preview-artifact.json",
+            )
+
+    def test_preview_apply_workflow_request_requires_plan_id(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires plan_id"):
+            build_odoo_preview_apply_workflow_request(
+                facts=_workflow_facts(),
+                dry_run_plan_file="/tmp/dry-run.json",
+                plan_id=" ",
                 manifest_file="/tmp/preview-artifact.json",
             )
 

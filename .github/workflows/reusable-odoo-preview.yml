@@ -328,7 +328,7 @@ jobs:
 
       - name: Render Launchplane publish inputs request
         id: publish_inputs_request
-        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@191d840ce260a4bd25c931987324d8c041aa71c7 # main
         with:
           request-kind: artifact-publish-inputs
           product: ${{ inputs.product }}
@@ -451,7 +451,7 @@ jobs:
 
       - name: Render Launchplane isolated preview apply inputs request
         id: dry_run_request
-        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@191d840ce260a4bd25c931987324d8c041aa71c7 # main
         with:
           request-kind: preview-apply-inputs
           product: ${{ inputs.product }}
@@ -481,11 +481,12 @@ jobs:
             inputs_status=result.status,
             preview_slug=result.preview_slug,
             preview_url=result.preview_url,
+            plan_id=result.plan_provenance.plan_id,
             error_message=result.error_message
 
       - name: Render Launchplane isolated preview apply request
         id: launchplane_request
-        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@191d840ce260a4bd25c931987324d8c041aa71c7 # main
         with:
           request-kind: preview-apply
           product: ${{ inputs.product }}
@@ -494,6 +495,7 @@ jobs:
           preview-slug: ${{ steps.dry_run.outputs.preview_slug }}
           source-git-ref: ${{ steps.facts.outputs.source_git_ref }}
           dry-run-plan-file: ${{ steps.dry_run_payload.outputs.dry_run_plan_file }}
+          plan-id: ${{ steps.dry_run.outputs.plan_id }}
           manifest-file: ${{ steps.publish.outputs.manifest_file }}
           wait-for-deploy: ${{ inputs.wait_for_deploy }}
 
@@ -507,7 +509,7 @@ jobs:
           route-path: ${{ steps.launchplane_request.outputs.route-path }}
           payload: ${{ steps.launchplane_request.outputs.payload }}
           payload-json-files: ${{ steps.launchplane_request.outputs.payload-json-files }}
-          idempotency-key: ${{ steps.launchplane_request.outputs.idempotency-key }}
+          idempotency-key: ${{ steps.dry_run.outputs.plan_id }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
           fail-result-paths: ${{ steps.launchplane_request.outputs.fail-result-paths }}
           output-paths: >-
@@ -653,7 +655,7 @@ jobs:
 
       - name: Render Launchplane isolated preview destroy inputs request
         id: dry_run_request
-        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@191d840ce260a4bd25c931987324d8c041aa71c7 # main
         with:
           request-kind: preview-apply-inputs
           product: ${{ inputs.product }}
@@ -682,11 +684,12 @@ jobs:
             inputs_status=result.status,
             preview_slug=result.preview_slug,
             preview_url=result.preview_url,
+            plan_id=result.plan_provenance.plan_id,
             error_message=result.error_message
 
       - name: Render Launchplane isolated preview destroy request
         id: launchplane_request
-        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@191d840ce260a4bd25c931987324d8c041aa71c7 # main
         with:
           request-kind: preview-apply
           product: ${{ inputs.product }}
@@ -696,6 +699,7 @@ jobs:
           preview-slug: ${{ steps.dry_run.outputs.preview_slug }}
           source-git-ref: ${{ steps.facts.outputs.source_git_ref }}
           dry-run-plan-file: ${{ steps.dry_run_payload.outputs.dry_run_plan_file }}
+          plan-id: ${{ steps.dry_run.outputs.plan_id }}
           wait-for-deploy: false
 
       - name: Request Launchplane isolated preview destroy
@@ -708,7 +712,7 @@ jobs:
           route-path: ${{ steps.launchplane_request.outputs.route-path }}
           payload: ${{ steps.launchplane_request.outputs.payload }}
           payload-json-files: ${{ steps.launchplane_request.outputs.payload-json-files }}
-          idempotency-key: ${{ steps.launchplane_request.outputs.idempotency-key }}
+          idempotency-key: ${{ steps.dry_run.outputs.plan_id }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
           fail-result-paths: ${{ steps.launchplane_request.outputs.fail-result-paths }}
           output-paths: >-
