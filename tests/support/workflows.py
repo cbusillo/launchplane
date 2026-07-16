@@ -419,6 +419,66 @@ def check_security_policy_runs_for_all_pull_requests(
     return checker.violations
 
 
+def check_frontend_browser_smoke(
+    workflow: Workflow,
+) -> tuple[WorkflowInvariantViolation, ...]:
+    checker = WorkflowInvariantChecker(workflow)
+    invariant = "frontend-browser-smoke"
+    job_id = "frontend_browser_smoke"
+    job = workflow.job(job_id)
+    checker.require(bool(job), invariant, f"missing {job_id} job")
+    checker.require(
+        tuple(_runner_labels(job.get("runs-on"))) == UBUNTU_HOSTED_RUNNER,
+        invariant,
+        f"{job_id} must run on ubuntu-latest",
+    )
+    checker.require(
+        not _string_value(job.get("if")),
+        invariant,
+        f"{job_id} must run for same-repository and fork pull requests",
+    )
+    install_step = workflow.step_named(job_id, "Install Chromium")
+    checker.require(install_step is not None, invariant, "missing Install Chromium step")
+    if install_step is not None:
+        checker.require(
+            "playwright install --with-deps chromium" in install_step.run,
+            invariant,
+            "Chromium install must include hosted-runner dependencies",
+        )
+    run_step = workflow.step_named(job_id, "Run browser smoke")
+    checker.require(run_step is not None, invariant, "missing Run browser smoke step")
+    if run_step is not None:
+        checker.require(
+            run_step.run == "pnpm --dir frontend test:browser",
+            invariant,
+            "browser smoke command drifted",
+        )
+    upload_step = workflow.step_named(job_id, "Upload browser evidence")
+    checker.require(upload_step is not None, invariant, "missing browser evidence upload")
+    if upload_step is not None:
+        checker.require(
+            upload_step.uses.startswith("actions/upload-artifact@"),
+            invariant,
+            "browser evidence must use upload-artifact",
+        )
+        checker.require(
+            _normalize_expression(_string_value(upload_step.data.get("if"))) == "always()",
+            invariant,
+            "browser evidence must upload after failures",
+        )
+        _require_step_with(
+            checker,
+            upload_step,
+            invariant,
+            {
+                "path": "tmp/browser-smoke",
+                "if-no-files-found": "error",
+                "retention-days": "14",
+            },
+        )
+    return checker.violations
+
+
 def check_ci_aggregate_gate(workflow: Workflow) -> tuple[WorkflowInvariantViolation, ...]:
     checker = WorkflowInvariantChecker(workflow)
     invariant = "aggregate-ci-gate"
@@ -429,6 +489,7 @@ def check_ci_aggregate_gate(workflow: Workflow) -> tuple[WorkflowInvariantViolat
         "container_scan_fork",
         "frontend_validate",
         "frontend_validate_fork",
+        "frontend_browser_smoke",
         "test",
         "test_fork",
         "postgres_integration",
@@ -442,6 +503,7 @@ def check_ci_aggregate_gate(workflow: Workflow) -> tuple[WorkflowInvariantViolat
         "CONTAINER_SCAN_FORK_RESULT",
         "FRONTEND_VALIDATE_RESULT",
         "FRONTEND_VALIDATE_FORK_RESULT",
+        "FRONTEND_BROWSER_SMOKE_RESULT",
         "TEST_RESULT",
         "TEST_FORK_RESULT",
         "POSTGRES_INTEGRATION_RESULT",
@@ -485,6 +547,26 @@ def check_ci_aggregate_gate(workflow: Workflow) -> tuple[WorkflowInvariantViolat
             "require_success test_fork",
         ):
             checker.require(required in step.run, invariant, f"ci_gate script missing {required!r}")
+        browser_gate = 'require_success frontend_browser_smoke "${FRONTEND_BROWSER_SMOKE_RESULT}"'
+        branch_marker = 'if [ "${HEAD_REPOSITORY}" = "${BASE_REPOSITORY}" ]; then'
+        _, branch_separator, branch_tail = step.run.partition(branch_marker)
+        same_repo_block, else_separator, fork_tail = branch_tail.partition("\nelse\n")
+        fork_block, fi_separator, _ = fork_tail.partition("\nfi")
+        checker.require(
+            bool(branch_separator and else_separator and fi_separator),
+            invariant,
+            "ci_gate same-repository and fork branch structure drifted",
+        )
+        checker.require(
+            browser_gate in same_repo_block,
+            invariant,
+            "ci_gate same-repository path must require browser smoke",
+        )
+        checker.require(
+            browser_gate in fork_block,
+            invariant,
+            "ci_gate fork path must require browser smoke",
+        )
     return checker.violations
 
 

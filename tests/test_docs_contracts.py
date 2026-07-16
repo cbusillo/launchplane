@@ -4,6 +4,7 @@ from unittest import TestCase
 
 from tests.support.workflows import WorkflowInvariantViolation
 from tests.support.workflows import check_ci_aggregate_gate
+from tests.support.workflows import check_frontend_browser_smoke
 from tests.support.workflows import check_fork_runner_isolation
 from tests.support.workflows import check_security_aggregate_gate
 from tests.support.workflows import check_unittest_timing_snapshot
@@ -81,6 +82,20 @@ class DocsContractsTests(TestCase):
         self.assertIn("12 shards with a 20-test/30-second split threshold", testing_docs)
         self.assertIn("GitHub Actions remains the source of truth", testing_docs)
         _assert_no_workflow_violations(self, check_unittest_timing_snapshot(ci_workflow))
+
+    def test_frontend_browser_smoke_is_documented_and_wired(self) -> None:
+        metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
+        ci_workflow = load_workflow(".github/workflows/ci.yml")
+        testing_docs = Path("docs/style/testing.md").read_text(encoding="utf-8")
+
+        self.assertEqual(
+            "pnpm --dir frontend test:browser",
+            metadata["qualityGate"]["build"]["browser"],
+        )
+        self.assertIn("pnpm --dir frontend test:browser", testing_docs)
+        self.assertIn("repo-local `?fixture=products`", testing_docs)
+        self.assertIn("Deployed OIDC smoke remains a separate", testing_docs)
+        _assert_no_workflow_violations(self, check_frontend_browser_smoke(ci_workflow))
 
     def test_frontend_openapi_codegen_gates_are_documented_and_wired(self) -> None:
         metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
