@@ -39,6 +39,13 @@ name: Merge Train Policy Import
         options:
           - pause_train
           - continue_after_blocking_pr
+      trusted_automation_github_user_ids:
+        description: >-
+          Optional comma-separated immutable GitHub user IDs allowed as trusted
+          automation PR authors
+        required: false
+        default: ""
+        type: string
       source_label:
         description: Source label stored on the policy record
         required: true
@@ -77,6 +84,8 @@ jobs:
       POLICY_STACK_CHILD_DISPOSITION_LABEL: ${{ inputs.stack_child_disposition_label }}
       POLICY_MERGE_METHOD: ${{ inputs.merge_method }}
       POLICY_FAILURE_POLICY: ${{ inputs.failure_policy }}
+      POLICY_TRUSTED_AUTOMATION_GITHUB_USER_IDS: >-
+        ${{ inputs.trusted_automation_github_user_ids }}
       POLICY_SOURCE_LABEL: ${{ inputs.source_label }}
       POLICY_REASON: ${{ inputs.reason }}
     steps:
@@ -146,6 +155,30 @@ jobs:
                   "stack_child_disposition_label must differ from enqueue_label "
                   "and blocked_label"
               )
+          trusted_automation_ids_raw = os.environ[
+              "POLICY_TRUSTED_AUTOMATION_GITHUB_USER_IDS"
+          ].strip()
+          if "\n" in trusted_automation_ids_raw or "\r" in trusted_automation_ids_raw:
+              raise SystemExit(
+                  "trusted_automation_github_user_ids must be a single line"
+              )
+          trusted_automation_ids = []
+          for raw_id in trusted_automation_ids_raw.split(","):
+              normalized_id = raw_id.strip()
+              if not normalized_id:
+                  continue
+              try:
+                  github_user_id = int(normalized_id)
+              except ValueError as error:
+                  raise SystemExit(
+                      "trusted_automation_github_user_ids must contain positive integers"
+                  ) from error
+              if github_user_id <= 0:
+                  raise SystemExit(
+                      "trusted_automation_github_user_ids must contain positive integers"
+                  )
+              trusted_automation_ids.append(github_user_id)
+          trusted_automation_ids = sorted(set(trusted_automation_ids))
           print("schema_version = 1")
           print()
           print("[[policies]]")
@@ -163,6 +196,10 @@ jobs:
           print("[policies.enqueue]")
           print("label_required = true")
           print('allowed_actor_roles = ["repo_owner", "repo_admin"]')
+          print(
+              "trusted_automation_github_user_ids = "
+              + json.dumps(trusted_automation_ids)
+          )
           print()
           print("[policies.merge_identity]")
           print('kind = "github_actions_oidc"')

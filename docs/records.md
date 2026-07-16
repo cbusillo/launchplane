@@ -1504,6 +1504,9 @@ preflights.
   records. Each record stores the repository/base branch, mode, status, policy
   key and digest, fresh GitHub snapshot, dry-run decision, selected pull request
   metadata, trace id, recorded timestamp, and optional one-step worker result.
+  The fresh snapshot retains the PR author's immutable GitHub numeric user id so
+  trusted-automation decisions remain auditable against the active policy; that
+  id is not copied into the compact public queue response.
   The record is evidence for a single Level 1 ordered-queue service call, not
   queue authority for a later pass.
 - Merge train pull-request feedback is persisted as

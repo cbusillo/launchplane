@@ -57,6 +57,24 @@ class MergeTrainPolicyTests(unittest.TestCase):
         self.assertFalse(codex_skills_policy.scheduler.enabled)
         self.assertEqual(codex_skills_policy.scheduler.runner_mode, "controller")
         self.assertFalse(codex_skills_policy.scheduler.mutate)
+        self.assertEqual(codex_skills_policy.enqueue.trusted_automation_github_user_ids, ())
+
+    def test_policy_normalizes_trusted_automation_github_user_ids(self) -> None:
+        policy = build_test_merge_train_policy(
+            trusted_automation_github_user_ids=(279560559, 123456789, 279560559)
+        )
+
+        repository_policy = policy.find_repository_policy(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+        self.assertEqual(
+            repository_policy.enqueue.trusted_automation_github_user_ids,
+            (123456789, 279560559),
+        )
+
+    def test_policy_rejects_non_positive_trusted_automation_github_user_id(self) -> None:
+        with self.assertRaises(ValidationError):
+            build_test_merge_train_policy(trusted_automation_github_user_ids=(0,))
 
     def test_policy_can_enable_db_backed_scheduler_target(self) -> None:
         policy = parse_merge_train_policy_toml(
@@ -169,6 +187,34 @@ class MergeTrainPolicyTests(unittest.TestCase):
         enabled_policy = build_test_merge_train_policy(scheduler_enabled=True)
 
         self.assertNotEqual(disabled_policy.policy_sha256, enabled_policy.policy_sha256)
+
+    def test_trusted_automation_ids_change_policy_digest(self) -> None:
+        default_policy = build_test_merge_train_policy()
+        trusted_policy = build_test_merge_train_policy(
+            trusted_automation_github_user_ids=(279560559,)
+        )
+
+        self.assertNotEqual(default_policy.policy_sha256, trusted_policy.policy_sha256)
+
+    def test_empty_trusted_automation_ids_are_omitted_from_serialized_policy(self) -> None:
+        policy = build_test_merge_train_policy()
+
+        payload = policy.model_dump(mode="json")
+
+        self.assertNotIn(
+            "trusted_automation_github_user_ids",
+            payload["policies"][0]["enqueue"],
+        )
+
+    def test_trusted_automation_ids_are_retained_in_serialized_policy(self) -> None:
+        policy = build_test_merge_train_policy(trusted_automation_github_user_ids=(279560559,))
+
+        payload = policy.model_dump(mode="json")
+
+        self.assertEqual(
+            payload["policies"][0]["enqueue"]["trusted_automation_github_user_ids"],
+            [279560559],
+        )
 
     def test_policy_rejects_multiline_repository_authority_values(self) -> None:
         policy_toml = textwrap.dedent(
