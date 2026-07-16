@@ -124,6 +124,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("merge-train-policy-apply-request.json", workflow_text)
         self.assertIn("stack_child_disposition_label:", workflow_text)
         self.assertIn("POLICY_STACK_CHILD_DISPOSITION_LABEL", workflow_text)
+        self.assertIn("trusted_automation_github_user_ids:", workflow_text)
+        self.assertIn("POLICY_TRUSTED_AUTOMATION_GITHUB_USER_IDS", workflow_text)
+        self.assertIn(
+            "trusted_automation_github_user_ids must contain positive integers",
+            workflow_text,
+        )
         self.assertIn('print(f"{key} = {json.dumps(values[key])}")', workflow_text)
 
     def test_merge_train_runner_uses_shared_request_for_reads_worker_and_feedback_posts(

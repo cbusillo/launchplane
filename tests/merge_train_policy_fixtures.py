@@ -4,10 +4,17 @@ from control_plane.contracts.merge_train_policy import parse_merge_train_policy_
 
 
 def build_test_merge_train_policy(
-    *, repository: str = "cbusillo/sellyouroutboard", scheduler_enabled: bool = False
+    *,
+    repository: str = "cbusillo/sellyouroutboard",
+    scheduler_enabled: bool = False,
+    trusted_automation_github_user_ids: tuple[int, ...] = (),
 ) -> MergeTrainPolicy:
     return parse_merge_train_policy_toml(
-        _policy_toml(repository, scheduler_enabled=scheduler_enabled)
+        _policy_toml(
+            repository,
+            scheduler_enabled=scheduler_enabled,
+            trusted_automation_github_user_ids=trusted_automation_github_user_ids,
+        )
     )
 
 
@@ -38,16 +45,30 @@ def build_test_merge_train_policy_with_codex_skills() -> MergeTrainPolicy:
     )
 
 
-def _policy_toml(repository: str, *, scheduler_enabled: bool = False) -> str:
+def _policy_toml(
+    repository: str,
+    *,
+    scheduler_enabled: bool = False,
+    trusted_automation_github_user_ids: tuple[int, ...] = (),
+) -> str:
     return "\n\n".join(
         (
             "schema_version = 1",
-            _policy_table(repository, scheduler_enabled=scheduler_enabled),
+            _policy_table(
+                repository,
+                scheduler_enabled=scheduler_enabled,
+                trusted_automation_github_user_ids=trusted_automation_github_user_ids,
+            ),
         )
     )
 
 
-def _policy_table(repository: str, *, scheduler_enabled: bool = False) -> str:
+def _policy_table(
+    repository: str,
+    *,
+    scheduler_enabled: bool = False,
+    trusted_automation_github_user_ids: tuple[int, ...] = (),
+) -> str:
     scheduler_table = ""
     if scheduler_enabled:
         scheduler_table = """
@@ -56,6 +77,9 @@ enabled = true
 runner_mode = "controller"
 mutate = false
 """
+    trusted_automation_ids = ", ".join(
+        str(github_user_id) for github_user_id in trusted_automation_github_user_ids
+    )
     return f"""[[policies]]
 repository = "{repository}"
 base_branch = "main"
@@ -68,6 +92,7 @@ failure_policy = "pause_train"
 [policies.enqueue]
 label_required = true
 allowed_actor_roles = ["repo_owner", "repo_admin"]
+trusted_automation_github_user_ids = [{trusted_automation_ids}]
 
 [policies.merge_identity]
 kind = "github_actions_oidc"

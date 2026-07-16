@@ -86,7 +86,10 @@ Each repository policy contains:
 - `merge_method`: GitHub merge strategy, one of `merge`, `squash`, or `rebase`.
 - `failure_policy`: Whether Launchplane pauses the whole train or continues
   after marking the blocked pull request.
-- `enqueue`: Requirements for who may enqueue.
+- `enqueue`: Requirements for who may enqueue. Human authority remains role-based
+  through `allowed_actor_roles`. Trusted automation is an independent,
+  repository-scoped allowlist of immutable GitHub numeric user ids in
+  `trusted_automation_github_user_ids`.
 - `merge_identity`: Token or workload identity allowed to update branches and
   merge pull requests.
 - `service_authz`: Launchplane authz action/product/context required before the
@@ -98,9 +101,13 @@ Each repository policy contains:
   Launchplane API; checked-in workflows and GitHub variables are not target
   authority.
 
-The initial enqueue policy is intentionally narrow: the enqueue label must be
-present and the enqueue action must come from a repo owner or repo admin. That
-keeps the runner fail-closed until #410 wires live GitHub role checks.
+The default enqueue policy is intentionally narrow: the enqueue label must be
+present and the PR author must be a repo owner or repo admin. A repository may
+explicitly opt a known automation account in by storing its immutable GitHub
+numeric user id in `trusted_automation_github_user_ids`. Matching identities are
+reported as `trusted_automation` in controller dry-run output. The default list
+is empty, so existing owner/admin-only policies remain fail-closed and unchanged.
+Logins are diagnostic labels, not policy identity, because logins can be renamed.
 
 ## Failure Semantics
 
@@ -225,6 +232,7 @@ failure_policy = "pause_train"
 [policies.enqueue]
 label_required = true
 allowed_actor_roles = ["repo_owner", "repo_admin"]
+trusted_automation_github_user_ids = []
 
 [policies.merge_identity]
 kind = "github_actions_oidc"
@@ -255,6 +263,7 @@ failure_policy = "pause_train"
 [policies.enqueue]
 label_required = true
 allowed_actor_roles = ["repo_owner", "repo_admin"]
+trusted_automation_github_user_ids = [123456789]
 
 [policies.merge_identity]
 kind = "github_actions_oidc"
@@ -276,6 +285,17 @@ import a new active `launchplane_merge_train_policies` record. The service
 resolves repository/base branch requests from the active typed policy record
 before authorization, token lookup, or GitHub calls, so unsupported pairs fail
 closed.
+
+The `Merge Train Policy Import` workflow accepts an optional comma-separated
+`trusted_automation_github_user_ids` input. It parses positive integers,
+deduplicates them, and writes only the resulting numeric identities into the
+DB-backed policy payload. Do not put bot logins or user ids into workflow
+defaults or checked-in runtime authority. Empty allowlists are omitted from the
+serialized policy record so owner/admin-only records remain readable by older
+strict service binaries. Deploy service support for this field to every replica
+before importing a non-empty allowlist; older strict policy models reject the
+unknown field. A rollback must first restore an empty, old-compatible allowlist
+while the newer service is still running.
 
 Prepare a TOML payload with every repository/base policy the service should
 support, store it outside the repo or generate it from operator automation, then

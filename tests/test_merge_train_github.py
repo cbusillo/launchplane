@@ -1188,6 +1188,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         pull_request = snapshot.pull_requests[0]
         self.assertEqual(pull_request.number, 42)
         self.assertEqual(pull_request.labels, ("ready-to-merge",))
+        self.assertEqual(pull_request.actor_id, 1042)
         self.assertEqual(pull_request.actor_role, "repo_admin")
         self.assertEqual(pull_request.head_sha, "head-42")
         self.assertEqual(pull_request.head_ref, "feature-42")
@@ -1388,7 +1389,7 @@ def _github_pull_request(
         "draft": False,
         "created_at": f"2026-05-08T10:{number % 60:02d}:00Z",
         "labels": [{"name": "ready-to-merge"}],
-        "user": {"login": "cbusillo"},
+        "user": {"id": 1000 + number, "login": "cbusillo"},
         "author_association": author_association,
         "head": {
             "sha": head_sha or f"head-{number}",

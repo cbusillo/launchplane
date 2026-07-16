@@ -161,6 +161,54 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertIn("missing ready-to-merge label", result.queue[0].ineligible_reasons)
         self.assertIn("actor role is not allowed", result.queue[1].ineligible_reasons[0])
 
+    def test_dry_run_allows_only_configured_trusted_automation_identity(self) -> None:
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(trusted_automation_github_user_ids=(279560559,)),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(
+                    _pull_request(6, actor_id=279560559, actor_role="unknown"),
+                    _pull_request(7, actor_id=123456789, actor_role="unknown"),
+                ),
+            ),
+        )
+
+        self.assertEqual(result.queue_order, (6,))
+        self.assertEqual(result.queue[0].actor_role, "trusted_automation")
+        self.assertNotIn("actor_id", result.queue[0].model_dump())
+        self.assertTrue(result.queue[0].eligible)
+        self.assertEqual(result.queue[1].actor_role, "unknown")
+        self.assertIn("actor role is not allowed to enqueue", result.queue[1].ineligible_reasons)
+
+    def test_dry_run_does_not_trust_automation_without_configured_identity(self) -> None:
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(6, actor_id=279560559, actor_role="unknown"),),
+            ),
+        )
+
+        self.assertEqual(result.queue_order, ())
+        self.assertEqual(result.queue[0].actor_role, "unknown")
+        self.assertIn("actor role is not allowed to enqueue", result.queue[0].ineligible_reasons)
+
+    def test_dry_run_does_not_trust_automation_role_without_matching_identity(self) -> None:
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(6, actor_id=None, actor_role="trusted_automation"),),
+            ),
+        )
+
+        self.assertEqual(result.queue_order, ())
+        self.assertEqual(result.queue[0].actor_role, "trusted_automation")
+        self.assertIn("actor role is not allowed to enqueue", result.queue[0].ineligible_reasons)
+
     def test_dry_run_ignores_stack_children_that_do_not_target_base_branch(self) -> None:
         result = build_merge_train_dry_run_result(
             policy=build_test_merge_train_policy(),
@@ -864,6 +912,7 @@ def _pull_request(
     *,
     created_at: str = "2026-05-08T10:00:00Z",
     labels: tuple[str, ...] = ("ready-to-merge",),
+    actor_id: int | None = None,
     actor_role: str = "repo_admin",
     is_draft: bool = False,
     mergeable: str = "mergeable",
@@ -884,6 +933,7 @@ def _pull_request(
             "title": f"PR {number}",
             "created_at": created_at,
             "labels": labels,
+            "actor_id": actor_id,
             "actor_role": actor_role,
             "is_draft": is_draft,
             "head_sha": f"head-{number}",
