@@ -98,6 +98,12 @@ directly. Deployment records must carry the adapter's provider identity,
 provider target reference, and delegated executor so operator evidence stays
 accurate when a future deploy provider is introduced.
 
+`control_plane/http_routes/generic_web.py` owns the Generic Web FastAPI edge and
+durable provider-mutation adapters. The existing `generic_web_*_http.py` modules
+remain the domain boundary for request resolution, execution, record shaping,
+and idempotency decisions. Keep new provider behavior behind those protocols and
+modules; do not add Generic Web route logic back to `http_app.py`.
+
 ## Capability Design
 
 Use capability names to describe operator-visible behavior, not implementation

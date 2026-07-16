@@ -643,7 +643,7 @@ class FastApiPreviewDesiredStateTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch(
-                "control_plane.http_app.discover_generic_web_preview_desired_state",
+                "control_plane.http_routes.generic_web.discover_generic_web_preview_desired_state",
                 return_value=record,
             ) as discover:
                 response = await _post_generic_web_preview_desired_state(
@@ -712,7 +712,7 @@ class FastApiPreviewDesiredStateTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch(
-                "control_plane.http_app.discover_generic_web_preview_desired_state"
+                "control_plane.http_routes.generic_web.discover_generic_web_preview_desired_state"
             ) as discover:
                 response = await _post_generic_web_preview_desired_state(
                     app,
