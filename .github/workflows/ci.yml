@@ -299,6 +299,54 @@ jobs:
       - name: Validate frontend
         run: pnpm --dir frontend validate
 
+  frontend_browser_smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.10.0 --activate
+
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: >-
+            ${{ runner.os }}-node-22-pnpm-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-node-22-pnpm-
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Install Chromium
+        run: pnpm --dir frontend exec playwright install --with-deps chromium
+
+      - name: Run browser smoke
+        run: pnpm --dir frontend test:browser
+
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-smoke-${{ github.run_attempt }}
+          path: tmp/browser-smoke
+          if-no-files-found: error
+          retention-days: 14
+
   test_timing_snapshot:
     if: >-
       github.event_name != 'pull_request' ||
@@ -546,6 +594,7 @@ jobs:
       - container_scan_fork
       - frontend_validate
       - frontend_validate_fork
+      - frontend_browser_smoke
       - test
       - test_fork
       - postgres_integration
@@ -563,6 +612,7 @@ jobs:
           CONTAINER_SCAN_FORK_RESULT: ${{ needs.container_scan_fork.result }}
           FRONTEND_VALIDATE_RESULT: ${{ needs.frontend_validate.result }}
           FRONTEND_VALIDATE_FORK_RESULT: ${{ needs.frontend_validate_fork.result }}
+          FRONTEND_BROWSER_SMOKE_RESULT: ${{ needs.frontend_browser_smoke.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TEST_FORK_RESULT: ${{ needs.test_fork.result }}
           POSTGRES_INTEGRATION_RESULT: ${{ needs.postgres_integration.result }}
@@ -581,11 +631,13 @@ jobs:
             require_success static_checks "${STATIC_CHECKS_RESULT}"
             require_success container_scan "${CONTAINER_SCAN_RESULT}"
             require_success frontend_validate "${FRONTEND_VALIDATE_RESULT}"
+            require_success frontend_browser_smoke "${FRONTEND_BROWSER_SMOKE_RESULT}"
             require_success test "${TEST_RESULT}"
             require_success postgres_integration "${POSTGRES_INTEGRATION_RESULT}"
           else
             require_success static_checks_fork "${STATIC_CHECKS_FORK_RESULT}"
             require_success container_scan_fork "${CONTAINER_SCAN_FORK_RESULT}"
             require_success frontend_validate_fork "${FRONTEND_VALIDATE_FORK_RESULT}"
+            require_success frontend_browser_smoke "${FRONTEND_BROWSER_SMOKE_RESULT}"
             require_success test_fork "${TEST_FORK_RESULT}"
           fi

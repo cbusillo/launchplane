@@ -94,6 +94,41 @@ integration command is the official production storage-semantics proof when a
 local or CI PostgreSQL service is available. Neither local command replaces CI's
 runner isolation, artifact retention, or required status checks.
 
+## Browser smoke
+
+Run the deterministic operator-journey smoke separately from the frontend unit,
+type, OpenAPI, and production-build gate:
+
+```bash
+pnpm --dir frontend exec playwright install chromium
+pnpm --dir frontend test:browser
+```
+
+The Playwright suite starts the Vite development server and uses only the
+repo-local `?fixture=products` evidence source for signed-in journeys. Anonymous
+authentication is simulated by intercepting only `/v1/auth/session`; no product
+or runtime mutation reaches a deployed Launchplane service. The suite exercises
+the rendered authentication prompt, product workspace, environment diagnostics,
+an honest product-inventory error, an honestly blocked action, and a dry-run
+confirmation without submitting the apply. Each journey runs at desktop and
+narrow widths, checks route-heading and keyboard focus behavior, rejects
+duplicate document IDs, and fails on unexpected mutation requests, console
+errors, uncaught page errors, failed requests, or HTTP error responses.
+
+Screenshots, traces, and failure evidence are written under
+`tmp/browser-smoke/`. CI uploads that directory from the dedicated hosted browser
+job. Every run clears prior evidence first and verifies the complete desktop and
+narrow screenshot set before passing. These screenshots are review evidence
+rather than pixel-diff baselines, so intentional visual changes do not require
+snapshot churn.
+
+Development fixtures remain excluded from production authority. `pnpm --dir
+frontend validate` still runs the independent production build and
+`assert-production-fixtures.mjs` scan; browser smoke does not weaken or replace
+that proof. Deployed OIDC smoke remains a separate non-destructive evidence
+layer because it validates service authentication and deployment wiring rather
+than deterministic UI behavior.
+
 Workflow contract tests should parse workflow YAML through
 `tests/support/workflows.py` and assert named invariants instead of mirroring
 large YAML snippets, substring counts, or indentation-sensitive job fragments.

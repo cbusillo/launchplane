@@ -2,7 +2,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from tests.support.workflows import check_ci_aggregate_gate
 from tests.support.workflows import check_fork_runner_isolation
+from tests.support.workflows import check_frontend_browser_smoke
 from tests.support.workflows import check_launchplane_request_contract
 from tests.support.workflows import load_workflow
 
@@ -65,6 +67,54 @@ class WorkflowInvariantCheckerTests(unittest.TestCase):
         )
 
         self.assertEqual([], [str(violation) for violation in violations])
+
+    def test_browser_smoke_must_run_for_fork_pull_requests(self) -> None:
+        workflow_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        job_header = "  frontend_browser_smoke:\n    runs-on: ubuntu-latest\n"
+        self.assertIn(job_header, workflow_text)
+        drifted_workflow = workflow_text.replace(
+            job_header,
+            "  frontend_browser_smoke:\n"
+            "    if: github.event_name != 'pull_request'\n"
+            "    runs-on: ubuntu-latest\n",
+            1,
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "ci.yml"
+            workflow_path.write_text(drifted_workflow, encoding="utf-8")
+            workflow = load_workflow(workflow_path)
+
+        violations = check_frontend_browser_smoke(workflow)
+
+        self.assertTrue(
+            any("same-repository and fork pull requests" in item.message for item in violations)
+        )
+
+    def test_ci_gate_must_require_browser_smoke_on_both_paths(self) -> None:
+        workflow_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        browser_gate = (
+            "            require_success frontend_browser_smoke "
+            '"${FRONTEND_BROWSER_SMOKE_RESULT}"\n'
+        )
+        self.assertEqual(2, workflow_text.count(browser_gate))
+        prefix, suffix = workflow_text.rsplit(browser_gate, 1)
+        drifted_workflow = (prefix + suffix).replace(
+            browser_gate,
+            browser_gate + browser_gate,
+            1,
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "ci.yml"
+            workflow_path.write_text(drifted_workflow, encoding="utf-8")
+            workflow = load_workflow(workflow_path)
+
+        violations = check_ci_aggregate_gate(workflow)
+
+        self.assertTrue(
+            any("fork path must require browser smoke" in item.message for item in violations)
+        )
 
 
 if __name__ == "__main__":

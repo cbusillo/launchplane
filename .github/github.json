@@ -51,6 +51,7 @@
       "default": "uv run --extra dev mypy control_plane tests"
     },
     "build": {
+      "browser": "pnpm --dir frontend test:browser",
       "frontend": "pnpm --dir frontend validate",
       "container": "docker build -t launchplane-ci:test ."
     },

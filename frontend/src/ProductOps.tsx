@@ -60,6 +60,20 @@ export function ProductIndexRoute({
 }) {
   const products = resource.data ?? [];
   const loading = resource.status === "idle" || resource.status === "loading";
+  const viewState =
+    loading && !products.length
+      ? "loading"
+      : resource.status === "error" && !products.length
+        ? "error"
+        : resource.status === "ready" && !products.length
+          ? "empty"
+          : "ready";
+
+  useEffect(() => {
+    document.querySelector<HTMLElement>("[data-route-heading]")?.focus({
+      preventScroll: true,
+    });
+  }, [viewState]);
 
   if (loading && !products.length) {
     return <ProductIndexSkeleton />;
