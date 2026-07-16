@@ -202,6 +202,7 @@ console.log(Object.keys(client).sort().join(','));
                     "OPERATION": "destroy",
                     "PR-NUMBER": "42",
                     "DRY-RUN-PLAN-FILE": "/tmp/destroy-dry-run.json",
+                    "PLAN-ID": "odoo-preview-plan-test",
                     "WAIT-FOR-DEPLOY": "false",
                     "SMOKE-CHECK": "false",
                     "RUN-ID": "456",
@@ -217,10 +218,7 @@ console.log(Object.keys(client).sort().join(','));
             )
             self.assertEqual(outputs["fail-result-paths"], "result.status")
             self.assertEqual(outputs["response-output-path"], "")
-            self.assertEqual(
-                outputs["idempotency-key"],
-                "odoo-preview-apply:odoo-tenant-cm-website:pr-42:destroy:run-456-attempt-2",
-            )
+            self.assertEqual(outputs["idempotency-key"], "odoo-preview-plan-test")
             self.assertEqual(
                 json.loads(outputs["payload"])["apply"],
                 {"timeout_seconds": 600, "wait_for_deploy": False, "smoke_check": False},
@@ -242,6 +240,7 @@ console.log(Object.keys(client).sort().join(','));
                     "PREVIEW-SLUG": "preview-42",
                     "SOURCE-GIT-REF": "abc123",
                     "DRY-RUN-PLAN-FILE": "/tmp/dry-run.json",
+                    "PLAN-ID": "odoo-preview-plan-test",
                     "MANIFEST-FILE": "/tmp/preview-artifact.json",
                     "RUN-ID": "456",
                     "RUN-ATTEMPT": "2",
@@ -257,10 +256,7 @@ console.log(Object.keys(client).sort().join(','));
             )
             self.assertEqual(outputs["fail-result-paths"], "result.status")
             self.assertEqual(outputs["response-output-path"], "")
-            self.assertEqual(
-                outputs["idempotency-key"],
-                "odoo-preview-apply:odoo-tenant-cm-website:preview-42:refresh:run-456-attempt-2",
-            )
+            self.assertEqual(outputs["idempotency-key"], "odoo-preview-plan-test")
             self.assertEqual(
                 json.loads(outputs["payload"]),
                 {
@@ -415,6 +411,7 @@ const apply = client.buildOdooPreviewApplyRequest({
   operation: 'destroy',
   prNumber: 42,
   dryRunPlanFile: '/tmp/dry-run.json',
+  planId: 'odoo-preview-plan-test',
   runId: '456',
   runAttempt: '2',
 });
@@ -433,10 +430,7 @@ console.log(JSON.stringify({ inputs, apply }));
             payload["apply"]["payloadJsonFiles"], {"apply.dry_run_plan": "/tmp/dry-run.json"}
         )
         self.assertNotIn("smoke_check", payload["apply"]["payload"]["apply"])
-        self.assertEqual(
-            payload["apply"]["idempotencyKey"],
-            "odoo-preview-apply:odoo-tenant-cm-website:pr-42:destroy:run-456-attempt-2",
-        )
+        self.assertEqual(payload["apply"]["idempotencyKey"], "odoo-preview-plan-test")
 
     def test_client_preserves_manual_apply_boolean_overrides(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -454,6 +448,7 @@ const request = client.buildOdooPreviewApplyRequest({
   prNumber: 42,
   sourceGitRef: 'abc123',
   dryRunPlanFile: '/tmp/dry-run.json',
+  planId: 'odoo-preview-plan-test',
   manifestFile: '/tmp/preview-artifact.json',
   waitForDeploy: 'false',
   smokeCheck: 'true',
@@ -490,6 +485,7 @@ const request = client.buildOdooPreviewApplyRequest({
   prNumber: 42,
   sourceGitRef: 'abc123',
   dryRunPlanFile: '/tmp/dry-run.json',
+  planId: 'odoo-preview-plan-test',
   manifestFile: '/tmp/preview-artifact.json',
   runId: '456',
   runAttempt: '2',
@@ -524,6 +520,7 @@ client.buildOdooPreviewApplyRequest({
   prNumber: 42,
   sourceGitRef: 'abc123',
   dryRunPlanFile: '/tmp/dry-run.json',
+  planId: 'odoo-preview-plan-test',
   manifestFile: '/tmp/preview-artifact.json',
   waitForDeploy: 'sometimes',
   runId: '456',
@@ -564,6 +561,7 @@ client.buildOdooPreviewApplyRequest({
   prNumber: 42,
   sourceGitRef: 'abc123',
   dryRunPlanFile: '/tmp/dry-run.json',
+  planId: 'odoo-preview-plan-test',
   runId: '456',
   runAttempt: '2',
 });

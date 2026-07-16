@@ -298,11 +298,15 @@ from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyInputsEnvelope,
     OdooPreviewApplyProductMismatchError,
     OdooPreviewApplyRouteDependencyError,
+    OdooPreviewPlanProvenanceError,
     build_odoo_preview_apply_inputs_result,
+    build_odoo_preview_plan_id,
     driver_result_contains_status,
     execute_odoo_preview_apply_result,
+    issue_odoo_preview_apply_plan,
     observe_odoo_preview_apply_result,
     resolve_odoo_preview_apply_profile,
+    validate_odoo_preview_issued_plan,
 )
 from control_plane.odoo_post_deploy_http import (
     ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE as _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
@@ -394,6 +398,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
     build_odoo_stable_target_replacement_plan,
 )
+from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
 )
@@ -1232,6 +1237,7 @@ class _OdooPreviewProviderMutationAdapter:
         record_store: object,
         profile: LaunchplaneProductProfileRecord,
         apply_request: OdooPreviewApplyEnvelope,
+        issued_plan: OdooPreviewApplyInputsResult,
         database_url: str | None,
         trace_id: str,
     ) -> None:
@@ -1239,6 +1245,7 @@ class _OdooPreviewProviderMutationAdapter:
         self._record_store = record_store
         self._profile = profile
         self._apply_request = apply_request
+        self._issued_plan = issued_plan
         self._database_url = database_url
         self._trace_id = trace_id
 
@@ -1293,6 +1300,7 @@ class _OdooPreviewProviderMutationAdapter:
                 record_store=self._record_store,
                 profile=self._profile,
                 request=self._apply_request,
+                issued_plan=self._issued_plan,
                 database_url=self._database_url,
                 provider_operation_title=provider_operation_title(provider_operation_key),
                 provider_effect_checkpoint=lease.checkpoint_effect,
@@ -4859,6 +4867,40 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Odoo preview apply inputs require an Idempotency-Key header.",
+            )
+        if idempotency_capable_store(record_store) is None:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="plan_storage_required",
+                message="Odoo preview plan issuance requires durable idempotency storage.",
+            )
+        payload_fingerprint = idempotency_request_fingerprint(
+            route_path=_ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+            payload=cast(dict[str, object], raw_payload),
+        )
+        plan_id = build_odoo_preview_plan_id(
+            scope=idempotency_scope(identity),
+            idempotency_key=normalized_idempotency_key,
+        )
+        replay_response = replay_stored_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+            idempotency_key=plan_id,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+        )
+        if replay_response is not None:
+            return replay_response
+
         try:
             driver_result = build_odoo_preview_apply_inputs_result(
                 control_plane_root=resolved_control_plane_root,
@@ -4882,11 +4924,38 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
+        issued_plan = issue_odoo_preview_apply_plan(
+            result=driver_result,
+            plan_id=plan_id,
+        )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={},
-            result=driver_result,
+            result=issued_plan.model_dump(mode="json"),
         )
+        if issued_plan.status == "ready":
+            try:
+                store_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+                    idempotency_key=plan_id,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
+            except Exception as write_error:
+                replay_response = replay_stored_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+                    idempotency_key=plan_id,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                )
+                if replay_response is not None:
+                    return replay_response
+                raise write_error
         return response
 
     async def write_odoo_preview_apply(
@@ -4970,6 +5039,48 @@ def create_launchplane_fastapi_app(
                 code="idempotency_key_required",
                 message="Odoo preview apply requests require an Idempotency-Key header.",
             )
+        idempotency_store = idempotency_capable_store(record_store)
+        if idempotency_store is None:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="plan_storage_required",
+                message="Odoo preview apply requires durable plan storage.",
+            )
+        stored_plan_record = idempotency_store.read_idempotency_record(
+            scope=idempotency_scope(identity),
+            route_path=_ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+        )
+        if stored_plan_record is None or stored_plan_record.state != "completed":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_preview_plan_not_issued",
+                message="Odoo preview apply requires a matching service-issued plan.",
+            )
+        stored_plan_payload = stored_plan_record.response_payload.get("result")
+        try:
+            issued_plan = OdooPreviewApplyInputsResult.model_validate(stored_plan_payload)
+            service_apply_request = validate_odoo_preview_issued_plan(
+                plan_id=normalized_idempotency_key,
+                issued_plan=issued_plan,
+                request=apply_request,
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_preview_plan_not_issued",
+                message="Stored Odoo preview plan evidence is invalid.",
+            ) from error
+        except OdooPreviewPlanProvenanceError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
         payload_fingerprint = idempotency_request_fingerprint(
             route_path=_ODOO_PREVIEW_APPLY_ROUTE,
             payload=cast(dict[str, object], raw_payload),
@@ -4978,7 +5089,8 @@ def create_launchplane_fastapi_app(
             control_plane_root=resolved_control_plane_root,
             record_store=record_store,
             profile=product_profile,
-            apply_request=apply_request,
+            apply_request=service_apply_request,
+            issued_plan=issued_plan,
             database_url=getattr(record_store, "database_url", None),
             trace_id=trace_id,
         )
@@ -4997,6 +5109,13 @@ def create_launchplane_fastapi_app(
                 ),
                 reconcile_message=("The Odoo preview apply requires reconciliation before retry."),
             )
+        except OdooPreviewPlanProvenanceError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
         except OdooPreviewApplyConfigError as error:
             return JSONResponse(
                 status_code=400,

@@ -63,6 +63,10 @@ refresh one through a reviewed plan, verify health and runtime identity,
 destroy it, and confirm that no provider or Launchplane inventory remains
 orphaned. Apply, destroy, and report-only reconciliation are one understandable
 journey.
+Reviewed Odoo preview plans are service-issued, short-lived, and bound to their
+artifact and provider-routing evidence. If that evidence changes or the plan
+expires, the UI must present a stale-plan result and obtain a new plan rather
+than offering a force-apply control.
 
 ### Promote A Verified Release
 

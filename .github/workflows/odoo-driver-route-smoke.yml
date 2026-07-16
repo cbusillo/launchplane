@@ -297,7 +297,7 @@ jobs:
           idempotency-key: >-
             odoo-driver-route-smoke:preview-apply-inputs:${{
             github.run_id }}:${{ github.run_attempt }}
-          expected-status: 202,403,503
+          expected-status: 202,403,409,503
           timeout-ms: "30000"
           response-output-file: ${{ steps.route_probes.outputs.preview_apply_inputs_response }}
           log-response-body: "false"
@@ -314,7 +314,7 @@ jobs:
           idempotency-key: >-
             odoo-driver-route-smoke:preview-apply:${{
             github.run_id }}:${{ github.run_attempt }}
-          expected-status: 202,403,503
+          expected-status: 202,403,409,503
           timeout-ms: "30000"
           response-output-file: ${{ steps.route_probes.outputs.preview_apply_response }}
           log-response-body: "false"

@@ -189,6 +189,7 @@ export function buildOdooPreviewApplyInputsRequest(options = {}) {
 
 export function buildOdooPreviewApplyRequest(options = {}) {
   const facts = normalizeFacts(options);
+  const planId = requiredText(options.planId, "Odoo preview plan ID");
   const dryRunPlanFile = requiredText(
     options.dryRunPlanFile,
     "Odoo preview dry run plan file",
@@ -225,10 +226,7 @@ export function buildOdooPreviewApplyRequest(options = {}) {
       apply: applyPayload,
     },
     payloadJsonFiles,
-    idempotencyKey:
-      "odoo-preview-apply:" +
-      `${facts.product}:${previewRequestToken(facts)}:${facts.operation}:` +
-      `run-${facts.runId}-attempt-${facts.runAttempt}`,
+    idempotencyKey: planId,
     failResultPaths: ["result.status"],
   });
 }

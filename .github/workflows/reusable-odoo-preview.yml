@@ -481,6 +481,7 @@ jobs:
             inputs_status=result.status,
             preview_slug=result.preview_slug,
             preview_url=result.preview_url,
+            plan_id=result.plan_provenance.plan_id,
             error_message=result.error_message
 
       - name: Render Launchplane isolated preview apply request
@@ -494,6 +495,7 @@ jobs:
           preview-slug: ${{ steps.dry_run.outputs.preview_slug }}
           source-git-ref: ${{ steps.facts.outputs.source_git_ref }}
           dry-run-plan-file: ${{ steps.dry_run_payload.outputs.dry_run_plan_file }}
+          plan-id: ${{ steps.dry_run.outputs.plan_id }}
           manifest-file: ${{ steps.publish.outputs.manifest_file }}
           wait-for-deploy: ${{ inputs.wait_for_deploy }}
 
@@ -507,7 +509,7 @@ jobs:
           route-path: ${{ steps.launchplane_request.outputs.route-path }}
           payload: ${{ steps.launchplane_request.outputs.payload }}
           payload-json-files: ${{ steps.launchplane_request.outputs.payload-json-files }}
-          idempotency-key: ${{ steps.launchplane_request.outputs.idempotency-key }}
+          idempotency-key: ${{ steps.dry_run.outputs.plan_id }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
           fail-result-paths: ${{ steps.launchplane_request.outputs.fail-result-paths }}
           output-paths: >-
@@ -682,6 +684,7 @@ jobs:
             inputs_status=result.status,
             preview_slug=result.preview_slug,
             preview_url=result.preview_url,
+            plan_id=result.plan_provenance.plan_id,
             error_message=result.error_message
 
       - name: Render Launchplane isolated preview destroy request
@@ -696,6 +699,7 @@ jobs:
           preview-slug: ${{ steps.dry_run.outputs.preview_slug }}
           source-git-ref: ${{ steps.facts.outputs.source_git_ref }}
           dry-run-plan-file: ${{ steps.dry_run_payload.outputs.dry_run_plan_file }}
+          plan-id: ${{ steps.dry_run.outputs.plan_id }}
           wait-for-deploy: false
 
       - name: Request Launchplane isolated preview destroy
@@ -708,7 +712,7 @@ jobs:
           route-path: ${{ steps.launchplane_request.outputs.route-path }}
           payload: ${{ steps.launchplane_request.outputs.payload }}
           payload-json-files: ${{ steps.launchplane_request.outputs.payload-json-files }}
-          idempotency-key: ${{ steps.launchplane_request.outputs.idempotency-key }}
+          idempotency-key: ${{ steps.dry_run.outputs.plan_id }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
           fail-result-paths: ${{ steps.launchplane_request.outputs.fail-result-paths }}
           output-paths: >-

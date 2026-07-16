@@ -2215,13 +2215,15 @@ and website-bootstrap override are native FastAPI routes too. They preserve
 product-profile driver validation, lane-scoped authorization, optional
 `Idempotency-Key` replay/conflict behavior, post-deploy transition records, and
 Odoo instance override record merge behavior. Odoo preview apply inputs and
-preview apply are also owned by native FastAPI. They preserve preview-context authorization,
-runtime-environment dependency classification, and the
+preview apply are also owned by native FastAPI. They preserve preview-context
+authorization, runtime-environment dependency classification, and the
 `odoo_preview_runtime_config_incomplete` details envelope for apply requests
-whose template runtime records are incomplete. Preview apply inputs remains
-uncached/non-idempotent, while preview apply keeps optional `Idempotency-Key`
-replay/conflict behavior for non-blocked results and skips blocked-result
-storage so retries can observe changed runtime/provider state. The smoke also
+whose template runtime records are incomplete. Ready preview apply inputs are
+persisted as identity-scoped issued plans; blocked inputs remain unstored so a
+retry can observe recovered runtime/provider state. Preview apply requires the
+service-issued plan id as its `Idempotency-Key`, validates exact plan and artifact
+continuity, and recomputes current plan authority before a fresh provider effect.
+The smoke also
 sends authenticated GitHub OIDC probes to `/v1/drivers/odoo/preview-apply-inputs`,
 `/v1/drivers/odoo/preview-apply`, and `/v1/previews/pr-feedback`.
 
@@ -2400,10 +2402,13 @@ retries do not collide. The regular cleanup workflow uses
 - generic-web preview destroy driver:
   `generic-web-preview-destroy:<product>:<anchor_pr_number>`
 - Odoo isolated preview apply-inputs driver:
-  none; apply-inputs remains uncached/non-idempotent so blocked input derivation
-  can be retried against changed runtime/provider records.
+  `odoo-preview-apply-inputs:<product>:<preview>:<source-or-destroy>:<run-attempt>`;
+  ready responses are persisted under the service-derived plan id, while blocked
+  input derivation remains unstored so it can be retried against changed
+  runtime/provider records.
 - Odoo isolated preview apply driver:
-  `odoo-preview-apply:<product>:<preview_slug>:<operation>:<sha-or-destroy>`
+  the `plan_provenance.plan_id` returned by preview apply-inputs; callers must
+  not synthesize a separate apply key.
 
 Generic-web product workflow clients live in product repositories as thin
 Launchplane callers until Launchplane provides a shared distributable helper.
@@ -2561,10 +2566,16 @@ If the service-side runtime contract is incomplete before any provider mutation,
 the route returns `odoo_preview_runtime_config_incomplete` with the affected
 context, instance, and missing key names only; it never returns runtime values or
 secret material.
-The route is idempotency-keyed for non-blocked apply results and intended for
-approved non-production Odoo preview targets while the isolated runtime migration
-is being exercised. Blocked apply results are not stored as idempotency responses
-so retries can recompute after runtime or provider dependencies recover.
+The preceding `preview-apply-inputs` call persists each ready plan with its
+normalized source/artifact request, canonical fingerprint, and 30-minute expiry.
+Its returned plan id is the only accepted apply idempotency key. Apply rejects
+unissued ids, caller changes to provider routing or artifact identity, expired
+plans, and plans whose fresh service-side recomputation differs. These checks run
+before provider effects; a rejected fresh reservation is released. Completed
+exact retries still replay their response, while reconciliation observes the
+stored original plan instead of creating a new effect. Blocked apply results are
+not stored as completed apply responses so retries can recompute after runtime or
+provider dependencies recover.
 
 For Odoo preview smoke follow-ups,
 `POST /v1/drivers/generic-web/preview-verification` accepts the product,

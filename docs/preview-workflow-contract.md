@@ -199,9 +199,10 @@ adapters, not product-repo authority.
 Launchplane also owns the reusable request-shape builders for Odoo tenant
 preview workflows. Tenant repos may keep thin adapter jobs for checkout, image
 publication, runner selection, and product smoke facts, but the route paths,
-payload skeletons, JSON-file bindings, fail-result paths, and run-scoped
-idempotency keys for `artifact-publish-inputs`, `preview-apply-inputs`, and
-`preview-apply` are Launchplane contract fixtures. New or migrated tenant
+payload skeletons, JSON-file bindings, fail-result paths, run-scoped inputs
+keys, and service-issued apply key for `artifact-publish-inputs`,
+`preview-apply-inputs`, and `preview-apply` are Launchplane contract fixtures.
+New or migrated tenant
 preview workflows should install
 `cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main`
 and either use its `request-kind` render mode or import the generated ESM client
@@ -245,6 +246,22 @@ artifact/revision evidence, and module install/update evidence. Product
 workflows should treat the Odoo refresh route's `refresh_status="pass"` as the
 ready-to-comment signal instead of independently deciding readiness from raw
 health checks.
+
+Ready Odoo apply-inputs responses also include the normalized `plan_request`
+and `plan_provenance`: a service-derived plan id, canonical SHA-256 fingerprint,
+issuance time, and 30-minute expiry. Launchplane persists that response under the
+calling identity and requires the returned plan id as the `preview-apply`
+`Idempotency-Key`; workflows must not derive a replacement apply key. Apply
+loads the persisted result, requires the caller's dry-run plan and artifact to
+match exactly, rejects missing, mismatched, or expired provenance, and rebuilds
+the plan from current Launchplane records and current provider discovery before
+the first provider effect. Any changed profile, runtime routing, template target,
+environment id, or discovered preview target makes the plan stale and requires
+new apply inputs. Completed exact retries replay the stored apply response, and
+uncertain operations reconcile against the originally issued plan instead of
+replanning into another effect. Blocked apply-inputs responses have no apply
+provenance and are not persisted as issued plans, so a later retry can re-evaluate
+recovered dependencies.
 If a later browser or product-specific smoke workflow needs to publish common
 preview evidence, it should call
 `cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@main`
