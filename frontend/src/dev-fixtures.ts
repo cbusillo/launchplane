@@ -305,6 +305,17 @@ export function promotionStatusForFixture(
     : staleEvidence
       ? ["Testing inventory evidence is stale."]
       : [];
+  const workflowAction = detail.available_actions.find(
+    (action) => action.action_id === "prod_promotion_workflow",
+  );
+  const workflowBlockers = [
+    ...blockers,
+    ...(workflowAction?.enabled
+      ? []
+      : workflowAction?.disabled_reasons.length
+        ? workflowAction.disabled_reasons
+        : ["Promotion workflow availability was not recorded."]),
+  ];
   const direct = promotionAvailability(
     "direct_dry_run",
     "generic_web_prod_promotion.execute",
@@ -313,13 +324,13 @@ export function promotionStatusForFixture(
   const workflowDryRun = promotionAvailability(
     "workflow_dry_run",
     "generic_web_prod_promotion.dispatch",
-    blockers,
+    workflowBlockers,
     true,
   );
   const workflowLive = promotionAvailability(
     "workflow_live",
     "generic_web_prod_promotion.dispatch",
-    blockers,
+    workflowBlockers,
     true,
     true,
   );

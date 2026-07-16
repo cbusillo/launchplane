@@ -41,7 +41,7 @@ export function navigateTo(path: string, replace = false): void {
   window.dispatchEvent(new Event(NAVIGATION_EVENT));
 }
 
-export function routeHref(path: string): string {
+function routeHref(path: string): string {
   if (!import.meta.env.DEV) {
     return path;
   }

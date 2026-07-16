@@ -328,6 +328,15 @@ function SessionGate({
   const checking = state.status === "checking";
   const failed = state.status === "error";
 
+  useEffect(() => {
+    if (state.status === "checking") {
+      return;
+    }
+    document.querySelector<HTMLElement>("[data-route-heading]")?.focus({
+      preventScroll: true,
+    });
+  }, [state.status]);
+
   return (
     <main className="session-screen">
       <section className="session-card" aria-live="polite">

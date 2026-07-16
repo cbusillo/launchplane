@@ -87,13 +87,19 @@ class DocsContractsTests(TestCase):
         metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
         ci_workflow = load_workflow(".github/workflows/ci.yml")
         testing_docs = Path("docs/style/testing.md").read_text(encoding="utf-8")
+        normalized_testing_docs = " ".join(testing_docs.split())
 
         self.assertEqual(
             "pnpm --dir frontend test:browser",
             metadata["qualityGate"]["build"]["browser"],
         )
         self.assertIn("pnpm --dir frontend test:browser", testing_docs)
-        self.assertIn("repo-local `?fixture=products`", testing_docs)
+        self.assertIn(
+            "uses only repo-local development fixtures",
+            normalized_testing_docs,
+        )
+        for fixture in ("`?fixture=products`", "`?fixture=empty`", "`?fixture=error`"):
+            self.assertIn(fixture, testing_docs)
         self.assertIn("Deployed OIDC smoke remains a separate", testing_docs)
         _assert_no_workflow_violations(self, check_frontend_browser_smoke(ci_workflow))
 
@@ -148,10 +154,14 @@ class DocsContractsTests(TestCase):
         for route_path, operation_id in write_operations.items():
             self.assertEqual(set(ui_openapi["paths"][route_path]), {"post"})
             self.assertEqual(ui_openapi["paths"][route_path]["post"]["operationId"], operation_id)
-        self.assertIn(
-            "export type DriverListPayload = GeneratedDriverDescriptorsResponse",
-            frontend_types,
-        )
+        for generated_alias in (
+            "export type AuthSessionPayload = AuthSessionResponse",
+            "export type ApiErrorPayload = LaunchplaneErrorResponse",
+            "export type ProductListPayload = ProductEnvironmentListResponse",
+        ):
+            self.assertIn(generated_alias, frontend_types)
+        self.assertNotIn("export interface DriverDescriptor", frontend_types)
+        self.assertNotIn("export interface LaneSummary", frontend_types)
         self.assertNotIn("WorkGraphSnapshotPayload", frontend_types)
         self.assertNotIn("ProductConfigApplyRequest", frontend_types)
         self.assertNotIn("GenericWebProdPromotionPayload", frontend_types)

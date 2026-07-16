@@ -144,7 +144,7 @@ export function persistBrowserOperationState(
   }
 }
 
-export function browserOperationStorageKey(scope: string): string {
+function browserOperationStorageKey(scope: string): string {
   const normalizedScope = scope.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
   return `launchplane.browser-operation.${normalizedScope || "operation"}`;
 }
@@ -325,7 +325,7 @@ export function resetBrowserOperation(
   return createBrowserOperationState();
 }
 
-export function browserOperationReceipt(
+function browserOperationReceipt(
   envelope: BrowserOperationEnvelope,
 ): BrowserOperationReceipt {
   return {
@@ -335,7 +335,7 @@ export function browserOperationReceipt(
   };
 }
 
-export function createBrowserIdempotencyKey(scope: string): string {
+function createBrowserIdempotencyKey(scope: string): string {
   const normalizedScope = scope
     .trim()
     .toLowerCase()

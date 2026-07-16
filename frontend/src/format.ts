@@ -13,7 +13,3 @@ export function formatTime(value: string): string {
     minute: "2-digit",
   }).format(date);
 }
-
-export function labelForStatus(status: string): string {
-  return status.replace("_", " ") || "unknown";
-}
