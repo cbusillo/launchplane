@@ -7,10 +7,12 @@ import click
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.drivers.generic_web_preview_dispatch import (
+    GenericWebPreviewDesiredStateEnvelope,
     GenericWebPreviewDestroyEnvelope,
     GenericWebPreviewInventoryEnvelope,
     GenericWebPreviewReadinessEnvelope,
     GenericWebPreviewRefreshEnvelope,
+    _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
     _GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
     _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
     _GENERIC_WEB_PREVIEW_READINESS_ROUTE,
@@ -37,15 +39,18 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 GENERIC_WEB_PREVIEW_DESTROY_ROUTE = _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path
+GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE = _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path
 GENERIC_WEB_PREVIEW_INVENTORY_ROUTE = _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path
 GENERIC_WEB_PREVIEW_READINESS_ROUTE = _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path
 GENERIC_WEB_PREVIEW_REFRESH_ROUTE = _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path
 
 __all__ = [
     "GENERIC_WEB_PREVIEW_DESTROY_ROUTE",
+    "GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE",
     "GENERIC_WEB_PREVIEW_INVENTORY_ROUTE",
     "GENERIC_WEB_PREVIEW_READINESS_ROUTE",
     "GENERIC_WEB_PREVIEW_REFRESH_ROUTE",
+    "GenericWebPreviewDesiredStateEnvelope",
     "GenericWebPreviewDestroyEnvelope",
     "GenericWebPreviewInventoryEnvelope",
     "GenericWebPreviewReadinessEnvelope",
@@ -57,6 +62,7 @@ __all__ = [
     "apply_generic_web_preview_readiness_result",
     "apply_generic_web_preview_refresh_result",
     "resolve_generic_web_preview_profile",
+    "resolve_generic_web_preview_desired_state_profile",
     "should_store_generic_web_preview_idempotency",
 ]
 
@@ -67,6 +73,32 @@ class GenericWebPreviewProductMismatchError(ValueError):
 
 class GenericWebPreviewRouteDependencyError(ValueError):
     pass
+
+
+def resolve_generic_web_preview_desired_state_profile(
+    *, record_store: object, product: str
+) -> LaunchplaneProductProfileRecord:
+    read_profile = getattr(record_store, "read_product_profile_record", None)
+    if not callable(read_profile):
+        raise TypeError(
+            "Launchplane record store does not support generic web preview desired-state "
+            "profile reads: read_product_profile_record"
+        )
+    try:
+        profile = cast(LaunchplaneProductProfileRecord, read_profile(product.strip()))
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            "Generic web preview desired-state requires an existing product profile."
+        ) from error
+    if not product_profile_uses_generic_web_base(profile):
+        raise ValueError(
+            "Product profile is not compatible with the generic-web preview desired-state route."
+        )
+    if not profile.preview.enabled:
+        raise ValueError("Product profile does not have generic-web previews enabled.")
+    if not profile.preview.context.strip():
+        raise ValueError("Product profile does not define a preview context.")
+    return profile
 
 
 def resolve_generic_web_preview_profile(

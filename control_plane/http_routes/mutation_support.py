@@ -66,6 +66,19 @@ def accepted_evidence_response(
     )
 
 
+def provider_operation_response_payload(
+    *,
+    trace_id: str,
+    records: Mapping[str, object],
+    result: dict[str, object],
+) -> dict[str, object]:
+    return accepted_evidence_response(
+        trace_id=trace_id,
+        records=records,
+        result=result,
+    ).model_dump(mode="json", exclude_none=True)
+
+
 def idempotency_capable_store(record_store: object) -> IdempotencyCapableStore | None:
     if callable(getattr(record_store, "read_idempotency_record", None)) and callable(
         getattr(record_store, "write_idempotency_record", None)

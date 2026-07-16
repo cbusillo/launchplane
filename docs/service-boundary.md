@@ -51,7 +51,8 @@ Service implementation ownership is split by runtime responsibility:
   remaining core and mutation route registration, and the webhook callable used
   by the unauthenticated GitHub route. Domain modules under
   `control_plane/http_routes/` own extracted read handlers and registrations,
-  plus the dependency-explicit evidence-ingress write registrar.
+  plus the dependency-explicit evidence-ingress and Generic Web write
+  registrars.
 - `control_plane/drivers/native_routes.py` owns native descriptor metadata,
   handler authorization binding, and FastAPI driver-route validation.
 
@@ -416,8 +417,8 @@ contract shape for future route-family slices.
 
 Read-only ingress, topology, operational-record, managed-secret, product,
 driver, preview, work-graph, merge-train, and Every Code route families, plus
-the seven evidence-ingress write routes, are registered from
-dependency-explicit modules under `control_plane.http_routes`.
+the seven evidence-ingress writes and twelve Generic Web provider writes, are
+registered from dependency-explicit modules under `control_plane.http_routes`.
 `http_app.py` remains the composition root: it passes frozen dependency objects
 and callables into the registrars, and each registrar calls the Launchplane
 FastAPI app's custom `add_api_route` directly so shared error-schema handling and
@@ -428,11 +429,13 @@ capability detection, and the existing general replay serializer. Notification
 replay remains separate until a later behavior-focused change can prove a safe
 unification.
 Route families with intervening write or UI registrations expose multiple
-registrar entrypoints rather than being reordered; in particular, product
-environment config-status remains the final API route registered immediately
-before the exception handlers. Core auth, session, service-status, and mutation
-handlers not covered by a proven registrar remain in the composition root until
-their own domain boundary is proven.
+registrar entrypoints rather than being reordered. Generic Web uses one frozen
+dependency object and handler set for its preview/deploy/promotion/verification
+block and its later rollback pair, preserving the audited global route order.
+Product environment config-status remains the final API route registered
+immediately before the exception handlers. Core auth, session, service-status,
+and mutation handlers not covered by a proven registrar remain in the
+composition root until their own domain boundary is proven.
 
 Frontend contract generation uses the same boundary. Run
 `uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`

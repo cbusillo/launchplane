@@ -1276,7 +1276,7 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
                     side_effect=execute_promotion,
                 ) as execute_mock,
                 patch(
-                    "control_plane.http_app.default_generic_web_deploy_provider",
+                    "control_plane.http_routes.generic_web.default_generic_web_deploy_provider",
                     return_value=deploy_provider,
                 ),
             ):

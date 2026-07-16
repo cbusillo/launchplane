@@ -33,7 +33,7 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane import secrets as control_plane_secrets
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
-from control_plane.http_app import _GenericWebDeployProviderMutationAdapter
+from control_plane.http_routes.generic_web import _GenericWebDeployProviderMutationAdapter
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     GenericWebDeployStore,
