@@ -35746,6 +35746,15 @@
                         "default": true,
                         "title": "Label Required",
                         "type": "boolean"
+                      },
+                      "trusted_automation_github_user_ids": {
+                        "default": [],
+                        "items": {
+                          "exclusiveMinimum": 0,
+                          "type": "integer"
+                        },
+                        "title": "Trusted Automation Github User Ids",
+                        "type": "array"
                       }
                     },
                     "title": "MergeTrainEnqueuePolicy",

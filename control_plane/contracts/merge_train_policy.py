@@ -2,9 +2,17 @@ import hashlib
 import json
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 
 MergeTrainActorRole = Literal["repo_owner", "repo_admin"]
@@ -20,13 +28,24 @@ class MergeTrainEnqueuePolicy(BaseModel):
 
     label_required: bool = True
     allowed_actor_roles: tuple[MergeTrainActorRole, ...] = ("repo_owner", "repo_admin")
+    trusted_automation_github_user_ids: tuple[PositiveInt, ...] = ()
 
     @model_validator(mode="after")
     def _validate_enqueue_policy(self) -> "MergeTrainEnqueuePolicy":
         if not self.allowed_actor_roles:
             raise ValueError("merge train enqueue policy requires at least one actor role")
         self.allowed_actor_roles = tuple(dict.fromkeys(self.allowed_actor_roles))
+        self.trusted_automation_github_user_ids = tuple(
+            sorted(set(self.trusted_automation_github_user_ids))
+        )
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_enqueue_policy(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload = cast(dict[str, Any], handler(self))
+        if not self.trusted_automation_github_user_ids:
+            payload.pop("trusted_automation_github_user_ids", None)
+        return payload
 
 
 class MergeTrainIdentity(BaseModel):
@@ -222,6 +241,13 @@ def load_merge_train_policy(policy_file: Path) -> MergeTrainPolicy:
 def merge_train_policy_sha256(policy: MergeTrainPolicy) -> str:
     policy_payload = policy.model_dump(mode="json")
     for repository_policy in policy_payload.get("policies", ()):
+        enqueue_policy = (
+            repository_policy.get("enqueue") if isinstance(repository_policy, dict) else None
+        )
+        if isinstance(enqueue_policy, dict) and not enqueue_policy.get(
+            "trusted_automation_github_user_ids"
+        ):
+            enqueue_policy.pop("trusted_automation_github_user_ids", None)
         if isinstance(repository_policy, dict) and not repository_policy.get(
             "stack_child_disposition_label"
         ):

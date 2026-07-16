@@ -850,6 +850,7 @@ class GitHubMergeTrainSnapshotReader:
         head_repository = _repository_full_name(head.get("repo"), "GitHub pull request head repo")
         base_repository = _repository_full_name(base.get("repo"), "GitHub pull request base repo")
         user = _json_object(source.get("user"), "GitHub pull request user")
+        actor_id = _required_int(user.get("id"), "GitHub pull request user requires id.")
         actor_role = self._actor_role_for_pull_request(
             repository_path=repository_path,
             username=_required_text(user.get("login"), "GitHub pull request user requires login."),
@@ -865,6 +866,7 @@ class GitHubMergeTrainSnapshotReader:
                 source.get("created_at"), "GitHub pull request entry requires created_at."
             ),
             labels=_labels(source.get("labels")),
+            actor_id=actor_id,
             actor_role=actor_role,
             head_sha=head_sha,
             head_ref=_required_text(head.get("ref"), "GitHub pull request head requires ref."),

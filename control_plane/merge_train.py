@@ -1,6 +1,6 @@
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
@@ -8,14 +8,10 @@ from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolic
 
 
 MergeTrainCheckStatus = Literal["pass", "fail", "pending", "unknown"]
-MergeTrainDryRunAction = Literal[
-    "idle", "block", "merge", "update_branch", "wait_for_checks"
-]
+MergeTrainDryRunAction = Literal["idle", "block", "merge", "update_branch", "wait_for_checks"]
 MergeTrainMergeableState = Literal["mergeable", "conflicting", "unknown"]
 MergeTrainPullRequestState = Literal["open", "closed", "merged"]
-MergeTrainStackDiscoveryStatus = Literal[
-    "ready_for_collapse", "not_stacked", "unsupported"
-]
+MergeTrainStackDiscoveryStatus = Literal["ready_for_collapse", "not_stacked", "unsupported"]
 
 
 class MergeTrainLabelClient(Protocol):
@@ -57,6 +53,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     is_draft: bool = False
     created_at: str
     labels: tuple[str, ...] = ()
+    actor_id: PositiveInt | None = None
     actor_role: str = "unknown"
     head_sha: str
     head_ref: str = ""
@@ -242,7 +239,9 @@ def build_merge_train_dry_run_result(
     )
     queue = tuple(
         _build_queue_entry(repository_policy, pull_request)
-        for pull_request in sorted(base_pull_requests, key=lambda item: (item.created_at, item.number))
+        for pull_request in sorted(
+            base_pull_requests, key=lambda item: (item.created_at, item.number)
+        )
     )
     selected_pr = next((entry for entry in queue if entry.eligible), None)
     intended_next_action, next_action_detail = _next_action_for_selected_pr(
@@ -267,7 +266,9 @@ def build_merge_train_dry_run_result(
 def discover_merge_train_stack(
     *, snapshot: MergeTrainDryRunSnapshot, root_pull_request_number: int
 ) -> MergeTrainStackDiscoveryResult:
-    pull_requests_by_number = {pull_request.number: pull_request for pull_request in snapshot.pull_requests}
+    pull_requests_by_number = {
+        pull_request.number: pull_request for pull_request in snapshot.pull_requests
+    }
     root_pull_request = pull_requests_by_number.get(root_pull_request_number)
     if root_pull_request is None:
         return MergeTrainStackDiscoveryResult(
@@ -281,7 +282,10 @@ def discover_merge_train_stack(
         snapshot=snapshot, pull_request=root_pull_request
     )
     if root_pull_request.base_ref != snapshot.base_branch:
-        unsupported_reasons = (*unsupported_reasons, "root pull request does not target base branch")
+        unsupported_reasons = (
+            *unsupported_reasons,
+            "root pull request does not target base branch",
+        )
     if unsupported_reasons:
         return _unsupported_stack_result(
             snapshot=snapshot,
@@ -392,10 +396,7 @@ def apply_merge_train_branch_update_intent(
     dry_run_result: MergeTrainDryRunResult,
     branch_client: MergeTrainBranchClient,
 ) -> MergeTrainBranchUpdateResult:
-    if (
-        dry_run_result.intended_next_action != "update_branch"
-        or dry_run_result.selected_pr is None
-    ):
+    if dry_run_result.intended_next_action != "update_branch" or dry_run_result.selected_pr is None:
         return MergeTrainBranchUpdateResult(
             status="skipped",
             repository=dry_run_result.repository,
@@ -516,6 +517,11 @@ def _build_queue_entry(
     pull_request: MergeTrainPullRequestSnapshot,
 ) -> MergeTrainQueueEntry:
     ineligible_reasons: list[str] = []
+    is_trusted_automation = (
+        pull_request.actor_id is not None
+        and pull_request.actor_id in repository_policy.enqueue.trusted_automation_github_user_ids
+    )
+    actor_role = "trusted_automation" if is_trusted_automation else pull_request.actor_role
     if pull_request.state != "open":
         ineligible_reasons.append("pull request is not open")
     if pull_request.is_draft:
@@ -525,7 +531,10 @@ def _build_queue_entry(
         and repository_policy.enqueue_label not in pull_request.labels
     ):
         ineligible_reasons.append(f"missing {repository_policy.enqueue_label} label")
-    if pull_request.actor_role not in repository_policy.enqueue.allowed_actor_roles:
+    if (
+        not is_trusted_automation
+        and actor_role not in repository_policy.enqueue.allowed_actor_roles
+    ):
         ineligible_reasons.append("actor role is not allowed to enqueue")
     return MergeTrainQueueEntry(
         number=pull_request.number,
@@ -534,7 +543,7 @@ def _build_queue_entry(
         created_at=pull_request.created_at,
         head_sha=pull_request.head_sha,
         labels=pull_request.labels,
-        actor_role=pull_request.actor_role,
+        actor_role=actor_role,
         mergeable=pull_request.mergeable,
         required_checks_status=pull_request.required_checks_status,
         branch_update_required=pull_request.branch_update_required,
