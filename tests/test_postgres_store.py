@@ -191,6 +191,7 @@ from control_plane.storage.postgres import (
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
+from tests.support.artifact_manifests import artifact_manifest_v2
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1747,6 +1748,26 @@ class PostgresRecordStoreTests(unittest.TestCase):
             self.assertEqual(loaded.image.repository, "ghcr.io/cbusillo/odoo-tenant-opw")
             self.assertEqual(len(listed), 1)
             self.assertEqual(listed[0].image.digest, "sha256:image123")
+            self.assertIsNone(loaded.dependency_provenance)
+
+    def test_v2_artifact_dependency_provenance_round_trips(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            manifest = artifact_manifest_v2()
+
+            store.write_artifact_manifest(manifest)
+            loaded = store.read_artifact_manifest(manifest.artifact_id)
+
+            provenance = loaded.dependency_provenance
+            assert provenance is not None
+            self.assertEqual(loaded.schema_version, 2)
+            self.assertEqual(provenance.uv_locks[0].scope, "support_runtime")
+            self.assertEqual(
+                provenance.external_compatibility_inputs[0].resolution_posture,
+                "exact_source_unlocked",
+            )
 
     def test_artifacts_show_uses_database_store_when_configured(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

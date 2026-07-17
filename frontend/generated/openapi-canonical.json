@@ -531,8 +531,122 @@
         "title": "ArtifactBuildToolProvenance",
         "type": "object"
       },
+      "ArtifactDependencyProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "external_compatibility_inputs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ArtifactExternalCompatibilityInput"
+            },
+            "title": "External Compatibility Inputs",
+            "type": "array"
+          },
+          "python_environments": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ArtifactPythonEnvironmentProvenance"
+            },
+            "title": "Python Environments",
+            "type": "object"
+          },
+          "target_platforms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Target Platforms",
+            "type": "array"
+          },
+          "uv_locks": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactUvLockProvenance"
+            },
+            "title": "Uv Locks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "target_platforms",
+          "uv_locks",
+          "python_environments"
+        ],
+        "title": "ArtifactDependencyProvenance",
+        "type": "object"
+      },
+      "ArtifactExternalCompatibilityInput": {
+        "additionalProperties": false,
+        "properties": {
+          "dependency_file_path": {
+            "title": "Dependency File Path",
+            "type": "string"
+          },
+          "dependency_file_sha256": {
+            "title": "Dependency File Sha256",
+            "type": "string"
+          },
+          "format": {
+            "enum": [
+              "pyproject_toml",
+              "requirements_txt"
+            ],
+            "title": "Format",
+            "type": "string"
+          },
+          "resolution_posture": {
+            "enum": [
+              "locked",
+              "exact_source_unlocked"
+            ],
+            "title": "Resolution Posture",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "source_repository": {
+            "title": "Source Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_repository",
+          "source_ref",
+          "dependency_file_path",
+          "dependency_file_sha256",
+          "format",
+          "resolution_posture"
+        ],
+        "title": "ArtifactExternalCompatibilityInput",
+        "type": "object"
+      },
       "ArtifactIdentityManifest": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "properties": {
+              "dependency_provenance": {
+                "type": "null"
+              },
+              "schema_version": {
+                "const": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "dependency_provenance": {
+                "$ref": "#/components/schemas/ArtifactDependencyProvenance"
+              },
+              "schema_version": {
+                "const": 2
+              }
+            },
+            "required": [
+              "schema_version",
+              "dependency_provenance"
+            ]
+          }
+        ],
         "properties": {
           "addon_selectors": {
             "default": [],
@@ -560,6 +674,16 @@
           "build_provenance": {
             "$ref": "#/components/schemas/ArtifactBuildProvenance"
           },
+          "dependency_provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactDependencyProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "enterprise_base_digest": {
             "title": "Enterprise Base Digest",
             "type": "string"
@@ -580,7 +704,10 @@
           },
           "schema_version": {
             "default": 1,
-            "minimum": 1.0,
+            "enum": [
+              1,
+              2
+            ],
             "title": "Schema Version",
             "type": "integer"
           },
@@ -660,6 +787,128 @@
           }
         },
         "title": "ArtifactOpenUpgradeInputs",
+        "type": "object"
+      },
+      "ArtifactPythonEnvironmentProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "package_count": {
+            "minimum": 0.0,
+            "title": "Package Count",
+            "type": "integer"
+          },
+          "packages": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactPythonPackage"
+            },
+            "title": "Packages",
+            "type": "array"
+          },
+          "packages_sha256": {
+            "title": "Packages Sha256",
+            "type": "string"
+          },
+          "python_version": {
+            "title": "Python Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "python_version",
+          "packages",
+          "package_count",
+          "packages_sha256"
+        ],
+        "title": "ArtifactPythonEnvironmentProvenance",
+        "type": "object"
+      },
+      "ArtifactPythonPackage": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ArtifactPythonPackageSource"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "source"
+        ],
+        "title": "ArtifactPythonPackage",
+        "type": "object"
+      },
+      "ArtifactPythonPackageSource": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "default": "",
+            "title": "Commit",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "registry",
+              "vcs"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "repository": {
+            "default": "",
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "ArtifactPythonPackageSource",
+        "type": "object"
+      },
+      "ArtifactUvLockProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "support_runtime",
+              "tenant"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "source_repository": {
+            "title": "Source Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "source_repository",
+          "source_ref",
+          "path",
+          "sha256"
+        ],
+        "title": "ArtifactUvLockProvenance",
         "type": "object"
       },
       "AuthLogoutResponse": {
@@ -25065,8 +25314,122 @@
                     "title": "ArtifactBuildToolProvenance",
                     "type": "object"
                   },
+                  "ArtifactDependencyProvenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "external_compatibility_inputs": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/ArtifactExternalCompatibilityInput"
+                        },
+                        "title": "External Compatibility Inputs",
+                        "type": "array"
+                      },
+                      "python_environments": {
+                        "additionalProperties": {
+                          "$ref": "#/$defs/ArtifactPythonEnvironmentProvenance"
+                        },
+                        "title": "Python Environments",
+                        "type": "object"
+                      },
+                      "target_platforms": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Target Platforms",
+                        "type": "array"
+                      },
+                      "uv_locks": {
+                        "items": {
+                          "$ref": "#/$defs/ArtifactUvLockProvenance"
+                        },
+                        "title": "Uv Locks",
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "target_platforms",
+                      "uv_locks",
+                      "python_environments"
+                    ],
+                    "title": "ArtifactDependencyProvenance",
+                    "type": "object"
+                  },
+                  "ArtifactExternalCompatibilityInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "dependency_file_path": {
+                        "title": "Dependency File Path",
+                        "type": "string"
+                      },
+                      "dependency_file_sha256": {
+                        "title": "Dependency File Sha256",
+                        "type": "string"
+                      },
+                      "format": {
+                        "enum": [
+                          "pyproject_toml",
+                          "requirements_txt"
+                        ],
+                        "title": "Format",
+                        "type": "string"
+                      },
+                      "resolution_posture": {
+                        "enum": [
+                          "locked",
+                          "exact_source_unlocked"
+                        ],
+                        "title": "Resolution Posture",
+                        "type": "string"
+                      },
+                      "source_ref": {
+                        "title": "Source Ref",
+                        "type": "string"
+                      },
+                      "source_repository": {
+                        "title": "Source Repository",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "source_repository",
+                      "source_ref",
+                      "dependency_file_path",
+                      "dependency_file_sha256",
+                      "format",
+                      "resolution_posture"
+                    ],
+                    "title": "ArtifactExternalCompatibilityInput",
+                    "type": "object"
+                  },
                   "ArtifactIdentityManifest": {
                     "additionalProperties": false,
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "dependency_provenance": {
+                            "type": "null"
+                          },
+                          "schema_version": {
+                            "const": 1
+                          }
+                        }
+                      },
+                      {
+                        "properties": {
+                          "dependency_provenance": {
+                            "$ref": "#/$defs/ArtifactDependencyProvenance"
+                          },
+                          "schema_version": {
+                            "const": 2
+                          }
+                        },
+                        "required": [
+                          "schema_version",
+                          "dependency_provenance"
+                        ]
+                      }
+                    ],
                     "properties": {
                       "addon_selectors": {
                         "default": [],
@@ -25094,6 +25457,16 @@
                       "build_provenance": {
                         "$ref": "#/$defs/ArtifactBuildProvenance"
                       },
+                      "dependency_provenance": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/ArtifactDependencyProvenance"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "enterprise_base_digest": {
                         "title": "Enterprise Base Digest",
                         "type": "string"
@@ -25114,7 +25487,10 @@
                       },
                       "schema_version": {
                         "default": 1,
-                        "minimum": 1,
+                        "enum": [
+                          1,
+                          2
+                        ],
                         "title": "Schema Version",
                         "type": "integer"
                       },
@@ -25176,6 +25552,128 @@
                     "title": "ArtifactOpenUpgradeInputs",
                     "type": "object"
                   },
+                  "ArtifactPythonEnvironmentProvenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "package_count": {
+                        "minimum": 0,
+                        "title": "Package Count",
+                        "type": "integer"
+                      },
+                      "packages": {
+                        "items": {
+                          "$ref": "#/$defs/ArtifactPythonPackage"
+                        },
+                        "title": "Packages",
+                        "type": "array"
+                      },
+                      "packages_sha256": {
+                        "title": "Packages Sha256",
+                        "type": "string"
+                      },
+                      "python_version": {
+                        "title": "Python Version",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "python_version",
+                      "packages",
+                      "package_count",
+                      "packages_sha256"
+                    ],
+                    "title": "ArtifactPythonEnvironmentProvenance",
+                    "type": "object"
+                  },
+                  "ArtifactPythonPackage": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "title": "Name",
+                        "type": "string"
+                      },
+                      "source": {
+                        "$ref": "#/$defs/ArtifactPythonPackageSource"
+                      },
+                      "version": {
+                        "title": "Version",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "version",
+                      "source"
+                    ],
+                    "title": "ArtifactPythonPackage",
+                    "type": "object"
+                  },
+                  "ArtifactPythonPackageSource": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "commit": {
+                        "default": "",
+                        "title": "Commit",
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "registry",
+                          "vcs"
+                        ],
+                        "title": "Kind",
+                        "type": "string"
+                      },
+                      "repository": {
+                        "default": "",
+                        "title": "Repository",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "title": "ArtifactPythonPackageSource",
+                    "type": "object"
+                  },
+                  "ArtifactUvLockProvenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path": {
+                        "title": "Path",
+                        "type": "string"
+                      },
+                      "scope": {
+                        "enum": [
+                          "support_runtime",
+                          "tenant"
+                        ],
+                        "title": "Scope",
+                        "type": "string"
+                      },
+                      "sha256": {
+                        "title": "Sha256",
+                        "type": "string"
+                      },
+                      "source_ref": {
+                        "title": "Source Ref",
+                        "type": "string"
+                      },
+                      "source_repository": {
+                        "title": "Source Repository",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "scope",
+                      "source_repository",
+                      "source_ref",
+                      "path",
+                      "sha256"
+                    ],
+                    "title": "ArtifactUvLockProvenance",
+                    "type": "object"
+                  },
                   "OdooArtifactPublishEvidenceRequest": {
                     "additionalProperties": false,
                     "properties": {
@@ -25193,7 +25691,10 @@
                       },
                       "schema_version": {
                         "default": 1,
-                        "minimum": 1,
+                        "enum": [
+                          1,
+                          2
+                        ],
                         "title": "Schema Version",
                         "type": "integer"
                       }
@@ -25217,7 +25718,10 @@
                   },
                   "schema_version": {
                     "default": 1,
-                    "minimum": 1,
+                    "enum": [
+                      1,
+                      2
+                    ],
                     "title": "Schema Version",
                     "type": "integer"
                   }
@@ -26020,8 +26524,122 @@
                     "title": "ArtifactBuildToolProvenance",
                     "type": "object"
                   },
+                  "ArtifactDependencyProvenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "external_compatibility_inputs": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/ArtifactExternalCompatibilityInput"
+                        },
+                        "title": "External Compatibility Inputs",
+                        "type": "array"
+                      },
+                      "python_environments": {
+                        "additionalProperties": {
+                          "$ref": "#/$defs/ArtifactPythonEnvironmentProvenance"
+                        },
+                        "title": "Python Environments",
+                        "type": "object"
+                      },
+                      "target_platforms": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Target Platforms",
+                        "type": "array"
+                      },
+                      "uv_locks": {
+                        "items": {
+                          "$ref": "#/$defs/ArtifactUvLockProvenance"
+                        },
+                        "title": "Uv Locks",
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "target_platforms",
+                      "uv_locks",
+                      "python_environments"
+                    ],
+                    "title": "ArtifactDependencyProvenance",
+                    "type": "object"
+                  },
+                  "ArtifactExternalCompatibilityInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "dependency_file_path": {
+                        "title": "Dependency File Path",
+                        "type": "string"
+                      },
+                      "dependency_file_sha256": {
+                        "title": "Dependency File Sha256",
+                        "type": "string"
+                      },
+                      "format": {
+                        "enum": [
+                          "pyproject_toml",
+                          "requirements_txt"
+                        ],
+                        "title": "Format",
+                        "type": "string"
+                      },
+                      "resolution_posture": {
+                        "enum": [
+                          "locked",
+                          "exact_source_unlocked"
+                        ],
+                        "title": "Resolution Posture",
+                        "type": "string"
+                      },
+                      "source_ref": {
+                        "title": "Source Ref",
+                        "type": "string"
+                      },
+                      "source_repository": {
+                        "title": "Source Repository",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "source_repository",
+                      "source_ref",
+                      "dependency_file_path",
+                      "dependency_file_sha256",
+                      "format",
+                      "resolution_posture"
+                    ],
+                    "title": "ArtifactExternalCompatibilityInput",
+                    "type": "object"
+                  },
                   "ArtifactIdentityManifest": {
                     "additionalProperties": false,
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "dependency_provenance": {
+                            "type": "null"
+                          },
+                          "schema_version": {
+                            "const": 1
+                          }
+                        }
+                      },
+                      {
+                        "properties": {
+                          "dependency_provenance": {
+                            "$ref": "#/$defs/ArtifactDependencyProvenance"
+                          },
+                          "schema_version": {
+                            "const": 2
+                          }
+                        },
+                        "required": [
+                          "schema_version",
+                          "dependency_provenance"
+                        ]
+                      }
+                    ],
                     "properties": {
                       "addon_selectors": {
                         "default": [],
@@ -26049,6 +26667,16 @@
                       "build_provenance": {
                         "$ref": "#/$defs/ArtifactBuildProvenance"
                       },
+                      "dependency_provenance": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/ArtifactDependencyProvenance"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "enterprise_base_digest": {
                         "title": "Enterprise Base Digest",
                         "type": "string"
@@ -26069,7 +26697,10 @@
                       },
                       "schema_version": {
                         "default": 1,
-                        "minimum": 1,
+                        "enum": [
+                          1,
+                          2
+                        ],
                         "title": "Schema Version",
                         "type": "integer"
                       },
@@ -26129,6 +26760,128 @@
                       }
                     },
                     "title": "ArtifactOpenUpgradeInputs",
+                    "type": "object"
+                  },
+                  "ArtifactPythonEnvironmentProvenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "package_count": {
+                        "minimum": 0,
+                        "title": "Package Count",
+                        "type": "integer"
+                      },
+                      "packages": {
+                        "items": {
+                          "$ref": "#/$defs/ArtifactPythonPackage"
+                        },
+                        "title": "Packages",
+                        "type": "array"
+                      },
+                      "packages_sha256": {
+                        "title": "Packages Sha256",
+                        "type": "string"
+                      },
+                      "python_version": {
+                        "title": "Python Version",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "python_version",
+                      "packages",
+                      "package_count",
+                      "packages_sha256"
+                    ],
+                    "title": "ArtifactPythonEnvironmentProvenance",
+                    "type": "object"
+                  },
+                  "ArtifactPythonPackage": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "title": "Name",
+                        "type": "string"
+                      },
+                      "source": {
+                        "$ref": "#/$defs/ArtifactPythonPackageSource"
+                      },
+                      "version": {
+                        "title": "Version",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "version",
+                      "source"
+                    ],
+                    "title": "ArtifactPythonPackage",
+                    "type": "object"
+                  },
+                  "ArtifactPythonPackageSource": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "commit": {
+                        "default": "",
+                        "title": "Commit",
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "registry",
+                          "vcs"
+                        ],
+                        "title": "Kind",
+                        "type": "string"
+                      },
+                      "repository": {
+                        "default": "",
+                        "title": "Repository",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "title": "ArtifactPythonPackageSource",
+                    "type": "object"
+                  },
+                  "ArtifactUvLockProvenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path": {
+                        "title": "Path",
+                        "type": "string"
+                      },
+                      "scope": {
+                        "enum": [
+                          "support_runtime",
+                          "tenant"
+                        ],
+                        "title": "Scope",
+                        "type": "string"
+                      },
+                      "sha256": {
+                        "title": "Sha256",
+                        "type": "string"
+                      },
+                      "source_ref": {
+                        "title": "Source Ref",
+                        "type": "string"
+                      },
+                      "source_repository": {
+                        "title": "Source Repository",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "scope",
+                      "source_repository",
+                      "source_ref",
+                      "path",
+                      "sha256"
+                    ],
+                    "title": "ArtifactUvLockProvenance",
                     "type": "object"
                   },
                   "OdooPreviewDokployApplyRequest": {
@@ -26699,8 +27452,122 @@
                     "title": "ArtifactBuildToolProvenance",
                     "type": "object"
                   },
+                  "ArtifactDependencyProvenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "external_compatibility_inputs": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/ArtifactExternalCompatibilityInput"
+                        },
+                        "title": "External Compatibility Inputs",
+                        "type": "array"
+                      },
+                      "python_environments": {
+                        "additionalProperties": {
+                          "$ref": "#/$defs/ArtifactPythonEnvironmentProvenance"
+                        },
+                        "title": "Python Environments",
+                        "type": "object"
+                      },
+                      "target_platforms": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Target Platforms",
+                        "type": "array"
+                      },
+                      "uv_locks": {
+                        "items": {
+                          "$ref": "#/$defs/ArtifactUvLockProvenance"
+                        },
+                        "title": "Uv Locks",
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "target_platforms",
+                      "uv_locks",
+                      "python_environments"
+                    ],
+                    "title": "ArtifactDependencyProvenance",
+                    "type": "object"
+                  },
+                  "ArtifactExternalCompatibilityInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "dependency_file_path": {
+                        "title": "Dependency File Path",
+                        "type": "string"
+                      },
+                      "dependency_file_sha256": {
+                        "title": "Dependency File Sha256",
+                        "type": "string"
+                      },
+                      "format": {
+                        "enum": [
+                          "pyproject_toml",
+                          "requirements_txt"
+                        ],
+                        "title": "Format",
+                        "type": "string"
+                      },
+                      "resolution_posture": {
+                        "enum": [
+                          "locked",
+                          "exact_source_unlocked"
+                        ],
+                        "title": "Resolution Posture",
+                        "type": "string"
+                      },
+                      "source_ref": {
+                        "title": "Source Ref",
+                        "type": "string"
+                      },
+                      "source_repository": {
+                        "title": "Source Repository",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "source_repository",
+                      "source_ref",
+                      "dependency_file_path",
+                      "dependency_file_sha256",
+                      "format",
+                      "resolution_posture"
+                    ],
+                    "title": "ArtifactExternalCompatibilityInput",
+                    "type": "object"
+                  },
                   "ArtifactIdentityManifest": {
                     "additionalProperties": false,
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "dependency_provenance": {
+                            "type": "null"
+                          },
+                          "schema_version": {
+                            "const": 1
+                          }
+                        }
+                      },
+                      {
+                        "properties": {
+                          "dependency_provenance": {
+                            "$ref": "#/$defs/ArtifactDependencyProvenance"
+                          },
+                          "schema_version": {
+                            "const": 2
+                          }
+                        },
+                        "required": [
+                          "schema_version",
+                          "dependency_provenance"
+                        ]
+                      }
+                    ],
                     "properties": {
                       "addon_selectors": {
                         "default": [],
@@ -26728,6 +27595,16 @@
                       "build_provenance": {
                         "$ref": "#/$defs/ArtifactBuildProvenance"
                       },
+                      "dependency_provenance": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/ArtifactDependencyProvenance"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "enterprise_base_digest": {
                         "title": "Enterprise Base Digest",
                         "type": "string"
@@ -26748,7 +27625,10 @@
                       },
                       "schema_version": {
                         "default": 1,
-                        "minimum": 1,
+                        "enum": [
+                          1,
+                          2
+                        ],
                         "title": "Schema Version",
                         "type": "integer"
                       },
@@ -26808,6 +27688,128 @@
                       }
                     },
                     "title": "ArtifactOpenUpgradeInputs",
+                    "type": "object"
+                  },
+                  "ArtifactPythonEnvironmentProvenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "package_count": {
+                        "minimum": 0,
+                        "title": "Package Count",
+                        "type": "integer"
+                      },
+                      "packages": {
+                        "items": {
+                          "$ref": "#/$defs/ArtifactPythonPackage"
+                        },
+                        "title": "Packages",
+                        "type": "array"
+                      },
+                      "packages_sha256": {
+                        "title": "Packages Sha256",
+                        "type": "string"
+                      },
+                      "python_version": {
+                        "title": "Python Version",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "python_version",
+                      "packages",
+                      "package_count",
+                      "packages_sha256"
+                    ],
+                    "title": "ArtifactPythonEnvironmentProvenance",
+                    "type": "object"
+                  },
+                  "ArtifactPythonPackage": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "title": "Name",
+                        "type": "string"
+                      },
+                      "source": {
+                        "$ref": "#/$defs/ArtifactPythonPackageSource"
+                      },
+                      "version": {
+                        "title": "Version",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "version",
+                      "source"
+                    ],
+                    "title": "ArtifactPythonPackage",
+                    "type": "object"
+                  },
+                  "ArtifactPythonPackageSource": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "commit": {
+                        "default": "",
+                        "title": "Commit",
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "registry",
+                          "vcs"
+                        ],
+                        "title": "Kind",
+                        "type": "string"
+                      },
+                      "repository": {
+                        "default": "",
+                        "title": "Repository",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "title": "ArtifactPythonPackageSource",
+                    "type": "object"
+                  },
+                  "ArtifactUvLockProvenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path": {
+                        "title": "Path",
+                        "type": "string"
+                      },
+                      "scope": {
+                        "enum": [
+                          "support_runtime",
+                          "tenant"
+                        ],
+                        "title": "Scope",
+                        "type": "string"
+                      },
+                      "sha256": {
+                        "title": "Sha256",
+                        "type": "string"
+                      },
+                      "source_ref": {
+                        "title": "Source Ref",
+                        "type": "string"
+                      },
+                      "source_repository": {
+                        "title": "Source Repository",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "scope",
+                      "source_repository",
+                      "source_ref",
+                      "path",
+                      "sha256"
+                    ],
+                    "title": "ArtifactUvLockProvenance",
                     "type": "object"
                   },
                   "OdooPreviewApplyInputsRequest": {

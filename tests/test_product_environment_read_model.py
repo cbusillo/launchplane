@@ -7,11 +7,7 @@ from typing import cast
 import unittest
 
 from control_plane.contracts.artifact_identity import (
-    ArtifactBaseImageProvenance,
-    ArtifactBuildProvenance,
-    ArtifactBuildToolProvenance,
     ArtifactIdentityManifest,
-    ArtifactImageReference,
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -50,6 +46,7 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.support.artifact_manifests import artifact_manifest_v2
 
 
 def _site_profile_payload(
@@ -198,34 +195,9 @@ class _RuntimeIdentityReadModelStore(_PreviewRecordStore):
     ) -> None:
         super().__init__(profile, ())
         self._inventory = inventory
-        self._artifact_manifest = ArtifactIdentityManifest(
+        self._artifact_manifest = artifact_manifest_v2(
             artifact_id="ghcr.io/every/example-site@sha256:abc123",
-            source_commit="abc123",
-            enterprise_base_digest="sha256:enterprise",
-            image=ArtifactImageReference(
-                repository="ghcr.io/every/example-site",
-                digest="sha256:abc123",
-            ),
-            build_provenance=ArtifactBuildProvenance(
-                base_images=(
-                    ArtifactBaseImageProvenance(
-                        role="runtime",
-                        image=ArtifactImageReference(
-                            repository="ghcr.io/cbusillo/odoo-runtime",
-                            digest="sha256:runtime",
-                        ),
-                        source_repository="cbusillo/odoo-docker",
-                        source_ref="1111111111111111111111111111111111111111",
-                    ),
-                ),
-                build_tools=(
-                    ArtifactBuildToolProvenance(
-                        name="odoo-devkit",
-                        source_repository="cbusillo/odoo-devkit",
-                        source_ref="2222222222222222222222222222222222222222",
-                    ),
-                ),
-            ),
+            image_repository="ghcr.io/every/example-site",
         )
 
     def read_environment_inventory(
@@ -1217,7 +1189,15 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             artifact_manifest.build_provenance.build_tools[0].name,
             "odoo-devkit",
         )
+        dependency_provenance = artifact_manifest.dependency_provenance
+        assert dependency_provenance is not None
+        self.assertEqual(
+            dependency_provenance.python_environments["linux/amd64"].python_version,
+            "3.13.5",
+        )
+        self.assertEqual(dependency_provenance.uv_locks[1].scope, "tenant")
         self.assertIn("odoo-devkit", detail.model_dump_json())
+        self.assertIn("simple-zpl2", detail.model_dump_json())
 
     def test_product_environment_detail_exposes_physical_provider_target(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

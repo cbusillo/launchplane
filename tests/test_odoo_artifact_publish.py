@@ -21,6 +21,7 @@ from control_plane.workflows.odoo_artifact_publish import (
     execute_odoo_artifact_publish,
     ingest_odoo_artifact_publish_evidence,
 )
+from tests.support.artifact_manifests import artifact_manifest_v2
 
 
 def _artifact_payload() -> dict[str, object]:
@@ -136,6 +137,7 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
 
         self.assertEqual(manifest.build_provenance.base_images, ())
         self.assertEqual(manifest.build_provenance.build_tools, ())
+        self.assertIsNone(manifest.dependency_provenance)
 
     def test_artifact_manifest_rejects_duplicate_base_image_roles(self) -> None:
         payload = _artifact_payload()
@@ -184,6 +186,14 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
         self.assertEqual(publish_request.context, "new-site")
         self.assertEqual(evidence_request.context, "new-site")
         self.assertEqual(inputs_request.context, "new-site")
+
+    def test_publish_evidence_request_rejects_manifest_schema_downgrade(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "must match manifest schema_version"):
+            OdooArtifactPublishEvidenceRequest(
+                context="cm",
+                instance="testing",
+                manifest=artifact_manifest_v2(),
+            )
 
     def test_publish_requests_reject_blank_contexts(self) -> None:
         with self.assertRaisesRegex(ValidationError, "requires context"):
@@ -323,6 +333,158 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
         self.assertIn("wrong context", result.error_message)
         record_store.write_artifact_manifest.assert_not_called()
 
+    def test_publish_rejects_invalid_v2_manifest_without_leaking_source_url(self) -> None:
+        record_store = self._record_store()
+        sensitive_url = "https://token@github.com/cbusillo/private.git?token=secret"
+
+        def fake_run(
+            command: list[str], *, capture_output: bool, text: bool, env: dict[str, str]
+        ) -> Mock:
+            del capture_output, text, env
+            payload = artifact_manifest_v2().model_dump(mode="json")
+            provenance = payload["dependency_provenance"]
+            assert isinstance(provenance, dict)
+            environments = provenance["python_environments"]
+            environments["linux/amd64"]["packages"][1]["source"]["repository"] = sensitive_url
+            output_file = Path(command[command.index("--output-file") + 1])
+            output_file.write_text(json.dumps(payload), encoding="utf-8")
+            return Mock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_artifact_publish.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"ODOO_MASTER_PASSWORD": "managed-secret"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_artifact_publish.subprocess.run", side_effect=fake_run
+            ),
+        ):
+            result = execute_odoo_artifact_publish(
+                control_plane_root=Path("/launchplane"),
+                record_store=record_store,
+                request=OdooArtifactPublishRequest(
+                    context="cm",
+                    manifest_path=Path("/work/cm/workspace.toml"),
+                    devkit_root=Path("/work/odoo-devkit"),
+                    image_repository="ghcr.io/cbusillo/odoo-tenant-cm",
+                    image_tag="cm-20260716-v2",
+                ),
+            )
+
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(
+            result.error_message,
+            "Odoo artifact publish produced an invalid artifact manifest.",
+        )
+        self.assertNotIn(sensitive_url, result.error_message)
+        record_store.write_artifact_manifest.assert_not_called()
+
+    def test_publish_binds_v2_manifest_to_requested_schema_repository_and_platforms(self) -> None:
+        cases = (
+            ("schema", _artifact_payload(), "wrong schema version"),
+            (
+                "repository",
+                artifact_manifest_v2(
+                    image_repository="ghcr.io/cbusillo/odoo-tenant-other"
+                ).model_dump(mode="json"),
+                "wrong image repository",
+            ),
+            (
+                "platforms",
+                artifact_manifest_v2().model_dump(mode="json"),
+                "incomplete target platform evidence",
+            ),
+        )
+        for label, payload, expected_error in cases:
+            with self.subTest(label=label):
+                record_store = self._record_store()
+                if label == "platforms":
+                    provenance = payload["dependency_provenance"]
+                    assert isinstance(provenance, dict)
+                    provenance["target_platforms"] = ["linux/amd64"]
+                    provenance["python_environments"] = {
+                        "linux/amd64": provenance["python_environments"]["linux/amd64"]
+                    }
+
+                def fake_run(
+                    command: list[str],
+                    *,
+                    capture_output: bool,
+                    text: bool,
+                    env: dict[str, str],
+                ) -> Mock:
+                    del capture_output, text, env
+                    output_file = Path(command[command.index("--output-file") + 1])
+                    output_file.write_text(json.dumps(payload), encoding="utf-8")
+                    return Mock(returncode=0, stdout="", stderr="")
+
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_artifact_publish.control_plane_runtime_environments.resolve_runtime_environment_values",
+                        return_value={"ODOO_MASTER_PASSWORD": "managed-secret"},
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_artifact_publish.subprocess.run",
+                        side_effect=fake_run,
+                    ),
+                ):
+                    result = execute_odoo_artifact_publish(
+                        control_plane_root=Path("/launchplane"),
+                        record_store=record_store,
+                        request=OdooArtifactPublishRequest(
+                            schema_version=2,
+                            context="cm",
+                            manifest_path=Path("/work/cm/workspace.toml"),
+                            devkit_root=Path("/work/odoo-devkit"),
+                            image_repository="ghcr.io/cbusillo/odoo-tenant-cm",
+                            image_tag="cm-20260716-v2",
+                            platforms=("linux/amd64", "linux/arm64"),
+                        ),
+                    )
+
+                self.assertEqual(result.status, "fail")
+                self.assertIn(expected_error, result.error_message)
+                record_store.write_artifact_manifest.assert_not_called()
+
+    def test_publish_rejects_non_utf8_manifest_as_structured_failure(self) -> None:
+        record_store = self._record_store()
+
+        def fake_run(
+            command: list[str], *, capture_output: bool, text: bool, env: dict[str, str]
+        ) -> Mock:
+            del capture_output, text, env
+            output_file = Path(command[command.index("--output-file") + 1])
+            output_file.write_bytes(b"\xff")
+            return Mock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_artifact_publish.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"ODOO_MASTER_PASSWORD": "managed-secret"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_artifact_publish.subprocess.run", side_effect=fake_run
+            ),
+        ):
+            result = execute_odoo_artifact_publish(
+                control_plane_root=Path("/launchplane"),
+                record_store=record_store,
+                request=OdooArtifactPublishRequest(
+                    context="cm",
+                    manifest_path=Path("/work/cm/workspace.toml"),
+                    devkit_root=Path("/work/odoo-devkit"),
+                    image_repository="ghcr.io/cbusillo/odoo-tenant-cm",
+                    image_tag="cm-20260716-v1",
+                ),
+            )
+
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(
+            result.error_message,
+            "Odoo artifact publish produced invalid artifact manifest JSON.",
+        )
+        record_store.write_artifact_manifest.assert_not_called()
+
     def test_ingest_publish_evidence_writes_artifact_manifest(self) -> None:
         record_store = self._record_store()
 
@@ -339,6 +501,27 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
         self.assertEqual(result.artifact_id, "artifact-cm-005c291b63b6")
         written_manifest = record_store.write_artifact_manifest.call_args.args[0]
         self.assertEqual(written_manifest.artifact_id, "artifact-cm-005c291b63b6")
+
+    def test_ingest_publish_evidence_writes_v2_dependency_provenance(self) -> None:
+        record_store = self._record_store()
+        manifest = artifact_manifest_v2()
+
+        result = ingest_odoo_artifact_publish_evidence(
+            record_store=record_store,
+            request=OdooArtifactPublishEvidenceRequest(
+                schema_version=2,
+                context="cm",
+                instance="testing",
+                manifest=manifest,
+            ),
+        )
+
+        self.assertEqual(result.status, "pass")
+        written_manifest = record_store.write_artifact_manifest.call_args.args[0]
+        provenance = written_manifest.dependency_provenance
+        assert provenance is not None
+        self.assertEqual(written_manifest.schema_version, 2)
+        self.assertEqual(provenance.uv_locks[1].source_repository, "cbusillo/odoo-tenant-cm")
 
     def test_publish_inputs_return_only_build_scoped_environment_keys(self) -> None:
         with patch(

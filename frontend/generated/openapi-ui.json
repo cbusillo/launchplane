@@ -2808,8 +2808,127 @@
         "title": "ArtifactBuildToolProvenance",
         "type": "object"
       },
+      "ArtifactDependencyProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "external_compatibility_inputs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ArtifactExternalCompatibilityInput"
+            },
+            "title": "External Compatibility Inputs",
+            "type": "array"
+          },
+          "python_environments": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ArtifactPythonEnvironmentProvenance"
+            },
+            "title": "Python Environments",
+            "type": "object"
+          },
+          "target_platforms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Target Platforms",
+            "type": "array"
+          },
+          "uv_locks": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactUvLockProvenance"
+            },
+            "title": "Uv Locks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "external_compatibility_inputs",
+          "python_environments",
+          "target_platforms",
+          "uv_locks"
+        ],
+        "title": "ArtifactDependencyProvenance",
+        "type": "object"
+      },
+      "ArtifactExternalCompatibilityInput": {
+        "additionalProperties": false,
+        "properties": {
+          "dependency_file_path": {
+            "title": "Dependency File Path",
+            "type": "string"
+          },
+          "dependency_file_sha256": {
+            "title": "Dependency File Sha256",
+            "type": "string"
+          },
+          "format": {
+            "enum": [
+              "pyproject_toml",
+              "requirements_txt"
+            ],
+            "title": "Format",
+            "type": "string"
+          },
+          "resolution_posture": {
+            "enum": [
+              "locked",
+              "exact_source_unlocked"
+            ],
+            "title": "Resolution Posture",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "source_repository": {
+            "title": "Source Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dependency_file_path",
+          "dependency_file_sha256",
+          "format",
+          "resolution_posture",
+          "source_ref",
+          "source_repository"
+        ],
+        "title": "ArtifactExternalCompatibilityInput",
+        "type": "object"
+      },
       "ArtifactIdentityManifest": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "properties": {
+              "dependency_provenance": {
+                "type": "null"
+              },
+              "schema_version": {
+                "const": 1
+              }
+            },
+            "required": [
+              "dependency_provenance",
+              "schema_version"
+            ]
+          },
+          {
+            "properties": {
+              "dependency_provenance": {
+                "$ref": "#/components/schemas/ArtifactDependencyProvenance"
+              },
+              "schema_version": {
+                "const": 2
+              }
+            },
+            "required": [
+              "dependency_provenance",
+              "schema_version"
+            ]
+          }
+        ],
         "properties": {
           "addon_selectors": {
             "default": [],
@@ -2837,6 +2956,16 @@
           "build_provenance": {
             "$ref": "#/components/schemas/ArtifactBuildProvenance"
           },
+          "dependency_provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactDependencyProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "enterprise_base_digest": {
             "title": "Enterprise Base Digest",
             "type": "string"
@@ -2857,7 +2986,10 @@
           },
           "schema_version": {
             "default": 1,
-            "minimum": 1,
+            "enum": [
+              1,
+              2
+            ],
             "title": "Schema Version",
             "type": "integer"
           },
@@ -2872,6 +3004,7 @@
           "artifact_id",
           "build_flags",
           "build_provenance",
+          "dependency_provenance",
           "enterprise_base_digest",
           "image",
           "odoo_install_modules",
@@ -2951,6 +3084,130 @@
           "addon_repository",
           "install_spec"
         ]
+      },
+      "ArtifactPythonEnvironmentProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "package_count": {
+            "minimum": 0,
+            "title": "Package Count",
+            "type": "integer"
+          },
+          "packages": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactPythonPackage"
+            },
+            "title": "Packages",
+            "type": "array"
+          },
+          "packages_sha256": {
+            "title": "Packages Sha256",
+            "type": "string"
+          },
+          "python_version": {
+            "title": "Python Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "package_count",
+          "packages",
+          "packages_sha256",
+          "python_version"
+        ],
+        "title": "ArtifactPythonEnvironmentProvenance",
+        "type": "object"
+      },
+      "ArtifactPythonPackage": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ArtifactPythonPackageSource"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "source",
+          "version"
+        ],
+        "title": "ArtifactPythonPackage",
+        "type": "object"
+      },
+      "ArtifactPythonPackageSource": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "default": "",
+            "title": "Commit",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "registry",
+              "vcs"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "repository": {
+            "default": "",
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commit",
+          "kind",
+          "repository"
+        ],
+        "title": "ArtifactPythonPackageSource",
+        "type": "object"
+      },
+      "ArtifactUvLockProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "support_runtime",
+              "tenant"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "source_repository": {
+            "title": "Source Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "scope",
+          "sha256",
+          "source_ref",
+          "source_repository"
+        ],
+        "title": "ArtifactUvLockProvenance",
+        "type": "object"
       },
       "AuthSessionRequiredResponse": {
         "additionalProperties": false,

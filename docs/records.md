@@ -311,9 +311,12 @@ an ORM column/table or remains only in the evidence payload.
 
 - Artifact manifest: modeled fields are `artifact_id`, `source_commit`,
   `image_repository`, and `image_digest`. The payload also carries typed Odoo
-  build provenance for base images and build tools such as `odoo-devkit`.
-  Source input details, addon selectors, support-repo provenance, and provider
-  evidence stay payload-only until they become normal query or action fields.
+  build provenance for base images and build tools such as `odoo-devkit`, plus
+  schema-v2 dependency provenance for uv locks, platform-specific Python
+  inventories, and exact-source external compatibility inputs. Source input
+  details, addon selectors, dependency provenance, support-repo provenance, and
+  provider evidence stay payload-only until they become normal query or action
+  fields.
 - Backup gate: modeled fields are `record_id`, `context`, `instance`,
   `created_at`, and `status`. Concrete backup paths and provider-specific backup
   evidence stay payload-only.
@@ -1094,6 +1097,33 @@ run` is the foreground loop intended for an external process supervisor, and
   `odoo-shared-addons`, and `disable_odoo_online` stay support/dependency repos,
   while Launchplane records the immutable image/build refs used to produce an
   artifact.
+- Artifact manifest schema v1 remains readable without synthetic dependency
+  evidence. Schema v2 requires both complete build provenance and
+  `dependency_provenance`. The dependency payload records exactly one
+  `support_runtime` uv lock and one `tenant` uv lock, each bound to a source
+  repository, exact git commit, repo-relative `uv.lock` path, and SHA-256. The
+  tenant lock commit must equal the manifest source commit; the support/runtime
+  lock repository and commit must equal one exact-source build-tool entry.
+- Schema-v2 Python environment evidence is keyed by every published OCI target
+  platform. Each environment records an exact Python version, canonical package
+  names and exact installed versions, sanitized registry-or-VCS source evidence,
+  package count,
+  and a SHA-256 over compact, key-sorted JSON for the package list. VCS source
+  evidence contains only sanitized repository identity and the resolved git
+  commit; raw direct URLs, local paths, URL userinfo, queries, and fragments are
+  not persisted.
+- The package-inventory digest sorts entries by canonical package name, dumps
+  each complete `{name, source, version}` object with recursively sorted JSON
+  keys, ASCII escaping, and separators `,` and `:` with no whitespace, then
+  hashes the resulting UTF-8 JSON array. Registry sources use
+  `{kind: "registry", repository: "", commit: ""}`; VCS sources use
+  `{kind: "vcs", repository: <sanitized identity>, commit: <exact SHA>}`.
+- Exact-source external compatibility inputs record their repository commit,
+  repo-relative dependency-file path and SHA-256, dependency-file format, and
+  whether resolution was locked or explicitly exact-source/unlocked. Launchplane
+  validates and stores this producer evidence; it does not fetch repositories,
+  read dependency files, contact package indexes, resolve versions, or install
+  dependencies.
 - `odoo-docker` owns Odoo base-image build and promotion across its own
   candidate, testing, and stable image tracks. Launchplane does not create a
   separate base-image promotion record today; it consumes the selected
@@ -1118,9 +1148,9 @@ run` is the foreground loop intended for an external process supervisor, and
 - Tuple minting requires artifact manifest source refs to be exact git SHAs;
   branch names such as `main` or `origin/testing` are rejected instead of being
   written as release truth.
-- Tuple minting uses tenant and addon source SHAs only. Base-image and build-tool
-  provenance remains on the artifact manifest payload and does not expand the
-  release tuple `repo_shas` map.
+- Tuple minting uses tenant and addon source SHAs only. Base-image, build-tool,
+  lockfile, package, and compatibility-input provenance remains on the artifact
+  manifest payload and does not expand the release tuple `repo_shas` map.
 - Promotion execution copies the source channel tuple to the destination
   channel after the destination deploy passes, retaining the promotion and
   deployment record ids that established the promoted state.
