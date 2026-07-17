@@ -1,6 +1,6 @@
-from typing import cast
+from typing import Literal, cast
 
-from pydantic import Field, model_validator
+from pydantic import model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.drivers.dispatch import (
@@ -31,12 +31,16 @@ class OdooArtifactPublishRouteDependencyError(OdooRouteDependencyError):
 
 
 class OdooArtifactPublishEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: Literal[1, 2] = 1
     publish: OdooArtifactPublishEvidenceRequest
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooArtifactPublishEnvelope":
         _validate_driver_envelope_product(self.product, label="Odoo artifact publish")
+        if self.schema_version != self.publish.schema_version:
+            raise ValueError(
+                "Odoo artifact publish envelope schema_version must match publish schema_version."
+            )
         return self
 
 
@@ -58,6 +62,23 @@ def resolve_odoo_artifact_publish_product_route(
         raise OdooArtifactPublishRouteDependencyError from error
     except OdooProductMismatchError as error:
         raise OdooArtifactPublishProductMismatchError from error
+
+
+def validate_odoo_artifact_publish_product_evidence(
+    *,
+    product_profile: LaunchplaneProductProfileRecord | None,
+    request: OdooArtifactPublishEnvelope,
+) -> None:
+    if product_profile is None:
+        return
+    expected_repository = product_profile.image.repository.strip().rstrip("/")
+    if not expected_repository:
+        raise ValueError("Odoo artifact publish requires a product profile image repository.")
+    observed_repository = request.publish.manifest.image.repository.strip().rstrip("/")
+    if observed_repository != expected_repository:
+        raise ValueError(
+            "Odoo artifact publish evidence image repository does not match product profile."
+        )
 
 
 def ingest_odoo_artifact_publish_evidence_result(

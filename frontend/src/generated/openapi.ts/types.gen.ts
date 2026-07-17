@@ -62,17 +62,42 @@ export type ArtifactBuildToolProvenance = {
     version: string;
 };
 
-export type ArtifactIdentityManifest = {
+export type ArtifactDependencyProvenance = {
+    external_compatibility_inputs: Array<ArtifactExternalCompatibilityInput>;
+    python_environments: {
+        [key: string]: ArtifactPythonEnvironmentProvenance;
+    };
+    target_platforms: Array<string>;
+    uv_locks: Array<ArtifactUvLockProvenance>;
+};
+
+export type ArtifactExternalCompatibilityInput = {
+    dependency_file_path: string;
+    dependency_file_sha256: string;
+    format: 'pyproject_toml' | 'requirements_txt';
+    resolution_posture: 'locked' | 'exact_source_unlocked';
+    source_ref: string;
+    source_repository: string;
+};
+
+export type ArtifactIdentityManifest = ({
+    dependency_provenance: null;
+    schema_version: 1;
+} | {
+    dependency_provenance: ArtifactDependencyProvenance;
+    schema_version: 2;
+}) & {
     addon_selectors: Array<ArtifactAddonSelector>;
     addon_sources: Array<ArtifactAddonSource>;
     artifact_id: string;
     build_flags: ArtifactBuildFlags;
     build_provenance: ArtifactBuildProvenance;
+    dependency_provenance: ArtifactDependencyProvenance | null;
     enterprise_base_digest: string;
     image: ArtifactImageReference;
     odoo_install_modules: Array<string>;
     openupgrade_inputs: ArtifactOpenUpgradeInputs;
-    schema_version: number;
+    schema_version: 1 | 2;
     source_commit: string;
 };
 
@@ -90,6 +115,33 @@ export type ArtifactImageReference = {
 export type ArtifactOpenUpgradeInputs = {
     addon_repository: string;
     install_spec: string;
+};
+
+export type ArtifactPythonEnvironmentProvenance = {
+    package_count: number;
+    packages: Array<ArtifactPythonPackage>;
+    packages_sha256: string;
+    python_version: string;
+};
+
+export type ArtifactPythonPackage = {
+    name: string;
+    source: ArtifactPythonPackageSource;
+    version: string;
+};
+
+export type ArtifactPythonPackageSource = {
+    commit: string;
+    kind: 'registry' | 'vcs';
+    repository: string;
+};
+
+export type ArtifactUvLockProvenance = {
+    path: string;
+    scope: 'support_runtime' | 'tenant';
+    sha256: string;
+    source_ref: string;
+    source_repository: string;
 };
 
 export type AuthSessionRequiredResponse = {

@@ -67,6 +67,7 @@ from tests.http_app_test_support import (
     _post_odoo_website_bootstrap_override,
 )
 from tests.support.auth import _identity, _StubVerifier
+from tests.support.artifact_manifests import artifact_manifest_v2
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.support.stores import (
     _sqlite_database_url,
@@ -588,6 +589,18 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
+    def _v2_payload(self, *, product: str = "odoo", context: str = "opw") -> dict[str, object]:
+        payload = self._payload(product=product, context=context)
+        payload["schema_version"] = 2
+        publish = payload["publish"]
+        assert isinstance(publish, dict)
+        publish["schema_version"] = 2
+        publish["manifest"] = artifact_manifest_v2(
+            artifact_id=f"artifact-{context}-v2",
+            image_repository=f"ghcr.io/cbusillo/{product}",
+        ).model_dump(mode="json")
+        return payload
+
     def _identity(
         self,
         *,
@@ -659,6 +672,37 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["result"]["artifact_id"], "artifact-opw-new")
         ingest_evidence.assert_called_once()
 
+    async def test_odoo_artifact_publish_accepts_v2_dependency_provenance(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_artifact_publish_http.ingest_odoo_artifact_publish_evidence",
+                return_value=OdooArtifactPublishResult(
+                    status="pass",
+                    context="opw",
+                    instance="testing",
+                    artifact_id="artifact-opw-v2",
+                    image_repository="ghcr.io/cbusillo/odoo",
+                    image_digest=f"sha256:{'f' * 64}",
+                    source_commit="0" * 40,
+                ),
+            ) as ingest_evidence:
+                response = await _post_odoo_artifact_publish(app, self._v2_payload())
+
+        self.assertEqual(response.status_code, 202)
+        request = ingest_evidence.call_args.kwargs["request"]
+        self.assertEqual(request.manifest.schema_version, 2)
+        provenance = request.manifest.dependency_provenance
+        assert provenance is not None
+        self.assertEqual(provenance.target_platforms, ("linux/amd64", "linux/arm64"))
+
     async def test_odoo_artifact_publish_accepts_product_profile_lane(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -700,6 +744,82 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["records"]["artifact_id"], "artifact-cm_website-new")
         ingest_evidence.assert_called_once()
+
+    async def test_odoo_artifact_publish_rejects_product_profile_image_mismatch(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._tenant_store(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity()),
+                authz_policy=self._policy(
+                    product="odoo-tenant-cm-website",
+                    context="cm_website",
+                    repository="cbusillo/odoo-tenant-cm-website",
+                    workflow_ref=(
+                        "cbusillo/odoo-tenant-cm-website/.github/workflows/odoo-preview.yml@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            payload = self._payload(
+                product="odoo-tenant-cm-website",
+                context="cm_website",
+            )
+            publish = payload["publish"]
+            assert isinstance(publish, dict)
+            manifest = publish["manifest"]
+            assert isinstance(manifest, dict)
+            image = manifest["image"]
+            assert isinstance(image, dict)
+            image["repository"] = "ghcr.io/cbusillo/unrelated-image"
+
+            with patch(
+                "control_plane.odoo_artifact_publish_http.ingest_odoo_artifact_publish_evidence"
+            ) as ingest_evidence:
+                response = await _post_odoo_artifact_publish(app, payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        ingest_evidence.assert_not_called()
+
+    async def test_odoo_artifact_publish_rejects_blank_product_profile_image(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._tenant_store(root / "state")
+            profile = store.read_product_profile_record("odoo-tenant-cm-website")
+            assert profile is not None
+            profile.preview.enabled = False
+            profile.image.repository = ""
+            store.write_product_profile_record(profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity()),
+                authz_policy=self._policy(
+                    product="odoo-tenant-cm-website",
+                    context="cm_website",
+                    repository="cbusillo/odoo-tenant-cm-website",
+                    workflow_ref=(
+                        "cbusillo/odoo-tenant-cm-website/.github/workflows/odoo-preview.yml@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_artifact_publish_http.ingest_odoo_artifact_publish_evidence"
+            ) as ingest_evidence:
+                response = await _post_odoo_artifact_publish(
+                    app,
+                    self._payload(
+                        product="odoo-tenant-cm-website",
+                        context="cm_website",
+                    ),
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        ingest_evidence.assert_not_called()
 
     async def test_odoo_artifact_publish_rejects_product_profile_lane_mismatch(
         self,
@@ -813,6 +933,18 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
         )
         request_schema = route["requestBody"]["content"]["application/json"]["schema"]
         self.assertEqual(request_schema["title"], "OdooArtifactPublishEnvelope")
+        schemas = response.json()["components"]["schemas"]
+        self.assertIn("ArtifactDependencyProvenance", schemas)
+        artifact_manifest_schema = schemas["ArtifactIdentityManifest"]
+        self.assertIn("dependency_provenance", artifact_manifest_schema["properties"])
+        self.assertEqual(
+            artifact_manifest_schema["oneOf"][0]["properties"]["schema_version"]["const"],
+            1,
+        )
+        self.assertEqual(
+            artifact_manifest_schema["oneOf"][1]["required"],
+            ["schema_version", "dependency_provenance"],
+        )
         self.assertIn("400", route["responses"])
         self.assertIn("401", route["responses"])
         self.assertIn("403", route["responses"])

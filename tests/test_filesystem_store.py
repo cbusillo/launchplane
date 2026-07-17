@@ -132,6 +132,7 @@ from control_plane.contracts.runner_lane_registration import plan_runner_lane_re
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
+from tests.support.artifact_manifests import artifact_manifest_v2
 
 
 def _artifact_identity(artifact_id: str) -> ArtifactIdentityReference:
@@ -1749,6 +1750,27 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(loaded_manifest.artifact_id, manifest.artifact_id)
             self.assertEqual(loaded_manifest.image.digest, "sha256:image456")
             self.assertEqual(loaded_manifest.addon_selectors[0].selector, "main")
+            self.assertIsNone(loaded_manifest.dependency_provenance)
+            persisted_payload = json.loads(written_path.read_text(encoding="utf-8"))
+            self.assertNotIn("dependency_provenance", persisted_payload)
+
+    def test_write_and_read_v2_artifact_dependency_provenance(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            manifest = artifact_manifest_v2()
+
+            store.write_artifact_manifest(manifest)
+            loaded_manifest = store.read_artifact_manifest(manifest.artifact_id)
+
+            provenance = loaded_manifest.dependency_provenance
+            assert provenance is not None
+            self.assertEqual(loaded_manifest.schema_version, 2)
+            self.assertEqual(provenance.target_platforms, ("linux/amd64", "linux/arm64"))
+            self.assertEqual(provenance.uv_locks[1].scope, "tenant")
+            self.assertEqual(
+                provenance.python_environments["linux/arm64"].packages[1].source.commit,
+                "7" * 40,
+            )
 
     def test_write_and_read_release_tuple_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

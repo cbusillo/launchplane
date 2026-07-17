@@ -73,6 +73,7 @@ from control_plane.storage.postgres import (
 )
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
+from tests.support.artifact_manifests import artifact_manifest_v2
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
 LOCK_WAIT_TIMEOUT = "1000ms"
@@ -379,6 +380,71 @@ def _outbox_delivery(*, suffix: str = "one") -> OutboxDeliveryRecord:
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_artifact_dependency_provenance_round_trips_jsonb(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            manifest = artifact_manifest_v2()
+
+            store.write_artifact_manifest(manifest)
+            loaded = store.read_artifact_manifest(manifest.artifact_id)
+
+            provenance = loaded.dependency_provenance
+            expected_provenance = manifest.dependency_provenance
+            assert provenance is not None
+            assert expected_provenance is not None
+            self.assertEqual(loaded.schema_version, 2)
+            self.assertEqual(provenance.target_platforms, ("linux/amd64", "linux/arm64"))
+            self.assertEqual(
+                provenance.python_environments["linux/amd64"].packages_sha256,
+                expected_provenance.python_environments["linux/amd64"].packages_sha256,
+            )
+
+    def test_artifact_dependency_provenance_migration_preserves_v1_payload(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            alembic_command.upgrade(_alembic_config(database_url), "e1f3a5c7d9b1")
+            legacy_artifact_id = "artifact-cm-v1-before-dependency-provenance"
+            legacy_source_commit = "legacy-short-ref"
+            legacy_image_repository = "ghcr.io/cbusillo/odoo-tenant-cm"
+            legacy_image_digest = "sha256:legacy"
+            legacy_payload = {
+                "artifact_id": legacy_artifact_id,
+                "source_commit": legacy_source_commit,
+                "enterprise_base_digest": "sha256:legacy",
+                "image": {
+                    "repository": legacy_image_repository,
+                    "digest": legacy_image_digest,
+                },
+            }
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_artifact_manifests "
+                        "(artifact_id, source_commit, image_repository, image_digest, payload) "
+                        "VALUES (:artifact_id, :source_commit, :image_repository, :image_digest, "
+                        "CAST(:payload AS jsonb))"
+                    ),
+                    {
+                        "artifact_id": legacy_artifact_id,
+                        "source_commit": legacy_source_commit,
+                        "image_repository": legacy_image_repository,
+                        "image_digest": legacy_image_digest,
+                        "payload": json.dumps(legacy_payload),
+                    },
+                )
+            engine.dispose()
+
+            _upgrade_empty_database_to_head(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.verify_schema()
+                loaded = store.read_artifact_manifest(legacy_artifact_id)
+            finally:
+                store.close()
+
+        self.assertEqual(loaded.schema_version, 1)
+        self.assertIsNone(loaded.dependency_provenance)
+        self.assertEqual(loaded.source_commit, "legacy-short-ref")
+
     def test_alembic_from_empty_database_reaches_exact_head_and_required_invariants(
         self,
     ) -> None:

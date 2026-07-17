@@ -289,6 +289,7 @@ from control_plane.odoo_artifact_publish_http import (
     ingest_odoo_artifact_publish_evidence_result,
     resolve_odoo_artifact_publish_product_route,
     should_store_odoo_artifact_publish_idempotency,
+    validate_odoo_artifact_publish_product_evidence,
 )
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_INPUTS_ROUTE as _ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
@@ -4568,6 +4569,10 @@ def create_launchplane_fastapi_app(
                 product=publish_request.product,
                 context=publish_request.publish.context,
                 instance=publish_request.publish.instance,
+            )
+            validate_odoo_artifact_publish_product_evidence(
+                product_profile=product_profile,
+                request=publish_request,
             )
         except OdooArtifactPublishRouteDependencyError:
             return driver_route_dependency_not_found_response(

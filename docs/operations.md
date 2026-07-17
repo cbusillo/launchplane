@@ -1277,6 +1277,22 @@ the requested context, and writes the artifact manifest back to Launchplane
 records. Do not point a local devkit checkout directly at the live Launchplane
 database or recreate runtime env files to publish artifacts.
 
+Launchplane accepts historical schema-v1 artifact manifests and strict
+schema-v2 manifests. V2 records carry typed uv-lock, per-platform Python package,
+and exact-source external compatibility evidence. Launchplane validates the
+evidence shape, exact refs, sanitized source identities, and canonical package
+digest before storage, but it does not resolve or install tenant dependencies.
+Dependency resolution, environment inspection, and evidence generation remain
+with the artifact producer and generic image tooling.
+
+The rollout is reader-first. During the coordinated producer migration, v1
+publish requests remain accepted for compatibility but never satisfy a v2
+provenance requirement. A v2 envelope, publish request, and returned manifest
+must all declare version 2; local publish also binds the returned manifest to the
+requested image repository and complete requested platform set. After all
+producers migrate, service ingress can require v2 without rewriting historical
+v1 records.
+
 ## Launchplane Preview Operations
 
 Launchplane commands operate on durable preview, generation, and enablement records.

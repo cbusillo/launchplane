@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import click
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_publish_inputs import (
@@ -16,6 +16,7 @@ from control_plane.contracts.artifact_publish_inputs import (
     GenericArtifactPublishInputsResult,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.artifact_dependency_provenance import normalize_artifact_platform
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.runtime_key_safety import (
@@ -79,7 +80,7 @@ def _normalize_publish_scope(context: str, instance: str) -> tuple[str, str]:
 class OdooArtifactPublishRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: Literal[1, 2] = 1
     context: str
     instance: str = "testing"
     manifest_path: Path
@@ -99,7 +100,16 @@ class OdooArtifactPublishRequest(BaseModel):
             raise ValueError("Odoo artifact publish requires image_repository.")
         if not self.image_tag:
             raise ValueError("Odoo artifact publish requires image_tag.")
-        self.platforms = tuple(platform.strip() for platform in self.platforms if platform.strip())
+        self.platforms = tuple(
+            normalize_artifact_platform(
+                platform,
+                label="Odoo artifact publish platforms",
+            )
+            for platform in self.platforms
+            if platform.strip()
+        )
+        if len(self.platforms) != len(set(self.platforms)):
+            raise ValueError("Odoo artifact publish platforms cannot contain duplicates")
         return self
 
 
@@ -120,7 +130,7 @@ class OdooArtifactPublishResult(BaseModel):
 class OdooArtifactPublishEvidenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: Literal[1, 2] = 1
     context: str
     instance: str = "testing"
     manifest: ArtifactIdentityManifest
@@ -133,6 +143,10 @@ class OdooArtifactPublishEvidenceRequest(BaseModel):
             raise ValueError(
                 "Odoo artifact publish evidence has an artifact for the wrong context. "
                 f"Expected prefix {expected_prefix!r}; got {self.manifest.artifact_id!r}."
+            )
+        if self.manifest.schema_version != self.schema_version:
+            raise ValueError(
+                "Odoo artifact publish evidence schema_version must match manifest schema_version."
             )
         return self
 
@@ -383,12 +397,32 @@ def _read_manifest(
         raise click.ClickException(
             f"Odoo artifact publish did not create output file {output_file}."
         ) from error
-    except json.JSONDecodeError as error:
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise click.ClickException(
             "Odoo artifact publish produced invalid artifact manifest JSON."
         ) from error
-    manifest = ArtifactIdentityManifest.model_validate(payload)
+    try:
+        manifest = ArtifactIdentityManifest.model_validate(payload)
+    except ValidationError as error:
+        raise click.ClickException(
+            "Odoo artifact publish produced an invalid artifact manifest."
+        ) from error
+    if manifest.schema_version != request.schema_version:
+        raise click.ClickException(
+            "Odoo artifact publish produced a manifest with the wrong schema version."
+        )
     _validate_manifest_context(manifest=manifest, context=request.context)
+    if manifest.image.repository != request.image_repository:
+        raise click.ClickException(
+            "Odoo artifact publish produced a manifest for the wrong image repository."
+        )
+    if request.platforms and manifest.schema_version == 2:
+        dependency_provenance = manifest.dependency_provenance
+        assert dependency_provenance is not None
+        if set(dependency_provenance.target_platforms) != set(request.platforms):
+            raise click.ClickException(
+                "Odoo artifact publish produced incomplete target platform evidence."
+            )
     return manifest
 
 
