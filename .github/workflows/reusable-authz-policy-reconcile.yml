@@ -208,6 +208,7 @@ jobs:
           PY
 
       - name: Reconcile managed authz policy
+        id: reconcile
         uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_PUBLIC_URL }}
@@ -218,6 +219,35 @@ jobs:
           expected-status: "200,202"
           response-output-file: ${{ steps.request.outputs.response_file }}
           log-response-body: "false"
+
+      - name: Summarize managed authz failure
+        if: ${{ failure() && steps.reconcile.outcome == 'failure' }}
+        shell: bash
+        env:
+          EVIDENCE_DIRECTORY: ${{ steps.request.outputs.evidence_directory }}
+          RESPONSE_FILE: ${{ steps.request.outputs.response_file }}
+        run: |
+          set -euo pipefail
+
+          if [ -s "$RESPONSE_FILE" ] && jq -e 'type == "object"' "$RESPONSE_FILE" >/dev/null 2>&1; then
+            jq '{
+              status: "failed",
+              error: {
+                code: ((.error.code // .detail.error.code // "request_failed") | tostring),
+                message: ((.error.message // .detail.error.message // "Launchplane request failed without a structured error.") | tostring | .[0:500]),
+                trace_id: ((.error.trace_id // .detail.error.trace_id // "") | tostring)
+              }
+            }' "$RESPONSE_FILE" > "$EVIDENCE_DIRECTORY/error-summary.json"
+          else
+            jq -n '{
+              status: "failed",
+              error: {
+                code: "request_failed",
+                message: "Launchplane request failed without a structured error.",
+                trace_id: ""
+              }
+            }' > "$EVIDENCE_DIRECTORY/error-summary.json"
+          fi
 
       - name: Verify and summarize managed authz result
         shell: bash

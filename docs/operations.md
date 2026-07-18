@@ -420,8 +420,10 @@ reviewed plan. The service recomputes the plan against the active policy and
 rejects drift before mutation.
 
 The artifact contains only request hashes/intent and the service's redacted
-summary. The worker removes the protected desired policy, raw request, and raw
-response material before upload so repository-secret contents do not become
+summary. Failed requests add a bounded error summary containing only the
+service error code, at most 500 message characters, and the trace ID. The
+worker removes the protected desired policy, raw request, and raw response
+material before upload so repository-secret contents do not become
 artifact-readable runtime authority.
 
 Schema-v1 migration requires `schema_migration: "migrate_v1_to_v2"` in the

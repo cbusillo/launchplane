@@ -117,6 +117,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         request_step = self.workflow.step_named("reconcile", "Reconcile managed authz policy")
         self.assertIsNotNone(request_step)
         assert request_step is not None
+        self.assertEqual(request_step.data["id"], "reconcile")
         self.assertRegex(
             request_step.uses,
             r"^cbusillo/launchplane/\.github/actions/launchplane-request@[0-9a-f]{40}$",
@@ -135,6 +136,19 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(request_step.with_values["log-response-body"], "false")
 
+        failure_step = self.workflow.step_named(
+            "reconcile", "Summarize managed authz failure"
+        )
+        self.assertIsNotNone(failure_step)
+        assert failure_step is not None
+        self.assertEqual(
+            failure_step.data["if"],
+            "${{ failure() && steps.reconcile.outcome == 'failure' }}",
+        )
+        self.assertIn("error-summary.json", failure_step.run)
+        self.assertIn(".[0:500]", failure_step.run)
+        self.assertNotIn("cat \"$RESPONSE_FILE\"", failure_step.run)
+
         upload_step = self.workflow.step_named("reconcile", "Upload managed authz evidence")
         self.assertIsNotNone(upload_step)
         assert upload_step is not None
@@ -148,6 +162,10 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         )
         self.assertIsNotNone(cleanup_step)
         assert cleanup_step is not None
+        self.assertEqual(
+            cleanup_step.data["if"],
+            "always() && steps.request.outputs.private_directory != ''",
+        )
         self.assertIn('rm -rf -- "$PRIVATE_DIRECTORY"', cleanup_step.run)
 
     def test_render_step_builds_review_bound_requests(self) -> None:
