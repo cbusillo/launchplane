@@ -504,7 +504,7 @@ def build_generic_web_write_route_handlers(
                 record_store=record_store,
                 product=profile.product,
                 destination_environment=lane.instance,
-                action_allowed=lambda _action, _product, _context: True,
+                action_allowed=lambda _action, _product, _context, _instances: True,
                 workflow_credentials_ready=lambda _context: True,
             )
         except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
@@ -633,11 +633,13 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_generic_web_rollback_plan,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_generic_web_rollback_plan),
             product=rollback_request.product,
             context=lane.context,
+            instances=(lane.instance,),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -757,11 +759,13 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_generic_web_rollback,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_generic_web_rollback),
             product=rollback_request.product,
             context=lane.context,
+            instances=(lane.instance,),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -862,11 +866,10 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_generic_web_preview_desired_state,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                apply_generic_web_preview_desired_state
-            ),
             product=profile.product,
             context=profile.preview.context,
         ):
@@ -960,11 +963,10 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_generic_web_preview_inventory,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                apply_generic_web_preview_inventory
-            ),
             product=profile.product,
             context=profile.preview.context,
         ):
@@ -1027,11 +1029,10 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_generic_web_preview_readiness,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                apply_generic_web_preview_readiness
-            ),
             product=profile.product,
             context=profile.preview.context,
         ):
@@ -1096,11 +1097,10 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_generic_web_preview_refresh,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                apply_generic_web_preview_refresh
-            ),
             product=profile.product,
             context=profile.preview.context,
         ):
@@ -1191,11 +1191,10 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_generic_web_preview_destroy,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                apply_generic_web_preview_destroy
-            ),
             product=profile.product,
             context=profile.preview.context,
         ):
@@ -1287,11 +1286,13 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_generic_web_deploy,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(apply_generic_web_deploy),
             product=profile.product,
             context=lane.context,
+            instances=(lane.instance,),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -1409,13 +1410,16 @@ def build_generic_web_write_route_handlers(
                 code="authorization_denied",
                 message="Launchplane UI can only dry-run generic-web prod promotions.",
             )
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_generic_web_prod_promotion,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                apply_generic_web_prod_promotion
-            ),
             product=profile.product,
             context=lane.context.strip(),
+            instances=(
+                promotion_request.promotion.from_instance,
+                promotion_request.promotion.to_instance,
+            ),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -1607,7 +1611,7 @@ def build_generic_web_write_route_handlers(
                 ),
             )
         try:
-            profile, lane = resolve_generic_web_promotion_workflow_lane(
+            profile, lane, affected_instances = resolve_generic_web_promotion_workflow_lane(
                 record_store=record_store,
                 product=workflow_request.product,
                 context=workflow_request.workflow.context,
@@ -1631,13 +1635,13 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=dispatch_generic_web_prod_promotion_workflow,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                dispatch_generic_web_prod_promotion_workflow
-            ),
             product=profile.product,
             context=lane.context.strip(),
+            instances=affected_instances,
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -1755,13 +1759,13 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_generic_web_stable_verification,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                apply_generic_web_stable_verification
-            ),
             product=profile.product,
             context=lane.context,
+            instances=(lane.instance,),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -1849,11 +1853,10 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not dependencies.authorization_allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_generic_web_preview_verification,
+            authorization_allows=dependencies.authorization_allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                apply_generic_web_preview_verification
-            ),
             product=profile.product,
             context=profile.preview.context,
         ):

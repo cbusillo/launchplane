@@ -389,6 +389,27 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
             "deployment-example-site-testing",
         )
 
+    async def test_driver_instance_view_denies_ungranted_instance_in_shared_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = _driver_context_store(Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_driver_read_policy(
+                    context="example-site",
+                    instances=("testing",),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+
+            testing_response = await _get_driver_instance_view(app, "example-site", "testing")
+            prod_response = await _get_driver_instance_view(app, "example-site", "prod")
+
+        self.assertEqual(testing_response.status_code, 200)
+        self.assertEqual(prod_response.status_code, 403)
+        self.assertEqual(prod_response.json()["error"]["code"], "authorization_denied")
+
     async def test_driver_context_view_returns_context_summary(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = _driver_context_store(Path(temporary_directory_name) / "state")
@@ -1178,6 +1199,27 @@ class FastApiDokployTargetSetupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tracked_target_logs_deny_ungranted_instance_in_shared_context(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="target_logs.read",
+                context="sellyouroutboard-testing",
+                instances=("testing",),
+                schema_version=2,
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_tracked_target_logs(
+            app,
+            "sellyouroutboard-testing",
+            "prod",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_tracked_target_logs_returns_redacted_application_logs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

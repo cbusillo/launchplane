@@ -596,7 +596,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             build_product_site_overview(
                 record_store=store,
                 product="unknown-site",
-                action_allowed=lambda _action, _product, _context: True,
+                action_allowed=lambda _action, _product, _context, _instances: True,
             )
 
     def test_product_environment_detail_raises_for_unknown_environment(self) -> None:
@@ -608,7 +608,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                 record_store=store,
                 product="example-site",
                 environment="staging",
-                action_allowed=lambda _action, _product, _context: True,
+                action_allowed=lambda _action, _product, _context, _instances: True,
             )
 
     def test_product_site_overview_filters_preview_summaries_by_repository_and_state(self) -> None:
@@ -659,7 +659,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             )
         )
 
-        def action_allowed(action: str, product: str, context: str) -> bool:
+        def action_allowed(
+            action: str,
+            product: str,
+            context: str,
+            _instances: tuple[str, ...],
+        ) -> bool:
             return (
                 action
                 in {
@@ -690,7 +695,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload())
         seen_contexts: list[tuple[str, str]] = []
 
-        def action_allowed(action: str, _product: str, context: str) -> bool:
+        def action_allowed(
+            action: str,
+            _product: str,
+            context: str,
+            _instances: tuple[str, ...],
+        ) -> bool:
             if action == "generic_web_prod_rollback.plan":
                 seen_contexts.append((action, context))
                 return context == "cm"
@@ -732,7 +742,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             _site_profile_payload(preview_enabled=False)
         )
 
-        def action_allowed(action: str, product: str, context: str) -> bool:
+        def action_allowed(
+            action: str,
+            product: str,
+            context: str,
+            _instances: tuple[str, ...],
+        ) -> bool:
             return action == "generic_web_deploy.execute" and context == "example-site-testing"
 
         overview = build_product_site_overview(
@@ -773,7 +788,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             _site_profile_payload(preview_enabled=False)
         )
 
-        def action_allowed(action: str, product: str, context: str) -> bool:
+        def action_allowed(
+            action: str,
+            product: str,
+            context: str,
+            _instances: tuple[str, ...],
+        ) -> bool:
             return (
                 action == "generic_web_prod_promotion.dispatch"
                 and context == "example-site-testing"
@@ -795,7 +815,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             _site_profile_payload(preview_enabled=False)
         )
 
-        def action_allowed(action: str, product: str, context: str) -> bool:
+        def action_allowed(
+            action: str,
+            product: str,
+            context: str,
+            _instances: tuple[str, ...],
+        ) -> bool:
             return (
                 action == "generic_web_prod_promotion.dispatch" and context == "example-site-prod"
             )
@@ -834,7 +859,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             _site_profile_payload(preview_enabled=False)
         )
 
-        def action_allowed(action: str, product: str, context: str) -> bool:
+        def action_allowed(
+            action: str,
+            product: str,
+            context: str,
+            _instances: tuple[str, ...],
+        ) -> bool:
             return context == "example-site-testing" and action in {
                 "generic_web_prod_promotion.dispatch",
                 "generic_web_prod_promotion.execute",

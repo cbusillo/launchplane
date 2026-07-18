@@ -4,15 +4,21 @@ import json
 import unittest
 from typing import cast
 
+from pydantic import ValidationError
+
 from control_plane.authz_grant_service import (
     AuthzPolicyGitHubActionsGrant,
     AuthzPolicyGitHubActionsGrantEnvelope,
     AuthzPolicyGitHubActionsRemovalEnvelope,
     AuthzPolicyGitHubHumanGrant,
     AuthzPolicyGitHubHumanGrantEnvelope,
+    AuthzPolicyLocalAdminGrantEnvelope,
+    AuthzPolicyLocalOperatorGrantEnvelope,
+    AuthzPolicyTerminalAgentGrantEnvelope,
     authz_policy_grant_response_audit_payload,
     build_authz_policy_github_actions_removal_service_result,
     build_authz_policy_grant_service_result,
+    execute_authz_policy_route,
     plan_github_actions_authz_policy_removal,
     plan_github_actions_authz_policy_grant,
     plan_github_human_authz_policy_grant,
@@ -152,6 +158,205 @@ def _human_grant_request(mode: str = "apply") -> AuthzPolicyGitHubHumanGrantEnve
 
 
 class AuthzGrantServiceTests(unittest.TestCase):
+    def test_route_request_schema_must_match_active_policy_schema(self) -> None:
+        request = AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "grant": {
+                    "repository": "cbusillo/launchplane",
+                    "actions": ["product_profile.read"],
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "must match the active policy schema_version",
+        ):
+            execute_authz_policy_route(
+                record_store=_AuthzPolicyStore((_active_record(),)),
+                request=request,
+                identity=_identity(),
+                trace_id="trace-schema-mismatch",
+                now_timestamp=lambda: "2026-07-18T00:00:00Z",
+            )
+
+    def test_schema_v2_instance_scoped_grants_require_instances_for_every_principal(
+        self,
+    ) -> None:
+        grants = (
+            (
+                AuthzPolicyGitHubActionsGrantEnvelope,
+                {"repository": "cbusillo/odoo-tenant", "actions": ["deployment.write"]},
+            ),
+            (
+                AuthzPolicyGitHubHumanGrantEnvelope,
+                {
+                    "logins": ["alice"],
+                    "roles": ["admin"],
+                    "actions": ["deployment.write"],
+                },
+            ),
+            (
+                AuthzPolicyTerminalAgentGrantEnvelope,
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "actions": ["deployment.write"],
+                },
+            ),
+            (
+                AuthzPolicyLocalOperatorGrantEnvelope,
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-write"],
+                    "actions": ["deployment.write"],
+                },
+            ),
+            (
+                AuthzPolicyLocalAdminGrantEnvelope,
+                {
+                    "subjects": ["local-owner-admin"],
+                    "token_labels": ["local-owner-admin"],
+                    "actions": ["deployment.write"],
+                },
+            ),
+        )
+        for envelope_type, grant in grants:
+            with self.subTest(envelope_type=envelope_type.__name__):
+                payload = {
+                    "schema_version": 2,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "grant": grant,
+                }
+                with self.assertRaisesRegex(
+                    ValidationError,
+                    "instance-scoped authz grants require instances",
+                ):
+                    envelope_type.model_validate(payload)
+
+                payload["grant"] = {**grant, "instances": ["testing"]}
+                envelope = envelope_type.model_validate(payload)
+                self.assertEqual(envelope.grant.to_policy_rule().instances, ("testing",))
+
+    def test_schema_v1_preserves_legacy_instance_grant_shape(self) -> None:
+        envelope = AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
+            {
+                "schema_version": 1,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "grant": {
+                    "repository": "cbusillo/odoo-tenant",
+                    "actions": ["deployment.write"],
+                },
+            }
+        )
+
+        self.assertEqual(envelope.grant.instances, ())
+
+    def test_schema_v1_rejects_instance_selectors(self) -> None:
+        with self.assertRaisesRegex(
+            ValidationError,
+            "Schema-v1 authz grants cannot declare instances",
+        ):
+            AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
+                {
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "grant": {
+                        "repository": "cbusillo/odoo-tenant",
+                        "instances": ["testing"],
+                        "actions": ["deployment.write"],
+                    },
+                }
+            )
+
+    def test_schema_v2_instance_scoped_removal_requires_instances(self) -> None:
+        payload = {
+            "schema_version": 2,
+            "product": "launchplane",
+            "mode": "dry_run",
+            "removal": {
+                "repository": "cbusillo/odoo-tenant",
+                "actions": ["deployment.write"],
+            },
+        }
+
+        with self.assertRaisesRegex(
+            ValidationError,
+            "instance-scoped authz grants require instances",
+        ):
+            AuthzPolicyGitHubActionsRemovalEnvelope.model_validate(payload)
+
+        removal = cast(dict[str, object], payload["removal"])
+        removal["instances"] = ["testing"]
+        envelope = AuthzPolicyGitHubActionsRemovalEnvelope.model_validate(payload)
+        self.assertEqual(envelope.removal.instances, ("testing",))
+
+    def test_schema_v2_dual_scope_grants_support_context_or_exact_instance(self) -> None:
+        context_envelope = AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "grant": {
+                    "repository": "cbusillo/launchplane",
+                    "actions": ["product_environment.read"],
+                },
+            }
+        )
+        instance_envelope = AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "grant": {
+                    "repository": "cbusillo/launchplane",
+                    "instances": ["testing"],
+                    "actions": ["product_environment.read"],
+                },
+            }
+        )
+
+        self.assertEqual(context_envelope.grant.instances, ())
+        self.assertEqual(instance_envelope.grant.instances, ("testing",))
+
+    def test_schema_v2_rejects_instance_selectors_for_context_only_actions(self) -> None:
+        with self.assertRaisesRegex(
+            ValidationError,
+            "can only declare instances for instance-scoped actions",
+        ):
+            AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
+                {
+                    "schema_version": 2,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "grant": {
+                        "repository": "cbusillo/launchplane",
+                        "instances": ["testing"],
+                        "actions": ["product_profile.read"],
+                    },
+                }
+            )
+
+    def test_unknown_grant_schema_version_fails_closed(self) -> None:
+        with self.assertRaises(ValidationError):
+            AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
+                {
+                    "schema_version": 3,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "grant": {
+                        "repository": "cbusillo/launchplane",
+                        "actions": ["product_profile.read"],
+                    },
+                }
+            )
+
     def test_grant_normalizes_tuple_values(self) -> None:
         grant = AuthzPolicyGitHubActionsGrant.model_validate(
             {
@@ -234,14 +439,12 @@ class AuthzGrantServiceTests(unittest.TestCase):
         self.assertEqual(diff["new_github_actions_rule_count"], 1)
         self.assertEqual(diff["new_github_humans_rule_count"], 1)
 
-        updated_policy, record, changed, write_diff, audit = (
-            write_github_human_authz_policy_grant(
-                record_store=store,
-                request=request,
-                identity=_identity(),
-                trace_id="trace-human",
-                now_timestamp=lambda: "2026-05-07T16:00:00Z",
-            )
+        updated_policy, record, changed, write_diff, audit = write_github_human_authz_policy_grant(
+            record_store=store,
+            request=request,
+            identity=_identity(),
+            trace_id="trace-human",
+            now_timestamp=lambda: "2026-05-07T16:00:00Z",
         )
 
         self.assertTrue(changed)
@@ -410,14 +613,12 @@ class AuthzGrantServiceTests(unittest.TestCase):
         store = _AuthzPolicyStore((duplicate_record,))
         request = _removal_request()
 
-        updated_policy, _record, changed, diff, _audit = (
-            write_github_actions_authz_policy_removal(
-                record_store=store,
-                request=request,
-                identity=_identity(),
-                trace_id="trace-remove-duplicates",
-                now_timestamp=lambda: "2026-05-07T16:00:00Z",
-            )
+        updated_policy, _record, changed, diff, _audit = write_github_actions_authz_policy_removal(
+            record_store=store,
+            request=request,
+            identity=_identity(),
+            trace_id="trace-remove-duplicates",
+            now_timestamp=lambda: "2026-05-07T16:00:00Z",
         )
 
         self.assertTrue(changed)
@@ -439,9 +640,9 @@ class AuthzGrantServiceTests(unittest.TestCase):
 
     def test_response_audit_summarizes_human_grant_without_logins(self) -> None:
         audit: dict[str, object] = {
-            "requested_grant": _human_grant_request().grant.to_policy_rule().model_dump(
-                mode="json"
-            ),
+            "requested_grant": _human_grant_request()
+            .grant.to_policy_rule()
+            .model_dump(mode="json"),
             "mode": "dry_run",
         }
 

@@ -12,7 +12,11 @@ from control_plane.contracts.preview_readiness_read_model import (
     build_preview_readiness_read_model,
 )
 from control_plane.contracts.product_environment_read_model import ActionAllowed
-from control_plane.service_auth import LaunchplaneAuthzPolicy, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneAuthzPolicy,
+    LaunchplaneIdentity,
+)
 from control_plane.work_graph_service import (
     WorkGraphPlanningFactsProvider,
     WorkGraphWorkRequestStore,
@@ -122,18 +126,29 @@ def agent_context_allowed(
         action="product_environment.read",
         product="launchplane",
         context=LAUNCHPLANE_SERVICE_CONTEXT,
+        target=AuthorizationTarget(scope="context"),
     )
 
 
 def agent_context_action_allowed(
     *, authz_policy: LaunchplaneAuthzPolicy, identity: LaunchplaneIdentity
 ) -> ActionAllowed:
-    def action_allowed(requested_action: str, requested_product: str, requested_context: str) -> bool:
+    def action_allowed(
+        requested_action: str,
+        requested_product: str,
+        requested_context: str,
+        requested_instances: tuple[str, ...],
+    ) -> bool:
         return authz_policy.allows(
             identity=identity,
             action=requested_action,
             product=requested_product,
             context=requested_context,
+            target=(
+                AuthorizationTarget(scope="instance", instances=requested_instances)
+                if requested_instances
+                else AuthorizationTarget(scope="context")
+            ),
         )
 
     return action_allowed

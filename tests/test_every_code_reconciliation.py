@@ -42,6 +42,8 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
                     "grant-workflow",
                     "--service-url",
                     "https://launchplane.example",
+                    "--schema-version",
+                    "2",
                     "--repository",
                     "cbusillo/launchplane",
                     "--workflow-ref",
@@ -52,8 +54,10 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
                     "sellyouroutboard",
                     "--context",
                     "launchplane",
+                    "--instance",
+                    "testing",
                     "--action",
-                    "product_profile.read",
+                    "deployment.write",
                     "--reason",
                     "Inspect grant before apply.",
                     "--related-issue",
@@ -68,12 +72,14 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         self.assertEqual(captured_request["path"], "/v1/authz-policies/github-actions/grants")
         payload = captured_request["payload"]
         assert isinstance(payload, dict)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["mode"], "dry_run")
         self.assertEqual(payload["reason"], "Inspect grant before apply.")
         grant = payload["grant"]
         assert isinstance(grant, dict)
         self.assertEqual(grant["repository"], "cbusillo/launchplane")
-        self.assertEqual(grant["actions"], ["product_profile.read"])
+        self.assertEqual(grant["instances"], ["testing"])
+        self.assertEqual(grant["actions"], ["deployment.write"])
         response_payload = json.loads(result.output)
         self.assertEqual(response_payload["result"]["mode"], "dry_run")
 
@@ -143,11 +149,13 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         self.assertEqual(captured_request["path"], "/v1/authz-policies/github-actions/removals")
         payload = captured_request["payload"]
         assert isinstance(payload, dict)
+        self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(payload["mode"], "dry_run")
         self.assertEqual(payload["reason"], "Inspect broad deploy authority removal.")
         removal = payload["removal"]
         assert isinstance(removal, dict)
         self.assertEqual(removal["repository"], "cbusillo/launchplane")
+        self.assertEqual(removal["instances"], [])
         self.assertEqual(removal["actions"], ["launchplane_service_deploy.execute"])
         response_payload = json.loads(result.output)
         self.assertEqual(response_payload["result"]["mode"], "dry_run")
@@ -200,11 +208,13 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         self.assertEqual(captured_request["idempotency_key"], "authz-human-grant:syo-dispatch")
         payload = captured_request["payload"]
         assert isinstance(payload, dict)
+        self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(payload["mode"], "apply")
         grant = payload["grant"]
         assert isinstance(grant, dict)
         self.assertEqual(grant["logins"], ["cbusillo"])
         self.assertEqual(grant["roles"], ["admin"])
+        self.assertEqual(grant["instances"], [])
         self.assertEqual(grant["actions"], ["generic_web_prod_promotion.dispatch"])
 
     def test_cli_authz_grant_terminal_agent_posts_service_request(self) -> None:
@@ -255,11 +265,13 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         self.assertEqual(captured_request["idempotency_key"], "authz-terminal-agent-grant:syo-read")
         payload = captured_request["payload"]
         assert isinstance(payload, dict)
+        self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(payload["mode"], "apply")
         grant = payload["grant"]
         assert isinstance(grant, dict)
         self.assertEqual(grant["subjects"], ["local-owner-agent"])
         self.assertEqual(grant["token_labels"], ["local-owner-read"])
+        self.assertEqual(grant["instances"], [])
         self.assertEqual(grant["actions"], ["product_environment.read"])
 
     def test_creates_queued_request_when_trigger_label_is_present(self) -> None:

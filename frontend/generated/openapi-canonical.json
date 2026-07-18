@@ -20274,6 +20274,14 @@
                         "title": "Event Names",
                         "type": "array"
                       },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
                       "job_workflow_refs": {
                         "default": [],
                         "items": {
@@ -20354,7 +20362,10 @@
                   },
                   "schema_version": {
                     "default": 1,
-                    "minimum": 1,
+                    "enum": [
+                      1,
+                      2
+                    ],
                     "title": "Schema Version",
                     "type": "integer"
                   }
@@ -20509,6 +20520,14 @@
                         "title": "Event Names",
                         "type": "array"
                       },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
                       "job_workflow_refs": {
                         "default": [],
                         "items": {
@@ -20589,7 +20608,10 @@
                   },
                   "schema_version": {
                     "default": 1,
-                    "minimum": 1,
+                    "enum": [
+                      1,
+                      2
+                    ],
                     "title": "Schema Version",
                     "type": "integer"
                   }
@@ -20728,6 +20750,14 @@
                         "title": "Contexts",
                         "type": "array"
                       },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
                       "logins": {
                         "default": [],
                         "items": {
@@ -20815,7 +20845,10 @@
                   },
                   "schema_version": {
                     "default": 1,
-                    "minimum": 1,
+                    "enum": [
+                      1,
+                      2
+                    ],
                     "title": "Schema Version",
                     "type": "integer"
                   }
@@ -20954,6 +20987,14 @@
                         "title": "Contexts",
                         "type": "array"
                       },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
                       "products": {
                         "default": [],
                         "items": {
@@ -21021,7 +21062,10 @@
                   },
                   "schema_version": {
                     "default": 1,
-                    "minimum": 1,
+                    "enum": [
+                      1,
+                      2
+                    ],
                     "title": "Schema Version",
                     "type": "integer"
                   }
@@ -21160,6 +21204,14 @@
                         "title": "Contexts",
                         "type": "array"
                       },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
                       "products": {
                         "default": [],
                         "items": {
@@ -21227,7 +21279,10 @@
                   },
                   "schema_version": {
                     "default": 1,
-                    "minimum": 1,
+                    "enum": [
+                      1,
+                      2
+                    ],
                     "title": "Schema Version",
                     "type": "integer"
                   }
@@ -21366,6 +21421,14 @@
                         "title": "Contexts",
                         "type": "array"
                       },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
                       "products": {
                         "default": [],
                         "items": {
@@ -21433,7 +21496,10 @@
                   },
                   "schema_version": {
                     "default": 1,
-                    "minimum": 1,
+                    "enum": [
+                      1,
+                      2
+                    ],
                     "title": "Schema Version",
                     "type": "integer"
                   }

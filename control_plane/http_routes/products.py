@@ -34,7 +34,11 @@ from control_plane.http_routes.support import (
     ApiRouteRegistrar,
     ReadRouteDependencies,
 )
-from control_plane.service_auth import LaunchplaneIdentity, TerminalAgentIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneIdentity,
+    TerminalAgentIdentity,
+)
 from control_plane.product_promotion_http import (
     PRODUCT_PROMOTION_STATUS_ROUTE,
     PRODUCT_PROMOTION_WORKFLOW_STATUS_ROUTE,
@@ -343,6 +347,7 @@ def _build_product_environment_read_result(
         requested_action: str,
         requested_product: str,
         requested_context: str,
+        requested_instances: tuple[str, ...],
     ) -> bool:
         if requested_action.startswith("product_config.") and isinstance(
             identity, TerminalAgentIdentity
@@ -353,6 +358,14 @@ def _build_product_environment_read_result(
             action=requested_action,
             product=requested_product,
             context=requested_context,
+            target=(
+                AuthorizationTarget(
+                    scope="instance",
+                    instances=requested_instances,
+                )
+                if requested_instances
+                else AuthorizationTarget(scope="context")
+            ),
         )
 
     try:
@@ -401,6 +414,14 @@ def _require_product_environment_result_authorization(
         action="product_environment.read",
         product=result.authorization_product,
         context=result.authorization_context,
+        target=(
+            AuthorizationTarget(
+                scope="instance",
+                instances=result.authorization_instances,
+            )
+            if result.authorization_instances
+            else AuthorizationTarget(scope="context")
+        ),
     ):
         return
     raise dependencies.http_error(
@@ -423,6 +444,7 @@ def _require_agent_context_read_authorization(
         action="product_environment.read",
         product=LAUNCHPLANE_SERVICE_CONTEXT,
         context=LAUNCHPLANE_SERVICE_CONTEXT,
+        target=AuthorizationTarget(scope="context"),
     ):
         return
     raise dependencies.http_error(
@@ -626,12 +648,18 @@ def register_agent_context_read_routes(
             requested_action: str,
             requested_product: str,
             requested_context: str,
+            requested_instances: tuple[str, ...],
         ) -> bool:
             return common.authorization_allows(
                 identity=identity,
                 action=requested_action,
                 product=requested_product,
                 context=requested_context,
+                target=(
+                    AuthorizationTarget(scope="instance", instances=requested_instances)
+                    if requested_instances
+                    else AuthorizationTarget(scope="context")
+                ),
             )
 
         context = build_agent_context_service_payload(
@@ -688,12 +716,18 @@ def register_product_environment_read_routes(
             requested_action: str,
             requested_product: str,
             requested_context: str,
+            requested_instances: tuple[str, ...],
         ) -> bool:
             return common.authorization_allows(
                 identity=identity,
                 action=requested_action,
                 product=requested_product,
                 context=requested_context,
+                target=(
+                    AuthorizationTarget(scope="instance", instances=requested_instances)
+                    if requested_instances
+                    else AuthorizationTarget(scope="context")
+                ),
             )
 
         if not common.authorization_allows(
@@ -701,6 +735,7 @@ def register_product_environment_read_routes(
             action="product_environment.read",
             product=LAUNCHPLANE_SERVICE_CONTEXT,
             context=LAUNCHPLANE_SERVICE_CONTEXT,
+            target=AuthorizationTarget(scope="context"),
         ):
             raise common.http_error(
                 status_code=403,
@@ -1192,11 +1227,22 @@ def register_product_promotion_status_read_routes(
                 code="not_found",
                 message="Product promotion status was not found.",
             ) from error
+        source_lane = next(
+            (candidate for candidate in profile.lanes if candidate.instance == "testing"),
+            None,
+        )
+        authorization_instances = (
+            (source_lane.instance, lane.instance) if source_lane is not None else (lane.instance,)
+        )
         if not common.authorization_allows(
             identity=identity,
             action="product_environment.read",
             product=profile.product,
             context=lane.context,
+            target=AuthorizationTarget(
+                scope="instance",
+                instances=authorization_instances,
+            ),
         ):
             raise common.http_error(
                 status_code=404,
@@ -1205,12 +1251,22 @@ def register_product_promotion_status_read_routes(
                 message="Product promotion status was not found.",
             )
 
-        def action_allowed(action: str, requested_product: str, context: str) -> bool:
+        def action_allowed(
+            action: str,
+            requested_product: str,
+            context: str,
+            instances: tuple[str, ...],
+        ) -> bool:
             return common.authorization_allows(
                 identity=identity,
                 action=action,
                 product=requested_product,
                 context=context,
+                target=(
+                    AuthorizationTarget(scope="instance", instances=instances)
+                    if instances
+                    else AuthorizationTarget(scope="context")
+                ),
             )
 
         try:

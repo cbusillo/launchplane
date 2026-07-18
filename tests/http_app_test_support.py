@@ -360,7 +360,7 @@ def _product_environment_read_policy(
                     "contexts": list(allowed_contexts),
                     "actions": list(actions),
                 }
-            ]
+            ],
         }
     )
 
@@ -383,7 +383,7 @@ def _work_graph_read_policy(
                     "contexts": list(contexts),
                     "actions": ["work_graph.rank", "product_environment.read"],
                 }
-            ]
+            ],
         }
     )
 
@@ -399,7 +399,7 @@ def _github_human_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
                     "contexts": ["launchplane"],
                     "actions": ["work_graph.rank"],
                 }
-            ]
+            ],
         }
     )
 
@@ -415,7 +415,7 @@ def _terminal_agent_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
                     "contexts": ["launchplane"],
                     "actions": ["work_graph.rank"],
                 }
-            ]
+            ],
         }
     )
 
@@ -431,7 +431,7 @@ def _terminal_agent_merge_train_pr_feedback_policy() -> LaunchplaneAuthzPolicy:
                     "contexts": ["launchplane"],
                     "actions": ["merge_train.pr_feedback"],
                 }
-            ]
+            ],
         }
     )
 
@@ -447,7 +447,7 @@ def _terminal_agent_merge_train_run_once_policy() -> LaunchplaneAuthzPolicy:
                     "contexts": ["launchplane"],
                     "actions": ["merge_train.run_once"],
                 }
-            ]
+            ],
         }
     )
 
@@ -463,7 +463,7 @@ def _local_operator_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
                     "contexts": ["launchplane"],
                     "actions": ["work_graph.rank"],
                 }
-            ]
+            ],
         }
     )
 
@@ -484,18 +484,25 @@ def _local_admin_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
-def _driver_read_policy(*, context: str = "launchplane") -> LaunchplaneAuthzPolicy:
+def _driver_read_policy(
+    *,
+    context: str = "launchplane",
+    instances: tuple[str, ...] = (),
+    schema_version: int = 1,
+) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
+            "schema_version": schema_version,
             "local_operators": [
                 {
                     "subjects": ["local-owner-agent"],
                     "token_labels": ["local-owner-read"],
                     "products": ["launchplane"],
                     "contexts": [context],
+                    "instances": list(instances),
                     "actions": ["driver.read"],
                 }
-            ]
+            ],
         }
     )
 
@@ -508,9 +515,15 @@ def _backup_gate_write_identity() -> GitHubActionsIdentity:
     )
 
 
-def _backup_gate_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+def _backup_gate_write_policy(
+    *,
+    context: str,
+    instances: tuple[str, ...] = (),
+    schema_version: int = 1,
+) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
+            "schema_version": schema_version,
             "github_actions": [
                 {
                     "repository": "every/example-site",
@@ -520,9 +533,10 @@ def _backup_gate_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
                     "event_names": ["workflow_dispatch"],
                     "products": ["example-site"],
                     "contexts": [context],
+                    "instances": list(instances),
                     "actions": ["backup_gate.write"],
                 }
-            ]
+            ],
         }
     )
 
@@ -588,9 +602,15 @@ def _promotion_write_identity() -> GitHubActionsIdentity:
     )
 
 
-def _promotion_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+def _promotion_write_policy(
+    *,
+    context: str,
+    instances: tuple[str, ...] = (),
+    schema_version: int = 1,
+) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
+            "schema_version": schema_version,
             "github_actions": [
                 {
                     "repository": "every/example-site",
@@ -600,9 +620,10 @@ def _promotion_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
                     "event_names": ["workflow_dispatch"],
                     "products": ["example-site"],
                     "contexts": [context],
+                    "instances": list(instances),
                     "actions": ["promotion.write"],
                 }
-            ]
+            ],
         }
     )
 
@@ -1269,9 +1290,15 @@ def _deployment_write_identity() -> GitHubActionsIdentity:
     )
 
 
-def _deployment_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+def _deployment_write_policy(
+    *,
+    context: str,
+    instances: tuple[str, ...] = (),
+    schema_version: int = 1,
+) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
+            "schema_version": schema_version,
             "github_actions": [
                 {
                     "repository": "every/example-site",
@@ -1281,9 +1308,10 @@ def _deployment_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
                     "event_names": ["workflow_dispatch"],
                     "products": ["example-site"],
                     "contexts": [context],
+                    "instances": list(instances),
                     "actions": ["deployment.write"],
                 }
-            ]
+            ],
         }
     )
 
@@ -1293,9 +1321,12 @@ def _record_read_policy(
     action: str,
     context: str,
     extra_actions: tuple[str, ...] = (),
+    instances: tuple[str, ...] = (),
+    schema_version: int = 1,
 ) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
+            "schema_version": schema_version,
             "github_actions": [
                 {
                     "repository": "every/verireel",
@@ -1305,9 +1336,10 @@ def _record_read_policy(
                     "event_names": ["pull_request"],
                     "products": ["launchplane"],
                     "contexts": [context],
+                    "instances": list(instances),
                     "actions": [action, *extra_actions],
                 }
-            ]
+            ],
         }
     )
 
@@ -2552,19 +2584,23 @@ def _github_human_product_config_policy(
     product: str = "sellyouroutboard",
     context: str = "sellyouroutboard",
     role: str = "admin",
+    instances: tuple[str, ...] = (),
+    schema_version: int = 1,
 ) -> LaunchplaneAuthzPolicy:
     allowed_actions = actions if actions is not None else (action,)
     return LaunchplaneAuthzPolicy.model_validate(
         {
+            "schema_version": schema_version,
             "github_humans": [
                 {
                     "logins": ["example-operator"],
                     "roles": [role],
                     "products": [product],
                     "contexts": [context],
+                    "instances": list(instances),
                     "actions": list(allowed_actions),
                 }
-            ]
+            ],
         }
     )
 
@@ -2755,10 +2791,13 @@ def _odoo_operation_status_policy(
     actions: tuple[str, ...] = (),
     products: tuple[str, ...] = ("odoo-tenant-cm",),
     contexts: tuple[str, ...] = ("cm",),
+    instances: tuple[str, ...] = (),
+    schema_version: int = 1,
 ) -> LaunchplaneAuthzPolicy:
     resolved_actions = actions or (action,)
     return LaunchplaneAuthzPolicy.model_validate(
         {
+            "schema_version": schema_version,
             "github_actions": [
                 {
                     "repository": "cbusillo/launchplane",
@@ -2768,9 +2807,10 @@ def _odoo_operation_status_policy(
                     "event_names": ["workflow_dispatch"],
                     "products": list(products),
                     "contexts": list(contexts),
+                    "instances": list(instances),
                     "actions": list(resolved_actions),
                 }
-            ]
+            ],
         }
     )
 

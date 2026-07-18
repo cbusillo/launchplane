@@ -37,7 +37,7 @@ from control_plane.odoo_stable_bootstrap_http import ODOO_STABLE_BOOTSTRAP_ROUTE
 from control_plane.odoo_target_replacement_apply_http import (
     ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
 )
-from control_plane.service_auth import LaunchplaneIdentity
+from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
 
 _LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
@@ -263,12 +263,17 @@ def _ensure_driver_read_allowed(
     identity: LaunchplaneIdentity,
     trace_id: str,
     context: str = _LAUNCHPLANE_DRIVER_READ_CONTEXT,
+    instance: str = "",
 ) -> None:
     if not dependencies.authorization_allows(
         identity=identity,
         action="driver.read",
         product=_LAUNCHPLANE_DRIVER_READ_PRODUCT,
         context=context,
+        target=AuthorizationTarget(
+            scope="instance" if instance else "context",
+            instances=(instance,) if instance else (),
+        ),
     ):
         raise dependencies.http_error(
             status_code=403,
@@ -311,6 +316,7 @@ def register_operation_status_read_routes(
             action=native_routes._descriptor_driver_route_authz_action(ODOO_STABLE_BOOTSTRAP_ROUTE),
             product=operation.product,
             context=operation.context,
+            target=AuthorizationTarget(scope="instance", instances=(operation.instance,)),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -362,6 +368,7 @@ def register_operation_status_read_routes(
             ),
             product=operation.product,
             context=operation.context,
+            target=AuthorizationTarget(scope="instance", instances=(operation.instance,)),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -484,6 +491,7 @@ def register_driver_descriptor_read_routes(
             identity=identity,
             trace_id=trace_id,
             context=context,
+            instance=instance,
         )
         view = build_driver_context_view(
             record_store=record_store,
@@ -661,6 +669,7 @@ def register_tracked_target_log_read_routes(
             action="target_logs.read",
             product="launchplane",
             context=context,
+            target=AuthorizationTarget(scope="instance", instances=(instance,)),
         ):
             raise common.http_error(
                 status_code=403,

@@ -47,6 +47,23 @@ from tests.support.auth import _StubVerifier
 
 
 class FastApiDeploymentEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deployment_evidence_denies_ungranted_instance(self) -> None:
+        store = _DeploymentEvidenceOnlyStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(
+                context="example-site",
+                instances=("testing",),
+                schema_version=2,
+            ),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_deployment_evidence(app, _deployment_evidence_payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_deployment_evidence_accepts_store_without_promotion_methods(self) -> None:
         store = _DeploymentEvidenceOnlyStore()
         app = create_launchplane_fastapi_app(
@@ -105,6 +122,23 @@ class FastApiDeploymentEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiBackupGateEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_backup_gate_evidence_denies_ungranted_instance(self) -> None:
+        store = _BackupGateEvidenceOnlyStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_backup_gate_write_identity()),
+            authz_policy=_backup_gate_write_policy(
+                context="example-site",
+                instances=("testing",),
+                schema_version=2,
+            ),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_backup_gate_evidence(app, _backup_gate_evidence_payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_backup_gate_evidence_accepts_store_with_only_backup_gate_method(self) -> None:
         store = _BackupGateEvidenceOnlyStore()
         app = create_launchplane_fastapi_app(
@@ -173,6 +207,26 @@ class FastApiBackupGateEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiPromotionEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_promotion_evidence_requires_every_affected_instance(self) -> None:
+        store = _PromotionEvidenceOnlyStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_promotion_write_identity()),
+            authz_policy=_promotion_write_policy(
+                context="example-site",
+                instances=("testing",),
+                schema_version=2,
+            ),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_promotion_evidence(
+            app,
+            _promotion_evidence_payload(link_deployment=False),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_promotion_evidence_accepts_record_only_store_without_deployment_methods(
         self,
     ) -> None:

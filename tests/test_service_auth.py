@@ -7,7 +7,10 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from pydantic import ValidationError
+
 from control_plane.service_auth import (
+    AuthorizationTarget,
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
     GitHubHumanIdentity,
@@ -24,6 +27,7 @@ from control_plane.service_auth import (
     agent_authz_audit,
     agent_consumer_subject,
     limited_remote_user_action_allowed,
+    migrate_authz_policy_to_schema_v2,
     parse_authz_policy_toml,
 )
 from control_plane.contracts.authz_policy_record import authz_policy_sha256
@@ -1044,6 +1048,8 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
             )
         )
         legacy_payload = policy.model_dump(mode="json", exclude_none=True)
+        for rule in legacy_payload["github_actions"]:
+            rule.pop("instances", None)
         legacy_payload.pop("terminal_agents", None)
         legacy_payload.pop("local_operators", None)
         legacy_payload.pop("local_admins", None)
@@ -1052,6 +1058,378 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
         ).hexdigest()
 
         self.assertEqual(authz_policy_sha256(policy), legacy_sha256)
+
+    def test_unknown_policy_schema_version_fails_closed(self) -> None:
+        with self.assertRaises(ValidationError):
+            LaunchplaneAuthzPolicy.model_validate({"schema_version": 3})
+
+    def test_schema_v1_preserves_implicit_instance_wildcard(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/verireel",
+                    products=("verireel",),
+                    contexts=("verireel",),
+                    actions=("deployment.write", "product_profile.read"),
+                ),
+            )
+        )
+
+        self.assertTrue(
+            policy.allows(
+                identity=_actions_identity(),
+                action="deployment.write",
+                product="verireel",
+                context="verireel",
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+            )
+        )
+        self.assertTrue(
+            policy.allows(
+                identity=_actions_identity(),
+                action="deployment.write",
+                product="verireel",
+                context="verireel",
+                target=AuthorizationTarget(scope="instance", instances=("prod",)),
+            )
+        )
+
+    def test_policy_schema_rejects_ambiguous_instance_rule_shapes(self) -> None:
+        with self.assertRaisesRegex(
+            ValidationError,
+            "Schema-v1 authz policy rules cannot declare instances",
+        ):
+            LaunchplaneAuthzPolicy(
+                github_actions=(
+                    GitHubActionsPolicyRule(
+                        repository="cbusillo/verireel",
+                        instances=("testing",),
+                        actions=("deployment.write",),
+                    ),
+                ),
+            )
+        with self.assertRaisesRegex(
+            ValidationError,
+            "instance-scoped authz policy rules require instances",
+        ):
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(
+                    GitHubActionsPolicyRule(
+                        repository="cbusillo/verireel",
+                        actions=("deployment.write",),
+                    ),
+                ),
+            )
+        with self.assertRaisesRegex(
+            ValidationError,
+            "can only declare instances for instance-scoped actions",
+        ):
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(
+                    GitHubActionsPolicyRule(
+                        repository="cbusillo/verireel",
+                        instances=("testing",),
+                        actions=("product_profile.read",),
+                    ),
+                ),
+            )
+
+    def test_schema_v2_requires_matching_instance_selector(self) -> None:
+        identity = _actions_identity()
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/verireel",
+                    products=("verireel",),
+                    contexts=("verireel",),
+                    instances=("testing",),
+                    actions=("deployment.write",),
+                ),
+            ),
+        )
+
+        self.assertTrue(
+            policy.allows(
+                identity=identity,
+                action="deployment.write",
+                product="verireel",
+                context="verireel",
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+            ),
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=identity,
+                action="deployment.write",
+                product="verireel",
+                context="verireel",
+                target=AuthorizationTarget(scope="instance", instances=("prod",)),
+            )
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=identity,
+                action="deployment.write",
+                product="verireel",
+                context="verireel",
+                target=AuthorizationTarget(
+                    scope="instance",
+                    instances=("testing", "prod"),
+                ),
+            )
+        )
+
+    def test_instance_scope_requires_a_resolved_target(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/verireel",
+                    products=("verireel",),
+                    contexts=("verireel",),
+                    instances=("*",),
+                    actions=("deployment.write",),
+                ),
+            ),
+        )
+
+        self.assertFalse(
+            policy.allows(
+                identity=_actions_identity(),
+                action="deployment.write",
+                product="verireel",
+                context="verireel",
+            )
+        )
+        with self.assertRaises(ValidationError):
+            AuthorizationTarget(scope="instance")
+        with self.assertRaises(ValidationError):
+            AuthorizationTarget(scope="context", instances=("testing",))
+
+    def test_instance_selectors_are_exact_or_a_lone_wildcard(self) -> None:
+        with self.assertRaises(ValidationError):
+            GitHubActionsPolicyRule(
+                repository="cbusillo/verireel",
+                instances=("test*",),
+            )
+        with self.assertRaises(ValidationError):
+            GitHubActionsPolicyRule(
+                repository="cbusillo/verireel",
+                instances=("*", "testing"),
+            )
+
+    def test_schema_v2_exact_instances_apply_to_all_principal_types(self) -> None:
+        target = AuthorizationTarget(scope="instance", instances=("testing",))
+        wrong_target = AuthorizationTarget(scope="instance", instances=("prod",))
+        cases = (
+            (
+                _actions_identity(),
+                LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=(
+                        GitHubActionsPolicyRule(
+                            repository="cbusillo/verireel",
+                            instances=("testing",),
+                            actions=("deployment.write",),
+                        ),
+                    ),
+                ),
+            ),
+            (
+                _human_identity(role="admin"),
+                LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_humans=(
+                        GitHubHumanPolicyRule(
+                            logins=("alice",),
+                            roles=("admin",),
+                            instances=("testing",),
+                            actions=("deployment.write",),
+                        ),
+                    ),
+                ),
+            ),
+            (
+                _terminal_agent_identity(),
+                LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    terminal_agents=(
+                        TerminalAgentPolicyRule(
+                            subjects=("local-owner-agent",),
+                            token_labels=("local-owner-read",),
+                            instances=("testing",),
+                            actions=("deployment.write",),
+                        ),
+                    ),
+                ),
+            ),
+            (
+                _local_operator_identity(),
+                LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    local_operators=(
+                        LocalOperatorPolicyRule(
+                            subjects=("local-owner-agent",),
+                            token_labels=("local-owner-write",),
+                            instances=("testing",),
+                            actions=("deployment.write",),
+                        ),
+                    ),
+                ),
+            ),
+            (
+                _local_admin_identity(),
+                LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    local_admins=(
+                        LocalAdminPolicyRule(
+                            subjects=("local-owner-admin",),
+                            token_labels=("local-owner-admin",),
+                            instances=("testing",),
+                            actions=("deployment.write",),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        for identity, policy in cases:
+            with self.subTest(identity_type=type(identity).__name__):
+                self.assertTrue(
+                    policy.allows(
+                        identity=identity,
+                        action="deployment.write",
+                        product="verireel",
+                        context="verireel",
+                        target=target,
+                    )
+                )
+                self.assertFalse(
+                    policy.allows(
+                        identity=identity,
+                        action="deployment.write",
+                        product="verireel",
+                        context="verireel",
+                        target=wrong_target,
+                    )
+                )
+
+    def test_schema_v2_migration_materializes_legacy_instance_wildcards(self) -> None:
+        legacy_policy = LaunchplaneAuthzPolicy(
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/verireel",
+                    products=("verireel",),
+                    contexts=("verireel",),
+                    actions=("deployment.write", "product_profile.read"),
+                ),
+            ),
+            github_humans=(
+                GitHubHumanPolicyRule(
+                    logins=("alice",),
+                    roles=("admin",),
+                    actions=("deployment.write",),
+                ),
+            ),
+            terminal_agents=(
+                TerminalAgentPolicyRule(
+                    subjects=("local-owner-agent",),
+                    token_labels=("local-owner-read",),
+                    actions=("deployment.write",),
+                ),
+            ),
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=("local-owner-agent",),
+                    token_labels=("local-owner-write",),
+                    actions=("deployment.write",),
+                ),
+            ),
+            local_admins=(
+                LocalAdminPolicyRule(
+                    subjects=("local-owner-admin",),
+                    token_labels=("local-owner-admin",),
+                    actions=("deployment.write",),
+                ),
+            ),
+        )
+
+        migrated_policy = migrate_authz_policy_to_schema_v2(legacy_policy)
+
+        self.assertEqual(migrated_policy.schema_version, 2)
+        self.assertEqual(len(migrated_policy.github_actions), 2)
+        self.assertEqual(
+            migrated_policy.github_actions[0].actions,
+            ("product_profile.read",),
+        )
+        self.assertEqual(migrated_policy.github_actions[0].instances, ())
+        self.assertEqual(
+            migrated_policy.github_actions[1].actions,
+            ("deployment.write",),
+        )
+        self.assertEqual(migrated_policy.github_actions[1].instances, ("*",))
+        for rule_collection in (
+            migrated_policy.github_humans,
+            migrated_policy.terminal_agents,
+            migrated_policy.local_operators,
+            migrated_policy.local_admins,
+        ):
+            self.assertEqual(rule_collection[0].instances, ("*",))
+        self.assertTrue(
+            migrated_policy.allows(
+                identity=_actions_identity(),
+                action="deployment.write",
+                product="verireel",
+                context="verireel",
+                target=AuthorizationTarget(scope="instance", instances=("prod",)),
+            )
+        )
+        self.assertTrue(
+            migrated_policy.allows(
+                identity=_actions_identity(),
+                action="product_profile.read",
+                product="verireel",
+                context="verireel",
+            )
+        )
+
+    def test_schema_v2_migration_splits_actionless_legacy_rules_by_scope(self) -> None:
+        migrated_policy = migrate_authz_policy_to_schema_v2(
+            LaunchplaneAuthzPolicy(
+                github_actions=(GitHubActionsPolicyRule(repository="cbusillo/verireel"),),
+            )
+        )
+
+        self.assertEqual(len(migrated_policy.github_actions), 2)
+        self.assertEqual(migrated_policy.github_actions[0].instances, ())
+        self.assertEqual(migrated_policy.github_actions[1].instances, ("*",))
+        self.assertTrue(
+            migrated_policy.allows(
+                identity=_actions_identity(),
+                action="product_profile.read",
+                product="verireel",
+                context="verireel",
+            )
+        )
+        self.assertFalse(
+            migrated_policy.allows(
+                identity=_actions_identity(),
+                action="deployment.write",
+                product="verireel",
+                context="verireel",
+            )
+        )
+        self.assertTrue(
+            migrated_policy.allows(
+                identity=_actions_identity(),
+                action="deployment.write",
+                product="verireel",
+                context="verireel",
+                target=AuthorizationTarget(scope="instance", instances=("prod",)),
+            )
+        )
 
     def test_policy_sha256_includes_terminal_agent_rules_when_present(self) -> None:
         base_policy = LaunchplaneAuthzPolicy(

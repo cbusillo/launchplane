@@ -405,6 +405,23 @@ stores audit metadata, and reloads the current service worker's active policy.
 Launchplane self-deploy authority is separate and does not authorize authz
 policy grant maintenance.
 
+Authz policy schema v1 remains the compatibility contract for an active v1
+policy and retains its existing product/context breadth. Schema v2 adds exact
+instance selectors to every principal rule and grant contract. Selectors are
+exact names or the lone `*` wildcard; an empty schema-v2 selector authorizes
+non-instance scope only and is never an implicit instance wildcard. Actions
+that can operate at either context or instance scope, such as `driver.read` and
+`product_environment.read`, use separate context and instance rules. Promotion
+and other multi-lane decisions require every affected instance.
+
+Grant and removal requests must use the same schema version as the active
+policy. The CLI therefore defaults to `--schema-version 1`; after an operator
+has explicitly migrated and activated a schema-v2 policy, pass
+`--schema-version 2 --instance <lane>`. Migration splits mixed or actionless v1
+rules into explicit context and `*` instance representations so their current
+breadth is preserved without teaching new schema-v2 rules that an empty
+selector means all instances.
+
 When the CLI uses `--session-cookie`, it first reads `GET /v1/auth/session` and
 then sends the returned single-use CSRF token with strict same-origin fetch
 metadata. Use the configured public Launchplane URL so its origin matches

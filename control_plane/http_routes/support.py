@@ -5,7 +5,7 @@ from typing import Any, Protocol
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from control_plane.service_auth import LaunchplaneIdentity
+from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 
 LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
@@ -27,6 +27,7 @@ class AuthorizationAllows(Protocol):
         action: str,
         product: str,
         context: str,
+        target: AuthorizationTarget | None = None,
     ) -> bool: ...
 
 

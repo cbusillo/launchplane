@@ -6,10 +6,22 @@ import secrets
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol, cast
 
 import jwt
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
+
+from control_plane.authz_scope import (
+    exclusively_instance_scoped_authz_actions,
+    instance_scoped_authz_actions,
+)
 
 
 GITHUB_ACTIONS_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
@@ -66,6 +78,8 @@ LaunchplaneIdentity = (
     | LocalOperatorIdentity
     | LocalAdminIdentity
 )
+AuthorizationScope = Literal["global", "context", "instance", "preview"]
+AuthzPolicySchemaVersion = Literal[1, 2]
 AgentConsumerSubjectType = Literal[
     "github_actions", "github_human", "terminal_agent", "local_operator", "local_admin"
 ]
@@ -85,6 +99,54 @@ AgentConsumerActionSafety = Literal[
     "policy_admin",
 ]
 AgentAuthzDecision = Literal["allowed", "denied"]
+
+
+def _validated_instance_selectors(instances: tuple[str, ...]) -> tuple[str, ...]:
+    normalized_instances = tuple(
+        dict.fromkeys(instance.strip() for instance in instances if instance.strip())
+    )
+    if "*" in normalized_instances and normalized_instances != ("*",):
+        raise ValueError("Authz instance wildcard must be the only instance selector.")
+    for instance in normalized_instances:
+        if instance != "*" and any(character in instance for character in "*?[]"):
+            raise ValueError("Authz instance selectors must be exact or the lone '*' wildcard.")
+    return normalized_instances
+
+
+AuthzInstanceSelectors = Annotated[
+    tuple[str, ...],
+    AfterValidator(_validated_instance_selectors),
+]
+
+
+class AuthorizationTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scope: AuthorizationScope
+    instances: AuthzInstanceSelectors = ()
+
+    @model_validator(mode="after")
+    def _validate_scope(self) -> "AuthorizationTarget":
+        if self.scope == "instance" and not self.instances:
+            raise ValueError("Instance-scoped authorization requires at least one instance.")
+        if self.scope != "instance" and self.instances:
+            raise ValueError("Only instance-scoped authorization can declare instances.")
+        return self
+
+
+def _instances_allowed(
+    *,
+    allowed_instances: AuthzInstanceSelectors,
+    target: AuthorizationTarget | None,
+    schema_version: AuthzPolicySchemaVersion,
+) -> bool:
+    if target is None or target.scope != "instance":
+        return not allowed_instances
+    if not allowed_instances:
+        return schema_version == 1
+    if allowed_instances == ("*",):
+        return True
+    return set(target.instances).issubset(allowed_instances)
 
 
 class TokenVerifier(Protocol):
@@ -233,6 +295,7 @@ class GitHubActionsPolicyRule(BaseModel):
     environments: tuple[str, ...] = ()
     products: tuple[str, ...] = ()
     contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...] = ()
 
     @staticmethod
@@ -241,7 +304,14 @@ class GitHubActionsPolicyRule(BaseModel):
         return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
 
     def allows(
-        self, *, identity: GitHubActionsIdentity, action: str, product: str, context: str
+        self,
+        *,
+        identity: GitHubActionsIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
+        schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
         if self.repository.strip() != identity.repository:
             return False
@@ -263,6 +333,12 @@ class GitHubActionsPolicyRule(BaseModel):
             return False
         if self.contexts and not self._matches_claim(context, self.contexts):
             return False
+        if not _instances_allowed(
+            allowed_instances=self.instances,
+            target=target,
+            schema_version=schema_version,
+        ):
+            return False
         if self.actions and action not in self.actions:
             return False
         return True
@@ -277,6 +353,7 @@ class GitHubHumanPolicyRule(BaseModel):
     roles: tuple[Literal["read_only", "admin"], ...] = ()
     products: tuple[str, ...] = ()
     contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...] = ()
 
     @staticmethod
@@ -293,7 +370,14 @@ class GitHubHumanPolicyRule(BaseModel):
         )
 
     def allows(
-        self, *, identity: GitHubHumanIdentity, action: str, product: str, context: str
+        self,
+        *,
+        identity: GitHubHumanIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
+        schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
         if self.logins and not self._matches_any(identity.login, self.logins):
             return False
@@ -306,6 +390,12 @@ class GitHubHumanPolicyRule(BaseModel):
         if self.products and product not in self.products:
             return False
         if self.contexts and context not in self.contexts:
+            return False
+        if not _instances_allowed(
+            allowed_instances=self.instances,
+            target=target,
+            schema_version=schema_version,
+        ):
             return False
         if self.actions and action not in self.actions:
             return False
@@ -337,6 +427,7 @@ class TerminalAgentPolicyRule(BaseModel):
     token_labels: tuple[str, ...] = ()
     products: tuple[str, ...] = ()
     contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...] = ()
 
     @staticmethod
@@ -345,7 +436,14 @@ class TerminalAgentPolicyRule(BaseModel):
         return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
 
     def allows(
-        self, *, identity: TerminalAgentIdentity, action: str, product: str, context: str
+        self,
+        *,
+        identity: TerminalAgentIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
+        schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
         if self.subjects and not self._matches_any(identity.subject, self.subjects):
             return False
@@ -354,6 +452,12 @@ class TerminalAgentPolicyRule(BaseModel):
         if self.products and product not in self.products:
             return False
         if self.contexts and context not in self.contexts:
+            return False
+        if not _instances_allowed(
+            allowed_instances=self.instances,
+            target=target,
+            schema_version=schema_version,
+        ):
             return False
         if self.actions and action not in self.actions:
             return False
@@ -367,6 +471,7 @@ class LocalOperatorPolicyRule(BaseModel):
     token_labels: tuple[str, ...] = ()
     products: tuple[str, ...] = ()
     contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...] = ()
 
     @staticmethod
@@ -375,7 +480,14 @@ class LocalOperatorPolicyRule(BaseModel):
         return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
 
     def allows(
-        self, *, identity: LocalOperatorIdentity, action: str, product: str, context: str
+        self,
+        *,
+        identity: LocalOperatorIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
+        schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
         if self.subjects and not self._matches_any(identity.subject, self.subjects):
             return False
@@ -384,6 +496,12 @@ class LocalOperatorPolicyRule(BaseModel):
         if self.products and not self._matches_any(product, self.products):
             return False
         if self.contexts and not self._matches_any(context, self.contexts):
+            return False
+        if not _instances_allowed(
+            allowed_instances=self.instances,
+            target=target,
+            schema_version=schema_version,
+        ):
             return False
         if self.actions and action not in self.actions:
             return False
@@ -397,6 +515,7 @@ class LocalAdminPolicyRule(BaseModel):
     token_labels: tuple[str, ...] = ()
     products: tuple[str, ...] = ()
     contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...] = ()
 
     @staticmethod
@@ -405,7 +524,14 @@ class LocalAdminPolicyRule(BaseModel):
         return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
 
     def allows(
-        self, *, identity: LocalAdminIdentity, action: str, product: str, context: str
+        self,
+        *,
+        identity: LocalAdminIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
+        schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
         if self.subjects and not self._matches_any(identity.subject, self.subjects):
             return False
@@ -414,6 +540,12 @@ class LocalAdminPolicyRule(BaseModel):
         if self.products and not self._matches_any(product, self.products):
             return False
         if self.contexts and not self._matches_any(context, self.contexts):
+            return False
+        if not _instances_allowed(
+            allowed_instances=self.instances,
+            target=target,
+            schema_version=schema_version,
+        ):
             return False
         if self.actions and action not in self.actions:
             return False
@@ -601,40 +733,131 @@ def agent_authz_audit(
 class LaunchplaneAuthzPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: AuthzPolicySchemaVersion = 1
     github_actions: tuple[GitHubActionsPolicyRule, ...] = ()
     github_humans: tuple[GitHubHumanPolicyRule, ...] = ()
     terminal_agents: tuple[TerminalAgentPolicyRule, ...] = ()
     local_operators: tuple[LocalOperatorPolicyRule, ...] = ()
     local_admins: tuple[LocalAdminPolicyRule, ...] = ()
 
+    @model_validator(mode="after")
+    def _validate_instance_rule_schema(self) -> "LaunchplaneAuthzPolicy":
+        instance_actions = instance_scoped_authz_actions()
+        exclusively_instance_actions = exclusively_instance_scoped_authz_actions()
+        for rules in (
+            self.github_actions,
+            self.github_humans,
+            self.terminal_agents,
+            self.local_operators,
+            self.local_admins,
+        ):
+            for rule in rules:
+                if self.schema_version == 1 and rule.instances:
+                    raise ValueError("Schema-v1 authz policy rules cannot declare instances.")
+                if self.schema_version != 2 or not rule.actions:
+                    continue
+                requested_actions = set(rule.actions)
+                if requested_actions & exclusively_instance_actions and not rule.instances:
+                    raise ValueError(
+                        "Schema-v2 instance-scoped authz policy rules require instances."
+                    )
+                if rule.instances and requested_actions - instance_actions:
+                    raise ValueError(
+                        "Schema-v2 authz policy rules can only declare instances for "
+                        "instance-scoped actions."
+                    )
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_policy(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload = cast(dict[str, Any], handler(self))
+        if self.schema_version == 1:
+            for rule_collection_name in (
+                "github_actions",
+                "github_humans",
+                "terminal_agents",
+                "local_operators",
+                "local_admins",
+            ):
+                for rule in payload.get(rule_collection_name, ()):
+                    rule.pop("instances", None)
+        return payload
+
     def allows(
-        self, *, identity: LaunchplaneIdentity, action: str, product: str, context: str
+        self,
+        *,
+        identity: LaunchplaneIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
     ) -> bool:
+        resolved_target = target or AuthorizationTarget(scope="context")
+        if (
+            self.schema_version == 2
+            and action in exclusively_instance_scoped_authz_actions()
+            and resolved_target.scope != "instance"
+        ):
+            return False
         if isinstance(identity, GitHubHumanIdentity):
             if identity.role == "read_only" and not limited_remote_user_action_allowed(action):
                 return False
             return any(
-                rule.allows(identity=identity, action=action, product=product, context=context)
+                rule.allows(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context,
+                    target=resolved_target,
+                    schema_version=self.schema_version,
+                )
                 for rule in self.github_humans
             )
         if isinstance(identity, TerminalAgentIdentity):
             return any(
-                rule.allows(identity=identity, action=action, product=product, context=context)
+                rule.allows(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context,
+                    target=resolved_target,
+                    schema_version=self.schema_version,
+                )
                 for rule in self.terminal_agents
             )
         if isinstance(identity, LocalOperatorIdentity):
             return local_operator_identity_valid(identity=identity, action=action) and any(
-                rule.allows(identity=identity, action=action, product=product, context=context)
+                rule.allows(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context,
+                    target=resolved_target,
+                    schema_version=self.schema_version,
+                )
                 for rule in self.local_operators
             )
         if isinstance(identity, LocalAdminIdentity):
             return local_admin_identity_valid(identity=identity, action=action) and any(
-                rule.allows(identity=identity, action=action, product=product, context=context)
+                rule.allows(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context,
+                    target=resolved_target,
+                    schema_version=self.schema_version,
+                )
                 for rule in self.local_admins
             )
         return any(
-            rule.allows(identity=identity, action=action, product=product, context=context)
+            rule.allows(
+                identity=identity,
+                action=action,
+                product=product,
+                context=context,
+                target=resolved_target,
+                schema_version=self.schema_version,
+            )
             for rule in self.github_actions
         )
 
@@ -660,6 +883,62 @@ class LaunchplaneAuthzPolicy(BaseModel):
         ):
             return "read_only"
         return None
+
+
+def migrate_authz_policy_to_schema_v2(
+    policy: LaunchplaneAuthzPolicy,
+) -> LaunchplaneAuthzPolicy:
+    if policy.schema_version == 2:
+        return policy
+
+    exclusively_instance_actions = exclusively_instance_scoped_authz_actions()
+    instance_actions = instance_scoped_authz_actions()
+
+    def migrated_rules(rule: Any) -> tuple[Any, ...]:
+        if not rule.actions:
+            return (
+                rule.model_copy(update={"instances": ()}),
+                rule.model_copy(update={"instances": ("*",)}),
+            )
+        context_actions = tuple(
+            action for action in rule.actions if action not in exclusively_instance_actions
+        )
+        scoped_instance_actions = tuple(
+            action for action in rule.actions if action in instance_actions
+        )
+        migrated: list[Any] = []
+        if context_actions:
+            migrated.append(rule.model_copy(update={"actions": context_actions, "instances": ()}))
+        if scoped_instance_actions:
+            migrated.append(
+                rule.model_copy(update={"actions": scoped_instance_actions, "instances": ("*",)})
+            )
+        return tuple(migrated)
+
+    return LaunchplaneAuthzPolicy(
+        schema_version=2,
+        github_actions=tuple(
+            migrated_rule
+            for rule in policy.github_actions
+            for migrated_rule in migrated_rules(rule)
+        ),
+        github_humans=tuple(
+            migrated_rule for rule in policy.github_humans for migrated_rule in migrated_rules(rule)
+        ),
+        terminal_agents=tuple(
+            migrated_rule
+            for rule in policy.terminal_agents
+            for migrated_rule in migrated_rules(rule)
+        ),
+        local_operators=tuple(
+            migrated_rule
+            for rule in policy.local_operators
+            for migrated_rule in migrated_rules(rule)
+        ),
+        local_admins=tuple(
+            migrated_rule for rule in policy.local_admins for migrated_rule in migrated_rules(rule)
+        ),
+    )
 
 
 def parse_authz_policy_toml(policy_toml: str) -> LaunchplaneAuthzPolicy:

@@ -102,7 +102,7 @@ def build_work_graph_snapshot_service_payload(
     readable_product_profiles = tuple(
         profile
         for profile in product_store.list_product_profile_records()
-        if action_allowed("product_environment.read", profile.product, "launchplane")
+        if action_allowed("product_environment.read", profile.product, "launchplane", ())
     )
     planning_issue_facts = planning_facts_provider() if planning_facts_provider is not None else ()
     repo_mapping = build_repo_product_mapping_from_records(

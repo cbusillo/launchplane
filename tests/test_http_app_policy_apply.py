@@ -2236,6 +2236,50 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             unknown_response.json()["error"]["message"],
         )
 
+    async def test_product_environment_config_denies_ungranted_shared_context_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            app_store.ensure_schema()
+            app_store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            session_manager = HumanSessionManager(
+                config=_github_oauth_config(),
+                session_store=InMemoryHumanSessionStore(),
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_product_config_policy(
+                    action="product_config.plan",
+                    product="example-site",
+                    context="example-site",
+                    instances=("testing",),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: app_store,
+                human_session_manager=session_manager,
+            )
+
+            response = await _post_product_environment_config_apply(
+                app,
+                {
+                    "mode": "dry-run",
+                    "reason": "Attempt an ungranted shared-context lane.",
+                    "runtime_settings": {"INTERNAL_CALLBACK_URL": "https://example.invalid"},
+                },
+                environment="prod",
+                authorization="",
+                headers=_browser_mutation_headers(session_manager, human_session),
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
     async def test_product_environment_config_path_rejects_dry_run_mismatch(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

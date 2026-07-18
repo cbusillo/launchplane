@@ -14,7 +14,7 @@ from control_plane.http_routes.support import (
     ApiRouteRegistrar,
     ReadRouteDependencies,
 )
-from control_plane.service_auth import LaunchplaneIdentity
+from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 from control_plane.storage.factory import storage_backend_name
 
 
@@ -275,6 +275,10 @@ def register_deployment_promotion_read_routes(
             action="deployment.read",
             product="launchplane",
             context=deployment.context,
+            target=AuthorizationTarget(
+                scope="instance",
+                instances=(deployment.instance,),
+            ),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -312,6 +316,10 @@ def register_deployment_promotion_read_routes(
             action="promotion.read",
             product="launchplane",
             context=promotion.context,
+            target=AuthorizationTarget(
+                scope="instance",
+                instances=(promotion.from_instance, promotion.to_instance),
+            ),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -370,6 +378,7 @@ def register_inventory_operation_read_routes(
             action="inventory.read",
             product="launchplane",
             context=context,
+            target=AuthorizationTarget(scope="instance", instances=(instance,)),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -402,6 +411,10 @@ def register_inventory_operation_read_routes(
             action="inventory.read",
             product="launchplane",
             context=inventory.context,
+            target=AuthorizationTarget(
+                scope="instance",
+                instances=(inventory.instance,),
+            ),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -422,6 +435,7 @@ def register_inventory_operation_read_routes(
             action="operations.read",
             product="launchplane",
             context=context,
+            target=AuthorizationTarget(scope="context"),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -455,6 +469,34 @@ def register_inventory_operation_read_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
+        stable_instances = tuple(
+            sorted(
+                {
+                    *(record.instance for record in inventory),
+                    *(record.instance for record in recent_deployments),
+                    *(record.from_instance for record in recent_promotions),
+                    *(record.to_instance for record in recent_promotions),
+                }
+            )
+        )
+        target = (
+            AuthorizationTarget(scope="instance", instances=stable_instances)
+            if stable_instances
+            else AuthorizationTarget(scope="context")
+        )
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="operations.read",
+            product="launchplane",
+            context=context,
+            target=target,
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read recent operations for the requested context.",
+            )
         return RecentOperationsResponse(
             trace_id=trace_id,
             context=context,
@@ -514,6 +556,10 @@ def register_managed_secret_read_routes(
             action="secret.list",
             product=LAUNCHPLANE_SERVICE_CONTEXT,
             context=context,
+            target=AuthorizationTarget(
+                scope="instance" if instance else "context",
+                instances=(instance,) if instance else (),
+            ),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -613,6 +659,10 @@ def register_managed_secret_read_routes(
             action="secret.read",
             product=LAUNCHPLANE_SERVICE_CONTEXT,
             context=secret_status.context,
+            target=AuthorizationTarget(
+                scope="instance" if secret_status.instance else "context",
+                instances=(secret_status.instance,) if secret_status.instance else (),
+            ),
         ):
             raise dependencies.http_error(
                 status_code=403,
