@@ -1106,7 +1106,6 @@ def _managed_rule_adoption_matches(
             current_rule=current_rule,
             desired_rule=desired_rule,
         )
-        and bool(current_rule.job_workflow_refs)
         and set(current_rule.job_workflow_refs).issubset(desired_rule.job_workflow_refs)
     )
 
