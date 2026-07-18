@@ -21,6 +21,10 @@ name: Reusable Authz Policy Reconcile
         description: Single-line issue or change reference bound into the reviewed plan.
         required: true
         type: string
+    secrets:
+      managed_set_json:
+        description: Operator-managed desired authz rule set.
+        required: true
 
 permissions:
   contents: read
@@ -37,7 +41,7 @@ jobs:
     env:
       LAUNCHPLANE_PUBLIC_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-      LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}
+      LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON: ${{ secrets.managed_set_json }}
     steps:
       - name: Validate and render managed authz request
         id: request

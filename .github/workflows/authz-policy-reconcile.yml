@@ -37,3 +37,5 @@ jobs:
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
       reason: ${{ inputs.reason }}
       related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}
