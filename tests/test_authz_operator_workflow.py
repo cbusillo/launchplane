@@ -24,7 +24,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         self.assertEqual(
             self.dispatch_workflow.job_uses("reconcile"),
             "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@"
-            "b9798f97c4b4584d2088a6e19652876f55f1abc1",
+            "f27074f5fab6fc0b1bcd554444175c7c03bc8cea",
         )
         self.assertEqual(
             self.dispatch_workflow.job_permissions("reconcile"),
@@ -38,7 +38,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         self.assertEqual(
             self.deploy_workflow.job_uses("operator-authz-managed"),
             "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@"
-            "b9798f97c4b4584d2088a6e19652876f55f1abc1",
+            "f27074f5fab6fc0b1bcd554444175c7c03bc8cea",
         )
         self.assertEqual(managed_job["needs"], "operator-authz-managed-validate")
         self.assertEqual(
