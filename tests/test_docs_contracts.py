@@ -272,7 +272,10 @@ class DocsContractsTests(TestCase):
         self.assertIn("repairshopr_api", product_repo_contract)
         self.assertIn("deployment-20260630T034901Z-repairshopr-sync-prod", product_repo_contract)
         self.assertIn("baseline for retiring older source-ref", product_repo_contract)
-        self.assertIn("reusable-product-repo-config-authority.yml@main", product_repo_contract)
+        self.assertIn(
+            "reusable-product-repo-config-authority.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
         self.assertIn("pinned Launchplane tool checkout", product_repo_contract)
         self.assertIn("Product repos build, test, smoke, and publish", product_repo_contract)
         self.assertIn("Launchplane derives lifecycle meaning", product_repo_contract)
@@ -345,14 +348,32 @@ class DocsContractsTests(TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("Reusable Generic-Web Lifecycle Workflows", product_repo_contract)
-        self.assertIn("reusable-generic-web-stable-deploy.yml@main", product_repo_contract)
-        self.assertIn("reusable-generic-web-prod-promotion.yml@main", product_repo_contract)
+        self.assertIn(
+            "reusable-generic-web-stable-deploy.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "reusable-generic-web-prod-promotion.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
         self.assertIn("product-specific semantic release tags", product_repo_contract)
         self.assertIn("source-inventory lookup and validation", product_repo_contract)
-        self.assertIn("reusable-generic-web-prod-rollback.yml@main", product_repo_contract)
-        self.assertIn("reusable-generic-web-stable-verification.yml@main", product_repo_contract)
-        self.assertIn("reusable-generic-web-preview-lifecycle.yml@main", product_repo_contract)
-        self.assertIn("reusable-generic-web-preview-verification.yml@main", product_repo_contract)
+        self.assertIn(
+            "reusable-generic-web-prod-rollback.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "reusable-generic-web-stable-verification.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "reusable-generic-web-preview-lifecycle.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "reusable-generic-web-preview-verification.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
         self.assertIn("route path, request JSON shape", product_repo_contract)
         self.assertIn("product key from the caller repository name", product_repo_contract)
         self.assertIn("`testing` stable lane", product_repo_contract)
@@ -388,9 +409,11 @@ class DocsContractsTests(TestCase):
         self.assertIn("derived value", preview_contract)
         self.assertIn("reusable-generic-web-preview-lifecycle.yml@main", preview_contract)
         self.assertIn("reusable-preview-feedback-status.yml@main", preview_contract)
-        self.assertIn("reusable-preview-feedback-status.yml@main", product_repo_contract)
+        self.assertIn(
+            "reusable-preview-feedback-status.yml@<launchplane-sha>", product_repo_contract
+        )
         self.assertIn("setup-preview-prepare-client@main", preview_contract)
-        self.assertIn("setup-preview-prepare-client@main", product_repo_contract)
+        self.assertIn("setup-preview-prepare-client@<launchplane-sha>", product_repo_contract)
         self.assertIn("does not accept", preview_contract)
         self.assertIn("idempotency keys as caller inputs", preview_contract)
         self.assertIn("read-only adapter", product_repo_contract)
@@ -582,11 +605,26 @@ class DocsContractsTests(TestCase):
             "defaults to the `testing` lane",
             product_repo_contract,
         )
-        self.assertIn("reusable-product-driver-stable-deploy.yml@main", product_repo_contract)
-        self.assertIn("reusable-product-driver-testing-deploy.yml@main", product_repo_contract)
-        self.assertIn("reusable-product-driver-prod-promotion.yml@main", product_repo_contract)
-        self.assertIn("reusable-product-driver-post-deploy.yml@main", product_repo_contract)
-        self.assertIn("reusable-product-driver-prod-rollback.yml@main", product_repo_contract)
+        self.assertIn(
+            "reusable-product-driver-stable-deploy.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "reusable-product-driver-testing-deploy.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "reusable-product-driver-prod-promotion.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "reusable-product-driver-post-deploy.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "reusable-product-driver-prod-rollback.yml@<launchplane-sha>",
+            product_repo_contract,
+        )
         self.assertIn("route path, envelope JSON, output mapping", product_repo_contract)
         self.assertIn("transitional connectors", product_repo_contract)
         self.assertIn("should not own Launchplane route construction", product_repo_contract)

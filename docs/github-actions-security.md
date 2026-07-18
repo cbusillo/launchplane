@@ -15,6 +15,7 @@ an immutable `sha256` manifest digest.
 | Reference class | Trust | Typical privilege | Required form |
 | --- | --- | --- | --- |
 | Same-repository local action or reusable workflow | Same reviewed workflow commit | Depends on the caller workflow | `./.github/actions/...` or `./.github/workflows/...` |
+| Same-repository reusable authorization worker | First-party immutable trust anchor | Authz policy administration | Repository-qualified path at a full reviewed SHA, limited to the approved dispatch wrappers |
 | GitHub-maintained action | GitHub-maintained | Checkout, artifacts, cache, runtime setup, GitHub API, CodeQL | Full SHA plus a release-tag provenance comment |
 | Third-party publisher | Third-party publisher | Python bootstrap, registry authentication, image build and publication | Full SHA plus a release-tag provenance comment |
 | First-party cross-repository Launchplane action | First-party cross-repository | OIDC-authenticated Launchplane requests and preview-client setup | Full SHA plus `# main` provenance |
@@ -48,7 +49,9 @@ remote code or move workflow data across trust boundaries.
   must be scoped to one workflow path and one literal reference, with a
   corresponding test and security review.
 - Same-repository reusable workflows must use relative paths rather than a
-  repository-qualified reference.
+  repository-qualified reference, except the narrowly approved authorization
+  worker whose full-SHA `job_workflow_ref` is itself part of the active policy
+  trust boundary.
 - Every static container image source must be classified in the policy test and
   use a release tag plus a 64-character `sha256` manifest digest. Mutable tags
   without a digest are rejected.

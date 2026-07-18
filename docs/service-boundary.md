@@ -610,7 +610,10 @@ must request `schema_migration = migrate_v1_to_v2` and/or
 `unmanaged_adoption = adopt_matching` during both review and apply. Multiple
 matching unmanaged rules fail closed. `GET /v1/authz-policies/active` exposes
 only active record metadata, counts, managed IDs, principal types, and rule
-hashes; it never returns full workflow refs or principal selectors.
+hashes; it never returns full workflow refs or principal selectors. Its removal
+readiness fields include managed and unmanaged rule totals, unmanaged counts by
+principal type, and the count of privileged GitHub Actions rules that still
+lack an immutable reusable-workflow identity.
 
 New managed GitHub Actions rules require immutable GitHub `repository_id` and
 `repository_owner_id` selectors. Production-capable, destructive,

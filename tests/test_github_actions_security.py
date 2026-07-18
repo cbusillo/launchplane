@@ -31,6 +31,14 @@ LOCAL_REFERENCE_PREFIXES = ("./.github/actions/", "./.github/workflows/")
 SELF_REUSABLE_WORKFLOW_PREFIX = "cbusillo/launchplane/.github/workflows/"
 FIRST_PARTY_CROSS_REPOSITORY_ACTION_PREFIX = "cbusillo/launchplane/.github/actions/"
 MUTABLE_REFERENCE_ALLOWLIST: Mapping[Path, frozenset[str]] = {}
+PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
+    Path(".github/workflows/authz-policy-reconcile.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml"}
+    ),
+    Path(".github/workflows/deploy-launchplane.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml"}
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -80,6 +88,9 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     ),
     "cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client": (
         ActionClassification("First-party cross-repository", "preview request client setup")
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml": (
+        ActionClassification("First-party same-repository", "authorization policy administration")
     ),
     "docker/build-push-action": ActionClassification(
         "Third-party publisher", "container build and publication"
@@ -182,9 +193,14 @@ class GitHubActionsSecurityTests(TestCase):
                 )
                 continue
             if source.startswith(SELF_REUSABLE_WORKFLOW_PREFIX):
-                violations.append(
-                    f"{action.location}: same-repository reusable workflows must use a relative path."
+                allowed_pinned_sources = PINNED_SELF_REUSABLE_WORKFLOWS.get(
+                    action.path, frozenset()
                 )
+                if source not in allowed_pinned_sources:
+                    violations.append(
+                        f"{action.location}: same-repository reusable workflows must use a "
+                        "relative path unless the exact pinned identity is an approved trust anchor."
+                    )
             classification = APPROVED_REMOTE_ACTIONS.get(source)
             if classification is None:
                 violations.append(
@@ -204,6 +220,11 @@ class GitHubActionsSecurityTests(TestCase):
                 if action.provenance != "main":
                     violations.append(
                         f"{action.location}: first-party cross-repository action provenance must be 'main'."
+                    )
+            elif source.startswith(SELF_REUSABLE_WORKFLOW_PREFIX):
+                if action.provenance != "main":
+                    violations.append(
+                        f"{action.location}: pinned same-repository workflow provenance must be 'main'."
                     )
             elif VERSION_PROVENANCE_PATTERN.fullmatch(action.provenance) is None:
                 violations.append(

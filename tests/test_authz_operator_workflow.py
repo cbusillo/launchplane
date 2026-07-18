@@ -13,6 +13,65 @@ from tests.support.workflows import load_workflow
 class AuthzOperatorWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = load_workflow(".github/workflows/reusable-authz-policy-reconcile.yml")
+        self.dispatch_workflow = load_workflow(".github/workflows/authz-policy-reconcile.yml")
+        self.deploy_workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
+
+    def test_dispatch_wrapper_calls_one_immutable_worker(self) -> None:
+        trigger = self.dispatch_workflow.data["on"]
+        assert isinstance(trigger, dict)
+        self.assertEqual(set(trigger), {"workflow_dispatch"})
+        self.assertEqual(set(self.dispatch_workflow.jobs), {"reconcile"})
+        self.assertEqual(
+            self.dispatch_workflow.job_uses("reconcile"),
+            "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@"
+            "b9798f97c4b4584d2088a6e19652876f55f1abc1",
+        )
+        self.assertEqual(
+            self.dispatch_workflow.job_permissions("reconcile"),
+            {"contents": "read", "id-token": "write"},
+        )
+
+    def test_deploy_workflow_bootstraps_managed_authz_without_deploying(self) -> None:
+        deploy_job = self.deploy_workflow.job("deploy")
+        self.assertIn("inputs.authz_managed_mode == 'none'", str(deploy_job["if"]))
+        managed_job = self.deploy_workflow.job("operator-authz-managed")
+        self.assertEqual(
+            self.deploy_workflow.job_uses("operator-authz-managed"),
+            "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@"
+            "b9798f97c4b4584d2088a6e19652876f55f1abc1",
+        )
+        self.assertEqual(managed_job["needs"], "operator-authz-managed-validate")
+        self.assertEqual(
+            self.deploy_workflow.job_permissions("operator-authz-managed"),
+            {"contents": "read", "id-token": "write"},
+        )
+        managed_inputs = managed_job["with"]
+        assert isinstance(managed_inputs, dict)
+        self.assertEqual(managed_inputs["mode"], "${{ inputs.authz_managed_mode }}")
+        self.assertEqual(
+            managed_inputs["reviewed_plan_sha256"],
+            "${{ inputs.authz_managed_reviewed_plan_sha256 }}",
+        )
+        validation_step = self.deploy_workflow.step_named(
+            "operator-authz-managed-validate", "Validate managed authz isolation"
+        )
+        self.assertIsNotNone(validation_step)
+        assert validation_step is not None
+        self.assertIn("cannot be combined with exact grant maintenance", validation_step.run)
+        self.assertIn("cannot include a deploy image input", validation_step.run)
+        self.assertIn("cannot include break-glass rollback inputs", validation_step.run)
+
+    def test_exact_bridge_reads_runtime_outputs_with_supported_separator(self) -> None:
+        runtime_step = self.deploy_workflow.step_named(
+            "operator-authz-grants", "Read active authz policy contract"
+        )
+        self.assertIsNotNone(runtime_step)
+        assert runtime_step is not None
+        self.assertEqual(
+            runtime_step.with_values["output-paths"],
+            "authz_policy_schema_version=runtime.authz_policy_schema_version,"
+            "authz_policy_sha256=runtime.authz_policy_sha256",
+        )
 
     def test_reusable_workflow_is_protected_and_service_backed(self) -> None:
         workflow_call = self.workflow.data["on"]
@@ -101,8 +160,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             outputs = dict(
-                line.split("=", 1)
-                for line in output_file.read_text(encoding="utf-8").splitlines()
+                line.split("=", 1) for line in output_file.read_text(encoding="utf-8").splitlines()
             )
             request = json.loads(Path(outputs["request_file"]).read_text(encoding="utf-8"))
             self.assertEqual(request["mode"], "dry_run")

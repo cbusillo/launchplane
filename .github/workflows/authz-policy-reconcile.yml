@@ -1,0 +1,39 @@
+---
+name: Manage Launchplane Authorization
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Review or apply the protected operator-managed desired rule set.
+        required: true
+        default: dry_run
+        type: choice
+        options:
+          - dry_run
+          - apply
+      reviewed_plan_sha256:
+        description: Plan SHA-256 returned by the reviewed dry run; required for apply.
+        required: false
+        type: string
+      reason:
+        description: Single-line operator reason bound into the reviewed plan.
+        required: true
+        type: string
+      related_issue:
+        description: Single-line issue or change reference bound into the reviewed plan.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  reconcile:
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@b9798f97c4b4584d2088a6e19652876f55f1abc1 # main
+    with:
+      mode: ${{ inputs.mode }}
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}

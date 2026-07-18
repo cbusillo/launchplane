@@ -780,17 +780,37 @@ def summarize_active_authz_policy_record(
 ) -> dict[str, object]:
     summary = summarize_authz_policy_record(record)
     summary["policy_schema_version"] = record.policy.schema_version
-    summary["managed_rules"] = [
+    rules_by_principal = tuple(_authz_policy_rule_collections(record.policy))
+    managed_rules = [
         {
             "managed_set_id": rule.managed_set_id,
             "managed_rule_id": rule.managed_rule_id,
             "principal_type": principal_type,
             "rule_sha256": _authz_rule_sha256(rule),
         }
-        for principal_type, rules in _authz_policy_rule_collections(record.policy)
+        for principal_type, rules in rules_by_principal
         for rule in rules
         if rule.managed_set_id is not None and rule.managed_rule_id is not None
     ]
+    unmanaged_rule_counts = {
+        principal_type: sum(rule.managed_set_id is None for rule in rules)
+        for principal_type, rules in rules_by_principal
+    }
+    summary["managed_rules"] = managed_rules
+    summary["managed_rule_count"] = len(managed_rules)
+    summary["unmanaged_rule_count"] = sum(unmanaged_rule_counts.values())
+    summary["unmanaged_rule_counts"] = unmanaged_rule_counts
+    summary["github_actions_privileged_unpinned_reusable_rule_count"] = sum(
+        _github_rule_requires_immutable_workflow(rule)
+        and (
+            not rule.job_workflow_refs
+            or any(
+                _IMMUTABLE_JOB_WORKFLOW_REF_PATTERN.fullmatch(job_workflow_ref) is None
+                for job_workflow_ref in rule.job_workflow_refs
+            )
+        )
+        for rule in record.policy.github_actions
+    )
     return summary
 
 
@@ -1101,13 +1121,10 @@ def _managed_rule_adoption_matches(
         desired_rule=desired_rule,
     ):
         return True
-    return (
-        _github_rule_transition_base_matches(
-            current_rule=current_rule,
-            desired_rule=desired_rule,
-        )
-        and set(current_rule.job_workflow_refs).issubset(desired_rule.job_workflow_refs)
-    )
+    return _github_rule_transition_base_matches(
+        current_rule=current_rule,
+        desired_rule=desired_rule,
+    ) and set(current_rule.job_workflow_refs).issubset(desired_rule.job_workflow_refs)
 
 
 def _managed_rules_by_id(

@@ -2143,6 +2143,7 @@ class ProductOnboardingTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "AUTHZ_GRANTS_MODE": "none",
+                    "AUTHZ_MANAGED_MODE": "none",
                     "BREAK_GLASS_IMAGE_REFERENCE": image_reference,
                     "BREAK_GLASS_REASON": rollback_reason,
                     "GITHUB_REPOSITORY": "cbusillo/launchplane",

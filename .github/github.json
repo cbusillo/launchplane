@@ -93,6 +93,7 @@
     "Ingress Route Audit Read",
     "Ingress Route Dry Run",
     "Live Target Runtime",
+    "Manage Launchplane Authorization",
     "Merge Train Runner",
     "Odoo Config Parameter Override",
     "Odoo Driver Route Smoke",
