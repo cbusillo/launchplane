@@ -1865,6 +1865,10 @@ class PostgresRecordStore(HumanSessionStore):
     def backend_name(self) -> str:
         return "postgres"
 
+    @property
+    def database_dialect_name(self) -> str:
+        return self._engine.url.get_backend_name()
+
     def ensure_schema(self) -> None:
         if self._engine.url.get_backend_name() != "sqlite":
             self.verify_schema()
@@ -1902,6 +1906,16 @@ class PostgresRecordStore(HumanSessionStore):
             )
         if backend_name == "postgresql":
             verify_postgres_schema_invariants(self._engine)
+
+    def schema_revision(self) -> str:
+        if self._engine.url.get_backend_name() != "postgresql":
+            return ""
+        with self._engine.connect() as connection:
+            rows = connection.execute(text("select version_num from alembic_version")).fetchall()
+        revisions = tuple(str(row[0]).strip() for row in rows if str(row[0]).strip())
+        if len(revisions) != 1:
+            raise RuntimeError("Launchplane database must have exactly one Alembic revision.")
+        return revisions[0]
 
     def close(self) -> None:
         self._engine.dispose()
@@ -6756,16 +6770,97 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_authz_policy_record(self, record: LaunchplaneAuthzPolicyRecord) -> None:
-        self._write_row(
-            LaunchplaneAuthzPolicyRow(
-                record_id=record.record_id,
-                status=record.status,
-                source=record.source,
-                updated_at=record.updated_at,
-                policy_sha256=record.policy_sha256,
-                payload=self._payload_dict(record),
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            if record.status == "active":
+                self._lock_active_authz_policy_write(session)
+                self._supersede_active_authz_policy_rows(
+                    session=session,
+                    excluding_record_id=record.record_id,
+                )
+            session.merge(self._authz_policy_row(record))
+            session.commit()
+
+    def compare_and_write_authz_policy_record(
+        self,
+        *,
+        expected_record: LaunchplaneAuthzPolicyRecord,
+        replacement_record: LaunchplaneAuthzPolicyRecord,
+    ) -> bool:
+        if expected_record.status != "active" or replacement_record.status != "active":
+            raise ValueError("Authz policy compare-and-write requires active policy records.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_active_authz_policy_write(session)
+            statement = (
+                select(LaunchplaneAuthzPolicyRow)
+                .where(LaunchplaneAuthzPolicyRow.status == "active")
+                .order_by(
+                    desc(LaunchplaneAuthzPolicyRow.updated_at),
+                    desc(LaunchplaneAuthzPolicyRow.record_id),
+                )
+                .limit(2)
+            )
+            if self._engine.url.get_backend_name() == "postgresql":
+                statement = statement.with_for_update()
+            active_rows = tuple(session.scalars(statement))
+            if not active_rows:
+                session.rollback()
+                return False
+            active_row = active_rows[0]
+            current_record = LaunchplaneAuthzPolicyRecord.model_validate(active_row.payload)
+            if self._payload_dict(current_record) != self._payload_dict(expected_record):
+                session.rollback()
+                return False
+            self._supersede_active_authz_policy_rows(
+                session=session,
+                excluding_record_id=replacement_record.record_id,
+            )
+            session.merge(self._authz_policy_row(replacement_record))
+            session.commit()
+            return True
+
+    def _lock_active_authz_policy_write(self, session: Any) -> None:
+        if self._engine.url.get_backend_name() != "postgresql":
+            return
+        session.execute(
+            text(
+                "select pg_advisory_xact_lock("
+                "hashtextextended('launchplane:active-authz-policy', 0))"
             )
         )
+
+    @staticmethod
+    def _authz_policy_row(record: LaunchplaneAuthzPolicyRecord) -> LaunchplaneAuthzPolicyRow:
+        return LaunchplaneAuthzPolicyRow(
+            record_id=record.record_id,
+            status=record.status,
+            source=record.source,
+            updated_at=record.updated_at,
+            policy_sha256=record.policy_sha256,
+            payload=record.model_dump(mode="json", exclude_none=True),
+        )
+
+    @staticmethod
+    def _supersede_active_authz_policy_rows(
+        *,
+        session: Any,
+        excluding_record_id: str,
+    ) -> None:
+        active_rows = tuple(
+            session.scalars(
+                select(LaunchplaneAuthzPolicyRow).where(
+                    LaunchplaneAuthzPolicyRow.status == "active"
+                )
+            )
+        )
+        for active_row in active_rows:
+            if active_row.record_id == excluding_record_id:
+                continue
+            payload = dict(active_row.payload)
+            payload["status"] = "superseded"
+            active_row.status = "superseded"
+            active_row.payload = payload
 
     def list_authz_policy_records(
         self,

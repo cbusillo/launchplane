@@ -29,22 +29,24 @@ title: Records
 
 Launchplane uses SQLAlchemy ORM models as the persistence boundary and Alembic as
 the versioned migration mechanism for shared-service Postgres databases. Hosted
-service startup runs Alembic to the checked-in head revision before starting the
-HTTP service; schema or payload changes must therefore land as explicit Alembic
-revisions. Runtime code can still call `ensure_schema()` for compatibility, but
-it only creates tables for local SQLite/test databases. For shared-service
-database URLs, `ensure_schema()` verifies that Alembic has already created the
-required tables and columns and fails closed when migrations are missing. Hosted
-Postgres verification also requires the database to be at the checked-in
-Alembic head and verifies the critical JSONB/integer types, unique indexes,
-worker-claim indexes, and partial active-operation predicates used by
-idempotency, claims, leases, CAS-style owner checks, and active operation
-reservations.
+service startup runs the Launchplane schema-migration helper under a
+deployment-wide PostgreSQL advisory lock before starting HTTP service. The
+helper advances only to the release's explicit migration target, which may be
+behind the checked-in Alembic head during an expand/contract rollout. Runtime
+code can still call `ensure_schema()` for compatibility, but it only creates
+tables for local SQLite/test databases. For shared-service database URLs,
+`ensure_schema()` verifies that Alembic has already created the required tables
+and columns and fails closed when migrations are missing. Hosted Postgres
+verification accepts only the release-declared compatible revisions and verifies
+the critical JSONB/integer types, unique indexes, worker-claim indexes, and
+partial active-operation predicates used by idempotency, claims, leases,
+CAS-style owner checks, and active operation reservations.
 
-For a fresh database, apply the current schema with:
+For a fresh or existing hosted database, use the same serialized helper as the
+service entrypoint:
 
 ```bash
-LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run alembic upgrade head
+LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane.storage.schema_migration
 ```
 
 For an existing Launchplane database that already has the tables created by the
@@ -57,8 +59,7 @@ partial predicate. A failure means the operator must stop and reconcile the
 schema before stamping; do not hand-edit the Alembic version table or skip the
 check.
 
-The hosted startup wrapper runs the verifier before stamping and then applies
-migrations:
+The hosted startup wrapper runs that helper before starting the service:
 
 ```bash
 LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... scripts/start-launchplane-service.sh
@@ -72,12 +73,22 @@ does not match the ORM-managed table shape:
 LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane.storage.schema_adoption
 ```
 
-After a passing verifier result, stamp the printed revision and upgrade:
+The migration helper performs a safe adoption stamp and then advances to the
+release target while holding the migration lock:
 
 ```bash
-LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run alembic stamp <printed-revision>
-LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run alembic upgrade head
+LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane.storage.schema_migration
 ```
+
+Do not run `alembic upgrade head` directly against the shared service database
+during a staged rollout. The authorization compatibility release targets
+revision `f3b5d7e9a1c2` while understanding both that revision and the fenced
+`f4c6e8a0b2d4` schema. Deploy that compatibility image across the fleet before a
+later release advances the target to `f4c6e8a0b2d4`. After the database reaches
+f4, rollback is supported only to an image that already understands f4; a
+pre-compatibility image is no longer a safe rollback target. The runtime status
+route reports both the observed database revision and the image's migration
+target so deployment verification can enforce this boundary.
 
 JSONB `payload` columns remain durable evidence envelopes and original typed
 payload snapshots. Fields that the GUI or drivers need to filter, order, join,
@@ -352,10 +363,27 @@ an ORM column/table or remains only in the evidence payload.
   grant audit metadata records the operator identity, reason, related issue,
   previous/new policy ids and shas, trace id, mode, and requested grant details;
   service responses redact that requested-grant detail to counts and scope
-  summaries. During a future OpenFGA migration, these DB-backed policy records
+  summaries. New GitHub Actions grant writes persist both the repository name and
+  immutable GitHub repository/owner IDs. Existing name-only rules remain readable
+  during the compatibility floor, while an exact ID-bound grant replaces an
+  otherwise identical name-only rule. Exact compatibility writes compare the
+  active record before commit and return a conflict instead of overwriting a
+  concurrent grant. Their idempotency completion remains a post-commit bridge;
+  the managed reconciliation contract records policy and idempotency state in one
+  transaction. Operator dry-run evidence binds the normalized grant set to the
+  active policy schema and separately records the active policy SHA, so apply can
+  reject a stale review before mutation. The staged f4 schema adds a monotonic
+  revision, one-active-record constraint, and a database
+  write fence that remains compatible with the preceding writer shape. During a
+  future OpenFGA migration, these DB-backed policy records
   remain the source evidence for dry-run tuple proposals and parity checks.
   After a proven cutover, records should store import/audit/model-version
   evidence rather than remain a second live authorization source.
+- Human session: the DB-backed payload includes the GitHub identity snapshot,
+  creation/expiry timestamps, and CSRF generation. Hosted authorization
+  revalidates roles against the current DB policy on every request and rejects
+  OAuth-derived organization/team claims after 24 hours, forcing a fresh GitHub
+  sign-in before those mutable claims can authorize another hosted request.
 - Merge train stack collapse plan: modeled fields are `record_id`, `status`,
   `source`, `updated_at`, `repository`, `base_branch`, `collapse_id`,
   `root_pull_request_number`, and `plan_status`. The payload carries the typed
@@ -665,8 +693,8 @@ settings, and it never removes existing expected-config entries. The manual
 metadata changes; real product, context, instance, and binding values are
 workflow inputs, not checked-in defaults. Because the route authorizes against
 the target product in the Launchplane service context, product-specific workflow
-grants must come from explicit operator-supplied authz grant input such as
-`LAUNCHPLANE_AUTHZ_GRANTS_JSON`, not a checked-in product catalog.
+grants must come from the service/operator UI or the temporary dedicated authz
+maintenance workflow input, not a checked-in product catalog.
 
 Odoo preview certificate-policy changes use
 `POST /v1/product-profiles/preview-tls/apply`. The route reads the current
@@ -682,7 +710,8 @@ no-op applies. The manual `Product Preview TLS` workflow is the audited operator
 surface for both modes and supplies the target product and requested `none` or
 `letsencrypt` value as runtime input. Its
 `product_profile.preview_tls.apply` grant is target-product scoped and must come
-from operator-supplied authz input rather than a checked-in product catalog.
+from service-backed or operator-supplied authz input rather than a checked-in
+product catalog.
 
 For initial seed or repair work, operators can write the same DB-backed record
 directly with

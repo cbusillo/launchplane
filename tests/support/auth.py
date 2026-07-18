@@ -23,10 +23,14 @@ def _identity(
     event_name: str = "pull_request",
     ref: str = "refs/heads/main",
     environment: str = "",
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
 ) -> GitHubActionsIdentity:
     return GitHubActionsIdentity(
         repository=repository,
-        repository_owner="every",
+        repository_owner=repository.split("/", 1)[0],
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
         workflow_ref=workflow_ref,
         job_workflow_ref=job_workflow_ref,
         ref=ref,

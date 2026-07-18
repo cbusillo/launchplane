@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from control_plane.service_auth import GitHubHumanIdentity
+from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import (
     GitHubOAuthConfig,
     HumanSessionManager,
@@ -37,6 +37,26 @@ def _identity() -> GitHubHumanIdentity:
 
 
 class HumanSessionManagerTests(unittest.TestCase):
+    def test_bootstrap_admin_role_survives_db_policy_revalidation(self) -> None:
+        manager = HumanSessionManager(
+            config=GitHubOAuthConfig(
+                client_id="client-id",
+                client_secret="client-secret",
+                public_url="https://launchplane.example",
+                session_secret="session-secret",
+                bootstrap_admin_emails=frozenset({"alice@example.com"}),
+            ),
+            session_store=InMemoryHumanSessionStore(),
+        )
+
+        self.assertEqual(
+            manager.authorized_role(
+                identity=_identity(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+            ),
+            "admin",
+        )
+
     def test_session_cookie_is_signed_and_round_trips(self) -> None:
         store = InMemoryHumanSessionStore()
         manager = HumanSessionManager(config=_config(), session_store=store)
@@ -113,6 +133,29 @@ class HumanSessionManagerTests(unittest.TestCase):
 
         self.assertIsNone(manager.read_cookie(cookie))
         self.assertIsNone(store.read_session(expired_session.session_id))
+
+    def test_authorization_claims_expire_without_extending_session(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        manager = HumanSessionManager(
+            config=_config(),
+            session_store=InMemoryHumanSessionStore(),
+            now=lambda: now,
+        )
+        current_session = LaunchplaneHumanSession(
+            session_id="current-claims",
+            identity=_identity(),
+            created_at=now - timedelta(hours=23),
+            expires_at=now + timedelta(days=13),
+        )
+        stale_session = LaunchplaneHumanSession(
+            session_id="stale-claims",
+            identity=_identity(),
+            created_at=now - timedelta(hours=24),
+            expires_at=now + timedelta(days=13),
+        )
+
+        self.assertTrue(manager.authorization_claims_are_current(current_session))
+        self.assertFalse(manager.authorization_claims_are_current(stale_session))
 
     def test_csrf_token_is_session_bound_single_use_and_rotates(self) -> None:
         store = InMemoryHumanSessionStore()

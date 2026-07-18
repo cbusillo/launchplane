@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
@@ -35,7 +36,11 @@ from control_plane.every_code_notifications_delivery import (
 )
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
-from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -97,6 +102,7 @@ from control_plane.service_human_auth import (
     HumanSessionManager,
     HumanSessionStore,
     InMemoryHumanSessionStore,
+    LaunchplaneHumanSession,
     build_browser_mutation_request_headers,
     load_github_oauth_config_from_env,
 )
@@ -147,6 +153,10 @@ LOCAL_OPERATOR_AUTH_ENV = {
     "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
     "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
     "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+}
+GITHUB_REPOSITORY_IDS = {
+    "repository_id": "1001",
+    "repository_owner_id": "2001",
 }
 
 
@@ -511,6 +521,12 @@ def create_launchplane_fastapi_test_app(**kwargs: object) -> Any:
         kwargs["record_store_factory"] = record_store_factory
     factory = cast(Any, create_launchplane_fastapi_app)
     return factory(**kwargs)
+
+
+class _HostedAuthzPolicyStore(PostgresRecordStore):
+    @property
+    def database_dialect_name(self) -> str:
+        return "postgresql"
 
 
 def create_every_code_github_webhook_app(**kwargs: object) -> Any:
@@ -1177,6 +1193,140 @@ class GitHubHumanAuthTests(unittest.TestCase):
 
         self.assertEqual(status_code, 401)
         self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    def test_human_session_role_is_revalidated_against_active_policy(self) -> None:
+        admin_policy = LaunchplaneAuthzPolicy.model_validate(
+            {"github_humans": [{"logins": ["alice"], "roles": ["admin"]}]}
+        )
+        session_manager = _fastapi_human_session_manager()
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = _HostedAuthzPolicyStore(database_url=database_url)
+            store.ensure_schema()
+            admin_record = LaunchplaneAuthzPolicyRecord(
+                record_id="authz-human-admin",
+                source="test:admin",
+                updated_at="2026-07-18T00:00:00Z",
+                policy=admin_policy,
+            )
+            store.write_authz_policy_record(admin_record)
+            authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(
+                admin_policy,
+                policy_sha256=admin_record.policy_sha256,
+                source="db",
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=admin_policy,
+                authz_policy_runtime=authz_policy_runtime,
+                human_session_manager=session_manager,
+                record_store_factory=lambda: store,
+            )
+            cookie = _fastapi_signed_in_cookie(session_manager, role="admin")
+            read_only_policy = LaunchplaneAuthzPolicy.model_validate(
+                {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}
+            )
+            store.write_authz_policy_record(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="authz-human-read-only",
+                    source="test:demoted",
+                    updated_at="2026-07-18T00:01:00Z",
+                    policy=read_only_policy,
+                )
+            )
+
+            demoted_status, demoted_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/auth/session",
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+            revoked_policy = LaunchplaneAuthzPolicy()
+            store.write_authz_policy_record(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="authz-human-revoked",
+                    source="test:revoked",
+                    updated_at="2026-07-18T00:02:00Z",
+                    policy=revoked_policy,
+                )
+            )
+            try:
+                revoked_status, revoked_payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/auth/session",
+                    authorization="",
+                    headers={"Cookie": cookie},
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(demoted_status, 200)
+        self.assertEqual(demoted_payload["identity"]["role"], "read_only")
+        self.assertEqual(revoked_status, 401)
+        self.assertEqual(revoked_payload["error"]["code"], "authentication_required")
+
+    def test_hosted_human_session_requires_fresh_github_authorization_claims(self) -> None:
+        now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {"github_humans": [{"logins": ["alice"], "roles": ["admin"]}]}
+        )
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=session_store,
+            now=lambda: now,
+        )
+        stale_session = LaunchplaneHumanSession(
+            session_id="stale-github-claims",
+            identity=_human_identity(role="admin"),
+            created_at=now - timedelta(hours=24),
+            expires_at=now + timedelta(days=13),
+        )
+        session_store.write_session(stale_session)
+        cookie = session_manager.session_cookie_header(stale_session)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = _HostedAuthzPolicyStore(database_url=database_url)
+            store.ensure_schema()
+            policy_record = LaunchplaneAuthzPolicyRecord(
+                record_id="authz-human-current",
+                source="test:current",
+                updated_at="2026-07-18T12:00:00Z",
+                policy=policy,
+            )
+            store.write_authz_policy_record(policy_record)
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                authz_policy_runtime=LaunchplaneAuthzPolicyRuntime(
+                    policy,
+                    policy_sha256=policy_record.policy_sha256,
+                    source="db",
+                ),
+                human_session_manager=session_manager,
+                record_store_factory=lambda: store,
+            )
+            try:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/auth/session",
+                    authorization="",
+                    headers={"Cookie": cookie},
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 401)
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertIsNone(session_store.read_session(stale_session.session_id))
 
 
 class LaunchplaneServiceTests(unittest.TestCase):
@@ -4748,6 +4898,155 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(payload["missing_provenance_count"], 2)
 
+    def test_service_refreshes_factory_backed_authz_policy_before_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service.read"],
+                        }
+                    ]
+                }
+            )
+            store = _HostedAuthzPolicyStore(database_url=database_url)
+            store.ensure_schema()
+            current_record = LaunchplaneAuthzPolicyRecord(
+                record_id="seed",
+                source="test:initial",
+                updated_at="2026-07-18T00:00:00Z",
+                policy_sha256=authz_policy_sha256(policy),
+                policy=policy,
+            )
+            store.write_authz_policy_record(current_record)
+            authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(
+                policy,
+                policy_sha256=current_record.policy_sha256,
+                source="db",
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                authz_policy_runtime=authz_policy_runtime,
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+            initial_status_code, initial_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/service/runtime",
+            )
+            replacement_policy = policy.model_copy(
+                update={
+                    "schema_version": 2,
+                    "github_actions": (),
+                }
+            )
+            replacement_record = LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    updated_at="2026-07-18T00:01:00Z",
+                    policy_sha256=authz_policy_sha256(replacement_policy),
+                ),
+                source="test:replacement",
+                updated_at="2026-07-18T00:01:00Z",
+                policy_sha256=authz_policy_sha256(replacement_policy),
+                policy=replacement_policy,
+            )
+            store.write_authz_policy_record(replacement_record)
+            try:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/service/runtime",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(initial_status_code, 200)
+        self.assertEqual(
+            initial_payload["runtime"]["authz_policy_sha256"], current_record.policy_sha256
+        )
+        self.assertEqual(initial_payload["runtime"]["database_schema_revision"], "")
+        self.assertEqual(
+            initial_payload["runtime"]["compatible_database_schema_revisions"],
+            ["f3b5d7e9a1c2", "f4c6e8a0b2d4"],
+        )
+        self.assertEqual(
+            initial_payload["runtime"]["schema_migration_target_revision"],
+            "f3b5d7e9a1c2",
+        )
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(authz_policy_runtime.policy_sha256, replacement_record.policy_sha256)
+
+    def test_service_authz_refresh_failure_returns_service_unavailable(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service.read"],
+                        }
+                    ]
+                }
+            )
+            store = _HostedAuthzPolicyStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_authz_policy_record(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="seed",
+                    source="test:initial",
+                    updated_at="2026-07-18T00:00:00Z",
+                    policy=policy,
+                )
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=policy,
+                authz_policy_runtime=LaunchplaneAuthzPolicyRuntime(policy),
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+            try:
+                with patch.object(
+                    store,
+                    "list_authz_policy_records",
+                    side_effect=RuntimeError("database unavailable"),
+                ):
+                    status_code, payload = _invoke_app(
+                        app,
+                        method="GET",
+                        path="/v1/service/runtime",
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "authz_policy_unavailable")
+
     def test_authz_policy_grant_endpoint_writes_db_record_and_updates_runtime(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -4796,6 +5095,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "related_issue": "cbusillo/launchplane#83",
                     "grant": {
                         "repository": "cbusillo/launchplane",
+                        **GITHUB_REPOSITORY_IDS,
                         "workflow_refs": [
                             "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                         ],
@@ -4828,6 +5128,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "related_issue": "cbusillo/launchplane#83",
                     "grant": {
                         "repository": "cbusillo/launchplane",
+                        **GITHUB_REPOSITORY_IDS,
                         "workflow_refs": [
                             "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                         ],
@@ -5031,6 +5332,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "related_issue": "cbusillo/launchplane#83",
                     "grant": {
                         "repository": "cbusillo/launchplane",
+                        **GITHUB_REPOSITORY_IDS,
                         "workflow_refs": [
                             "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                         ],
@@ -5209,6 +5511,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "related_issue": "cbusillo/launchplane#83",
                     "grant": {
                         "repository": "cbusillo/launchplane",
+                        **GITHUB_REPOSITORY_IDS,
                         "workflow_refs": [
                             "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                         ],
@@ -5236,12 +5539,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["changed"], True)
-        self.assertEqual(payload["result"]["audit"]["operator"]["type"], "github_human")
-        self.assertEqual(payload["result"]["audit"]["operator"]["login"], "alice")
+        self.assertEqual(
+            payload["result"]["audit"]["operator"],
+            {"type": "github_human"},
+        )
         human_operator = active_policy.audit["operator"]
         self.assertIsInstance(human_operator, dict)
         assert isinstance(human_operator, dict)
         self.assertEqual(human_operator["type"], "github_human")
+        self.assertEqual(human_operator["login"], "alice")
+        self.assertEqual(human_operator["github_id"], 123)
 
     def test_human_authz_policy_grant_endpoint_writes_db_record_and_updates_runtime(
         self,
@@ -5892,6 +6199,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "mode": "apply",
                     "grant": {
                         "repository": "cbusillo/launchplane",
+                        **GITHUB_REPOSITORY_IDS,
                         "actions": ["product_profile.read"],
                     },
                 },
@@ -5942,6 +6250,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "reason": "Attempt unauthorized grant.",
                     "grant": {
                         "repository": "cbusillo/launchplane",
+                        **GITHUB_REPOSITORY_IDS,
                         "actions": ["product_profile.read"],
                     },
                 },
@@ -5998,6 +6307,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "reason": "Attempt policy grant with deploy authority.",
                     "grant": {
                         "repository": "cbusillo/launchplane",
+                        **GITHUB_REPOSITORY_IDS,
                         "actions": ["product_profile.read"],
                     },
                 },

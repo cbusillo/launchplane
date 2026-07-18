@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
@@ -72,7 +73,12 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
-from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
+from control_plane.storage.schema_invariants import (
+    AUTHZ_COMPATIBILITY_FLOOR_REVISION,
+    EXPECTED_ALEMBIC_HEAD_REVISION,
+)
+from control_plane.storage.schema_migration import migrate_schema, schema_migration_action
+from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalAdminPolicyRule
 from tests.support.artifact_manifests import artifact_manifest_v2
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
@@ -380,6 +386,293 @@ def _outbox_delivery(*, suffix: str = "one") -> OutboxDeliveryRecord:
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_compatibility_release_keeps_f3_as_startup_target(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            migrated_revision = migrate_schema(database_url=database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.verify_schema()
+                observed_revision = _current_alembic_version(store._engine)
+            finally:
+                store.close()
+
+        self.assertEqual(migrated_revision, AUTHZ_COMPATIBILITY_FLOOR_REVISION)
+        self.assertEqual(observed_revision, AUTHZ_COMPATIBILITY_FLOOR_REVISION)
+
+    def test_compatibility_release_accepts_f4_and_previous_writer_shape(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            policy = LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_admins=(
+                    LocalAdminPolicyRule(
+                        managed_set_id="operator.owner",
+                        managed_rule_id="authz.admin",
+                        subjects=("owner",),
+                        token_labels=("owner-admin",),
+                        products=("launchplane",),
+                        contexts=("launchplane",),
+                        actions=("authz_policy_grant.write",),
+                    ),
+                ),
+            )
+            first_record = LaunchplaneAuthzPolicyRecord(
+                record_id="authz-compat-first",
+                source="test:compat",
+                updated_at="2026-07-18T00:00:00Z",
+                policy=policy,
+            )
+            second_record = first_record.model_copy(
+                update={
+                    "record_id": "authz-compat-second",
+                    "updated_at": "2026-07-18T00:01:00Z",
+                }
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.verify_schema()
+                with store._engine.begin() as connection:
+                    for record in (first_record, second_record):
+                        connection.execute(
+                            text(
+                                "insert into launchplane_authz_policies "
+                                "(record_id, status, source, updated_at, policy_sha256, payload) "
+                                "values (:record_id, :status, :source, :updated_at, "
+                                ":policy_sha256, cast(:payload as jsonb))"
+                            ),
+                            {
+                                "record_id": record.record_id,
+                                "status": record.status,
+                                "source": record.source,
+                                "updated_at": record.updated_at,
+                                "policy_sha256": record.policy_sha256,
+                                "payload": json.dumps(record.model_dump(mode="json")),
+                            },
+                        )
+                active_records = store.list_authz_policy_records(status="active")
+                superseded_records = store.list_authz_policy_records(status="superseded")
+                with store._engine.connect() as connection:
+                    revisions = tuple(
+                        connection.execute(
+                            text(
+                                "select revision from launchplane_authz_policies order by revision"
+                            )
+                        ).scalars()
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(revisions, (1, 2))
+        self.assertEqual(
+            tuple(record.record_id for record in active_records), ("authz-compat-second",)
+        )
+        self.assertEqual(
+            tuple(record.record_id for record in superseded_records),
+            ("authz-compat-first",),
+        )
+        self.assertEqual(
+            active_records[0].policy.local_admins[0].managed_rule_id,
+            "authz.admin",
+        )
+
+    def test_compatibility_writer_rejects_concurrent_stale_authz_replacement(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            migrate_schema(database_url=database_url)
+            base_rule = LocalAdminPolicyRule(
+                managed_set_id="operator.owner",
+                managed_rule_id="authz.admin",
+                subjects=("owner",),
+                token_labels=("owner-admin",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+                actions=("authz_policy_grant.write",),
+            )
+            base_record = LaunchplaneAuthzPolicyRecord(
+                record_id="authz-concurrent-base",
+                source="test:concurrent",
+                updated_at="2026-07-18T00:00:00Z",
+                policy=LaunchplaneAuthzPolicy(schema_version=2, local_admins=(base_rule,)),
+            )
+            replacements = tuple(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=f"authz-concurrent-{suffix}",
+                    source="test:concurrent",
+                    updated_at=f"2026-07-18T00:0{position}:00Z",
+                    policy=LaunchplaneAuthzPolicy(
+                        schema_version=2,
+                        local_admins=(
+                            base_rule,
+                            LocalAdminPolicyRule(
+                                managed_set_id="test.concurrent",
+                                managed_rule_id=f"grant.{suffix}",
+                                subjects=(suffix,),
+                                token_labels=(f"{suffix}-token",),
+                                products=("launchplane",),
+                                contexts=("launchplane",),
+                                actions=("product_profile.read",),
+                            ),
+                        ),
+                    ),
+                )
+                for position, suffix in enumerate(("a", "b"), start=1)
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_authz_policy_record(base_record)
+                start_barrier = threading.Barrier(2)
+
+                def compare_and_write(record: LaunchplaneAuthzPolicyRecord) -> bool:
+                    start_barrier.wait(timeout=5)
+                    return store.compare_and_write_authz_policy_record(
+                        expected_record=base_record,
+                        replacement_record=record,
+                    )
+
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    results = tuple(executor.map(compare_and_write, replacements))
+                active_records = store.list_authz_policy_records(status="active")
+            finally:
+                store.close()
+
+        self.assertEqual(sorted(results), [False, True])
+        self.assertEqual(len(active_records), 1)
+        self.assertIn(active_records[0].record_id, {record.record_id for record in replacements})
+
+    def test_compatibility_writer_canonicalizes_legacy_multi_active_history(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            migrate_schema(database_url=database_url)
+            policy = LaunchplaneAuthzPolicy(
+                local_admins=(
+                    LocalAdminPolicyRule(
+                        subjects=("owner",),
+                        token_labels=("owner-admin",),
+                        products=("launchplane",),
+                        contexts=("launchplane",),
+                        actions=("authz_policy_grant.write",),
+                    ),
+                )
+            )
+            legacy_records = tuple(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=f"authz-legacy-{suffix}",
+                    source="test:legacy-writer",
+                    updated_at=f"2026-07-18T00:0{position}:00Z",
+                    policy=policy,
+                )
+                for position, suffix in enumerate(("older", "newer"), start=1)
+            )
+            replacement_policy = policy.model_copy(
+                update={
+                    "local_admins": policy.local_admins
+                    + (
+                        LocalAdminPolicyRule(
+                            subjects=("backup-owner",),
+                            token_labels=("backup-owner-admin",),
+                            products=("launchplane",),
+                            contexts=("launchplane",),
+                            actions=("authz_policy_grant.write",),
+                        ),
+                    )
+                }
+            )
+            replacement_record = LaunchplaneAuthzPolicyRecord(
+                record_id="authz-legacy-replacement",
+                source="test:compatibility-writer",
+                updated_at="2026-07-18T00:03:00Z",
+                policy=replacement_policy,
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with store._engine.begin() as connection:
+                    for record in legacy_records:
+                        connection.execute(
+                            text(
+                                "insert into launchplane_authz_policies "
+                                "(record_id, status, source, updated_at, policy_sha256, payload) "
+                                "values (:record_id, :status, :source, :updated_at, "
+                                ":policy_sha256, cast(:payload as jsonb))"
+                            ),
+                            {
+                                "record_id": record.record_id,
+                                "status": record.status,
+                                "source": record.source,
+                                "updated_at": record.updated_at,
+                                "policy_sha256": record.policy_sha256,
+                                "payload": json.dumps(record.model_dump(mode="json")),
+                            },
+                        )
+                written = store.compare_and_write_authz_policy_record(
+                    expected_record=legacy_records[-1],
+                    replacement_record=replacement_record,
+                )
+                active_records = store.list_authz_policy_records(status="active")
+                superseded_records = store.list_authz_policy_records(status="superseded")
+            finally:
+                store.close()
+
+        self.assertTrue(written)
+        self.assertEqual(
+            tuple(record.record_id for record in active_records),
+            (replacement_record.record_id,),
+        )
+        self.assertEqual(
+            {record.record_id for record in superseded_records},
+            {record.record_id for record in legacy_records},
+        )
+
+    def test_schema_migration_serializes_concurrent_startups(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            migrate_schema(database_url=database_url)
+            first_migration_entered = threading.Event()
+            release_first_migration = threading.Event()
+            invocation_lock = threading.Lock()
+            invocation_count = 0
+
+            def delayed_schema_migration_action(
+                *, current_revision: str, target_revision: str
+            ) -> str:
+                nonlocal invocation_count
+                with invocation_lock:
+                    invocation_count += 1
+                    is_first_invocation = invocation_count == 1
+                if is_first_invocation:
+                    first_migration_entered.set()
+                    if not release_first_migration.wait(timeout=5):
+                        raise TimeoutError("Timed out waiting to release the first migration.")
+                return schema_migration_action(
+                    current_revision=current_revision,
+                    target_revision=target_revision,
+                )
+
+            with patch(
+                "control_plane.storage.schema_migration.schema_migration_action",
+                side_effect=delayed_schema_migration_action,
+            ):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first_future = executor.submit(
+                        migrate_schema,
+                        database_url=database_url,
+                        target_revision=EXPECTED_ALEMBIC_HEAD_REVISION,
+                    )
+                    self.assertTrue(first_migration_entered.wait(timeout=5))
+                    second_future = executor.submit(
+                        migrate_schema,
+                        database_url=database_url,
+                        target_revision=EXPECTED_ALEMBIC_HEAD_REVISION,
+                    )
+                    time.sleep(0.1)
+                    self.assertFalse(second_future.done())
+                    release_first_migration.set()
+                    revisions = (first_future.result(), second_future.result())
+            engine = create_engine(database_url)
+            try:
+                observed_revision = _current_alembic_version(engine)
+            finally:
+                engine.dispose()
+
+        self.assertEqual(revisions, (EXPECTED_ALEMBIC_HEAD_REVISION,) * 2)
+        self.assertEqual(observed_revision, EXPECTED_ALEMBIC_HEAD_REVISION)
+
     def test_artifact_dependency_provenance_round_trips_jsonb(self) -> None:
         with _store_for_fresh_head_database() as store:
             manifest = artifact_manifest_v2()
