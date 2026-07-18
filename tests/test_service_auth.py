@@ -1079,6 +1079,32 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(authz_policy_sha256(policy), legacy_sha256)
 
+    def test_schema_v2_policy_hash_omits_unset_immutable_repository_ids(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/launchplane",
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("product_profile.read",),
+                ),
+            ),
+        )
+        payload = policy.model_dump(mode="json", exclude_none=True)
+        payload.pop("terminal_agents", None)
+        payload.pop("local_operators", None)
+        payload.pop("local_admins", None)
+
+        self.assertNotIn("repository_id", payload["github_actions"][0])
+        self.assertNotIn("repository_owner_id", payload["github_actions"][0])
+        self.assertEqual(
+            authz_policy_sha256(policy),
+            hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        )
+
     def test_immutable_repository_ids_change_policy_sha256(self) -> None:
         legacy_policy = LaunchplaneAuthzPolicy(
             github_actions=(GitHubActionsPolicyRule(repository="cbusillo/launchplane"),)
@@ -1199,10 +1225,19 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
                 managed_set_id="operator.odoo",
                 repository="cbusillo/odoo-tenant-cm",
             )
+        with self.assertRaisesRegex(ValidationError, "lowercase stable identifier"):
+            GitHubActionsPolicyRule(
+                managed_set_id="Operator Odoo",
+                managed_rule_id="cm.testing.deploy",
+                repository="cbusillo/odoo-tenant-cm",
+            )
         with self.assertRaisesRegex(ValidationError, "must be unique across the policy"):
             LaunchplaneAuthzPolicy(
                 schema_version=2,
-                github_actions=(policy.github_actions[0], policy.github_actions[0]),
+                github_actions=(
+                    policy.github_actions[0],
+                    policy.github_actions[0],
+                ),
             )
         with self.assertRaisesRegex(ValidationError, "cannot declare managed IDs"):
             LaunchplaneAuthzPolicy(

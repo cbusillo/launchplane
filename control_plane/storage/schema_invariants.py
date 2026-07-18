@@ -11,10 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
 EXPECTED_ALEMBIC_HEAD_REVISION = "f4c6e8a0b2d4"
-COMPATIBLE_ALEMBIC_REVISIONS = (
-    AUTHZ_COMPATIBILITY_FLOOR_REVISION,
-    EXPECTED_ALEMBIC_HEAD_REVISION,
-)
+RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
 _AUTHZ_POLICY_WRITE_FENCE_FUNCTION = "launchplane_fence_authz_policy_write"
@@ -290,39 +287,21 @@ def verify_postgres_schema_invariants(engine: Engine) -> None:
             "Launchplane shared storage requires PostgreSQL for hosted service startup; "
             f"got {backend_name!r}."
         )
-    current_revision = _verify_alembic_head(engine)
+    _verify_alembic_head(engine)
     inspector = inspect(engine)
-    expected_column_types = CRITICAL_POSTGRES_COLUMN_TYPES
-    expected_indexes = CRITICAL_SCHEMA_INDEXES
-    if current_revision == AUTHZ_COMPATIBILITY_FLOOR_REVISION:
-        expected_column_types = tuple(
-            expected_type
-            for expected_type in expected_column_types
-            if not (
-                expected_type.table_name == _AUTHZ_POLICY_TABLE
-                and expected_type.column_name == "revision"
-            )
-        )
-        expected_indexes = tuple(
-            expected_index
-            for expected_index in expected_indexes
-            if expected_index.table_name != _AUTHZ_POLICY_TABLE
-        )
     errors = [
-        *critical_column_type_errors(inspector, expected_types=expected_column_types),
+        *critical_column_type_errors(inspector),
         *critical_index_errors(
             inspector=inspector,
             table_names=set(inspector.get_table_names()),
-            expected_indexes=expected_indexes,
             index_definitions=postgres_index_definitions(engine),
         ),
         *critical_primary_key_errors(
             inspector,
             table_names=set(inspector.get_table_names()),
         ),
+        *authz_policy_write_fence_errors(engine),
     ]
-    if current_revision == EXPECTED_ALEMBIC_HEAD_REVISION:
-        errors.extend(authz_policy_write_fence_errors(engine))
     if errors:
         joined_errors = "; ".join(errors)
         raise RuntimeError(
@@ -470,11 +449,12 @@ def _verify_alembic_head(engine: Engine) -> str:
             "Run Alembic migrations before starting the hosted service."
         ) from error
     version_numbers = tuple(str(row[0]).strip() for row in version_rows if str(row[0]).strip())
-    if len(version_numbers) != 1 or version_numbers[0] not in COMPATIBLE_ALEMBIC_REVISIONS:
+    if len(version_numbers) != 1 or version_numbers[0] not in RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS:
         observed = ", ".join(version_numbers) if version_numbers else "<none>"
         raise RuntimeError(
             "Launchplane shared storage schema is not at a compatible Alembic revision: "
-            f"observed {observed}; expected one of {', '.join(COMPATIBLE_ALEMBIC_REVISIONS)}. "
+            f"observed {observed}; expected one of "
+            f"{', '.join(RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS)}. "
             "Run the serialized Launchplane schema migration before starting the hosted service."
         )
     return version_numbers[0]

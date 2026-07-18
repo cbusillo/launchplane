@@ -25,7 +25,11 @@ from control_plane.contracts.agent_write_intent import (
     AgentWriteIntentRequest,
     build_agent_write_intent_record_id,
 )
-from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deploy_target import (
     DeployedTargetReference,
@@ -173,6 +177,7 @@ from control_plane.contracts.secret_record import (
 )
 from control_plane.service_auth import (
     GitHubActionsIdentity,
+    GitHubActionsPolicyRule,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     agent_authz_audit,
@@ -3745,7 +3750,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 )
             )
             store.ensure_schema()
-            store.write_authz_policy_record(
+            seeded_record = store.seed_authz_policy_if_absent(
                 LaunchplaneAuthzPolicyRecord(
                     record_id="launchplane-authz-policy-20260420T100500Z-test",
                     status="active",
@@ -3758,57 +3763,260 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(len(listed_records), 1)
-        self.assertEqual(
-            listed_records[0].record_id, "launchplane-authz-policy-20260420T100500Z-test"
-        )
+        self.assertEqual(listed_records[0], seeded_record)
+        self.assertEqual(listed_records[0].revision, 1)
         self.assertEqual(
             listed_records[0].policy.github_actions[0].repository, "cbusillo/launchplane"
         )
 
-    def test_authz_policy_import_allows_explicit_bootstrap_repair(self) -> None:
+    def test_authz_policy_compare_write_supersedes_active_history_and_detects_conflict(
+        self,
+    ) -> None:
+        initial_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "actions": ["product_profile.read"],
+                    }
+                ]
+            }
+        )
+        replacement_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_actions": [
+                    {
+                        "managed_set_id": "operator.launchplane",
+                        "managed_rule_id": "profile.read",
+                        "repository": "cbusillo/launchplane",
+                        "actions": ["product_profile.read"],
+                    }
+                ],
+            }
+        )
+        initial_seed = LaunchplaneAuthzPolicyRecord(
+            record_id="launchplane-authz-policy-seed",
+            status="active",
+            source="test:initial",
+            updated_at="2026-07-18T06:00:00Z",
+            policy=initial_policy,
+        )
+        replacement_template = LaunchplaneAuthzPolicyRecord(
+            record_id="launchplane-authz-policy-replacement",
+            revision=2,
+            status="active",
+            source="test:replacement",
+            updated_at="2026-07-18T06:01:00Z",
+            policy=replacement_policy,
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            initial_record = store.seed_authz_policy_if_absent(initial_seed)
+            replacement_record = replacement_template.model_copy(
+                update={
+                    "record_id": build_authz_policy_record_id(
+                        revision=2,
+                        policy_sha256=replacement_template.policy_sha256,
+                    )
+                }
+            )
+
+            write_result = store.compare_and_write_authz_policy_record(
+                expected_record=initial_record,
+                replacement_record=replacement_record,
+            )
+            conflict_result = store.compare_and_write_authz_policy_record(
+                expected_record=initial_record,
+                replacement_record=replacement_record.model_copy(
+                    update={
+                        "record_id": "launchplane-authz-policy-conflict",
+                    }
+                ),
+            )
+            active_records = store.list_authz_policy_records(status="active")
+            superseded_records = store.list_authz_policy_records(status="superseded")
+            store.close()
+
+        self.assertEqual(write_result.status, "written")
+        self.assertEqual(conflict_result.status, "stale")
+        self.assertIsNotNone(conflict_result.current_record)
+        assert conflict_result.current_record is not None
+        self.assertEqual(conflict_result.current_record.record_id, replacement_record.record_id)
+        self.assertEqual(
+            tuple(record.record_id for record in active_records), (replacement_record.record_id,)
+        )
+        self.assertEqual(
+            {record.record_id for record in superseded_records},
+            {initial_record.record_id},
+        )
+
+    def test_authz_policy_compare_write_completes_idempotency_atomically(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            current_record = store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="seed",
+                    source="test:initial",
+                    updated_at="2026-07-18T06:00:00Z",
+                    policy=LaunchplaneAuthzPolicy(),
+                )
+            )
+            replacement_policy = LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(
+                    GitHubActionsPolicyRule(
+                        repository="cbusillo/launchplane",
+                        actions=("product_profile.read",),
+                    ),
+                ),
+            )
+            replacement_record = LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=2,
+                    policy_sha256=authz_policy_sha256(replacement_policy),
+                ),
+                revision=2,
+                source="service:authz-managed-rule-set-reconcile",
+                updated_at="2026-07-18T06:01:00Z",
+                policy=replacement_policy,
+            )
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:authz-test",
+                route_path="/v1/authz-policies/managed-rule-sets/reconcile",
+                idempotency_key="authz:test:apply:1",
+                request_fingerprint="fingerprint-a",
+                lease_owner="trace-authz",
+                response_status_code=202,
+                response_trace_id="trace-authz",
+                response_payload={"status": "accepted", "trace_id": "trace-authz"},
+            )
+
+            written = store.compare_and_write_authz_policy_record(
+                expected_record=current_record,
+                replacement_record=replacement_record,
+                mutation=mutation,
+            )
+            replayed = store.compare_and_write_authz_policy_record(
+                expected_record=current_record,
+                replacement_record=replacement_record,
+                mutation=mutation,
+            )
+            conflict = store.compare_and_write_authz_policy_record(
+                expected_record=current_record,
+                replacement_record=replacement_record,
+                mutation=DbOnlyMutationRequest(
+                    **{
+                        **mutation.__dict__,
+                        "request_fingerprint": "fingerprint-b",
+                    }
+                ),
+            )
+            active_records = store.list_authz_policy_records(status="active")
+            superseded_records = store.list_authz_policy_records(status="superseded")
+            store.close()
+
+        self.assertEqual(written.status, "written")
+        self.assertIsNotNone(written.idempotency_record)
+        self.assertEqual(replayed.status, "replayed")
+        self.assertEqual(conflict.status, "idempotency_conflict")
+        self.assertEqual(active_records, (replacement_record,))
+        self.assertEqual(
+            superseded_records, (current_record.model_copy(update={"status": "superseded"}),)
+        )
+
+    def test_authz_policy_compare_write_rolls_back_policy_and_idempotency_together(self) -> None:
+        class FailingAuthzStore(PostgresRecordStore):
+            def _after_authz_policy_write_step(self, step_name: str) -> None:
+                if step_name == "insert_active":
+                    raise RuntimeError("injected authz write failure")
+
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
                 Path(temporary_directory_name) / "launchplane.sqlite3"
             )
-            policy_file = Path(temporary_directory_name) / "launchplane-authz.toml"
-            policy_file.write_text(
-                """
-schema_version = 1
-
-[[github_actions]]
-repository = "cbusillo/launchplane"
-workflow_refs = ["cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"]
-event_names = ["workflow_dispatch"]
-products = ["launchplane"]
-contexts = ["launchplane"]
-actions = ["launchplane_service_deploy.execute"]
-""".strip(),
-                encoding="utf-8",
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            current_record = store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="seed",
+                    source="test:initial",
+                    updated_at="2026-07-18T06:00:00Z",
+                    policy=LaunchplaneAuthzPolicy(),
+                )
             )
-            result = CliRunner().invoke(
-                main,
-                [
-                    "authz-policies",
-                    "import-toml",
-                    "--database-url",
-                    database_url,
-                    "--policy-file",
-                    str(policy_file),
-                    "--source-label",
-                    "test",
-                    "--allow-direct-db-mutation",
-                ],
+            store.close()
+            replacement_policy = LaunchplaneAuthzPolicy(schema_version=2)
+            replacement_record = LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=2,
+                    policy_sha256=authz_policy_sha256(replacement_policy),
+                ),
+                revision=2,
+                source="service:authz-managed-rule-set-reconcile",
+                updated_at="2026-07-18T06:01:00Z",
+                policy=replacement_policy,
+            )
+            failing_store = FailingAuthzStore(database_url=database_url)
+            with self.assertRaisesRegex(RuntimeError, "injected authz write failure"):
+                failing_store.compare_and_write_authz_policy_record(
+                    expected_record=current_record,
+                    replacement_record=replacement_record,
+                    mutation=DbOnlyMutationRequest(
+                        scope="github-actions:authz-test",
+                        route_path="/v1/authz-policies/managed-rule-sets/reconcile",
+                        idempotency_key="authz:test:rollback",
+                        request_fingerprint="fingerprint-rollback",
+                        lease_owner="trace-authz-rollback",
+                        response_status_code=202,
+                        response_trace_id="trace-authz-rollback",
+                        response_payload={"status": "accepted"},
+                    ),
+                )
+            active_records = failing_store.list_authz_policy_records(status="active")
+            idempotency_record = failing_store.read_idempotency_record(
+                scope="github-actions:authz-test",
+                route_path="/v1/authz-policies/managed-rule-sets/reconcile",
+                idempotency_key="authz:test:rollback",
+            )
+            failing_store.close()
+
+        self.assertEqual(active_records, (current_record,))
+        self.assertIsNone(idempotency_record)
+
+    def test_authz_policy_seed_is_idempotent(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
             )
             store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            seed = LaunchplaneAuthzPolicyRecord(
+                record_id="seed",
+                source="test",
+                updated_at="2026-07-18T00:00:00Z",
+                policy=LaunchplaneAuthzPolicy(),
+            )
+            first = store.seed_authz_policy_if_absent(seed)
+            second = store.seed_authz_policy_if_absent(
+                seed.model_copy(update={"source": "test:ignored"})
+            )
             listed_records = store.list_authz_policy_records(status="active", limit=1)
             store.close()
 
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(first, second)
         self.assertEqual(len(listed_records), 1)
         self.assertEqual(listed_records[0].source, "test")
-        self.assertEqual(
-            listed_records[0].policy.github_actions[0].repository, "cbusillo/launchplane"
-        )
 
     def test_runtime_key_safety_policy_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -4147,25 +4355,14 @@ env_var = "GH_TOKEN"
         self.assertIn("Direct local DB mutation is restricted", result.output)
         self.assertIn("--allow-direct-db-mutation", result.output)
 
-    def test_authz_policy_import_requires_direct_db_acknowledgement(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            policy_file = Path(temporary_directory_name) / "launchplane-authz.toml"
-            policy_file.write_text("schema_version = 1\n", encoding="utf-8")
-            result = CliRunner().invoke(
-                main,
-                [
-                    "authz-policies",
-                    "import-toml",
-                    "--database-url",
-                    "postgresql://launchplane:test@db/launchplane",
-                    "--policy-file",
-                    str(policy_file),
-                ],
-            )
+    def test_authz_policy_direct_import_command_is_removed(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            ["authz-policies", "import-toml"],
+        )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Direct local DB mutation is restricted", result.output)
-        self.assertIn("--allow-direct-db-mutation", result.output)
+        self.assertIn("No such command 'import-toml'", result.output)
 
     def test_product_profile_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

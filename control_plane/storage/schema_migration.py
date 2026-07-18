@@ -15,10 +15,14 @@ from control_plane.storage.postgres import _build_engine
 from control_plane.storage.schema_adoption import schema_stamp_revision_for_engine
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
-    COMPATIBLE_ALEMBIC_REVISIONS,
+    EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 
-SCHEMA_MIGRATION_TARGET_REVISION = AUTHZ_COMPATIBILITY_FLOOR_REVISION
+SCHEMA_MIGRATION_TARGET_REVISION = EXPECTED_ALEMBIC_HEAD_REVISION
+SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
+    AUTHZ_COMPATIBILITY_FLOOR_REVISION,
+    EXPECTED_ALEMBIC_HEAD_REVISION,
+)
 _SCHEMA_MIGRATION_LOCK_KEY = "launchplane:schema-migration"
 SchemaMigrationAction = Literal["current", "upgrade", "compatible_ahead"]
 
@@ -28,13 +32,13 @@ def schema_migration_action(
     current_revision: str,
     target_revision: str = SCHEMA_MIGRATION_TARGET_REVISION,
 ) -> SchemaMigrationAction:
-    if target_revision not in COMPATIBLE_ALEMBIC_REVISIONS:
+    if target_revision not in SCHEMA_MIGRATION_SUPPORTED_REVISIONS:
         raise ValueError(f"Unsupported Launchplane schema migration target {target_revision!r}.")
     if current_revision == target_revision:
         return "current"
-    if current_revision in COMPATIBLE_ALEMBIC_REVISIONS:
-        current_index = COMPATIBLE_ALEMBIC_REVISIONS.index(current_revision)
-        target_index = COMPATIBLE_ALEMBIC_REVISIONS.index(target_revision)
+    if current_revision in SCHEMA_MIGRATION_SUPPORTED_REVISIONS:
+        current_index = SCHEMA_MIGRATION_SUPPORTED_REVISIONS.index(current_revision)
+        target_index = SCHEMA_MIGRATION_SUPPORTED_REVISIONS.index(target_revision)
         if current_index > target_index:
             return "compatible_ahead"
         return "upgrade"

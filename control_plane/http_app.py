@@ -520,7 +520,6 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
     RouteBindingMutationResult,
 )
-from control_plane.storage.schema_invariants import AUTHZ_COMPATIBILITY_FLOOR_REVISION
 from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorStore,
@@ -655,6 +654,8 @@ _AUTHZ_POLICY_GITHUB_HUMANS_GRANTS_ROUTE = "/v1/authz-policies/github-humans/gra
 _AUTHZ_POLICY_TERMINAL_AGENTS_GRANTS_ROUTE = "/v1/authz-policies/terminal-agents/grants"
 _AUTHZ_POLICY_LOCAL_OPERATORS_GRANTS_ROUTE = "/v1/authz-policies/local-operators/grants"
 _AUTHZ_POLICY_LOCAL_ADMINS_GRANTS_ROUTE = "/v1/authz-policies/local-admins/grants"
+_AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
+_AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
 _AUTH_SESSION_ROUTE = "/v1/auth/session"
 _AUTH_GITHUB_LOGIN_ROUTE = "/auth/github/login"
 _AUTH_GITHUB_CALLBACK_ROUTE = "/auth/github/callback"
@@ -674,6 +675,7 @@ AuthzPolicyRouteEnvelope = (
     | control_plane_authz_grant_service.AuthzPolicyTerminalAgentGrantEnvelope
     | control_plane_authz_grant_service.AuthzPolicyLocalOperatorGrantEnvelope
     | control_plane_authz_grant_service.AuthzPolicyLocalAdminGrantEnvelope
+    | control_plane_authz_grant_service.AuthzManagedPolicyReconcileEnvelope
 )
 
 
@@ -1038,6 +1040,14 @@ class LaunchplaneRuntimeResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     runtime: LaunchplaneRuntimeStatus
+
+
+class LaunchplaneActiveAuthzPolicyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    policy: dict[str, object]
 
 
 class OdooStableOperationLeaseSummaryResponse(BaseModel):
@@ -2856,24 +2866,27 @@ def resolve_launchplane_authz_policy(
             )
 
     policy_sha256 = authz_policy_sha256(bootstrap_policy)
-    write_record = getattr(record_store, "write_authz_policy_record", None)
-    if callable(write_record):
+    seed_record = getattr(record_store, "seed_authz_policy_if_absent", None)
+    if callable(seed_record):
         record = LaunchplaneAuthzPolicyRecord(
             record_id=build_authz_policy_record_id(
-                updated_at=now_timestamp,
+                revision=1,
                 policy_sha256=policy_sha256,
             ),
+            revision=1,
             status="active",
             source=policy_source,
             updated_at=now_timestamp,
             policy_sha256=policy_sha256,
             policy=bootstrap_policy,
         )
-        write_record(record)
+        seeded_record = seed_record(record)
         return ResolvedLaunchplaneAuthzPolicy(
-            policy=record.policy,
-            policy_sha256=record.policy_sha256,
-            source="bootstrap_seeded_store",
+            policy=seeded_record.policy,
+            policy_sha256=seeded_record.policy_sha256,
+            source=(
+                "bootstrap_seeded_store" if seeded_record.record_id == record.record_id else "db"
+            ),
         )
 
     return ResolvedLaunchplaneAuthzPolicy(
@@ -2959,7 +2972,7 @@ def create_launchplane_fastapi_app(
     app.add_middleware(BoundedRequestBodyMiddleware)
     enforce_human_policy_revalidation = False
 
-    def read_active_authz_policy() -> tuple[tuple[LaunchplaneAuthzPolicyRecord, ...], str] | None:
+    def read_active_authz_policy_records() -> tuple[LaunchplaneAuthzPolicyRecord, ...] | None:
         nonlocal enforce_human_policy_revalidation
         refresh_record_store = (
             record_store_factory() if record_store_factory is not None else shared_record_store
@@ -2974,8 +2987,7 @@ def create_launchplane_fastapi_app(
             status="active",
             limit=2,
         )
-        schema_revision = refresh_record_store.schema_revision() if len(active_records) > 1 else ""
-        return active_records, schema_revision
+        return active_records
 
     @app.middleware("http")
     async def refresh_authz_policy_runtime(
@@ -2985,7 +2997,7 @@ def create_launchplane_fastapi_app(
         if request.url.path.startswith("/v1/") and request.url.path != "/v1/health":
             trace_id = next_trace_id()
             try:
-                refresh_result = await run_in_threadpool(read_active_authz_policy)
+                refresh_result = await run_in_threadpool(read_active_authz_policy_records)
             except Exception:
                 logging.exception("Failed to refresh the active Launchplane authz policy.")
                 return JSONResponse(
@@ -3000,7 +3012,7 @@ def create_launchplane_fastapi_app(
                 )
             if refresh_result is None:
                 return cast(Response, await call_next(request))
-            active_records, schema_revision = refresh_result
+            active_records = refresh_result
             if not active_records:
                 return JSONResponse(
                     status_code=503,
@@ -3012,10 +3024,7 @@ def create_launchplane_fastapi_app(
                         ),
                     ).model_dump(mode="json"),
                 )
-            if len(active_records) > 1 and schema_revision not in {
-                "",
-                AUTHZ_COMPATIBILITY_FLOOR_REVISION,
-            }:
+            if len(active_records) > 1:
                 return JSONResponse(
                     status_code=409,
                     content=LaunchplaneErrorResponse(
@@ -3025,12 +3034,6 @@ def create_launchplane_fastapi_app(
                             message="Multiple active Launchplane authz policy records were found.",
                         ),
                     ).model_dump(mode="json"),
-                )
-            if len(active_records) > 1:
-                logging.warning(
-                    "Using the newest active authz policy while compatibility revision %s "
-                    "awaits f4 history canonicalization.",
-                    schema_revision or "local-test",
                 )
             active_record = active_records[0]
             if (
@@ -10871,6 +10874,21 @@ def create_launchplane_fastapi_app(
             )
         normalized_idempotency_key = idempotency_key.strip()
         payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        is_managed_reconcile = isinstance(
+            authz_request,
+            control_plane_authz_grant_service.AuthzManagedPolicyReconcileEnvelope,
+        )
+        if (
+            is_managed_reconcile
+            and authz_request.mode == "apply"
+            and not normalized_idempotency_key
+        ):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Managed authz policy reconciliation apply requires an Idempotency-Key.",
+            )
         if authz_request.mode == "apply":
             (
                 normalized_idempotency_key,
@@ -10883,7 +10901,7 @@ def create_launchplane_fastapi_app(
                 route_path=route_path,
                 idempotency_key=normalized_idempotency_key,
                 trace_id=trace_id,
-                check_replay=bool(normalized_idempotency_key),
+                check_replay=bool(normalized_idempotency_key) and not is_managed_reconcile,
             )
             if replay_response is not None:
                 return replay_response
@@ -10896,7 +10914,29 @@ def create_launchplane_fastapi_app(
                 now_timestamp=authz_policy_record_timestamp,
                 authorized_policy_sha256=resolved_authz_policy_runtime.policy_sha256,
             )
+        except control_plane_authz_grant_service.AuthzPolicyRequestError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error),
+            ) from error
         except control_plane_authz_grant_service.AuthzPolicyConflictError as error:
+            if (
+                is_managed_reconcile
+                and authz_request.mode == "apply"
+                and normalized_idempotency_key
+            ):
+                replay_response = replay_stored_apply_idempotency(
+                    record_store=database_store,
+                    identity=identity,
+                    route_path=route_path,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                )
+                if replay_response is not None:
+                    return replay_response
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -10913,17 +10953,122 @@ def create_launchplane_fastapi_app(
                 code="authz_policy_unavailable",
                 message="Launchplane active authz policy is unavailable.",
             ) from error
+        if is_managed_reconcile and authz_request.mode == "apply":
+            mutation_scope = idempotency_scope(identity)
+            idempotency_record_digest = hashlib.sha256(
+                "\x1f".join((mutation_scope, route_path, normalized_idempotency_key)).encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            audit_context: dict[str, object] = {
+                "request_fingerprint": payload_fingerprint,
+                "idempotency_scope_sha256": hashlib.sha256(
+                    mutation_scope.encode("utf-8")
+                ).hexdigest(),
+                "idempotency_record_id": f"mutation-reservation-{idempotency_record_digest}",
+                "idempotency_key_sha256": hashlib.sha256(
+                    normalized_idempotency_key.encode("utf-8")
+                ).hexdigest(),
+            }
+            route_result.authz_policy_record.audit.update(audit_context)
+            response_audit = route_result.driver_result.get("audit")
+            if isinstance(response_audit, dict):
+                response_audit.update(audit_context)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=authz_policy_route_records(route_result.result),
+            result=route_result.driver_result,
+        )
+        if is_managed_reconcile and authz_request.mode == "apply":
+            mutation = DbOnlyMutationRequest(
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+            )
+            write_result = database_store.compare_and_write_authz_policy_record(
+                expected_record=route_result.previous_authz_policy_record,
+                replacement_record=(
+                    route_result.authz_policy_record if route_result.changed else None
+                ),
+                mutation=mutation,
+            )
+            if write_result.status == "replayed":
+                if write_result.idempotency_record is None:
+                    raise RuntimeError("Replayed authz policy write requires evidence.")
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=write_result.idempotency_record,
+                    route_path=route_path,
+                )
+            if write_result.status == "idempotency_conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different Launchplane request "
+                        "payload on this route."
+                    ),
+                )
+            if write_result.status == "reservation_in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching managed authz policy reconciliation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if write_result.status == "reconciliation_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The managed authz policy reconciliation requires reconciliation before "
+                        "retry."
+                    ),
+                )
+            if write_result.status == "stale":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="authz_policy_plan_stale",
+                    message="The reviewed managed authz policy plan is stale.",
+                )
+            if write_result.status == "ambiguous_active":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="active_authz_policy_ambiguous",
+                    message="Multiple active Launchplane authz policy records were found.",
+                )
+            if write_result.status == "missing":
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="authz_policy_unavailable",
+                    message="Launchplane active authz policy is unavailable.",
+                )
+            resolved_authz_policy_runtime.update(
+                route_result.updated_policy,
+                policy_sha256=route_result.authz_policy_record.policy_sha256,
+                source="db",
+            )
+            return response
         if authz_request.mode == "apply":
             resolved_authz_policy_runtime.update(
                 route_result.updated_policy,
                 policy_sha256=route_result.authz_policy_record.policy_sha256,
                 source="db",
             )
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=authz_policy_route_records(route_result.result),
-            result=route_result.driver_result,
-        )
         if authz_request.mode == "apply":
             store_apply_idempotency(
                 record_store=database_store,
@@ -11036,6 +11181,71 @@ def create_launchplane_fastapi_app(
             envelope_model=control_plane_authz_grant_service.AuthzPolicyLocalAdminGrantEnvelope,
             database_required_message="Authz local-admin policy grant writes require Launchplane database storage.",
             denied_message="Workflow cannot write Launchplane authz local-admin policy grants.",
+        )
+
+    async def read_active_authz_policy(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> LaunchplaneActiveAuthzPolicyResponse:
+        trace_id = next_trace_id()
+        if isinstance(
+            identity, TerminalAgentIdentity
+        ) or not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="authz_policy_grant.write",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read Launchplane authz policy administration state.",
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Active authz policy reads require Launchplane database storage.",
+        )
+        active_records = database_store.list_authz_policy_records(status="active", limit=2)
+        if not active_records:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_unavailable",
+                message="Launchplane active authz policy is unavailable.",
+            )
+        if len(active_records) > 1:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="active_authz_policy_ambiguous",
+                message="Multiple active Launchplane authz policy records were found.",
+            )
+        return LaunchplaneActiveAuthzPolicyResponse(
+            trace_id=trace_id,
+            policy=control_plane_authz_grant_service.summarize_active_authz_policy_record(
+                active_records[0]
+            ),
+        )
+
+    async def reconcile_managed_authz_policy(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        return await apply_authz_policy_route(
+            request=request,
+            identity=identity,
+            record_store=record_store,
+            idempotency_key=idempotency_key,
+            route_path=_AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE,
+            envelope_model=control_plane_authz_grant_service.AuthzManagedPolicyReconcileEnvelope,
+            database_required_message=(
+                "Managed authz policy reconciliation requires Launchplane database storage."
+            ),
+            denied_message="Workflow cannot reconcile Launchplane managed authz policy rules.",
         )
 
     async def apply_live_target_runtime(
@@ -16851,6 +17061,46 @@ def create_launchplane_fastapi_app(
         },
         operation_id="grant_local_admin_authz_policy",
         summary="Grant local-admin authz policy rules",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_ACTIVE_ROUTE,
+        read_active_authz_policy,
+        methods=["GET"],
+        response_model=LaunchplaneActiveAuthzPolicyResponse,
+        response_model_exclude_none=True,
+        operation_id="read_active_authz_policy",
+        summary="Read redacted active authz policy administration state",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE,
+        reconcile_managed_authz_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            control_plane_authz_grant_service.AuthzManagedPolicyReconcileEnvelope
+                        )
+                    }
+                },
+            }
+        },
+        operation_id="reconcile_managed_authz_policy",
+        summary="Reconcile managed authz policy rules",
         responses=authz_policy_route_responses,
     )
 

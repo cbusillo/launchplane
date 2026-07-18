@@ -6320,6 +6320,32 @@
         "title": "IngressRouteAuditRecordsResponse",
         "type": "object"
       },
+      "LaunchplaneActiveAuthzPolicyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "policy": {
+            "additionalProperties": true,
+            "title": "Policy",
+            "type": "object"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "policy"
+        ],
+        "title": "LaunchplaneActiveAuthzPolicyResponse",
+        "type": "object"
+      },
       "LaunchplaneErrorDetail": {
         "additionalProperties": false,
         "properties": {
@@ -20267,6 +20293,86 @@
         "summary": "Read human auth session"
       }
     },
+    "/v1/authz-policies/active": {
+      "get": {
+        "operationId": "read_active_authz_policy",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneActiveAuthzPolicyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read redacted active authz policy administration state"
+      }
+    },
     "/v1/authz-policies/github-actions/grants": {
       "post": {
         "operationId": "grant_github_actions_authz_policy",
@@ -20378,10 +20484,12 @@
                         "type": "string"
                       },
                       "repository_id": {
+                        "default": "",
                         "title": "Repository Id",
                         "type": "string"
                       },
                       "repository_owner_id": {
+                        "default": "",
                         "title": "Repository Owner Id",
                         "type": "string"
                       },
@@ -20401,8 +20509,6 @@
                     },
                     "required": [
                       "repository",
-                      "repository_id",
-                      "repository_owner_id",
                       "actions"
                     ],
                     "title": "AuthzPolicyGitHubActionsGrant",
@@ -21448,6 +21554,688 @@
           }
         },
         "summary": "Grant local-operator authz policy rules"
+      }
+    },
+    "/v1/authz-policies/managed-rule-sets/reconcile": {
+      "post": {
+        "operationId": "reconcile_managed_authz_policy",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "GitHubActionsPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "contexts": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Contexts",
+                        "type": "array"
+                      },
+                      "environments": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Environments",
+                        "type": "array"
+                      },
+                      "event_names": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Event Names",
+                        "type": "array"
+                      },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
+                      "job_workflow_refs": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Job Workflow Refs",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "products": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Products",
+                        "type": "array"
+                      },
+                      "refs": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Refs",
+                        "type": "array"
+                      },
+                      "repository": {
+                        "title": "Repository",
+                        "type": "string"
+                      },
+                      "repository_id": {
+                        "default": "",
+                        "title": "Repository Id",
+                        "type": "string"
+                      },
+                      "repository_owner_id": {
+                        "default": "",
+                        "title": "Repository Owner Id",
+                        "type": "string"
+                      },
+                      "workflow_refs": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Workflow Refs",
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "repository"
+                    ],
+                    "title": "GitHubActionsPolicyRule",
+                    "type": "object"
+                  },
+                  "GitHubHumanPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "contexts": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Contexts",
+                        "type": "array"
+                      },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
+                      "logins": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Logins",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "organizations": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Organizations",
+                        "type": "array"
+                      },
+                      "products": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Products",
+                        "type": "array"
+                      },
+                      "roles": {
+                        "default": [],
+                        "items": {
+                          "enum": [
+                            "read_only",
+                            "admin"
+                          ],
+                          "type": "string"
+                        },
+                        "title": "Roles",
+                        "type": "array"
+                      },
+                      "teams": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Teams",
+                        "type": "array"
+                      }
+                    },
+                    "title": "GitHubHumanPolicyRule",
+                    "type": "object"
+                  },
+                  "LaunchplaneAuthzPolicy": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "github_actions": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/GitHubActionsPolicyRule"
+                        },
+                        "title": "Github Actions",
+                        "type": "array"
+                      },
+                      "github_humans": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/GitHubHumanPolicyRule"
+                        },
+                        "title": "Github Humans",
+                        "type": "array"
+                      },
+                      "local_admins": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/LocalAdminPolicyRule"
+                        },
+                        "title": "Local Admins",
+                        "type": "array"
+                      },
+                      "local_operators": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/LocalOperatorPolicyRule"
+                        },
+                        "title": "Local Operators",
+                        "type": "array"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "enum": [
+                          1,
+                          2
+                        ],
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "terminal_agents": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/TerminalAgentPolicyRule"
+                        },
+                        "title": "Terminal Agents",
+                        "type": "array"
+                      }
+                    },
+                    "title": "LaunchplaneAuthzPolicy",
+                    "type": "object"
+                  },
+                  "LocalAdminPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "contexts": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Contexts",
+                        "type": "array"
+                      },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "products": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Products",
+                        "type": "array"
+                      },
+                      "subjects": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Subjects",
+                        "type": "array"
+                      },
+                      "token_labels": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Token Labels",
+                        "type": "array"
+                      }
+                    },
+                    "title": "LocalAdminPolicyRule",
+                    "type": "object"
+                  },
+                  "LocalOperatorPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "contexts": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Contexts",
+                        "type": "array"
+                      },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "products": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Products",
+                        "type": "array"
+                      },
+                      "subjects": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Subjects",
+                        "type": "array"
+                      },
+                      "token_labels": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Token Labels",
+                        "type": "array"
+                      }
+                    },
+                    "title": "LocalOperatorPolicyRule",
+                    "type": "object"
+                  },
+                  "TerminalAgentPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "contexts": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Contexts",
+                        "type": "array"
+                      },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "products": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Products",
+                        "type": "array"
+                      },
+                      "subjects": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Subjects",
+                        "type": "array"
+                      },
+                      "token_labels": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Token Labels",
+                        "type": "array"
+                      }
+                    },
+                    "title": "TerminalAgentPolicyRule",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "desired_policy": {
+                    "$ref": "#/$defs/LaunchplaneAuthzPolicy"
+                  },
+                  "managed_set_id": {
+                    "title": "Managed Set Id",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "default": "dry_run",
+                    "enum": [
+                      "dry_run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "default": "",
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "related_issue": {
+                    "default": "",
+                    "title": "Related Issue",
+                    "type": "string"
+                  },
+                  "reviewed_plan_sha256": {
+                    "default": "",
+                    "title": "Reviewed Plan Sha256",
+                    "type": "string"
+                  },
+                  "schema_migration": {
+                    "default": "reject",
+                    "enum": [
+                      "reject",
+                      "migrate_v1_to_v2"
+                    ],
+                    "title": "Schema Migration",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "const": 2,
+                    "default": 2,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  },
+                  "unmanaged_adoption": {
+                    "default": "reject",
+                    "enum": [
+                      "reject",
+                      "adopt_matching"
+                    ],
+                    "title": "Unmanaged Adoption",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "product",
+                  "managed_set_id",
+                  "desired_policy"
+                ],
+                "title": "AuthzManagedPolicyReconcileEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Reconcile managed authz policy rules"
       }
     },
     "/v1/authz-policies/terminal-agents/grants": {

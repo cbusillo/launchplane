@@ -81,14 +81,15 @@ LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane
 ```
 
 Do not run `alembic upgrade head` directly against the shared service database
-during a staged rollout. The authorization compatibility release targets
-revision `f3b5d7e9a1c2` while understanding both that revision and the fenced
-`f4c6e8a0b2d4` schema. Deploy that compatibility image across the fleet before a
-later release advances the target to `f4c6e8a0b2d4`. After the database reaches
-f4, rollback is supported only to an image that already understands f4; a
-pre-compatibility image is no longer a safe rollback target. The runtime status
-route reports both the observed database revision and the image's migration
-target so deployment verification can enforce this boundary.
+during a staged rollout. The authorization compatibility image was deployed at
+revision `f3b5d7e9a1c2` before this release advanced the migration target to the
+fenced `f4c6e8a0b2d4` schema. The full reconciliation image accepts f3 only as a
+serialized migration source; its ORM and runtime compatibility contract require
+f4. After the database reaches f4, rollback is supported only to the previously
+deployed compatibility image or another image that understands f4. The runtime
+status route reports the observed database revision, the image's f4-only runtime
+compatibility set, and its migration target so deployment verification can
+enforce this boundary.
 
 JSONB `payload` columns remain durable evidence envelopes and original typed
 payload snapshots. Fields that the GUI or drivers need to filter, order, join,
@@ -356,27 +357,23 @@ an ORM column/table or remains only in the evidence payload.
 - Release tuple: modeled fields are `context`, `channel`, `tuple_id`,
   `artifact_id`, `minted_at`, and `provenance`. Repo SHA maps and source
   provenance details stay payload-only.
-- Authz policy: modeled fields are `record_id`, `status`, `source`,
-  `updated_at`, `policy_sha256`, and optional service-owned `audit` metadata.
-  The parsed GitHub Actions and human grant policy stays payload-only until
-  Launchplane needs per-rule filtering or browser-side policy editing. Authz
-  grant audit metadata records the operator identity, reason, related issue,
-  previous/new policy ids and shas, trace id, mode, and requested grant details;
-  service responses redact that requested-grant detail to counts and scope
-  summaries. New GitHub Actions grant writes persist both the repository name and
-  immutable GitHub repository/owner IDs. Existing name-only rules remain readable
-  during the compatibility floor, while an exact ID-bound grant replaces an
-  otherwise identical name-only rule. Exact compatibility writes compare the
-  active record before commit and return a conflict instead of overwriting a
-  concurrent grant. Their idempotency completion remains a post-commit bridge;
-  the managed reconciliation contract records policy and idempotency state in one
-  transaction. Operator dry-run evidence binds the normalized grant set to the
-  active policy schema and separately records the active policy SHA, so apply can
-  reject a stale review before mutation. The staged f4 schema adds a monotonic
-  revision, one-active-record constraint, and a database
-  write fence that remains compatible with the preceding writer shape. During a
-  future OpenFGA migration, these DB-backed policy records
-  remain the source evidence for dry-run tuple proposals and parity checks.
+- Authz policy: modeled fields are `record_id`, monotonic `revision`, `status`,
+  `source`, `updated_at`, `policy_sha256`, and optional service-owned `audit`
+  metadata. PostgreSQL enforces unique revisions and at most one active row.
+  Managed rules persist stable `(managed_set_id, managed_rule_id)` identities in
+  the schema-v2 policy payload; content hashes describe versions rather than
+  ownership. Managed reconciliation audit records the operator identity, reason,
+  related issue, reviewed plan and desired-set digests, migration/adoption
+  intent, previous/new revisions and policy digests, trace/request fingerprints,
+  idempotency evidence, and a redacted rule-ID/hash diff. Policy CAS and
+  completed replay evidence commit in one transaction; a no-op apply creates no
+  policy-history row. Exact compatibility grants persist immutable GitHub
+  repository/owner IDs, replace otherwise-identical name-only rules, compare the
+  active record before commit, and redact requested-grant details to counts and
+  scope summaries. Their post-commit idempotency evidence remains a temporary
+  bridge; managed reconciliation commits policy and replay evidence together.
+  During a future OpenFGA migration, these DB-backed policy records remain the
+  source evidence for dry-run tuple proposals and parity checks.
   After a proven cutover, records should store import/audit/model-version
   evidence rather than remain a second live authorization source.
 - Human session: the DB-backed payload includes the GitHub identity snapshot,

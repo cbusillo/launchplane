@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 
 
@@ -24,15 +25,17 @@ def authz_policy_sha256(policy: LaunchplaneAuthzPolicy) -> str:
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
-def build_authz_policy_record_id(*, updated_at: str, policy_sha256: str) -> str:
-    timestamp = updated_at.replace("-", "").replace(":", "").replace("+00:00", "Z")
-    return f"launchplane-authz-policy-{timestamp}-{policy_sha256[:12]}"
+def build_authz_policy_record_id(*, revision: int, policy_sha256: str) -> str:
+    if revision < 1:
+        raise ValueError("authz policy record revision must be positive")
+    return f"launchplane-authz-policy-r{revision:020d}-{policy_sha256[:12]}"
 
 
 class LaunchplaneAuthzPolicyRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     record_id: str
+    revision: int = Field(default=1, ge=1)
     status: AuthzPolicyStatus = "active"
     source: str
     updated_at: str
@@ -54,3 +57,22 @@ class LaunchplaneAuthzPolicyRecord(BaseModel):
         if self.policy_sha256 != computed_sha256:
             raise ValueError("authz policy record policy_sha256 does not match policy payload")
         return self
+
+
+AuthzPolicyCompareWriteStatus = Literal[
+    "written",
+    "unchanged",
+    "stale",
+    "missing",
+    "ambiguous_active",
+    "replayed",
+    "idempotency_conflict",
+    "reservation_in_progress",
+    "reconciliation_required",
+]
+
+
+class AuthzPolicyCompareWriteResult(NamedTuple):
+    status: AuthzPolicyCompareWriteStatus
+    current_record: LaunchplaneAuthzPolicyRecord | None = None
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None

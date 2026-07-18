@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -28,10 +29,10 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
-    def test_compatibility_floor_is_current_by_default(self) -> None:
+    def test_compatibility_floor_upgrades_by_default(self) -> None:
         self.assertEqual(
             schema_migration_action(current_revision=AUTHZ_COMPATIBILITY_FLOOR_REVISION),
-            "current",
+            "upgrade",
         )
 
     def test_supported_adoption_revisions_upgrade_to_compatibility_floor(self) -> None:
@@ -61,7 +62,7 @@ class SchemaMigrationTests(unittest.TestCase):
                     ),
                     patch(
                         "control_plane.storage.schema_migration._current_revision",
-                        side_effect=(revision, AUTHZ_COMPATIBILITY_FLOOR_REVISION),
+                        side_effect=(revision, EXPECTED_ALEMBIC_HEAD_REVISION),
                     ),
                     patch("control_plane.storage.schema_migration.command.stamp") as stamp,
                     patch("control_plane.storage.schema_migration.command.upgrade") as upgrade,
@@ -70,17 +71,17 @@ class SchemaMigrationTests(unittest.TestCase):
                         database_url="postgresql+psycopg://launchplane:test@postgres/launchplane"
                     )
 
-                self.assertEqual(migrated_revision, AUTHZ_COMPATIBILITY_FLOOR_REVISION)
+                self.assertEqual(migrated_revision, EXPECTED_ALEMBIC_HEAD_REVISION)
                 self.assertEqual(stamp.call_args.args[1], revision)
                 self.assertEqual(
                     upgrade.call_args.args[1],
-                    AUTHZ_COMPATIBILITY_FLOOR_REVISION,
+                    EXPECTED_ALEMBIC_HEAD_REVISION,
                 )
 
-    def test_fenced_revision_is_accepted_by_compatibility_release(self) -> None:
+    def test_fenced_revision_is_current_by_default(self) -> None:
         self.assertEqual(
             schema_migration_action(current_revision=EXPECTED_ALEMBIC_HEAD_REVISION),
-            "compatible_ahead",
+            "current",
         )
 
     def test_fenced_release_upgrades_from_compatibility_floor(self) -> None:
@@ -124,8 +125,26 @@ class SchemaMigrationTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                store.write_authz_policy_record(first_record)
-                store.write_authz_policy_record(second_record)
+                with store._engine.begin() as connection:
+                    for record in (first_record, second_record):
+                        payload = record.model_dump(mode="json", exclude_none=True)
+                        payload.pop("revision", None)
+                        connection.execute(
+                            text(
+                                "insert into launchplane_authz_policies "
+                                "(record_id, status, source, updated_at, policy_sha256, payload) "
+                                "values (:record_id, :status, :source, :updated_at, "
+                                ":policy_sha256, :payload)"
+                            ),
+                            {
+                                "record_id": record.record_id,
+                                "status": record.status,
+                                "source": record.source,
+                                "updated_at": record.updated_at,
+                                "policy_sha256": record.policy_sha256,
+                                "payload": json.dumps(payload, separators=(",", ":")),
+                            },
+                        )
                 active_records = store.list_authz_policy_records(status="active")
                 with store._engine.connect() as connection:
                     revisions = tuple(
