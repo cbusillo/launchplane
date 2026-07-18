@@ -10,6 +10,8 @@ from typing import cast
 import click
 
 from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY
+from control_plane.storage.schema_invariants import RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS
+from control_plane.storage.schema_migration import SCHEMA_MIGRATION_TARGET_REVISION
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerStore,
     build_odoo_stable_operation_worker_status,
@@ -43,13 +45,22 @@ def launchplane_policy_sha256_from_env() -> str:
 
 
 def launchplane_runtime_payload(
-    *, storage_backend: str, authz_policy_sha256_value: str, authz_policy_source: str
+    *,
+    storage_backend: str,
+    database_schema_revision: str,
+    authz_policy_schema_version: int,
+    authz_policy_sha256_value: str,
+    authz_policy_source: str,
 ) -> dict[str, object]:
     return {
         "authz_policy_sha256": authz_policy_sha256_value,
+        "authz_policy_schema_version": authz_policy_schema_version,
         "authz_policy_source": authz_policy_source,
         "bootstrap_authz_policy_sha256": launchplane_policy_sha256_from_env(),
         "docker_image_reference": os.environ.get(LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY, "").strip(),
+        "compatible_database_schema_revisions": RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
+        "database_schema_revision": database_schema_revision,
+        "schema_migration_target_revision": SCHEMA_MIGRATION_TARGET_REVISION,
         "service_audience": os.environ.get("LAUNCHPLANE_SERVICE_AUDIENCE", "").strip(),
         "storage_backend": storage_backend,
     }

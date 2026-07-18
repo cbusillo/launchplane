@@ -22,6 +22,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from control_plane import authz_grant_service as control_plane_authz_grant_service
@@ -1022,9 +1023,13 @@ class LaunchplaneRuntimeStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     authz_policy_sha256: str
+    authz_policy_schema_version: Literal[1, 2]
     authz_policy_source: str
     bootstrap_authz_policy_sha256: str
+    compatible_database_schema_revisions: tuple[str, ...]
+    database_schema_revision: str
     docker_image_reference: str
+    schema_migration_target_revision: str
     service_audience: str
     storage_backend: str
 
@@ -2725,6 +2730,13 @@ class _LaunchplaneFastAPI(FastAPI):
             dict[int | str, dict[str, Any]] | None,
             kwargs.get("responses"),
         )
+        if path.startswith("/v1/") and path != "/v1/health":
+            responses = {
+                409: {"model": LaunchplaneErrorResponse},
+                503: {"model": LaunchplaneErrorResponse},
+                **(responses or {}),
+            }
+            kwargs["responses"] = responses
         registers_error_response_model = False
         if responses is not None:
             normalized_responses, registers_error_response_model = (
@@ -2958,6 +2970,24 @@ def create_launchplane_fastapi_app(
 
     app = _LaunchplaneFastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(BoundedRequestBodyMiddleware)
+    enforce_human_policy_revalidation = False
+
+    def read_active_authz_policy_records() -> tuple[LaunchplaneAuthzPolicyRecord, ...] | None:
+        nonlocal enforce_human_policy_revalidation
+        refresh_record_store = (
+            record_store_factory() if record_store_factory is not None else shared_record_store
+        )
+        if (
+            not isinstance(refresh_record_store, PostgresRecordStore)
+            or refresh_record_store.database_dialect_name != "postgresql"
+        ):
+            return None
+        enforce_human_policy_revalidation = True
+        active_records = refresh_record_store.list_authz_policy_records(
+            status="active",
+            limit=2,
+        )
+        return active_records
 
     @app.middleware("http")
     async def refresh_authz_policy_runtime(
@@ -2967,15 +2997,7 @@ def create_launchplane_fastapi_app(
         if request.url.path.startswith("/v1/") and request.url.path != "/v1/health":
             trace_id = next_trace_id()
             try:
-                refresh_record_store = (
-                    record_store_factory() if record_store_factory is not None else shared_record_store
-                )
-                if not isinstance(refresh_record_store, PostgresRecordStore):
-                    return await call_next(request)
-                active_records = refresh_record_store.list_authz_policy_records(
-                    status="active",
-                    limit=2,
-                )
+                refresh_result = await run_in_threadpool(read_active_authz_policy_records)
             except Exception:
                 logging.exception("Failed to refresh the active Launchplane authz policy.")
                 return JSONResponse(
@@ -2988,22 +3010,28 @@ def create_launchplane_fastapi_app(
                         ),
                     ).model_dump(mode="json"),
                 )
-            if len(active_records) != 1:
+            if refresh_result is None:
+                return cast(Response, await call_next(request))
+            active_records = refresh_result
+            if not active_records:
                 return JSONResponse(
-                    status_code=409 if active_records else 503,
+                    status_code=503,
                     content=LaunchplaneErrorResponse(
                         trace_id=trace_id,
                         error=LaunchplaneErrorDetail(
-                            code=(
-                                "active_authz_policy_ambiguous"
-                                if active_records
-                                else "authz_policy_unavailable"
-                            ),
-                            message=(
-                                "Multiple active Launchplane authz policy records were found."
-                                if active_records
-                                else "Launchplane active authz policy is unavailable."
-                            ),
+                            code="authz_policy_unavailable",
+                            message="Launchplane active authz policy is unavailable.",
+                        ),
+                    ).model_dump(mode="json"),
+                )
+            if len(active_records) > 1:
+                return JSONResponse(
+                    status_code=409,
+                    content=LaunchplaneErrorResponse(
+                        trace_id=trace_id,
+                        error=LaunchplaneErrorDetail(
+                            code="active_authz_policy_ambiguous",
+                            message="Multiple active Launchplane authz policy records were found.",
                         ),
                     ).model_dump(mode="json"),
                 )
@@ -3042,18 +3070,21 @@ def create_launchplane_fastapi_app(
         session = human_session_manager.read_cookie(cookie_header)
         if session is None:
             return None
-        current_role = resolved_authz_policy_runtime.policy.human_role_for(
-            login=session.identity.login,
-            organizations=session.identity.organizations,
-            teams=session.identity.teams,
-        )
-        if current_role is None:
-            return None
-        if current_role != session.identity.role:
-            session = replace(
-                session,
-                identity=replace(session.identity, role=current_role),
+        if enforce_human_policy_revalidation:
+            if not human_session_manager.authorization_claims_are_current(session):
+                human_session_manager.revoke(session)
+                return None
+            current_role = human_session_manager.authorized_role(
+                identity=session.identity,
+                authz_policy=resolved_authz_policy_runtime.policy,
             )
+            if current_role is None:
+                return None
+            if current_role != session.identity.role:
+                session = replace(
+                    session,
+                    identity=replace(session.identity, role=current_role),
+                )
         renewed_session = human_session_manager.renew_if_needed(session)
         if renewed_session is None:
             return None
@@ -3584,21 +3615,35 @@ def create_launchplane_fastapi_app(
     )
 
     def require_launchplane_service_read_authorization(
-        *, identity: LaunchplaneIdentity, trace_id: str
+        *,
+        identity: LaunchplaneIdentity,
+        trace_id: str,
+        allow_authz_policy_administrator: bool = False,
     ) -> None:
-        if not resolved_authz_policy_runtime.policy.allows(
+        service_read_allowed = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="launchplane_service.read",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
             target=AuthorizationTarget(scope="context"),
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read Launchplane service runtime state.",
+        )
+        authz_policy_administration_allowed = (
+            allow_authz_policy_administrator
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="authz_policy_grant.write",
+                product="launchplane",
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
             )
+        )
+        if service_read_allowed or authz_policy_administration_allowed:
+            return
+        raise _launchplane_http_error(
+            status_code=403,
+            trace_id=trace_id,
+            code="authorization_denied",
+            message="Workflow cannot read Launchplane service runtime state.",
+        )
 
     def require_launchplane_service_reconcile_authorization(
         *, identity: LaunchplaneIdentity, trace_id: str
@@ -3637,10 +3682,20 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> LaunchplaneRuntimeResponse:
         trace_id = next_trace_id()
-        require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
+        require_launchplane_service_read_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            allow_authz_policy_administrator=True,
+        )
+        schema_revision_reader = getattr(record_store, "schema_revision", None)
+        database_schema_revision = (
+            str(schema_revision_reader()).strip() if callable(schema_revision_reader) else ""
+        )
         runtime = LaunchplaneRuntimeStatus.model_validate(
             control_plane_service_status.launchplane_runtime_payload(
                 storage_backend=storage_backend_name(record_store),
+                database_schema_revision=database_schema_revision,
+                authz_policy_schema_version=resolved_authz_policy_runtime.policy.schema_version,
                 authz_policy_sha256_value=resolved_authz_policy_runtime.policy_sha256,
                 authz_policy_source=resolved_authz_policy_runtime.source,
             )
@@ -10857,6 +10912,7 @@ def create_launchplane_fastapi_app(
                 identity=identity,
                 trace_id=trace_id,
                 now_timestamp=authz_policy_record_timestamp,
+                authorized_policy_sha256=resolved_authz_policy_runtime.policy_sha256,
             )
         except control_plane_authz_grant_service.AuthzPolicyRequestError as error:
             raise _launchplane_http_error(
@@ -10885,7 +10941,10 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="authz_policy_conflict",
-                message=str(error),
+                message=(
+                    "Launchplane active authz policy changed during this request. "
+                    "Refresh the policy state and retry."
+                ),
             ) from error
         except ValueError as error:
             raise _launchplane_http_error(

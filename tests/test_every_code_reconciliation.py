@@ -100,6 +100,10 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
                     "2",
                     "--repository",
                     "cbusillo/launchplane",
+                    "--repository-id",
+                    "1001",
+                    "--repository-owner-id",
+                    "2001",
                     "--workflow-ref",
                     "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",
                     "--event-name",
@@ -132,6 +136,8 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         grant = payload["grant"]
         assert isinstance(grant, dict)
         self.assertEqual(grant["repository"], "cbusillo/launchplane")
+        self.assertEqual(grant["repository_id"], "1001")
+        self.assertEqual(grant["repository_owner_id"], "2001")
         self.assertEqual(grant["instances"], ["testing"])
         self.assertEqual(grant["actions"], ["deployment.write"])
         response_payload = json.loads(result.output)
@@ -149,6 +155,10 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
                 "https://launchplane.example",
                 "--repository",
                 "cbusillo/launchplane",
+                "--repository-id",
+                "1001",
+                "--repository-owner-id",
+                "2001",
                 "--product",
                 "launchplane",
                 "--action",
@@ -183,6 +193,10 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
                     "https://launchplane.example",
                     "--repository",
                     "cbusillo/launchplane",
+                    "--repository-id",
+                    "1001",
+                    "--repository-owner-id",
+                    "2001",
                     "--product",
                     "launchplane",
                     "--context",
@@ -209,10 +223,34 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         removal = payload["removal"]
         assert isinstance(removal, dict)
         self.assertEqual(removal["repository"], "cbusillo/launchplane")
+        self.assertEqual(removal["repository_id"], "1001")
+        self.assertEqual(removal["repository_owner_id"], "2001")
         self.assertEqual(removal["instances"], [])
         self.assertEqual(removal["actions"], ["launchplane_service_deploy.execute"])
         response_payload = json.loads(result.output)
         self.assertEqual(response_payload["result"]["mode"], "dry_run")
+
+    def test_cli_authz_remove_workflow_rule_requires_repository_id_pair(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            [
+                "authz-policies",
+                "remove-workflow-rule",
+                "--service-url",
+                "https://launchplane.example",
+                "--repository",
+                "cbusillo/launchplane",
+                "--repository-id",
+                "1001",
+                "--product",
+                "launchplane",
+                "--action",
+                "product_profile.read",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("must be provided together", result.output)
 
     def test_cli_authz_grant_human_posts_service_request(self) -> None:
         runner = CliRunner()

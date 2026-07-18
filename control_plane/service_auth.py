@@ -835,14 +835,6 @@ class LaunchplaneAuthzPolicy(BaseModel):
                     raise ValueError("Schema-v1 authz policy rules cannot declare instances.")
                 if self.schema_version == 1 and rule.managed_set_id is not None:
                     raise ValueError("Schema-v1 authz policy rules cannot declare managed IDs.")
-                if (
-                    self.schema_version == 1
-                    and isinstance(rule, GitHubActionsPolicyRule)
-                    and (rule.repository_id or rule.repository_owner_id)
-                ):
-                    raise ValueError(
-                        "Schema-v1 authz policy rules cannot declare immutable repository IDs."
-                    )
                 if self.schema_version != 2 or not rule.actions:
                     continue
                 requested_actions = set(rule.actions)

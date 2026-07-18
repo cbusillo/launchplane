@@ -24,6 +24,9 @@ _REVISION_INDEX = "launchplane_authz_policies_revision_uidx"
 _ACTIVE_INDEX = "launchplane_authz_policies_active_uidx"
 _WRITE_TRIGGER = "launchplane_authz_policy_write_fence"
 _WRITE_FUNCTION = "launchplane_fence_authz_policy_write"
+_SQLITE_ACTIVE_INSERT_TRIGGER = "launchplane_authz_policy_active_insert_fence"
+_SQLITE_ACTIVE_UPDATE_TRIGGER = "launchplane_authz_policy_active_update_fence"
+_SQLITE_REVISION_TRIGGER = "launchplane_authz_policy_revision_allocator"
 
 
 def _index_exists(index_name: str) -> bool:
@@ -71,9 +74,7 @@ def _canonicalize_records(*, include_revision: bool) -> None:
         )
     )
     active_timestamps = tuple(
-        timestamp
-        for row, timestamp in rows_with_timestamps
-        if row["status"] == "active"
+        timestamp for row, timestamp in rows_with_timestamps if row["status"] == "active"
     )
     if len(active_timestamps) > 1 and active_timestamps.count(max(active_timestamps)) > 1:
         raise RuntimeError(
@@ -115,6 +116,59 @@ def _legacy_updated_at(value: str, *, record_id: str) -> datetime:
             "include a timezone."
         )
     return parsed.astimezone(timezone.utc)
+
+
+def _create_sqlite_write_fence() -> None:
+    op.execute(
+        sa.text(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {_SQLITE_ACTIVE_INSERT_TRIGGER}
+            BEFORE INSERT ON {_TABLE}
+            WHEN NEW.status = 'active'
+            BEGIN
+                UPDATE {_TABLE}
+                SET status = 'superseded',
+                    payload = json_set(payload, '$.status', 'superseded')
+                WHERE status = 'active'
+                  AND record_id <> NEW.record_id;
+            END
+            """
+        )
+    )
+    op.execute(
+        sa.text(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {_SQLITE_ACTIVE_UPDATE_TRIGGER}
+            BEFORE UPDATE OF status ON {_TABLE}
+            WHEN NEW.status = 'active'
+            BEGIN
+                UPDATE {_TABLE}
+                SET status = 'superseded',
+                    payload = json_set(payload, '$.status', 'superseded')
+                WHERE status = 'active'
+                  AND record_id <> NEW.record_id;
+            END
+            """
+        )
+    )
+    op.execute(
+        sa.text(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {_SQLITE_REVISION_TRIGGER}
+            AFTER INSERT ON {_TABLE}
+            WHEN NEW.revision = 0
+            BEGIN
+                UPDATE {_TABLE}
+                SET revision = (
+                    SELECT COALESCE(MAX(revision), 0) + 1
+                    FROM {_TABLE}
+                    WHERE record_id <> NEW.record_id
+                )
+                WHERE record_id = NEW.record_id;
+            END
+            """
+        )
+    )
 
 
 def upgrade() -> None:
@@ -172,9 +226,16 @@ def upgrade() -> None:
     if revision_column is not None and bool(revision_column.get("nullable")):
         if op.get_bind().dialect.name == "sqlite":
             with op.batch_alter_table(_TABLE) as batch_op:
-                batch_op.alter_column("revision", existing_type=sa.BigInteger(), nullable=False)
+                batch_op.alter_column(
+                    "revision",
+                    existing_type=sa.BigInteger(),
+                    nullable=False,
+                    server_default=sa.text("0"),
+                )
         else:
             op.alter_column(_TABLE, "revision", existing_type=sa.BigInteger(), nullable=False)
+    if op.get_bind().dialect.name == "sqlite":
+        _create_sqlite_write_fence()
     if not _index_exists(_REVISION_INDEX):
         op.create_index(_REVISION_INDEX, _TABLE, ["revision"], unique=True)
     if not _index_exists(_ACTIVE_INDEX):
@@ -192,6 +253,10 @@ def downgrade() -> None:
     if op.get_bind().dialect.name == "postgresql":
         op.execute(sa.text(f"DROP TRIGGER IF EXISTS {_WRITE_TRIGGER} ON {_TABLE}"))
         op.execute(sa.text(f"DROP FUNCTION IF EXISTS {_WRITE_FUNCTION}()"))
+    else:
+        op.execute(sa.text(f"DROP TRIGGER IF EXISTS {_SQLITE_REVISION_TRIGGER}"))
+        op.execute(sa.text(f"DROP TRIGGER IF EXISTS {_SQLITE_ACTIVE_UPDATE_TRIGGER}"))
+        op.execute(sa.text(f"DROP TRIGGER IF EXISTS {_SQLITE_ACTIVE_INSERT_TRIGGER}"))
     if _index_exists(_ACTIVE_INDEX):
         op.drop_index(_ACTIVE_INDEX, table_name=_TABLE)
     if _index_exists(_REVISION_INDEX):

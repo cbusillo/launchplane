@@ -34,6 +34,7 @@ GITHUB_EMAILS_URL = "https://api.github.com/user/emails"
 SESSION_COOKIE_NAME = "launchplane_session"
 SESSION_TTL_SECONDS = 14 * 24 * 60 * 60
 SESSION_RENEW_AFTER_SECONDS = 24 * 60 * 60
+SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS = 24 * 60 * 60
 OAUTH_STATE_TTL_SECONDS = 10 * 60
 BROWSER_CSRF_HEADER_NAME = "X-CSRF-Token"
 _BROWSER_CSRF_TOKEN_VERSION = "v1"
@@ -250,7 +251,11 @@ class GitHubOAuthClient:
             if isinstance(org, dict) and str(org.get("login", "")).strip()
         )
         teams = frozenset(_team_names(team_payload))
-        if self._config.bootstrap_admin_emails.intersection(email_candidates):
+        bootstrap_admin_email = next(
+            iter(sorted(self._config.bootstrap_admin_emails.intersection(email_candidates))),
+            "",
+        )
+        if bootstrap_admin_email:
             role: Literal["read_only", "admin"] | None = "admin"
         else:
             role = authz_policy.human_role_for(
@@ -264,7 +269,12 @@ class GitHubOAuthClient:
             login=login,
             github_id=int(user_payload.get("id") or 0),
             name=str(user_payload.get("name") or "").strip(),
-            email=primary_email or public_email or next(iter(verified_emails), ""),
+            email=(
+                bootstrap_admin_email
+                or primary_email
+                or public_email
+                or next(iter(verified_emails), "")
+            ),
             organizations=organizations,
             teams=teams,
             role=role,
@@ -334,6 +344,21 @@ class HumanSessionManager:
     def public_origin(self) -> str:
         return browser_origin_from_url(self._config.public_url)
 
+    def authorized_role(
+        self,
+        *,
+        identity: GitHubHumanIdentity,
+        authz_policy: LaunchplaneAuthzPolicy,
+    ) -> Literal["read_only", "admin"] | None:
+        email = identity.email.strip().lower()
+        if email and email in self._config.bootstrap_admin_emails:
+            return "admin"
+        return authz_policy.human_role_for(
+            login=identity.login,
+            organizations=identity.organizations,
+            teams=identity.teams,
+        )
+
     def issue(self, identity: GitHubHumanIdentity) -> LaunchplaneHumanSession:
         now = self._now()
         session = LaunchplaneHumanSession(
@@ -353,6 +378,17 @@ class HumanSessionManager:
         if not session_id:
             return None
         return self._session_store.read_session(session_id)
+
+    def authorization_claims_are_current(self, session: LaunchplaneHumanSession) -> bool:
+        now = self._now()
+        return (
+            session.created_at <= now
+            and session.created_at + timedelta(seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS)
+            > now
+        )
+
+    def revoke(self, session: LaunchplaneHumanSession) -> None:
+        self._session_store.delete_session(session.session_id)
 
     def renew_if_needed(self, session: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
         now = self._now()

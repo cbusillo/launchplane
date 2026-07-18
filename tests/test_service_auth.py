@@ -186,7 +186,7 @@ class GitHubOidcVerifierBoundaryTests(unittest.TestCase):
             "repository": "OIDC token is missing repository claim",
             "repository_owner": "OIDC token is missing repository_owner claim",
             "repository_id": "OIDC token is missing numeric repository_id claim",
-            "repository_owner_id": ("OIDC token is missing numeric repository_owner_id claim"),
+            "repository_owner_id": "OIDC token is missing numeric repository_owner_id claim",
             "workflow_ref": "OIDC token is missing workflow_ref claim",
         }
         for missing_claim, expected_message in required_claims.items():
@@ -1068,6 +1068,8 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
         legacy_payload = policy.model_dump(mode="json", exclude_none=True)
         for rule in legacy_payload["github_actions"]:
             rule.pop("instances", None)
+            self.assertNotIn("repository_id", rule)
+            self.assertNotIn("repository_owner_id", rule)
         legacy_payload.pop("terminal_agents", None)
         legacy_payload.pop("local_operators", None)
         legacy_payload.pop("local_admins", None)
@@ -1101,6 +1103,25 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
             hashlib.sha256(
                 json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
+        )
+
+    def test_immutable_repository_ids_change_policy_sha256(self) -> None:
+        legacy_policy = LaunchplaneAuthzPolicy(
+            github_actions=(GitHubActionsPolicyRule(repository="cbusillo/launchplane"),)
+        )
+        immutable_policy = LaunchplaneAuthzPolicy(
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/launchplane",
+                    repository_id="1001",
+                    repository_owner_id="2001",
+                ),
+            )
+        )
+
+        self.assertNotEqual(
+            authz_policy_sha256(legacy_policy),
+            authz_policy_sha256(immutable_policy),
         )
 
     def test_unknown_policy_schema_version_fails_closed(self) -> None:
@@ -1229,7 +1250,7 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
                 ),
             )
 
-    def test_schema_v2_github_rules_match_immutable_repository_ids(self) -> None:
+    def test_github_rules_match_immutable_repository_ids_in_both_policy_schemas(self) -> None:
         policy = LaunchplaneAuthzPolicy(
             schema_version=2,
             github_actions=(
@@ -1271,16 +1292,34 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
                 repository_id="not-numeric",
                 repository_owner_id="2001",
             )
-        with self.assertRaisesRegex(ValidationError, "cannot declare immutable repository IDs"):
-            LaunchplaneAuthzPolicy(
-                github_actions=(
-                    GitHubActionsPolicyRule(
-                        repository="cbusillo/verireel",
-                        repository_id="1001",
-                        repository_owner_id="2001",
-                    ),
+        compatibility_policy = LaunchplaneAuthzPolicy(
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/verireel",
+                    repository_id="1001",
+                    repository_owner_id="2001",
+                    products=("verireel",),
+                    contexts=("verireel",),
+                    actions=("product_profile.read",),
                 ),
             )
+        )
+        self.assertTrue(
+            compatibility_policy.allows(
+                identity=_actions_identity(),
+                action="product_profile.read",
+                product="verireel",
+                context="verireel",
+            )
+        )
+        self.assertFalse(
+            compatibility_policy.allows(
+                identity=_actions_identity(repository_owner_id="9999"),
+                action="product_profile.read",
+                product="verireel",
+                context="verireel",
+            )
+        )
 
     def test_schema_v2_requires_matching_instance_selector(self) -> None:
         identity = _actions_identity()

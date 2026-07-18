@@ -90,6 +90,8 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
                         "related_issue": "cbusillo/launchplane#1323",
                         "grant": {
                             "repository": "cbusillo/launchplane",
+                            "repository_id": "1001",
+                            "repository_owner_id": "2001",
                             "workflow_refs": [
                                 "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                             ],

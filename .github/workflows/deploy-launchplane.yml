@@ -13,7 +13,7 @@ on:
         required: false
         type: string
       authz_grants_mode:
-        description: Reconcile only operator-configured GitHub Actions authz grants without deploying Launchplane.
+        description: Review or apply only operator-configured exact GitHub Actions grants without deploying Launchplane.
         required: false
         default: none
         type: choice
@@ -23,6 +23,10 @@ on:
           - apply
       authz_grants_expected_sha256:
         description: Canonical grant-set SHA-256 reported by the reviewed dry run; required for apply.
+        required: false
+        type: string
+      authz_policy_expected_sha256:
+        description: Active authz policy SHA-256 reported by the reviewed dry run; required for apply.
         required: false
         type: string
       authz_grants_reason:
@@ -126,10 +130,6 @@ jobs:
       LAUNCHPLANE_NPMPLUS_BASE_URL: ${{ vars.LAUNCHPLANE_NPMPLUS_BASE_URL }}
       LAUNCHPLANE_NPMPLUS_IDENTITY: ${{ secrets.LAUNCHPLANE_NPMPLUS_IDENTITY }}
       LAUNCHPLANE_NPMPLUS_SECRET: ${{ secrets.LAUNCHPLANE_NPMPLUS_SECRET }}
-      LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS }}
-      LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS }}
-      LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS }}
-      LAUNCHPLANE_AUTHZ_GRANTS_JSON: ${{ vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON }}
       LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON: ${{ vars.LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON }}
       LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: ${{ vars.LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK }}
       OMIT_EVERY_CODE_ENV: ${{ inputs.omit_every_code_env || false }}
@@ -943,92 +943,24 @@ jobs:
           response-output-file: ${{ runner.temp }}/launchplane-rollback-runtime-final.json
           log-response-body: "false"
 
-      - name: Render product context workflow authz grants
-        id: authz_grants
+      - name: Render runtime key-safety policy
+        id: runtime_key_safety
         shell: bash
         env:
-          LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON: >-
-            ${{ vars.LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON }}
-          LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON: >-
-            ${{ vars.LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON }}
-          LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON: >-
-            ${{ vars.LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON }}
-          LAUNCHPLANE_AUTHZ_GRANTS_JSON: >-
-            ${{ vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON }}
           LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON: >-
             ${{ vars.LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON }}
-        run: bash scripts/deploy/ensure-authz-grants.sh
-
-      - name: Ensure GitHub Actions authz grants
-        if: steps.authz_grants.outputs.has_github_actions_grants == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
-        with:
-          launchplane-url: ${{ steps.service.outputs.service_url }}
-          audience: ${{ steps.service.outputs.service_audience }}
-          route-path: /v1/authz-policies/github-actions/grants
-          payload-list-file: ${{ steps.authz_grants.outputs.github_actions_grants_file }}
-          idempotency-key-prefix: launchplane-authz-grant:${{ github.sha }}
-          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/github-actions-grants-responses.json
-          log-response-body: "false"
-
-      - name: Ensure terminal-agent authz grants
-        if: steps.authz_grants.outputs.has_terminal_agents_grants == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
-        with:
-          launchplane-url: ${{ steps.service.outputs.service_url }}
-          audience: ${{ steps.service.outputs.service_audience }}
-          route-path: /v1/authz-policies/terminal-agents/grants
-          payload-list-file: ${{ steps.authz_grants.outputs.terminal_agents_grants_file }}
-          idempotency-key-prefix: launchplane-terminal-agent-authz-grant:${{ github.sha }}
-          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/terminal-agents-grants-responses.json
-          log-response-body: "false"
-
-      - name: Ensure local-operator authz grants
-        if: steps.authz_grants.outputs.has_local_operators_grants == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
-        with:
-          launchplane-url: ${{ steps.service.outputs.service_url }}
-          audience: ${{ steps.service.outputs.service_audience }}
-          route-path: /v1/authz-policies/local-operators/grants
-          payload-list-file: ${{ steps.authz_grants.outputs.local_operators_grants_file }}
-          idempotency-key-prefix: launchplane-local-operator-authz-grant:${{ github.sha }}
-          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/local-operators-grants-responses.json
-          log-response-body: "false"
-
-      - name: Ensure local-admin authz grants
-        if: steps.authz_grants.outputs.has_local_admins_grants == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
-        with:
-          launchplane-url: ${{ steps.service.outputs.service_url }}
-          audience: ${{ steps.service.outputs.service_audience }}
-          route-path: /v1/authz-policies/local-admins/grants
-          payload-list-file: ${{ steps.authz_grants.outputs.local_admins_grants_file }}
-          idempotency-key-prefix: launchplane-local-admin-authz-grant:${{ github.sha }}
-          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/local-admins-grants-responses.json
-          log-response-body: "false"
-
-      - name: Ensure GitHub human authz grants
-        if: steps.authz_grants.outputs.has_github_humans_grants == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
-        with:
-          launchplane-url: ${{ steps.service.outputs.service_url }}
-          audience: ${{ steps.service.outputs.service_audience }}
-          route-path: /v1/authz-policies/github-humans/grants
-          payload-list-file: ${{ steps.authz_grants.outputs.github_humans_grants_file }}
-          idempotency-key-prefix: launchplane-product-config-human-grant:${{ github.sha }}
-          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/github-humans-grants-responses.json
-          log-response-body: "false"
+        run: bash scripts/deploy/render-runtime-key-safety-policy.sh
 
       - name: Ensure runtime key-safety policy
-        if: steps.authz_grants.outputs.has_runtime_key_safety_policy == 'true'
+        if: steps.runtime_key_safety.outputs.has_runtime_key_safety_policy == 'true'
         uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
           route-path: /v1/runtime-key-safety/policies/apply
-          payload-file: ${{ steps.authz_grants.outputs.runtime_key_safety_policy_file }}
-          idempotency-key: ${{ steps.authz_grants.outputs.runtime_key_safety_idempotency_key }}
-          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/runtime-key-safety-policy-response.json
+          payload-file: ${{ steps.runtime_key_safety.outputs.runtime_key_safety_policy_file }}
+          idempotency-key: ${{ steps.runtime_key_safety.outputs.runtime_key_safety_idempotency_key }}
+          response-output-file: ${{ runner.temp }}/launchplane-runtime-key-safety/runtime-key-safety-policy-response.json
           log-response-body: "false"
 
       - name: Read deployed Launchplane runtime
@@ -1125,6 +1057,12 @@ jobs:
             runtime_status_code="action_failed"
           fi
           actual_image_reference="$(jq -r '.runtime.docker_image_reference // empty' "$RUNTIME_RESPONSE_FILE" 2>/dev/null || true)"
+          database_schema_revision="$(jq -r '.runtime.database_schema_revision // empty' "$RUNTIME_RESPONSE_FILE" 2>/dev/null || true)"
+          schema_migration_target_revision="$(jq -r '.runtime.schema_migration_target_revision // empty' "$RUNTIME_RESPONSE_FILE" 2>/dev/null || true)"
+          schema_revision_is_compatible="$(jq -r \
+            --arg revision "$database_schema_revision" \
+            '(.runtime.compatible_database_schema_revisions // []) | index($revision) != null' \
+            "$RUNTIME_RESPONSE_FILE" 2>/dev/null || echo false)"
           runtime_trace_id="$(jq -r '.trace_id // empty' "$RUNTIME_RESPONSE_FILE" 2>/dev/null || true)"
           append_result \
             "/v1/service/runtime" \
@@ -1135,10 +1073,22 @@ jobs:
             "$runtime_trace_id" \
             "200 matching image" \
             "$([ "$runtime_status_code" = "200" ] && [ "$actual_image_reference" = "$DEPLOYED_IMAGE_REFERENCE" ] && echo true || echo false)"
+          append_result \
+            "/v1/service/runtime" \
+            "GET" \
+            "github-actions-oidc" \
+            "$runtime_status_code" \
+            "schema-migration-compatibility" \
+            "$runtime_trace_id" \
+            "compatible database revision ${database_schema_revision}; image target ${schema_migration_target_revision}" \
+            "$([ "$runtime_status_code" = "200" ] && [ -n "$database_schema_revision" ] && [ -n "$schema_migration_target_revision" ] && [ "$schema_revision_is_compatible" = "true" ] && echo true || echo false)"
           if [ "${RUNTIME_OUTCOME:-failure}" != "success" ] \
             || [ "$runtime_status_code" != "200" ] \
-            || [ "$actual_image_reference" != "$DEPLOYED_IMAGE_REFERENCE" ]; then
-            jq '{status, trace_id, error, runtime: {docker_image_reference: .runtime.docker_image_reference}}' "$RUNTIME_RESPONSE_FILE" >&2 || cat "$RUNTIME_RESPONSE_FILE" >&2 || true
+            || [ "$actual_image_reference" != "$DEPLOYED_IMAGE_REFERENCE" ] \
+            || [ -z "$database_schema_revision" ] \
+            || [ -z "$schema_migration_target_revision" ] \
+            || [ "$schema_revision_is_compatible" != "true" ]; then
+            jq '{status, trace_id, error, runtime: {docker_image_reference: .runtime.docker_image_reference, compatible_database_schema_revisions: .runtime.compatible_database_schema_revisions, database_schema_revision: .runtime.database_schema_revision, schema_migration_target_revision: .runtime.schema_migration_target_revision}}' "$RUNTIME_RESPONSE_FILE" >&2 || cat "$RUNTIME_RESPONSE_FILE" >&2 || true
             echo "Launchplane runtime smoke failed." >&2
             exit 1
           fi
@@ -1236,19 +1186,20 @@ jobs:
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    environment: launchplane-authz-admin
     env:
       LAUNCHPLANE_PUBLIC_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
       LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON: >-
         ${{ vars.LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON }}
       LAUNCHPLANE_AUTHZ_GRANT_MODE: ${{ inputs.authz_grants_mode }}
-      LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY: "true"
       LAUNCHPLANE_AUTHZ_GRANT_REASON: ${{ inputs.authz_grants_reason }}
     steps:
       - name: Validate grant-only request
         shell: bash
         env:
           REVIEWED_GRANTS_SHA256: ${{ inputs.authz_grants_expected_sha256 }}
+          REVIEWED_POLICY_SHA256: ${{ inputs.authz_policy_expected_sha256 }}
           DEPLOY_IMAGE_REFERENCE: ${{ inputs.image_reference }}
           OMIT_EVERY_CODE_ENV: ${{ inputs.omit_every_code_env }}
           OMIT_TERMINAL_AGENT_ENV: ${{ inputs.omit_terminal_agent_env }}
@@ -1262,20 +1213,20 @@ jobs:
           : "${LAUNCHPLANE_PUBLIC_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
           : "${LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON:?Missing LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON variable}"
           if [ -n "$DEPLOY_IMAGE_REFERENCE" ]; then
-            echo "Grant-only reconciliation cannot include a deploy image input." >&2
+            echo "Grant-only maintenance cannot include a deploy image input." >&2
             exit 1
           fi
           if [ "$OMIT_EVERY_CODE_ENV" = "true" ] ||
             [ "$OMIT_TERMINAL_AGENT_ENV" = "true" ] ||
             [ "$OMIT_OWNER_AGENT_ENV" = "true" ] ||
             [ "$OMIT_NPMPLUS_ENV" = "true" ]; then
-            echo "Grant-only reconciliation cannot include deploy compatibility inputs." >&2
+            echo "Grant-only maintenance cannot include deploy compatibility inputs." >&2
             exit 1
           fi
           if [ -n "$BREAK_GLASS_CONFIRM" ] ||
             [ -n "$BREAK_GLASS_IMAGE_REFERENCE" ] ||
             [ -n "$BREAK_GLASS_REASON" ]; then
-            echo "Grant-only reconciliation cannot include break-glass rollback inputs." >&2
+            echo "Grant-only maintenance cannot include break-glass rollback inputs." >&2
             exit 1
           fi
           if [ "$LAUNCHPLANE_AUTHZ_GRANT_MODE" = "apply" ]; then
@@ -1283,12 +1234,16 @@ jobs:
               echo "Apply requires the canonical SHA-256 reported by the reviewed dry run." >&2
               exit 1
             fi
+            if [[ ! "$REVIEWED_POLICY_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "Apply requires the active policy SHA-256 reported by the reviewed dry run." >&2
+              exit 1
+            fi
             if [[ -z "${LAUNCHPLANE_AUTHZ_GRANT_REASON//[[:space:]]/}" ]]; then
               echo "Apply requires an operator reason." >&2
               exit 1
             fi
-          elif [ -n "$REVIEWED_GRANTS_SHA256" ]; then
-            echo "The reviewed grant-set SHA-256 input is only valid for apply." >&2
+          elif [ -n "$REVIEWED_GRANTS_SHA256" ] || [ -n "$REVIEWED_POLICY_SHA256" ]; then
+            echo "Reviewed grant-set and policy SHA-256 inputs are only valid for apply." >&2
             exit 1
           fi
           jq -e 'type == "array" and length > 0' \
@@ -1300,11 +1255,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Read active authz policy contract
+        id: authz_policy
+        uses: ./.github/actions/launchplane-request
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: /v1/service/runtime
+          expected-status: "200"
+          output-paths: |
+            authz_policy_schema_version=runtime.authz_policy_schema_version
+            authz_policy_sha256=runtime.authz_policy_sha256
+          log-response-body: "false"
+
       - name: Render operator-configured authz grants
         id: authz_grants
         shell: bash
         env:
           LAUNCHPLANE_AUTHZ_GRANTS_JSON: ${{ env.LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON }}
+          LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION: ${{ steps.authz_policy.outputs.authz_policy_schema_version }}
         run: bash scripts/deploy/ensure-authz-grants.sh
 
       - name: Verify reviewed authz grant set
@@ -1312,7 +1282,9 @@ jobs:
         shell: bash
         env:
           REVIEWED_GRANTS_SHA256: ${{ inputs.authz_grants_expected_sha256 }}
+          REVIEWED_POLICY_SHA256: ${{ inputs.authz_policy_expected_sha256 }}
           RENDERED_GRANTS_SHA256: ${{ steps.authz_grants.outputs.configured_grants_sha256 }}
+          ACTIVE_POLICY_SHA256: ${{ steps.authz_policy.outputs.authz_policy_sha256 }}
         run: |
           set -euo pipefail
           if [ "$RENDERED_GRANTS_SHA256" != "$REVIEWED_GRANTS_SHA256" ]; then
@@ -1321,8 +1293,14 @@ jobs:
             echo "Current:  $RENDERED_GRANTS_SHA256" >&2
             exit 1
           fi
+          if [ "$ACTIVE_POLICY_SHA256" != "$REVIEWED_POLICY_SHA256" ]; then
+            echo "Active authz policy changed after the reviewed dry run." >&2
+            echo "Reviewed: $REVIEWED_POLICY_SHA256" >&2
+            echo "Current:  $ACTIVE_POLICY_SHA256" >&2
+            exit 1
+          fi
 
-      - name: Reconcile operator-configured authz grants
+      - name: Apply operator-configured exact authz grants
         id: authz_grant_request
         uses: ./.github/actions/launchplane-request
         with:
@@ -1339,6 +1317,8 @@ jobs:
         shell: bash
         env:
           CONFIGURED_GRANTS_SHA256: ${{ steps.authz_grants.outputs.configured_grants_sha256 }}
+          ACTIVE_POLICY_SCHEMA_VERSION: ${{ steps.authz_policy.outputs.authz_policy_schema_version }}
+          ACTIVE_POLICY_SHA256: ${{ steps.authz_policy.outputs.authz_policy_sha256 }}
           GRANTS_FILE: ${{ steps.authz_grants.outputs.github_actions_grants_file }}
           RESPONSES_FILE: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/github-actions-grants-responses.json
         run: |
@@ -1358,14 +1338,25 @@ jobs:
           changed_count="$(jq '[.[] | select(.result.changed == true)] | length' "$RESPONSES_FILE")"
           unchanged_count="$((request_count - changed_count))"
           {
-            echo "## Operator authz grant reconciliation"
+            echo "## Operator exact authz grant maintenance"
             echo
             echo "- Mode: $LAUNCHPLANE_AUTHZ_GRANT_MODE"
             echo "- Requests: $request_count"
             echo "- Changed: $changed_count"
             echo "- Already present: $unchanged_count"
+            echo "- Active policy schema: v$ACTIVE_POLICY_SCHEMA_VERSION"
+            printf '%s\n' "- Active policy SHA-256: $ACTIVE_POLICY_SHA256"
             printf '%s\n' "- Canonical grant-set SHA-256: $CONFIGURED_GRANTS_SHA256"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reviewed authz grant evidence
+        if: always() && steps.authz_grants.outputs.authz_grants_output_dir != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: launchplane-authz-grants-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}
+          if-no-files-found: error
+          retention-days: 30
 
   emergency-dokploy-rollback:
     if: >-
@@ -1398,7 +1389,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$AUTHZ_GRANTS_MODE" != "none" ]; then
-            echo "Break-glass rollback cannot be combined with authz grant reconciliation." >&2
+            echo "Break-glass rollback cannot be combined with authz grant maintenance." >&2
             exit 1
           fi
           : "${LAUNCHPLANE_DOKPLOY_TARGET_TYPE:?Missing LAUNCHPLANE_DOKPLOY_TARGET_TYPE variable}"

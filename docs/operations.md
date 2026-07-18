@@ -419,6 +419,13 @@ is only a thin service client. Direct authz policy list/import DB commands are
 not supported. Launchplane self-deploy authority remains separate and does not
 authorize authz policy administration.
 
+The exact grant/removal commands remain a bounded migration bridge while
+configured callers move to managed sets. New workflow grants require numeric
+`--repository-id` and `--repository-owner-id` selectors. Exact removals include
+both IDs for an ID-bound rule and omit both only when retiring a name-only
+compatibility rule. They match the complete persisted rule, reject concurrent
+policy changes, and cannot delete the final policy-administration principal.
+
 Authz policy schema v1 remains the compatibility contract for an active v1
 policy and retains its existing product/context breadth. Schema v2 adds exact
 instance selectors to every principal rule and grant contract. Selectors are
@@ -443,55 +450,78 @@ metadata. Use the configured public Launchplane URL so its origin matches
 calling through a different origin fails closed. Bearer-token and GitHub Actions
 OIDC callers do not use this browser preflight.
 
-The Launchplane deploy workflow also reconciles configured signed-in operator
-grants for product-config writes. Set
-`LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS`,
-`LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS`, and
-`LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS` as comma-separated repository
-variables. During deploy, `scripts/deploy/ensure-authz-grants.sh` renders
-GitHub-human grant payloads for `product_config.plan` and
-`product_config.apply`; the deploy workflow submits those payloads through the
-shared `launchplane-request` action to `/v1/authz-policies/github-humans/grants`.
-Leave those variables unset to skip reconciliation; do not hard-code human
-logins or product-specific operator grants in source.
+Normal Launchplane deployment does not mutate authorization policy. It deploys
+the reviewed image and may reconcile runtime key-safety policy, but authz grants
+remain DB-backed service state. This prevents a checked-in catalog or ordinary
+image rollout from silently expanding or replacing live authority.
 
-Product-specific GitHub Actions grants are not authored in the deploy script.
-When a temporary deploy-time bridge is needed, provide
-`LAUNCHPLANE_AUTHZ_GRANTS_JSON` as an explicit operator-controlled JSON array of
-grant requests with repository, workflow file, product, context, action, source
-label, optional event/ref override fields, and optional legacy idempotency suffix
-fields. The script only renders that configured payload for the deploy workflow
-to submit through the shared Launchplane request action; checked-in shell tuples
-must not become the live workflow grant catalog. Prefer the operator UI or
-service-backed authz policy
-management routes for steady-state shared and production grant changes.
+During the bounded compatibility window, exact GitHub Actions grants can still
+be maintained through the dedicated `operator-authz-grants` job. Manually
+dispatch `Deploy Launchplane` with `authz_grants_mode=dry_run` after staging only
+the candidate batch in the temporary
+`LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON` repository variable. The job validates
+the operator-managed JSON, renders exact grant requests, submits
+stateless service dry-runs, and reports changed versus already-present rules
+without building or deploying an image or mutating other runtime records. The
+job reads the current service runtime first, renders requests with the active
+authz policy schema version, and includes both the active policy SHA-256 and a
+canonical SHA-256 of the schema-bound normalized grant set in its summary.
+Configure the
+`launchplane-authz-admin` GitHub environment with required reviewers before using
+this job; both dry-run and apply dispatches cross that deliberate operator gate.
 
-For grant maintenance that must use the deploy workflow's existing
-`authz_policy_grant.write` authority, manually dispatch `Deploy Launchplane`
-with `authz_grants_mode=dry_run`. Stage only the candidate batch in the temporary
-`LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON` repository variable; the normal deploy
-continues to reconcile the separate durable `LAUNCHPLANE_AUTHZ_GRANTS_JSON`
-catalog and cannot apply the maintenance batch. The grant-only path validates
-the operator-managed JSON,
-renders only its configured GitHub Actions grants, submits stateless service
-dry-runs, and reports changed versus already-present rules without building or
-deploying an image or reconciling any other runtime records. The summary includes
-a canonical SHA-256 of the normalized grant set. Review the dry-run changes, then
-dispatch `authz_grants_mode=apply` with that SHA-256, an operator reason, and the
-identical repository-variable value; apply fails before mutation when the current
-grant set no longer matches the reviewed digest. Grant-only mode rejects deploy,
-compatibility, and break-glass rollback inputs, and the rollback path independently
-rejects grant mode. The request honors `LAUNCHPLANE_SERVICE_AUDIENCE` when set and
-otherwise uses the public URL host. The default `none` mode preserves the normal
-deploy workflow. After a successful apply, merge the reviewed entries into the
-durable grant variable and remove the temporary maintenance variable. Keep real
-grant identities in operator-managed variables or service records rather than
-copying them into this workflow or the render script.
+Each configured grant must contain exact string selectors and immutable numeric
+GitHub IDs. Unknown fields and glob syntax are rejected. A minimal example is:
 
-The deploy workflow also reconciles its own `authz_policy_grant.write` grants
-for product/context `launchplane`, covering both manual dispatches and automatic
-CI-success deploys. Those grants keep future grant reconciliation separate from
-Launchplane self-deploy authority.
+```json
+[
+  {
+    "repository": "example-org/example-product",
+    "repository_id": "3001",
+    "repository_owner_id": "4001",
+    "workflow_file": "deploy.yml",
+    "workflow_ref_suffix": "refs/heads/main",
+    "event_name": "workflow_dispatch",
+    "product": "example-product",
+    "context": "example-product",
+    "action": "product_profile.read",
+    "source_label": "operator:example-product-deploy"
+  }
+]
+```
+
+For an active schema-v2 policy, add `instance` only when the selected action is
+instance-scoped; schema-v1 requests and context-scoped actions must omit it.
+
+Verify the IDs against the intended GitHub repository and owner before review.
+Launchplane checks the name and both IDs at authorization time, so a mismatched
+pair creates a nonfunctional grant rather than broadening authority. When an
+otherwise identical name-only compatibility rule exists, applying the reviewed
+ID-bound grant replaces that rule instead of keeping both authority paths live.
+Repository and workflow names remain exact fail-closed selectors: a rename or
+transfer is denied until an operator reviews and updates the affected rule.
+`authz-policies list` and grant responses expose immutable-ID versus name-only
+rule counts so the remaining compatibility surface can be measured before its
+removal gate is declared complete.
+
+Review the dry-run changes, then dispatch `authz_grants_mode=apply` with the
+reported grant-set SHA-256, the reported active policy SHA-256, an operator
+reason, and the identical repository-variable value. Apply fails before mutation
+when the active policy, active schema version, or configured grant set no longer
+matches the reviewed dry run. Grant-only mode rejects deploy, compatibility, and break-glass inputs,
+and the rollback path independently rejects grant maintenance. The request
+honors `LAUNCHPLANE_SERVICE_AUDIENCE` when set and otherwise uses the public URL
+host. Remove the temporary maintenance variable after the reviewed operation.
+Every run uploads the canonical request and redacted response evidence for 30
+days. The temporary exact route uses active-policy compare-and-write to prevent
+lost authority updates. Its compatibility idempotency evidence is recorded after
+that policy commit, so a concurrent duplicate can return a conflict rather than
+an immediate replay; retry the same reviewed request only after refreshing the
+active policy state. The later managed-set route makes policy mutation and
+idempotency completion one database transaction.
+The exact-grant job is an explicit removable compatibility bridge, not desired
+state reconciliation; steady-state authz changes belong in the service/operator
+surface and the later managed-set contract.
 
 The #1049 compatibility cleanup removed stale
 `launchplane_service_deploy.execute` GitHub Actions rules for policy import
@@ -833,19 +863,23 @@ than Launchplane CLI validations:
 - The Postgres service referenced by `LAUNCHPLANE_DATABASE_URL` must already be
   deployed and reachable on the Dokploy network before Launchplane is redeployed.
 
-The Launchplane service entrypoint applies `uv run alembic upgrade head` with
-the container's `LAUNCHPLANE_DATABASE_URL` before starting HTTP service. This
-keeps hosted service startup fail-closed on schema drift while running
-migrations from inside the Dokploy network that can resolve the shared Postgres
-service hostname. The self-deploy workflow should not run shared database
-migrations from the GitHub runner; keep Launchplane migrations additive and
-rollback-aware so a failed health check can still return to the previous image.
+The Launchplane service entrypoint runs
+`uv run python -m control_plane.storage.schema_migration` with the container's
+`LAUNCHPLANE_DATABASE_URL` before starting HTTP service. The helper serializes
+startup migration through a PostgreSQL advisory lock and advances only to the
+image's explicit migration target. This keeps hosted service startup fail-closed
+on schema drift while preserving expand/contract rollout and rollback boundaries.
+The self-deploy workflow should not run shared database migrations from the
+GitHub runner. Its deployed-runtime smoke requires the observed database
+revision to appear in the image's reported compatible-revision set before the
+deployment is accepted; it records both the observed revision and the image's
+forward migration target as rollout evidence.
 The service route keeps OIDC authz and idempotency at the HTTP boundary, then
 delegates provider target env mutation and deployment triggering to the
 Launchplane self-deploy workflow module.
 If a shared database already has Launchplane tables but no `alembic_version`
-table from the pre-migration `create_all` era, the entrypoint stamps the newest
-revision that matches the detected legacy table set before applying later
+table from the pre-migration `create_all` era, the helper stamps the newest
+revision that matches the detected historical table set before applying later
 migrations. Empty databases still run the full migration chain from the first
 revision.
 
@@ -1009,9 +1043,9 @@ Current derived-state behavior:
 - The manual Tracked Target Logs workflow calls that service route with GitHub
   OIDC and uploads the redacted JSON result, so operators can inspect runtime or
   deployment failures without local Dokploy credentials. Tenant contexts need a
-  matching `target_logs.read` GitHub Actions grant in
-  `LAUNCHPLANE_AUTHZ_GRANTS_JSON`; do not broaden this workflow to read all
-  contexts by default. The workflow uploads the redacted response artifact even
+  matching service-backed `target_logs.read` GitHub Actions grant; do not broaden
+  this workflow to read all contexts by default. The workflow uploads the
+  redacted response artifact even
   when the provider request fails, then fails the job after preserving that
   diagnostic evidence.
 

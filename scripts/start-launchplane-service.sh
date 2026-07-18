@@ -26,11 +26,6 @@ with open(path, "wb") as handle:
 PY
 }
 
-schema_stamp_revision() {
-	database_url="$1"
-	LAUNCHPLANE_DATABASE_URL="$database_url" uv run python -m control_plane.storage.schema_adoption
-}
-
 launchplane_app_root="${LAUNCHPLANE_APP_ROOT:-/app}"
 state_dir="${LAUNCHPLANE_STATE_DIR:-$launchplane_app_root/runtime}"
 launchplane_policy_toml="${LAUNCHPLANE_POLICY_TOML:-}"
@@ -79,16 +74,15 @@ if [ -z "$launchplane_database_url" ]; then
 	exit 1
 fi
 
-echo "Applying Launchplane database migrations before service startup."
-stamp_revision="$(schema_stamp_revision "$launchplane_database_url")" || {
-	echo "Launchplane database schema verification failed before migrations." >&2
+echo "Reconciling Launchplane database schema under the deployment-wide migration lock."
+schema_revision="$(
+	LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" \
+		uv run python -m control_plane.storage.schema_migration
+)" || {
+	echo "Launchplane database schema migration failed before service startup." >&2
 	exit 1
 }
-if [ -n "$stamp_revision" ]; then
-	echo "Stamping Launchplane database at Alembic revision ${stamp_revision} before upgrade."
-	LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" uv run alembic stamp "$stamp_revision"
-fi
-LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" uv run alembic upgrade head
+echo "Launchplane database schema is compatible at revision ${schema_revision}."
 
 exec uv run launchplane service serve \
 	--host "$launchplane_service_host" \

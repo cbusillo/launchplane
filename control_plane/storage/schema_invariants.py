@@ -9,7 +9,9 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
 EXPECTED_ALEMBIC_HEAD_REVISION = "f4c6e8a0b2d4"
+RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
 _AUTHZ_POLICY_WRITE_FENCE_FUNCTION = "launchplane_fence_authz_policy_write"
@@ -313,9 +315,10 @@ def critical_column_type_errors(
     inspector: SchemaInspectorProtocol,
     *,
     table_names: set[str] | None = None,
+    expected_types: tuple[CriticalColumnType, ...] = CRITICAL_POSTGRES_COLUMN_TYPES,
 ) -> list[str]:
     errors: list[str] = []
-    for expected_type in CRITICAL_POSTGRES_COLUMN_TYPES:
+    for expected_type in expected_types:
         if table_names is not None and expected_type.table_name not in table_names:
             continue
         columns = {
@@ -434,7 +437,7 @@ def critical_index_errors(
     return errors
 
 
-def _verify_alembic_head(engine: Engine) -> None:
+def _verify_alembic_head(engine: Engine) -> str:
     try:
         with engine.connect() as connection:
             version_rows = connection.execute(
@@ -446,13 +449,15 @@ def _verify_alembic_head(engine: Engine) -> None:
             "Run Alembic migrations before starting the hosted service."
         ) from error
     version_numbers = tuple(str(row[0]).strip() for row in version_rows if str(row[0]).strip())
-    if version_numbers != (EXPECTED_ALEMBIC_HEAD_REVISION,):
+    if len(version_numbers) != 1 or version_numbers[0] not in RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS:
         observed = ", ".join(version_numbers) if version_numbers else "<none>"
         raise RuntimeError(
-            "Launchplane shared storage schema is not at the checked-in Alembic head: "
-            f"observed {observed}; expected {EXPECTED_ALEMBIC_HEAD_REVISION}. Run "
-            "Alembic migrations before starting the hosted service."
+            "Launchplane shared storage schema is not at a compatible Alembic revision: "
+            f"observed {observed}; expected one of "
+            f"{', '.join(RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS)}. "
+            "Run the serialized Launchplane schema migration before starting the hosted service."
         )
+    return version_numbers[0]
 
 
 def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
@@ -497,8 +502,7 @@ def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
     errors: list[str] = []
     if trigger_row is None:
         errors.append(
-            f"{_AUTHZ_POLICY_TABLE} missing required trigger "
-            f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER}"
+            f"{_AUTHZ_POLICY_TABLE} missing required trigger {_AUTHZ_POLICY_WRITE_FENCE_TRIGGER}"
         )
     else:
         if str(trigger_row["function_name"]) != _AUTHZ_POLICY_WRITE_FENCE_FUNCTION:
@@ -530,8 +534,7 @@ def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
         ):
             if expected_fragment not in function_definition:
                 errors.append(
-                    f"{_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}() is missing "
-                    f"{expected_fragment!r}"
+                    f"{_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}() is missing {expected_fragment!r}"
                 )
     return errors
 
@@ -592,12 +595,14 @@ def _normalize_index_column(value: object) -> str:
 
 
 def _normalized_predicate_text(index: Mapping[str, object], index_definition: str) -> str:
-    predicate_parts = [index_definition]
+    predicate_parts: list[str] = []
     dialect_options = index.get("dialect_options")
     if isinstance(dialect_options, Mapping):
         for key, value in dialect_options.items():
             if str(key).endswith("_where") and value is not None:
                 predicate_parts.append(str(value))
+    if not predicate_parts:
+        predicate_parts.append(index_definition)
     return " ".join(predicate_parts).lower().replace('"', "")
 
 

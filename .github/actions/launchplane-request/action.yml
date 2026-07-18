@@ -188,6 +188,10 @@ outputs:
     description: Dynamic output exposed by output-paths.
   error_message:
     description: Dynamic output exposed by output-paths.
+  authz_policy_schema_version:
+    description: Dynamic output exposed by output-paths.
+  authz_policy_sha256:
+    description: Dynamic output exposed by output-paths.
   image_digest:
     description: Dynamic output exposed by output-paths.
   image_repository:

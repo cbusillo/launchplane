@@ -17,16 +17,14 @@ class StartLaunchplaneServiceScriptTests(unittest.TestCase):
         uv_path = bin_dir / "uv"
         uv_path.write_text(
             """#!/bin/sh
+printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
 if [ "$1" = "run" ] && [ "$2" = "python" ]; then
   if [ "${UV_SCHEMA_STATUS:-0}" = "2" ]; then
     exit 2
   fi
-  if [ -n "${UV_LEGACY_REVISION:-}" ]; then
-    printf '%s\n' "$UV_LEGACY_REVISION"
-  fi
+  printf '%s\n' "${UV_SCHEMA_REVISION:-f4c6e8a0b2d4}"
   exit 0
 fi
-printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
 """,
             encoding="utf-8",
         )
@@ -244,12 +242,7 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
                 captured_lines = capture_file.read_text(encoding="utf-8").splitlines()
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertIn("alembic", captured_lines)
-            self.assertIn("stamp", captured_lines)
-            self.assertIn("b1c3d5e7f9a1", captured_lines)
-            self.assertNotIn("fe94a0486977", captured_lines)
-            self.assertIn("upgrade", captured_lines)
-            self.assertIn("head", captured_lines)
+            self.assertIn("control_plane.storage.schema_migration", captured_lines)
         finally:
             policy_path.unlink(missing_ok=True)
 
@@ -289,11 +282,7 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
                 captured_lines = capture_file.read_text(encoding="utf-8").splitlines()
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertIn("alembic", captured_lines)
-            self.assertIn("stamp", captured_lines)
-            self.assertIn("b1c3d5e7f9a1", captured_lines)
-            self.assertIn("upgrade", captured_lines)
-            self.assertIn("head", captured_lines)
+            self.assertIn("control_plane.storage.schema_migration", captured_lines)
         finally:
             policy_path.unlink(missing_ok=True)
 
@@ -333,11 +322,7 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
                 captured_lines = capture_file.read_text(encoding="utf-8").splitlines()
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertIn("alembic", captured_lines)
-            self.assertIn("stamp", captured_lines)
-            self.assertIn("fe94a0486977", captured_lines)
-            self.assertIn("upgrade", captured_lines)
-            self.assertIn("head", captured_lines)
+            self.assertIn("control_plane.storage.schema_migration", captured_lines)
         finally:
             policy_path.unlink(missing_ok=True)
 
@@ -370,7 +355,7 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
             )
 
         self.assertEqual(result.returncode, 1, msg=result.stdout)
-        self.assertIn("schema verification failed before migrations", result.stderr)
+        self.assertIn("schema migration failed before service startup", result.stderr)
 
 
 class StartLaunchplaneOdooWorkersScriptTests(unittest.TestCase):

@@ -235,8 +235,7 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
         "GITHUB_TOKEN": frozenset(("${{ github.token }}",)),
     },
     ".github/workflows/deploy-launchplane.yml": {
-        "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY": frozenset(('"true"', "true")),
-        "environment": frozenset(("launchplane-break-glass",)),
+        "environment": frozenset(("launchplane-authz-admin", "launchplane-break-glass")),
     },
     ".github/workflows/odoo-driver-route-smoke.yml": {
         "ROUTE_PATHS": frozenset(
@@ -560,7 +559,6 @@ WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
         "DEFAULT_GITHUB_TOKEN": frozenset(("${{ secrets.GITHUB_TOKEN }}",)),
         "GHCR_TOKEN": frozenset(("${{ secrets.GHCR_TOKEN }}",)),
         "GHCR_USERNAME": frozenset(("${{ secrets.GHCR_USERNAME }}",)),
-        "LAUNCHPLANE_AUTHZ_GRANTS_JSON": frozenset(("${{ vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON }}",)),
         "LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK": frozenset(
             ("${{ vars.LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK }}",)
         ),
@@ -582,21 +580,9 @@ WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
             ("${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}",)
         ),
         "LAUNCHPLANE_IMAGE_REPOSITORY": frozenset(("${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}",)),
-        "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": frozenset(
-            ("${{ vars.LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON }}",)
-        ),
         "LAUNCHPLANE_NPMPLUS_BASE_URL": frozenset(("${{ vars.LAUNCHPLANE_NPMPLUS_BASE_URL }}",)),
         "LAUNCHPLANE_NPMPLUS_IDENTITY": frozenset(("${{ secrets.LAUNCHPLANE_NPMPLUS_IDENTITY }}",)),
         "LAUNCHPLANE_NPMPLUS_SECRET": frozenset(("${{ secrets.LAUNCHPLANE_NPMPLUS_SECRET }}",)),
-        "LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS": frozenset(
-            ("${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS }}",)
-        ),
-        "LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS": frozenset(
-            ("${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS }}",)
-        ),
-        "LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS": frozenset(
-            ("${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS }}",)
-        ),
         "LAUNCHPLANE_PUBLIC_URL": frozenset(("${{ vars.LAUNCHPLANE_PUBLIC_URL }}",)),
         "LAUNCHPLANE_SERVICE_AUDIENCE": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
         "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN": frozenset(

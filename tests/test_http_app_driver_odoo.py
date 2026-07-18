@@ -4302,9 +4302,8 @@ class FastApiOdooTargetReplacementPlanTests(unittest.IsolatedAsyncioTestCase):
             operation["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/AcceptedEvidenceResponse",
         )
-        for status_code in ("400", "401", "403", "503"):
+        for status_code in ("400", "401", "403", "409", "503"):
             self.assertIn(status_code, operation["responses"])
-        self.assertNotIn("409", operation["responses"])
 
 
 class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):

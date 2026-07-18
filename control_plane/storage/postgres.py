@@ -1885,6 +1885,10 @@ class PostgresRecordStore(HumanSessionStore):
     def backend_name(self) -> str:
         return "postgres"
 
+    @property
+    def database_dialect_name(self) -> str:
+        return self._engine.url.get_backend_name()
+
     def ensure_schema(self) -> None:
         if self._engine.url.get_backend_name() != "sqlite":
             self.verify_schema()
@@ -1922,6 +1926,16 @@ class PostgresRecordStore(HumanSessionStore):
             )
         if backend_name == "postgresql":
             verify_postgres_schema_invariants(self._engine)
+
+    def schema_revision(self) -> str:
+        if self._engine.url.get_backend_name() != "postgresql":
+            return ""
+        with self._engine.connect() as connection:
+            rows = connection.execute(text("select version_num from alembic_version")).fetchall()
+        revisions = tuple(str(row[0]).strip() for row in rows if str(row[0]).strip())
+        if len(revisions) != 1:
+            raise RuntimeError("Launchplane database must have exactly one Alembic revision.")
+        return revisions[0]
 
     def close(self) -> None:
         self._engine.dispose()
@@ -6788,7 +6802,7 @@ class PostgresRecordStore(HumanSessionStore):
 
     @staticmethod
     def _authz_policy_payload(record: LaunchplaneAuthzPolicyRecord) -> PayloadDict:
-        payload = cast(PayloadDict, record.model_dump(mode="json"))
+        payload = record.model_dump(mode="json")
         payload.pop("revision", None)
         return payload
 
