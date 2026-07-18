@@ -392,9 +392,10 @@ sets; they are not the desired-state authority.
 
 Operators mutate shared or production authz through the deployed service, not
 through direct DB commands or a local CLI from an arbitrary checkout. Store the
-complete desired rules for one `managed_set_id` in the protected
-`launchplane-authz-admin` environment secret
-`LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON`. The JSON owns desired state only:
+complete desired rules for one `managed_set_id` in the repository secret
+`LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON`. Each dispatch wrapper explicitly forwards
+that secret into the reusable worker, whose OIDC-minting job remains gated by
+the `launchplane-authz-admin` environment. The JSON owns desired state only:
 `schema_version`, `product`, `managed_set_id`, migration/adoption intent, and
 `desired_policy`. Dispatch-time mode, reason, issue reference, and reviewed plan
 digest are deliberately excluded from that secret.
@@ -420,7 +421,7 @@ rejects drift before mutation.
 
 The artifact contains only request hashes/intent and the service's redacted
 summary. The worker removes the protected desired policy, raw request, and raw
-response material before upload so environment-secret contents do not become
+response material before upload so repository-secret contents do not become
 artifact-readable runtime authority.
 
 Schema-v1 migration requires `schema_migration: "migrate_v1_to_v2"` in the

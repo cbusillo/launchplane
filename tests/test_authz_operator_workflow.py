@@ -30,6 +30,13 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             self.dispatch_workflow.job_permissions("reconcile"),
             {"contents": "read", "id-token": "write"},
         )
+        dispatch_job = self.dispatch_workflow.job("reconcile")
+        dispatch_secrets = dispatch_job["secrets"]
+        assert isinstance(dispatch_secrets, dict)
+        self.assertEqual(
+            dispatch_secrets["managed_set_json"],
+            "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}",
+        )
 
     def test_deploy_workflow_bootstraps_managed_authz_without_deploying(self) -> None:
         deploy_job = self.deploy_workflow.job("deploy")
@@ -44,6 +51,12 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         self.assertEqual(
             self.deploy_workflow.job_permissions("operator-authz-managed"),
             {"contents": "read", "id-token": "write"},
+        )
+        managed_secrets = managed_job["secrets"]
+        assert isinstance(managed_secrets, dict)
+        self.assertEqual(
+            managed_secrets["managed_set_json"],
+            "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}",
         )
         managed_inputs = managed_job["with"]
         assert isinstance(managed_inputs, dict)
@@ -78,6 +91,13 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         self.assertIsInstance(workflow_call, dict)
         assert isinstance(workflow_call, dict)
         self.assertEqual(set(workflow_call), {"workflow_call"})
+        workflow_call_contract = workflow_call["workflow_call"]
+        assert isinstance(workflow_call_contract, dict)
+        workflow_call_secrets = workflow_call_contract["secrets"]
+        assert isinstance(workflow_call_secrets, dict)
+        managed_set_secret = workflow_call_secrets["managed_set_json"]
+        assert isinstance(managed_set_secret, dict)
+        self.assertEqual(managed_set_secret["required"], True)
         job = self.workflow.job("reconcile")
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         self.assertEqual(job["environment"], "launchplane-authz-admin")
@@ -85,7 +105,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         assert isinstance(job_environment, dict)
         self.assertEqual(
             job_environment["LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON"],
-            "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}",
+            "${{ secrets.managed_set_json }}",
         )
         self.assertEqual(self.workflow.job_permissions("reconcile")["contents"], "read")
         self.assertEqual(self.workflow.job_permissions("reconcile")["id-token"], "write")
