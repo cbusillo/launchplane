@@ -52,6 +52,13 @@ remote code or move workflow data across trust boundaries.
   repository-qualified reference, except the narrowly approved authorization
   worker whose full-SHA `job_workflow_ref` is itself part of the active policy
   trust boundary.
+- Changes to that authorization worker's `workflow_call` interface require two
+  landings. First land the worker contract without changing caller pins, then
+  pin each caller to that landed commit and start passing the new input or
+  secret in a follow-up change. GitHub validates the interface at the pinned revision before
+  starting any job, so forwarding a value that only exists in the caller's
+  current revision causes a workflow startup failure rather than a safe skipped
+  job.
 - Every static container image source must be classified in the policy test and
   use a release tag plus a 64-character `sha256` manifest digest. Mutable tags
   without a digest are rejected.
