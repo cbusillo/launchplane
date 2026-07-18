@@ -1252,7 +1252,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@f27074f5fab6fc0b1bcd554444175c7c03bc8cea # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
     with:
       mode: ${{ inputs.authz_managed_mode }}
       reviewed_plan_sha256: ${{ inputs.authz_managed_reviewed_plan_sha256 }}
