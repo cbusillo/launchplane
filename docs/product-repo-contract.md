@@ -146,7 +146,7 @@ Launchplane-owned reusable gate:
 ```yaml
 jobs:
   launchplane-config-authority:
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@main
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@<launchplane-sha>
 ```
 
 The reusable workflow checks out the product repository and Launchplane's `main`
@@ -186,7 +186,7 @@ Launchplane drivers once the driver has the necessary profile data.
 When product smoke checks need Launchplane-backed generated-user setup or
 cleanup during the same browser run, the workflow should install a
 Launchplane-owned smoke maintenance client with
-`cbusillo/launchplane/.github/actions/setup-smoke-maintenance-client@main` and
+`cbusillo/launchplane/.github/actions/setup-smoke-maintenance-client@<launchplane-sha>` and
 pass the generated client path to the product script. The workflow job must
 grant `id-token: write` so the client can request a GitHub OIDC token for
 Launchplane. The initial client covers VeriReel generated-user smoke
@@ -272,11 +272,12 @@ uv run launchplane odoo-ownership check --workspace-root ..
 
 The check is intentionally narrow. It allows product-owned source, tests,
 artifact publishing, GHCR login, devkit local build/runtime behavior, and thin
-Launchplane connectors through either:
+Launchplane connectors through reviewed immutable Launchplane revisions. In the
+examples below, `<launchplane-sha>` means one exact 40-character commit SHA:
 
-- `cbusillo/launchplane/.github/actions/launchplane-request@main`
-- `cbusillo/launchplane/.github/workflows/reusable-odoo-*.yml@main`
-- `cbusillo/launchplane/.github/workflows/reusable-product-driver-*.yml@main`
+- `cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>`
+- `cbusillo/launchplane/.github/workflows/reusable-odoo-*.yml@<launchplane-sha>`
+- `cbusillo/launchplane/.github/workflows/reusable-product-driver-*.yml@<launchplane-sha>`
 
 It blocks the patterns that previously caused ownership drift:
 
@@ -350,7 +351,7 @@ provider mutations still run inside the Launchplane service boundary.
 Product-driver testing deploys follow the same ownership shape. Tenant repos own
 the manual dispatch confirmation and pass explicit `product`, `context`,
 `driver`, stored `artifact_id`, and `source_git_ref` into
-`reusable-product-driver-testing-deploy.yml@main`; Odoo callers must pass
+`reusable-product-driver-testing-deploy.yml@<launchplane-sha>`; Odoo callers must pass
 `driver: odoo`. The reusable workflow preserves the explicit product and context
 from the caller, dispatches Odoo requests to
 `/v1/drivers/odoo/target-replacement-apply`, and leaves the provider mutation,
@@ -377,7 +378,7 @@ protected inventory. Some active-preview protections come from ready PR feedback
 records that carry immutable and refresh image references but no artifact id, so
 an artifact-id-only cleanup filter can still delete a live preview tag. Whole-
 product cleanup callers should use
-`cbusillo/launchplane/.github/actions/setup-protected-artifacts-request-client@main`
+`cbusillo/launchplane/.github/actions/setup-protected-artifacts-request-client@<launchplane-sha>`
 with `render-request: true` to render the
 `GET /v1/artifacts/protected?product=...` route, `GET` method, and
 `protected_artifacts` response extraction for `launchplane-request`. Product
@@ -435,7 +436,7 @@ Stable deploy uses:
 ```yaml
 jobs:
   launchplane-deploy:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@main
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@<launchplane-sha>
     with:
       artifact_id: ${{ needs.build.outputs.image_digest }}
       source_git_ref: ${{ github.sha }}
@@ -446,7 +447,7 @@ Production promotion uses:
 ```yaml
 jobs:
   launchplane-prod-promotion:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-prod-promotion.yml@main
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-prod-promotion.yml@<launchplane-sha>
     with:
       product: ${{ vars.LAUNCHPLANE_PRODUCT }}
       dry_run: ${{ inputs.dry_run }}
@@ -467,7 +468,7 @@ product-provided provider targets:
 ```yaml
 jobs:
   launchplane-prod-rollback:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-prod-rollback.yml@main
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-prod-rollback.yml@<launchplane-sha>
     with:
       rollback_deployment_record_id: ${{ inputs.rollback_deployment_record_id }}
       backup_record_id: ${{ inputs.backup_record_id }}
@@ -485,7 +486,7 @@ health records without mutating provider state:
 ```yaml
 jobs:
   launchplane-stable-verification:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-verification.yml@main
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-verification.yml@<launchplane-sha>
     with:
       context: ${{ vars.LAUNCHPLANE_CONTEXT }}
       deployment_record_id: ${{ needs.deploy.outputs.deployment_record_id }}
@@ -505,7 +506,7 @@ Preview refresh, destroy, and unsupported-notice handoff use:
 ```yaml
 jobs:
   launchplane-preview:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@main
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@<launchplane-sha>
     with:
       operation: refresh
       anchor_pr_number: ${{ github.event.pull_request.number }}
@@ -516,7 +517,7 @@ jobs:
 
 Destroy calls set `operation: destroy` and pass `destroy_reason`. Fork and
 Dependabot `unsupported_notice` handoffs call
-`cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@main`
+`cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@<launchplane-sha>`
 from a trusted `pull_request_target` workflow. Product repos do not choose a
 trusted checkout ref, pass preview slugs, preview URLs, provider application
 names, feedback context, feedback markdown, route payloads, or idempotency keys;
@@ -525,7 +526,7 @@ claims, the PR event, and the run-scoped workflow context.
 
 Product workflows that still compose local publish, provision, verification, or
 cleanup job results into preview PR feedback status should call
-`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@main`.
+`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@<launchplane-sha>`.
 That wrapper accepts primitive GitHub Actions job results and optional failure
 summaries, derives the canonical `ready`, `failed`, `destroyed`, or
 `cleanup_failed` status, and delegates delivery to the reusable Launchplane PR
@@ -533,7 +534,7 @@ feedback workflow. Product repos should not copy status selection, feedback
 route payloads, feedback markers, or idempotency-key logic.
 
 Product workflows that smoke a generic-web preview after refresh should call
-`cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@main`.
+`cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@<launchplane-sha>`.
 That wrapper submits product-owned smoke evidence to
 `/v1/drivers/generic-web/preview-verification`, defaults the anchor repository
 to the full caller `owner/repo` slug, normalizes skipped or neutral smoke jobs to
@@ -541,7 +542,7 @@ failure evidence, and maps service errors through the shared request-action
 `error_message` output.
 
 Odoo tenant preview workflows that still call Odoo driver routes directly should
-use `setup-odoo-preview-request-client@main` with `request-kind` set to
+use `setup-odoo-preview-request-client@<launchplane-sha>` with `request-kind` set to
 `artifact-publish-inputs`, `preview-apply-inputs`, or `preview-apply` before
 calling `launchplane-request`. The action owns the route path, JSON payload
 shape, JSON-file binding list, fail-result paths, response output path, and
@@ -585,18 +586,18 @@ Launchplane-owned runtime verification.
 
 The product-driver reusable surface is:
 
-- `reusable-product-driver-stable-environment.yml@main`
-- `reusable-product-driver-runtime-verification.yml@main`
-- `reusable-product-driver-stable-deploy.yml@main`
-- `reusable-product-driver-app-maintenance.yml@main`
-- `reusable-product-driver-post-deploy.yml@main`
-- `reusable-product-driver-testing-deploy.yml@main`
-- `reusable-product-driver-testing-verification.yml@main`
-- `reusable-product-driver-testing-reset.yml@main`
-- `reusable-product-driver-prod-backup-gate.yml@main`
-- `reusable-product-driver-prod-launch-readiness.yml@main`
-- `reusable-product-driver-prod-promotion.yml@main`
-- `reusable-product-driver-prod-rollback.yml@main`
+- `reusable-product-driver-stable-environment.yml@<launchplane-sha>`
+- `reusable-product-driver-runtime-verification.yml@<launchplane-sha>`
+- `reusable-product-driver-stable-deploy.yml@<launchplane-sha>`
+- `reusable-product-driver-app-maintenance.yml@<launchplane-sha>`
+- `reusable-product-driver-post-deploy.yml@<launchplane-sha>`
+- `reusable-product-driver-testing-deploy.yml@<launchplane-sha>`
+- `reusable-product-driver-testing-verification.yml@<launchplane-sha>`
+- `reusable-product-driver-testing-reset.yml@<launchplane-sha>`
+- `reusable-product-driver-prod-backup-gate.yml@<launchplane-sha>`
+- `reusable-product-driver-prod-launch-readiness.yml@<launchplane-sha>`
+- `reusable-product-driver-prod-promotion.yml@<launchplane-sha>`
+- `reusable-product-driver-prod-rollback.yml@<launchplane-sha>`
 
 These workflows are transitional connectors, not permission to move product
 lifecycle authority back into product repos. A product repo may still own image
@@ -605,7 +606,7 @@ should not own Launchplane route construction, request envelopes, idempotency
 recipes, polling behavior, or record-output extraction once a reusable workflow
 exists.
 
-`reusable-product-driver-post-deploy.yml@main` preserves explicit driver
+`reusable-product-driver-post-deploy.yml@<launchplane-sha>` preserves explicit driver
 post-deploy phases for Odoo refresh, manual, promotion, and deploy callers
 while moving request shaping into Launchplane. Odoo callers must pass
 `driver: odoo` plus the same explicit `product`, `context`, `instance`, and
@@ -615,7 +616,7 @@ operations; product repos should not use it as a generic phase-aware post-deploy
 substitute. The old Odoo-specific post-deploy reusable has been retired after
 tenant callers moved to the product-driver wrapper.
 
-`reusable-product-driver-prod-rollback.yml@main` keeps the existing VeriReel
+`reusable-product-driver-prod-rollback.yml@<launchplane-sha>` keeps the existing VeriReel
 rollback surface as its compatibility default and also supports explicit
 `driver: odoo` callers. Odoo rollback callers pass the same primitive rollback
 facts as the older Odoo-specific reusable: explicit `product`, explicit
@@ -627,7 +628,7 @@ route, payload envelope, output mapping, fail-result paths, and legacy
 `opr:<context>:<run>` idempotency key shape so tenant repos do not keep Odoo
 rollback request construction locally.
 
-`reusable-product-driver-prod-promotion.yml@main` keeps the existing VeriReel
+`reusable-product-driver-prod-promotion.yml@<launchplane-sha>` keeps the existing VeriReel
 promotion surface as its compatibility default and also supports explicit
 `driver: odoo` callers. Odoo promotion callers pass the same primitive facts as
 the older Odoo-specific reusable: explicit `product` and explicit `context`.
@@ -639,21 +640,21 @@ promotion request construction locally.
 When a workflow operation has implied lane or maintenance semantics, prefer an
 operation-level reusable workflow over passing checked-in lane, action, or
 intent strings from the product repository. For example, a product repo should
-call `reusable-product-driver-testing-reset.yml@main` rather than wiring
+call `reusable-product-driver-testing-reset.yml@<launchplane-sha>` rather than wiring
 `instance: testing`, `action: reset-testing`, and `intent:
 stable-testing-reset` itself. Product-owned smoke checks may still consume
 Launchplane reusable outputs, such as a resolved `primary_base_url`, as
 pass-through evidence for product behavior checks.
 
 Generated-user smoke setup that must happen inside a product browser flow should
-use `setup-smoke-maintenance-client@main` instead of a workflow-level
+use `setup-smoke-maintenance-client@<launchplane-sha>` instead of a workflow-level
 app-maintenance call. The setup action writes an importable Node ESM client into
 the product job so the browser script can keep its dynamic test email while
 Launchplane owns request shaping, driver intent derivation, and OIDC transport.
 The job using the generated client must include `permissions: id-token: write`.
 
 Same-repository preview jobs that need label normalization and preview image tag
-derivation should use `setup-preview-prepare-client@main` instead of carrying a
+derivation should use `setup-preview-prepare-client@<launchplane-sha>` instead of carrying a
 product-local helper. The generated Node ESM client returns refresh/noop or
 unsupported mode, same-repo support flags, `pr-<number>` image tags, and full
 caller-supplied image references from primitive GitHub event facts. It is a
@@ -687,7 +688,7 @@ supported thin connector workflow name. It should call:
 
 ```yaml
 - name: Request Launchplane deploy
-  uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+  uses: cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>
   with:
     launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
     route-path: /v1/drivers/generic-web/deploy
@@ -703,7 +704,7 @@ inputs.
 
 ```yaml
 - name: Request Launchplane preview refresh
-  uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+  uses: cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>
   with:
     launchplane-url: ${{ vars.LAUNCHPLANE_URL }}
     audience: ${{ vars.LAUNCHPLANE_AUDIENCE }}
@@ -767,7 +768,7 @@ polling instead of reimplementing OIDC and retry logic in the product repo:
 
 ```yaml
 - name: Request Launchplane backup gate
-  uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+  uses: cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>
   with:
     launchplane-url: ${{ vars.LAUNCHPLANE_URL }}
     audience: ${{ vars.LAUNCHPLANE_AUDIENCE }}

@@ -5343,6 +5343,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(conflict_payload["error"]["code"], "authz_policy_conflict")
         self.assertEqual(active_status, 200)
         self.assertEqual(active_payload["policy"]["revision"], 2)
+        self.assertEqual(active_payload["policy"]["managed_rule_count"], 1)
+        self.assertEqual(active_payload["policy"]["unmanaged_rule_count"], 1)
+        self.assertEqual(
+            active_payload["policy"]["github_actions_privileged_unpinned_reusable_rule_count"],
+            1,
+        )
         self.assertEqual(
             active_payload["policy"]["managed_rules"][0]["managed_rule_id"],
             "profile.read",

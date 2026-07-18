@@ -204,7 +204,8 @@ class OdooOwnershipDocsTests(TestCase):
 
         self.assertIn("uv run launchplane odoo-ownership check", product_repo_contract)
         self.assertIn(
-            "cbusillo/launchplane/.github/actions/launchplane-request@main", product_repo_contract
+            "cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>",
+            product_repo_contract,
         )
-        self.assertIn("reusable-odoo-*.yml@main", product_repo_contract)
-        self.assertIn("reusable-product-driver-*.yml@main", product_repo_contract)
+        self.assertIn("reusable-odoo-*.yml@<launchplane-sha>", product_repo_contract)
+        self.assertIn("reusable-product-driver-*.yml@<launchplane-sha>", product_repo_contract)

@@ -33,6 +33,27 @@ on:
         description: Operator reason recorded on each grant request; required for apply.
         required: false
         type: string
+      authz_managed_mode:
+        description: Bootstrap review or apply of managed authorization without deploying Launchplane.
+        required: false
+        default: none
+        type: choice
+        options:
+          - none
+          - dry_run
+          - apply
+      authz_managed_reviewed_plan_sha256:
+        description: Managed plan SHA-256 returned by the reviewed dry run; required for apply.
+        required: false
+        type: string
+      authz_managed_reason:
+        description: Single-line operator reason bound into the managed review plan.
+        required: false
+        type: string
+      authz_managed_related_issue:
+        description: Single-line issue or change reference bound into the managed review plan.
+        required: false
+        type: string
       omit_every_code_env:
         description: Temporarily omit Every Code env for one compatibility deploy.
         required: false
@@ -87,7 +108,8 @@ jobs:
        github.ref_type == 'branch' &&
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
        inputs.break_glass_confirm == '' &&
-       inputs.authz_grants_mode == 'none')
+       inputs.authz_grants_mode == 'none' &&
+       inputs.authz_managed_mode == 'none')
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
@@ -1174,6 +1196,69 @@ jobs:
               launchplane-v2-deployed-smoke.json
           } >> "$GITHUB_STEP_SUMMARY"
 
+  operator-authz-managed-validate:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref_type == 'branch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      inputs.authz_managed_mode != 'none'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate managed authz isolation
+        shell: bash
+        env:
+          AUTHZ_GRANTS_MODE: ${{ inputs.authz_grants_mode }}
+          BREAK_GLASS_CONFIRM: ${{ inputs.break_glass_confirm }}
+          BREAK_GLASS_IMAGE_REFERENCE: ${{ inputs.break_glass_image_reference }}
+          BREAK_GLASS_REASON: ${{ inputs.break_glass_reason }}
+          DEPLOY_IMAGE_REFERENCE: ${{ inputs.image_reference }}
+          OMIT_EVERY_CODE_ENV: ${{ inputs.omit_every_code_env }}
+          OMIT_NPMPLUS_ENV: ${{ inputs.omit_npmplus_env }}
+          OMIT_OWNER_AGENT_ENV: ${{ inputs.omit_owner_agent_env }}
+          OMIT_TERMINAL_AGENT_ENV: ${{ inputs.omit_terminal_agent_env }}
+        run: |
+          set -euo pipefail
+          if [ "$AUTHZ_GRANTS_MODE" != "none" ]; then
+            echo "Managed authz reconciliation cannot be combined with exact grant maintenance." >&2
+            exit 1
+          fi
+          if [ -n "$DEPLOY_IMAGE_REFERENCE" ]; then
+            echo "Managed authz reconciliation cannot include a deploy image input." >&2
+            exit 1
+          fi
+          if [ "$OMIT_EVERY_CODE_ENV" = "true" ] ||
+            [ "$OMIT_TERMINAL_AGENT_ENV" = "true" ] ||
+            [ "$OMIT_OWNER_AGENT_ENV" = "true" ] ||
+            [ "$OMIT_NPMPLUS_ENV" = "true" ]; then
+            echo "Managed authz reconciliation cannot include deploy compatibility inputs." >&2
+            exit 1
+          fi
+          if [ -n "$BREAK_GLASS_CONFIRM" ] ||
+            [ -n "$BREAK_GLASS_IMAGE_REFERENCE" ] ||
+            [ -n "$BREAK_GLASS_REASON" ]; then
+            echo "Managed authz reconciliation cannot include break-glass rollback inputs." >&2
+            exit 1
+          fi
+
+  operator-authz-managed:
+    needs: operator-authz-managed-validate
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref_type == 'branch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      inputs.authz_managed_mode != 'none'
+    permissions:
+      contents: read
+      id-token: write
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@f27074f5fab6fc0b1bcd554444175c7c03bc8cea # main
+    with:
+      mode: ${{ inputs.authz_managed_mode }}
+      reviewed_plan_sha256: ${{ inputs.authz_managed_reviewed_plan_sha256 }}
+      reason: ${{ inputs.authz_managed_reason }}
+      related_issue: ${{ inputs.authz_managed_related_issue }}
+
   operator-authz-grants:
     if: >-
       github.event_name == 'workflow_dispatch' &&
@@ -1200,6 +1285,7 @@ jobs:
         env:
           REVIEWED_GRANTS_SHA256: ${{ inputs.authz_grants_expected_sha256 }}
           REVIEWED_POLICY_SHA256: ${{ inputs.authz_policy_expected_sha256 }}
+          AUTHZ_MANAGED_MODE: ${{ inputs.authz_managed_mode }}
           DEPLOY_IMAGE_REFERENCE: ${{ inputs.image_reference }}
           OMIT_EVERY_CODE_ENV: ${{ inputs.omit_every_code_env }}
           OMIT_TERMINAL_AGENT_ENV: ${{ inputs.omit_terminal_agent_env }}
@@ -1212,6 +1298,10 @@ jobs:
           set -euo pipefail
           : "${LAUNCHPLANE_PUBLIC_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
           : "${LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON:?Missing LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON variable}"
+          if [ "$AUTHZ_MANAGED_MODE" != "none" ]; then
+            echo "Exact grant maintenance cannot be combined with managed authz reconciliation." >&2
+            exit 1
+          fi
           if [ -n "$DEPLOY_IMAGE_REFERENCE" ]; then
             echo "Grant-only maintenance cannot include a deploy image input." >&2
             exit 1
@@ -1264,9 +1354,7 @@ jobs:
           method: GET
           route-path: /v1/service/runtime
           expected-status: "200"
-          output-paths: |
-            authz_policy_schema_version=runtime.authz_policy_schema_version
-            authz_policy_sha256=runtime.authz_policy_sha256
+          output-paths: authz_policy_schema_version=runtime.authz_policy_schema_version,authz_policy_sha256=runtime.authz_policy_sha256
           log-response-body: "false"
 
       - name: Render operator-configured authz grants
@@ -1384,12 +1472,17 @@ jobs:
         shell: bash
         env:
           AUTHZ_GRANTS_MODE: ${{ inputs.authz_grants_mode }}
+          AUTHZ_MANAGED_MODE: ${{ inputs.authz_managed_mode }}
           BREAK_GLASS_IMAGE_REFERENCE: ${{ inputs.break_glass_image_reference }}
           BREAK_GLASS_REASON: ${{ inputs.break_glass_reason }}
         run: |
           set -euo pipefail
           if [ "$AUTHZ_GRANTS_MODE" != "none" ]; then
             echo "Break-glass rollback cannot be combined with authz grant maintenance." >&2
+            exit 1
+          fi
+          if [ "$AUTHZ_MANAGED_MODE" != "none" ]; then
+            echo "Break-glass rollback cannot be combined with managed authz reconciliation." >&2
             exit 1
           fi
           : "${LAUNCHPLANE_DOKPLOY_TARGET_TYPE:?Missing LAUNCHPLANE_DOKPLOY_TARGET_TYPE variable}"

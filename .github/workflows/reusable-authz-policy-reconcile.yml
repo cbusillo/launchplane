@@ -1,0 +1,305 @@
+---
+name: Reusable Authz Policy Reconcile
+
+"on":
+  workflow_call:
+    inputs:
+      mode:
+        description: Review or apply the operator-managed desired rule set.
+        required: true
+        type: string
+      reviewed_plan_sha256:
+        description: Plan SHA-256 returned by the reviewed dry run; required for apply.
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: Single-line operator reason bound into the reviewed plan.
+        required: true
+        type: string
+      related_issue:
+        description: Single-line issue or change reference bound into the reviewed plan.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: launchplane-authz-policy
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    environment: launchplane-authz-admin
+    env:
+      LAUNCHPLANE_PUBLIC_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+      LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}
+    steps:
+      - name: Validate and render managed authz request
+        id: request
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          MODE: ${{ inputs.mode }}
+          REASON: ${{ inputs.reason }}
+          RELATED_ISSUE: ${{ inputs.related_issue }}
+          REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          def require_single_line(name: str, value: str, *, maximum: int) -> str:
+              normalized = value.strip()
+              if not normalized:
+                  raise SystemExit(f"{name} is required.")
+              if len(normalized) > maximum or any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+                  raise SystemExit(f"{name} must be a single printable line no longer than {maximum} characters.")
+              return normalized
+
+          mode = os.environ["MODE"].strip()
+          if mode not in {"dry_run", "apply"}:
+              raise SystemExit("mode must be dry_run or apply.")
+          if os.environ.get("GITHUB_EVENT_NAME", "") != "workflow_dispatch":
+              raise SystemExit("Managed authz reconciliation requires workflow_dispatch.")
+          expected_ref = f"refs/heads/{os.environ['DEFAULT_BRANCH']}"
+          if os.environ.get("GITHUB_REF", "") != expected_ref:
+              raise SystemExit("Managed authz reconciliation must run from the default branch.")
+
+          reason = require_single_line("reason", os.environ["REASON"], maximum=500)
+          related_issue = require_single_line(
+              "related_issue", os.environ["RELATED_ISSUE"], maximum=200
+          )
+          reviewed_plan_sha256 = os.environ["REVIEWED_PLAN_SHA256"].strip().lower()
+          if mode == "apply":
+              if re.fullmatch(r"[0-9a-f]{64}", reviewed_plan_sha256) is None:
+                  raise SystemExit("apply requires the reviewed dry-run plan SHA-256.")
+          elif reviewed_plan_sha256:
+              raise SystemExit("dry_run cannot include a reviewed plan SHA-256.")
+
+          raw_configuration = os.environ.get("LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON", "").strip()
+          if not raw_configuration:
+              raise SystemExit("Missing LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON variable.")
+          try:
+              configuration = json.loads(raw_configuration)
+          except json.JSONDecodeError as error:
+              raise SystemExit(
+                  f"LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON is invalid JSON: {error.msg}."
+              ) from error
+          if not isinstance(configuration, dict):
+              raise SystemExit("LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON must be a JSON object.")
+          allowed_keys = {
+              "schema_version",
+              "product",
+              "managed_set_id",
+              "schema_migration",
+              "unmanaged_adoption",
+              "desired_policy",
+          }
+          unknown_keys = sorted(set(configuration) - allowed_keys)
+          if unknown_keys:
+              raise SystemExit(
+                  "LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON contains unsupported fields: "
+                  + ", ".join(unknown_keys)
+              )
+          if configuration.get("schema_version") != 2:
+              raise SystemExit("Managed authz configuration schema_version must be 2.")
+          if configuration.get("product") != "launchplane":
+              raise SystemExit("Managed authz configuration product must be launchplane.")
+          managed_set_id = str(configuration.get("managed_set_id", "")).strip()
+          if re.fullmatch(r"[a-z0-9][a-z0-9._:/-]{0,127}", managed_set_id) is None:
+              raise SystemExit("Managed authz configuration requires a stable managed_set_id.")
+          if configuration.get("schema_migration", "reject") not in {
+              "reject",
+              "migrate_v1_to_v2",
+          }:
+              raise SystemExit("Managed authz configuration has an invalid schema_migration.")
+          if configuration.get("unmanaged_adoption", "reject") not in {
+              "reject",
+              "adopt_matching",
+          }:
+              raise SystemExit("Managed authz configuration has an invalid unmanaged_adoption.")
+          desired_policy = configuration.get("desired_policy")
+          if not isinstance(desired_policy, dict) or desired_policy.get("schema_version") != 2:
+              raise SystemExit("Managed authz desired_policy must be a schema-v2 JSON object.")
+
+          request = dict(configuration)
+          request.update(
+              {
+                  "mode": mode,
+                  "reason": reason,
+                  "related_issue": related_issue,
+                  "reviewed_plan_sha256": reviewed_plan_sha256,
+              }
+          )
+          canonical_configuration = json.dumps(
+              configuration,
+              sort_keys=True,
+              separators=(",", ":"),
+          )
+          configuration_sha256 = hashlib.sha256(
+              canonical_configuration.encode("utf-8")
+          ).hexdigest()
+          output_directory = Path(os.environ["RUNNER_TEMP"]) / (
+              f"launchplane-authz-managed-{os.environ['GITHUB_RUN_ID']}-"
+              f"{os.environ['GITHUB_RUN_ATTEMPT']}"
+          )
+          output_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+          private_directory = output_directory / "private"
+          evidence_directory = output_directory / "evidence"
+          private_directory.mkdir(mode=0o700)
+          evidence_directory.mkdir(mode=0o700)
+          configuration_file = private_directory / "managed-set.json"
+          request_file = private_directory / "request.json"
+          response_file = private_directory / "response.json"
+          request_summary_file = evidence_directory / "request-summary.json"
+          configuration_file.write_text(canonical_configuration + "\n", encoding="utf-8")
+          request_file.write_text(
+              json.dumps(request, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          request_summary_file.write_text(
+              json.dumps(
+                  {
+                      "configuration_sha256": configuration_sha256,
+                      "managed_set_id": managed_set_id,
+                      "mode": mode,
+                      "related_issue": related_issue,
+                      "reviewed_plan_sha256": reviewed_plan_sha256,
+                      "schema_migration": configuration.get("schema_migration", "reject"),
+                      "unmanaged_adoption": configuration.get("unmanaged_adoption", "reject"),
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          configuration_file.chmod(0o600)
+          request_file.chmod(0o600)
+          request_summary_file.chmod(0o600)
+          idempotency_key = (
+              f"authz-managed:{managed_set_id}:{reviewed_plan_sha256}"
+              if mode == "apply"
+              else ""
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"configuration_sha256={configuration_sha256}\n")
+              output.write(f"evidence_directory={evidence_directory}\n")
+              output.write(f"idempotency_key={idempotency_key}\n")
+              output.write(f"managed_set_id={managed_set_id}\n")
+              output.write(f"output_directory={output_directory}\n")
+              output.write(f"private_directory={private_directory}\n")
+              output.write(f"request_file={request_file}\n")
+              output.write(f"response_file={response_file}\n")
+          PY
+
+      - name: Reconcile managed authz policy
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/authz-policies/managed-rule-sets/reconcile
+          payload-file: ${{ steps.request.outputs.request_file }}
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          expected-status: "200,202"
+          response-output-file: ${{ steps.request.outputs.response_file }}
+          log-response-body: "false"
+
+      - name: Verify and summarize managed authz result
+        shell: bash
+        env:
+          CONFIGURATION_SHA256: ${{ steps.request.outputs.configuration_sha256 }}
+          EVIDENCE_DIRECTORY: ${{ steps.request.outputs.evidence_directory }}
+          MANAGED_SET_ID: ${{ steps.request.outputs.managed_set_id }}
+          MODE: ${{ inputs.mode }}
+          RESPONSE_FILE: ${{ steps.request.outputs.response_file }}
+          REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
+        run: |
+          set -euo pipefail
+
+          jq -e \
+            --arg managed_set_id "$MANAGED_SET_ID" \
+            --arg mode "$MODE" \
+            '.result.mode == $mode and
+             (.result.changed | type == "boolean") and
+             .result.diff.managed_set_id == $managed_set_id and
+             (.result.diff.plan_sha256 | test("^[0-9a-f]{64}$")) and
+             (.result.diff.previous_policy_sha256 | test("^[0-9a-f]{64}$")) and
+             (.result.diff.desired_policy_sha256 | test("^[0-9a-f]{64}$")) and
+             (.result.diff.desired_set_sha256 | test("^[0-9a-f]{64}$"))' \
+            "$RESPONSE_FILE" >/dev/null || {
+            echo "Launchplane managed authz response did not match the reviewed contract." >&2
+            exit 1
+          }
+          plan_sha256="$(jq -r '.result.diff.plan_sha256' "$RESPONSE_FILE")"
+          if [ "$MODE" = "apply" ] && [ "$plan_sha256" != "$REVIEWED_PLAN_SHA256" ]; then
+            echo "Launchplane applied a different managed authz plan than the reviewed digest." >&2
+            exit 1
+          fi
+          jq '{
+            mode: .result.mode,
+            changed: .result.changed,
+            authz_policy: .result.authz_policy,
+            diff: .result.diff
+          }' "$RESPONSE_FILE" > "$EVIDENCE_DIRECTORY/summary.json"
+          changed="$(jq -r '.result.changed' "$RESPONSE_FILE")"
+          schema_migrated="$(jq -r '.result.diff.schema_migrated' "$RESPONSE_FILE")"
+          authorization_changed="$(jq -r '.result.diff.authorization_changed' "$RESPONSE_FILE")"
+          previous_policy_sha256="$(jq -r '.result.diff.previous_policy_sha256' "$RESPONSE_FILE")"
+          desired_policy_sha256="$(jq -r '.result.diff.desired_policy_sha256' "$RESPONSE_FILE")"
+          desired_set_sha256="$(jq -r '.result.diff.desired_set_sha256' "$RESPONSE_FILE")"
+          added="$(jq -r '.result.diff.added_rule_count' "$RESPONSE_FILE")"
+          adopted="$(jq -r '.result.diff.adopted_rule_count' "$RESPONSE_FILE")"
+          updated="$(jq -r '.result.diff.updated_rule_count' "$RESPONSE_FILE")"
+          removed="$(jq -r '.result.diff.removed_rule_count' "$RESPONSE_FILE")"
+          unchanged="$(jq -r '.result.diff.unchanged_rule_count' "$RESPONSE_FILE")"
+          {
+            echo "## Managed authorization reconciliation"
+            echo
+            echo "- Mode: $MODE"
+            echo "- Managed set: $MANAGED_SET_ID"
+            echo "- Changed: $changed"
+            echo "- Authorization changed: $authorization_changed"
+            echo "- Schema migrated: $schema_migrated"
+            echo "- Rules: added=$added adopted=$adopted updated=$updated removed=$removed unchanged=$unchanged"
+            printf '%s\n' "- Previous policy SHA-256: $previous_policy_sha256"
+            printf '%s\n' "- Desired policy SHA-256: $desired_policy_sha256"
+            printf '%s\n' "- Desired set SHA-256: $desired_set_sha256"
+            printf '%s\n' "- Configuration SHA-256: $CONFIGURATION_SHA256"
+            printf '%s\n' "- Reviewed plan SHA-256: $plan_sha256"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove managed authz request material
+        if: always() && steps.request.outputs.private_directory != ''
+        shell: bash
+        env:
+          PRIVATE_DIRECTORY: ${{ steps.request.outputs.private_directory }}
+        run: |
+          set -euo pipefail
+          case "$PRIVATE_DIRECTORY" in
+            "$RUNNER_TEMP"/launchplane-authz-managed-*/private) ;;
+            *)
+              echo "Refusing to remove an unexpected managed authz path." >&2
+              exit 1
+              ;;
+          esac
+          rm -rf -- "$PRIVATE_DIRECTORY"
+
+      - name: Upload managed authz evidence
+        if: always() && steps.request.outputs.evidence_directory != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: launchplane-authz-managed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.request.outputs.evidence_directory }}
+          if-no-files-found: error
+          retention-days: 30

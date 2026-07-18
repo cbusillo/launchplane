@@ -159,7 +159,7 @@ GITHUB_INPUT_REFERENCE_PATTERN = re.compile(
     r"^(?:inputs|github\.event\.inputs)\.(?P<input_name>[A-Za-z0-9_.-]+)$"
 )
 LAUNCHPLANE_REUSABLE_WORKFLOW_PATTERN = re.compile(
-    r"^cbusillo/launchplane/\.github/workflows/[A-Za-z0-9_.-]+\.yml@main$"
+    r"^cbusillo/launchplane/\.github/workflows/[A-Za-z0-9_.-]+\.yml@(?:main|[0-9a-f]{40})$"
 )
 WORKFLOW_RUNTIME_AUTHORITY_KEYS = frozenset(
     ("GITHUB_TOKEN", "ID_TOKEN", "LAUNCHPLANE_PRODUCT", "LAUNCHPLANE_URL")

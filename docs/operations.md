@@ -391,33 +391,44 @@ bounded rollout bridge for callers that have not yet moved to managed rule
 sets; they are not the desired-state authority.
 
 Operators mutate shared or production authz through the deployed service, not
-through direct DB commands from a checkout. Store the complete desired rules
-for one `managed_set_id` in operator-managed JSON, then run:
+through direct DB commands or a local CLI from an arbitrary checkout. Store the
+complete desired rules for one `managed_set_id` in the protected
+`launchplane-authz-admin` environment secret
+`LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON`. The JSON owns desired state only:
+`schema_version`, `product`, `managed_set_id`, migration/adoption intent, and
+`desired_policy`. Dispatch-time mode, reason, issue reference, and reviewed plan
+digest are deliberately excluded from that secret.
 
-```bash
-uv run launchplane authz-policies reconcile-managed \
-  --service-url "$LAUNCHPLANE_SERVICE_URL" \
-  --request-file managed-authz-dry-run.json
-```
+Use the `Manage Launchplane Authorization` workflow on the default branch.
+Dispatch `mode=dry_run` with the final single-line reason and related issue that
+will also be used for apply. The environment gate protects the OIDC-minting job,
+the worker is pinned to a reviewed immutable revision, and all authz runs share
+one non-canceling concurrency group. During the one-time bootstrap before the
+dedicated wrapper is present in active policy, dispatch `Deploy Launchplane`
+with `authz_managed_mode=dry_run`; that job calls the same protected immutable
+worker without building or deploying an image.
 
-Review `result.diff.plan_sha256`, rule IDs/hashes, counts, migration intent, and
-adoption intent. Build the apply request from the same normalized desired set,
-reason, and related issue; change only `mode` to `apply` and add that digest as
-`reviewed_plan_sha256`. Apply with a stable key:
+Review the job summary and 30-day evidence artifact. The review must cover
+`result.diff.plan_sha256`, previous and desired policy hashes, desired-set and
+configuration hashes, migration/adoption intent, rule IDs/hashes, add/adopt/
+update/remove counts, and whether authorization changed. Apply from the same
+default-branch workflow with the identical protected desired-set secret, reason,
+and issue reference; change only mode to `apply` and supply the reviewed plan
+SHA-256. The worker derives the stable idempotency key from the managed set and
+reviewed plan. The service recomputes the plan against the active policy and
+rejects drift before mutation.
 
-```bash
-uv run launchplane authz-policies reconcile-managed \
-  --service-url "$LAUNCHPLANE_SERVICE_URL" \
-  --request-file managed-authz-apply.json \
-  --idempotency-key "authz-managed:<set>:<reviewed-plan>"
-```
+The artifact contains only request hashes/intent and the service's redacted
+summary. The worker removes the protected desired policy, raw request, and raw
+response material before upload so environment-secret contents do not become
+artifact-readable runtime authority.
 
-Schema-v1 migration requires `schema_migration: "migrate_v1_to_v2"` in both
-requests. Taking ownership of an existing matching unmanaged rule requires
+Schema-v1 migration requires `schema_migration: "migrate_v1_to_v2"` in the
+protected desired-set JSON. Taking ownership of an existing matching unmanaged rule requires
 `unmanaged_adoption: "adopt_matching"`; ambiguous matches fail closed. The CLI
-is only a thin service client. Direct authz policy list/import DB commands are
-not supported. Launchplane self-deploy authority remains separate and does not
-authorize authz policy administration.
+remains only a thin service client for local/rehearsal use. Direct authz policy
+list/import DB commands are not supported. Launchplane self-deploy authority
+remains separate and does not authorize authz policy administration.
 
 The exact grant/removal commands remain a bounded migration bridge while
 configured callers move to managed sets. New workflow grants require numeric
@@ -500,9 +511,12 @@ otherwise identical name-only compatibility rule exists, applying the reviewed
 ID-bound grant replaces that rule instead of keeping both authority paths live.
 Repository and workflow names remain exact fail-closed selectors: a rename or
 transfer is denied until an operator reviews and updates the affected rule.
-`authz-policies list` and grant responses expose immutable-ID versus name-only
-rule counts so the remaining compatibility surface can be measured before its
-removal gate is declared complete.
+The redacted active-policy endpoint and managed workflow evidence expose
+immutable-ID versus name-only counts, managed versus unmanaged counts by
+principal type, and the number of privileged GitHub Actions rules that still
+lack an immutable reusable-workflow identity. Use those counts to declare the
+compatibility removal gate; do not reconstruct live selectors from checked-in
+catalogs.
 
 Review the dry-run changes, then dispatch `authz_grants_mode=apply` with the
 reported grant-set SHA-256, the reported active policy SHA-256, an operator
