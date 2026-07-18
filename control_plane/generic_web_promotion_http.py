@@ -191,18 +191,29 @@ def resolve_generic_web_promotion_destination_lane(
 
 def resolve_generic_web_promotion_workflow_lane(
     *, record_store: object, product: str, context: str
-) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile]:
+) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile, tuple[str, ...]]:
     profile = _read_generic_web_promotion_profile(
         record_store=record_store,
         product=product,
     )
     normalized_context = context.strip()
-    for lane in profile.lanes:
-        if lane.context.strip() == normalized_context:
-            return profile, lane
-    raise GenericWebPromotionProductMismatchError(
-        "Product profile does not own the requested driver lane."
+    matching_lane = next(
+        (lane for lane in profile.lanes if lane.context.strip() == normalized_context),
+        None,
     )
+    if matching_lane is None:
+        raise GenericWebPromotionProductMismatchError(
+            "Product profile does not own the requested driver lane."
+        )
+    lanes_by_instance = {lane.instance.strip(): lane for lane in profile.lanes}
+    affected_instances = tuple(
+        instance for instance in ("testing", "prod") if instance in lanes_by_instance
+    )
+    if affected_instances != ("testing", "prod"):
+        raise GenericWebPromotionProductMismatchError(
+            "Product profile does not expose testing and prod promotion lanes."
+        )
+    return profile, matching_lane, affected_instances
 
 
 def validate_generic_web_prod_promotion_lanes(

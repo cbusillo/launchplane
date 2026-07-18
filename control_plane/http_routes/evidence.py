@@ -46,7 +46,7 @@ from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview,
     apply_launchplane_generation_evidence,
 )
-from control_plane.service_auth import LaunchplaneIdentity
+from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     PromotionEvidenceValidationError,
@@ -325,6 +325,10 @@ def register_evidence_write_routes(
             action="deployment.write",
             product=deployment_request.product,
             context=deployment_request.deployment.context,
+            target=AuthorizationTarget(
+                scope="instance",
+                instances=(deployment_request.deployment.instance,),
+            ),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -411,6 +415,10 @@ def register_evidence_write_routes(
             action="backup_gate.write",
             product=backup_gate_request.product,
             context=backup_gate_request.backup_gate.context,
+            target=AuthorizationTarget(
+                scope="instance",
+                instances=(backup_gate_request.backup_gate.instance,),
+            ),
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -494,6 +502,13 @@ def register_evidence_write_routes(
             action="promotion.write",
             product=promotion_request.product,
             context=promotion_request.promotion.context,
+            target=AuthorizationTarget(
+                scope="instance",
+                instances=(
+                    promotion_request.promotion.from_instance,
+                    promotion_request.promotion.to_instance,
+                ),
+            ),
         ):
             raise dependencies.http_error(
                 status_code=403,

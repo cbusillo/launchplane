@@ -947,6 +947,17 @@ def list_driver_descriptors() -> tuple[DriverDescriptor, ...]:
     return _DESCRIPTORS
 
 
+def instance_scoped_driver_authz_actions() -> frozenset[str]:
+    return frozenset(
+        authz_action
+        for descriptor in list_driver_descriptors()
+        for action in descriptor.actions
+        if action.scope == "instance"
+        for authz_action in (action.authz_action, *action.alternate_authz_actions)
+        if authz_action
+    )
+
+
 def read_driver_descriptor(driver_id: str) -> DriverDescriptor:
     normalized_driver_id = driver_id.strip()
     for descriptor in _DESCRIPTORS:

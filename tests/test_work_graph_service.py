@@ -153,7 +153,7 @@ class WorkGraphServiceTests(unittest.TestCase):
             generated_at="2026-05-06T02:05:00Z",
             product_store=_EmptyProductStore(),
             work_request_store=work_request_store,
-            action_allowed=lambda _action, _product, _context: True,
+            action_allowed=lambda _action, _product, _context, _instances: True,
             planning_facts_provider=lambda: (
                 WorkGraphPlanningIssueFacts.model_validate(
                     {
@@ -238,7 +238,7 @@ class WorkGraphServiceTests(unittest.TestCase):
             generated_at="2026-05-06T02:05:00Z",
             product_store=_EmptyProductStore((product,)),
             work_request_store=_WorkRequestStore((_work_request(repository="every/example-site"),)),
-            action_allowed=lambda _action, _product, _context: False,
+            action_allowed=lambda _action, _product, _context, _instances: False,
             planning_facts_provider=None,
         )
 
@@ -254,7 +254,7 @@ class WorkGraphServiceTests(unittest.TestCase):
             generated_at="2026-05-06T02:05:00Z",
             product_store=_EmptyProductStore(),
             work_request_store=_WorkRequestStore((_work_request(),)),
-            action_allowed=lambda _action, _product, _context: True,
+            action_allowed=lambda _action, _product, _context, _instances: True,
             planning_facts_provider=None,
         )
         rank_request = WorkGraphRankEnvelope.model_validate(

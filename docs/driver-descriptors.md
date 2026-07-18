@@ -103,7 +103,9 @@ All endpoints are authenticated and use action `driver.read`.
 - `GET /v1/contexts/{context}/instances/{instance}/driver-view`
 
 Discovery endpoints authorize against Launchplane context `launchplane`.
-Context/instance views authorize against the requested context.
+Context views authorize against the requested context. Instance views authorize
+against the requested context and exact instance; a rule for another lane in
+the same context does not authorize the read.
 
 The view endpoints return provider-neutral descriptors plus repository-backed
 read state. They do not execute actions, reveal secret values, or ask the UI to
@@ -468,8 +470,12 @@ provider concepts, as the future GUI-facing action surface.
 Descriptor actions are the runtime source of truth for native driver route
 method, primary authorization action, alternate authorization actions, and
 operator visibility. Native FastAPI handlers bind this metadata when the route
-is registered and read authorization actions from that binding instead of
-declaring route-local action strings. If one route has multiple service modes
+is registered and read authorization actions and scope from that binding
+instead of declaring route-local action strings. Instance-scoped handlers must
+resolve and submit every affected lane to the central authorization helper;
+startup and contract coverage reject a descriptor/handler pair that drops the
+instance target. Promotion actions submit both source and destination lanes.
+If one route has multiple service modes
 with distinct authorization checks, declare the non-primary checks in
 `alternate_authz_actions`; the ingress driver uses its single alternate action
 for dry-run requests and its primary action for apply requests. Some service

@@ -1,4 +1,7 @@
+import ast
+import inspect
 import json
+import textwrap
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -439,6 +442,14 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             ("ingress_route.plan",),
         )
         self.assertEqual(route_actions[INGRESS_ROUTE_APPLY_ROUTE].method, "POST")
+        self.assertEqual(
+            route_actions["/v1/drivers/odoo/target-replacement-apply"].scope,
+            "instance",
+        )
+        self.assertEqual(
+            route_actions["/v1/drivers/generic-web/prod-promotion-workflow"].scope,
+            "instance",
+        )
         self.assertFalse(
             route_actions["/v1/drivers/verireel/testing-verification"].operator_visible
         )
@@ -745,6 +756,40 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             native_routes._native_driver_route_alternate_authz_action(ingress_endpoint),
             "ingress_route.plan",
         )
+
+    def test_instance_scoped_native_handlers_pass_resolved_instances(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: FilesystemRecordStore(root / "state"),
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+        routes_by_path = {
+            getattr(route, "path", ""): getattr(route, "endpoint", None) for route in app.routes
+        }
+        route_metadata = native_routes._driver_route_metadata_from_descriptors()
+        for route_path, metadata in route_metadata.items():
+            if metadata.scope != "instance":
+                continue
+            with self.subTest(route_path=route_path):
+                endpoint = routes_by_path[route_path]
+                assert endpoint is not None
+                source = textwrap.dedent(inspect.getsource(endpoint))
+                syntax_tree = ast.parse(source)
+                authorization_calls = [
+                    node
+                    for node in ast.walk(syntax_tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_native_driver_route_authorization_allows"
+                ]
+                self.assertEqual(len(authorization_calls), 1)
+                keyword_names = {keyword.arg for keyword in authorization_calls[0].keywords}
+                self.assertIn("instances", keyword_names)
 
     def test_native_fastapi_driver_route_validation_fails_closed(self) -> None:
         class _Route:

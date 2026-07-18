@@ -484,6 +484,7 @@ from control_plane.runtime_key_safety import (
 )
 from control_plane.service_auth import (
     AgentAuthzDecision,
+    AuthorizationTarget,
     BearerIdentityConfig,
     GitHubActionsIdentity,
     GitHubHumanIdentity,
@@ -3422,12 +3423,14 @@ def create_launchplane_fastapi_app(
         action: str,
         product: str,
         context: str,
+        target: AuthorizationTarget | None = None,
     ) -> bool:
         return resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action=action,
             product=product,
             context=context,
+            target=target,
         )
 
     read_route_dependencies = ReadRouteDependencies(
@@ -3469,12 +3472,18 @@ def create_launchplane_fastapi_app(
             requested_action: str,
             requested_product: str,
             requested_context: str,
+            requested_instances: tuple[str, ...],
         ) -> bool:
             return resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
                 action=requested_action,
                 product=requested_product,
                 context=requested_context,
+                target=(
+                    AuthorizationTarget(scope="instance", instances=requested_instances)
+                    if requested_instances
+                    else AuthorizationTarget(scope="context")
+                ),
             )
 
         return action_allowed
@@ -3494,6 +3503,7 @@ def create_launchplane_fastapi_app(
             action="launchplane_service.read",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            target=AuthorizationTarget(scope="context"),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -4597,11 +4607,13 @@ def create_launchplane_fastapi_app(
         authorization_product = (
             product_profile.product if product_profile is not None else publish_request.product
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_artifact_publish,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_odoo_artifact_publish),
             product=authorization_product,
             context=publish_request.publish.context,
+            instances=(publish_request.publish.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -4723,13 +4735,13 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_artifact_publish_inputs,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                write_odoo_artifact_publish_inputs
-            ),
             product=inputs_request.product,
             context=inputs_request.inputs.context,
+            instances=(inputs_request.inputs.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -4856,9 +4868,10 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_preview_apply_inputs,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_odoo_preview_apply_inputs),
             product=product_profile.product,
             context=product_profile.preview.context,
         ):
@@ -5020,9 +5033,10 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_preview_apply,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_odoo_preview_apply),
             product=product_profile.product,
             context=product_profile.preview.context,
         ):
@@ -5213,11 +5227,13 @@ def create_launchplane_fastapi_app(
         authorization_product = (
             product_profile.product if product_profile is not None else post_deploy_request.product
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_post_deploy,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_odoo_post_deploy),
             product=authorization_product,
             context=post_deploy_request.post_deploy.context,
+            instances=(post_deploy_request.post_deploy.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -5344,11 +5360,13 @@ def create_launchplane_fastapi_app(
         authorization_product = (
             product_profile.product if product_profile is not None else maintenance_request.product
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_app_maintenance,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_odoo_app_maintenance),
             product=authorization_product,
             context=maintenance_request.maintenance.context,
+            instances=(maintenance_request.maintenance.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -5476,13 +5494,13 @@ def create_launchplane_fastapi_app(
         authorization_product = (
             product_profile.product if product_profile is not None else override_request.product
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_config_parameter_override,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                write_odoo_config_parameter_override
-            ),
             product=authorization_product,
             context=override_request.override.context,
+            instances=(override_request.override.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -5608,13 +5626,13 @@ def create_launchplane_fastapi_app(
         authorization_product = (
             product_profile.product if product_profile is not None else override_request.product
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_website_bootstrap_override,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                write_odoo_website_bootstrap_override
-            ),
             product=authorization_product,
             context=override_request.override.context,
+            instances=(override_request.override.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -5740,11 +5758,13 @@ def create_launchplane_fastapi_app(
         authorization_product = (
             product_profile.product if product_profile is not None else backup_gate_request.product
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_prod_backup_gate,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_odoo_prod_backup_gate),
             product=authorization_product,
             context=backup_gate_request.backup_gate.context,
+            instances=(backup_gate_request.backup_gate.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -5871,11 +5891,13 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_stable_bootstrap,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_odoo_stable_bootstrap),
             product=bootstrap_request.product,
             context=bootstrap_request.bootstrap.context,
+            instances=(bootstrap_request.bootstrap.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -6001,13 +6023,13 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_target_replacement_plan,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                write_odoo_target_replacement_plan
-            ),
             product=plan_request.product,
             context=lane.context,
+            instances=(lane.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -6100,13 +6122,13 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_target_replacement_apply,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                write_odoo_target_replacement_apply
-            ),
             product=apply_request.product,
             context=lane.context,
+            instances=(lane.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -6238,11 +6260,13 @@ def create_launchplane_fastapi_app(
         authorization_product = (
             product_profile.product if product_profile is not None else rollback_request.product
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_prod_rollback,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_odoo_prod_rollback),
             product=authorization_product,
             context=rollback_request.rollback.context,
+            instances=(rollback_request.rollback.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -6368,11 +6392,16 @@ def create_launchplane_fastapi_app(
         authorization_product = (
             product_profile.product if product_profile is not None else promotion_request.product
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_prod_promotion,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_odoo_prod_promotion),
             product=authorization_product,
             context=promotion_request.promotion.context,
+            instances=(
+                promotion_request.promotion.from_instance,
+                promotion_request.promotion.to_instance,
+            ),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -6500,13 +6529,16 @@ def create_launchplane_fastapi_app(
         authorization_product = (
             product_profile.product if product_profile is not None else inputs_request.product
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_prod_promotion_inputs,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                write_odoo_prod_promotion_inputs
-            ),
             product=authorization_product,
             context=inputs_request.inputs.context,
+            instances=(
+                inputs_request.inputs.from_instance,
+                inputs_request.inputs.to_instance,
+            ),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -6636,11 +6668,13 @@ def create_launchplane_fastapi_app(
         authorization_product = (
             product_profile.product if product_profile is not None else run_request.product
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_prod_promotion_run,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(write_odoo_prod_promotion_run),
             product=authorization_product,
             context=run_request.run.context,
+            instances=(run_request.run.from_instance, run_request.run.to_instance),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -9493,6 +9527,12 @@ def create_launchplane_fastapi_app(
             action=action,
             product=product_config_request.product,
             context=product_config_request.context,
+            target=AuthorizationTarget(
+                scope="instance" if product_config_request.instance else "context",
+                instances=(product_config_request.instance,)
+                if product_config_request.instance
+                else (),
+            ),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -9792,6 +9832,7 @@ def create_launchplane_fastapi_app(
             action=action,
             product=profile.product,
             context=lane.context,
+            target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
         ):
             raise _launchplane_http_error(
                 status_code=404,
@@ -9868,6 +9909,7 @@ def create_launchplane_fastapi_app(
             action=action,
             product=profile.product,
             context=lane.context,
+            target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
         ):
             raise _launchplane_http_error(
                 status_code=404,
@@ -9890,12 +9932,18 @@ def create_launchplane_fastapi_app(
                 record_store=record_store,
                 product=product,
                 destination_environment=environment,
-                action_allowed=lambda action, requested_product, context: (
+                action_allowed=lambda action, requested_product, context, instances: (
                     resolved_authz_policy_runtime.policy.allows(
                         identity=identity,
                         action=action,
                         product=requested_product,
                         context=context,
+                        target=AuthorizationTarget(
+                            scope="instance",
+                            instances=instances,
+                        )
+                        if instances
+                        else AuthorizationTarget(scope="context"),
                     )
                 ),
                 workflow_credentials_ready=lambda context: bool(
@@ -12714,11 +12762,13 @@ def create_launchplane_fastapi_app(
             raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
         except (ValueError, click.ClickException) as error:
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_verireel_prod_deploy,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(apply_verireel_prod_deploy),
             product=authorization_product,
             context=authorization_context,
+            instances=(deploy_request.deploy.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -12798,11 +12848,13 @@ def create_launchplane_fastapi_app(
             raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
         except (ValueError, click.ClickException) as error:
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_verireel_prod_backup_gate,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(apply_verireel_prod_backup_gate),
             product=authorization_product,
             context=authorization_context,
+            instances=(backup_gate_request.backup_gate.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -12887,11 +12939,16 @@ def create_launchplane_fastapi_app(
             raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
         except (ValueError, click.ClickException) as error:
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_verireel_prod_promotion,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(apply_verireel_prod_promotion),
             product=authorization_product,
             context=authorization_context,
+            instances=(
+                promotion_request.promotion.from_instance,
+                promotion_request.promotion.to_instance,
+            ),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -12971,11 +13028,13 @@ def create_launchplane_fastapi_app(
             raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
         except (ValueError, click.ClickException) as error:
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_verireel_prod_rollback,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(apply_verireel_prod_rollback),
             product=authorization_product,
             context=authorization_context,
+            instances=(rollback_request.rollback.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -13065,11 +13124,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_verireel_testing_deploy,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(apply_verireel_testing_deploy),
             product=authorization_product,
             context=authorization_context,
+            instances=(deploy_request.deploy.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -13155,11 +13216,13 @@ def create_launchplane_fastapi_app(
                 code="product_driver_mismatch",
                 message="Product is not configured for the requested driver route.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_verireel_app_maintenance,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(apply_verireel_app_maintenance),
             product=authorization_product,
             context=authorization_context,
+            instances=(maintenance_request.maintenance.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -13251,13 +13314,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_verireel_testing_verification,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                apply_verireel_testing_verification
-            ),
             product=authorization_product,
             context=authorization_context,
+            instances=(verification_request.verification.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -13341,13 +13404,13 @@ def create_launchplane_fastapi_app(
                 code="product_driver_mismatch",
                 message="Product is not configured for the requested driver route.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=read_verireel_stable_environment,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                read_verireel_stable_environment
-            ),
             product=authorization_product,
             context=authorization_context,
+            instances=(environment_request.environment.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -13401,13 +13464,13 @@ def create_launchplane_fastapi_app(
                 code="product_driver_mismatch",
                 message="Product is not configured for the requested driver route.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=run_verireel_runtime_verification,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                run_verireel_runtime_verification
-            ),
             product=authorization_product,
             context=authorization_context,
+            instances=(verification_request.verification.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -13464,9 +13527,10 @@ def create_launchplane_fastapi_app(
                 message="Product is not configured for the requested driver route.",
             ) from error
         authorization_context = inventory_request.inventory.context.strip() or authorization_context
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=read_verireel_preview_inventory,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(read_verireel_preview_inventory),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -13525,9 +13589,10 @@ def create_launchplane_fastapi_app(
                 message="Product is not configured for the requested driver route.",
             ) from error
         authorization_context = refresh_request.refresh.context.strip() or authorization_context
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_verireel_preview_refresh,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(apply_verireel_preview_refresh),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -13627,9 +13692,10 @@ def create_launchplane_fastapi_app(
                 message="Product is not configured for the requested driver route.",
             ) from error
         authorization_context = destroy_request.destroy.context.strip() or authorization_context
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_verireel_preview_destroy,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(apply_verireel_preview_destroy),
             product=authorization_product,
             context=authorization_context,
         ):
@@ -13723,11 +13789,10 @@ def create_launchplane_fastapi_app(
         authorization_context = (
             verification_request.verification.context.strip() or authorization_context
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=apply_verireel_preview_verification,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
-            action=native_routes._native_driver_route_authz_action(
-                apply_verireel_preview_verification
-            ),
             product=authorization_product,
             context=authorization_context,
         ):

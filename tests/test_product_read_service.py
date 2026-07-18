@@ -240,7 +240,7 @@ class ProductReadServiceTests(unittest.TestCase):
         result = build_product_environment_read_service_result(
             record_store=self.store,
             params={"product": "example-site", "environment": "prod"},
-            action_allowed=lambda _action, _product, _context: True,
+            action_allowed=lambda _action, _product, _context, _instances: True,
         )
 
         self.assertEqual(result.authorization_product, "example-site")
@@ -256,7 +256,7 @@ class ProductReadServiceTests(unittest.TestCase):
             build_product_environment_read_service_result(
                 record_store=self.store,
                 params={},
-                action_allowed=lambda _action, _product, _context: True,
+                action_allowed=lambda _action, _product, _context, _instances: True,
             )
 
     def test_product_environment_results_identify_branch_authorization_targets(
@@ -309,7 +309,7 @@ class ProductReadServiceTests(unittest.TestCase):
                 result = build_product_environment_read_service_result(
                     record_store=self.store,
                     params=params,
-                    action_allowed=lambda _action, _product, _context: True,
+                    action_allowed=lambda _action, _product, _context, _instances: True,
                 )
 
                 self.assertEqual(result.authorization_product, product)
@@ -320,7 +320,7 @@ class ProductReadServiceTests(unittest.TestCase):
     def test_product_environment_list_payload_serializes_overviews(self) -> None:
         payload = build_product_environment_list_service_payload(
             record_store=self.store,
-            action_allowed=lambda _action, _product, _context: True,
+            action_allowed=lambda _action, _product, _context, _instances: True,
         )
 
         products = cast(list[dict[str, object]], payload["products"])

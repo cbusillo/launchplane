@@ -224,7 +224,7 @@ def _status(
         record_store=store,
         product="atlas-commerce",
         destination_environment="prod",
-        action_allowed=lambda _action, _product, _context: True,
+        action_allowed=lambda _action, _product, _context, _instances: True,
         workflow_credentials_ready=lambda _context: True,
         now=NOW,
     )
@@ -517,7 +517,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
             record_store=store,
             product="atlas-commerce",
             destination_environment="prod",
-            action_allowed=lambda _action, _product, _context: False,
+            action_allowed=lambda _action, _product, _context, _instances: False,
             workflow_credentials_ready=lambda _context: True,
             now=NOW,
         )
@@ -536,6 +536,35 @@ class ProductPromotionStatusTests(unittest.TestCase):
         self.assertIn(
             "Caller is not authorized to dispatch the promotion workflow.",
             status.workflow_live.disabled_reasons,
+        )
+
+    def test_status_authorizes_both_lanes_for_direct_and_workflow_promotion(self) -> None:
+        authorization_targets: dict[str, tuple[str, ...]] = {}
+
+        def action_allowed(
+            action: str,
+            _product: str,
+            _context: str,
+            instances: tuple[str, ...],
+        ) -> bool:
+            authorization_targets[action] = instances
+            return True
+
+        build_product_promotion_status(
+            record_store=_store(),
+            product="atlas-commerce",
+            destination_environment="prod",
+            action_allowed=action_allowed,
+            workflow_credentials_ready=lambda _context: True,
+            now=NOW,
+        )
+
+        self.assertEqual(
+            authorization_targets,
+            {
+                "generic_web_prod_promotion.execute": ("testing", "prod"),
+                "generic_web_prod_promotion.dispatch": ("testing", "prod"),
+            },
         )
 
 
@@ -1070,7 +1099,7 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
                 record_store=store,
                 product="atlas-commerce",
                 destination_environment="prod",
-                action_allowed=lambda _action, _product, _context: True,
+                action_allowed=lambda _action, _product, _context, _instances: True,
                 workflow_credentials_ready=lambda _context: True,
             )
             workflow_request = ProductPromotionWorkflowDispatchEnvelope(

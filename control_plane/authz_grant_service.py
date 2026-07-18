@@ -3,14 +3,20 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
+from control_plane.authz_scope import (
+    exclusively_instance_scoped_authz_actions,
+    instance_scoped_authz_actions,
+)
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
 from control_plane.service_auth import (
+    AuthzInstanceSelectors,
+    AuthzPolicySchemaVersion,
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
     GitHubHumanPolicyRule,
@@ -27,6 +33,28 @@ from control_plane.service_auth import (
 
 
 TimestampProvider = Callable[[], str]
+
+
+def _validate_instance_scoped_grant(
+    *,
+    schema_version: AuthzPolicySchemaVersion,
+    actions: tuple[str, ...],
+    instances: tuple[str, ...],
+) -> None:
+    if schema_version == 1:
+        if instances:
+            raise ValueError("Schema-v1 authz grants cannot declare instances.")
+        return
+    requested_actions = set(actions)
+    instance_actions = instance_scoped_authz_actions()
+    exclusively_instance_actions = exclusively_instance_scoped_authz_actions()
+    if requested_actions & exclusively_instance_actions and not instances:
+        raise ValueError("Schema-v2 instance-scoped authz grants require instances.")
+    non_instance_actions = requested_actions - instance_actions
+    if instances and non_instance_actions:
+        raise ValueError(
+            "Schema-v2 authz grants can only declare instances for instance-scoped actions."
+        )
 
 
 class AuthzPolicyRecordStore(Protocol):
@@ -51,6 +79,7 @@ class AuthzPolicyGitHubActionsGrant(BaseModel):
     environments: tuple[str, ...] = ()
     products: tuple[str, ...] = ()
     contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...]
     source_label: str = "service:authz-policy-grant"
 
@@ -70,6 +99,7 @@ class AuthzPolicyGitHubActionsGrant(BaseModel):
         self.environments = self._normalized_tuple(self.environments)
         self.products = self._normalized_tuple(self.products)
         self.contexts = self._normalized_tuple(self.contexts)
+        self.instances = self._normalized_tuple(self.instances)
         self.actions = self._normalized_tuple(self.actions)
         if not self.actions:
             raise ValueError("Authz policy grant requires at least one action.")
@@ -86,6 +116,7 @@ class AuthzPolicyGitHubActionsGrant(BaseModel):
             environments=self.environments,
             products=self.products,
             contexts=self.contexts,
+            instances=self.instances,
             actions=self.actions,
         )
 
@@ -93,7 +124,7 @@ class AuthzPolicyGitHubActionsGrant(BaseModel):
 class AuthzPolicyGitHubActionsGrantEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: AuthzPolicySchemaVersion = 1
     product: str
     mode: Literal["dry_run", "apply"] = "apply"
     reason: str = ""
@@ -109,13 +140,18 @@ class AuthzPolicyGitHubActionsGrantEnvelope(BaseModel):
         self.related_issue = self.related_issue.strip()
         if self.mode == "apply" and not self.reason:
             raise ValueError("Authz policy grant apply requires reason.")
+        _validate_instance_scoped_grant(
+            schema_version=self.schema_version,
+            actions=self.grant.actions,
+            instances=self.grant.instances,
+        )
         return self
 
 
 class AuthzPolicyGitHubActionsRemovalEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: AuthzPolicySchemaVersion = 1
     product: str
     mode: Literal["dry_run", "apply"] = "dry_run"
     reason: str = ""
@@ -131,6 +167,11 @@ class AuthzPolicyGitHubActionsRemovalEnvelope(BaseModel):
         self.related_issue = self.related_issue.strip()
         if self.mode == "apply" and not self.reason:
             raise ValueError("Authz policy removal apply requires reason.")
+        _validate_instance_scoped_grant(
+            schema_version=self.schema_version,
+            actions=self.removal.actions,
+            instances=self.removal.instances,
+        )
         return self
 
 
@@ -143,6 +184,7 @@ class AuthzPolicyGitHubHumanGrant(BaseModel):
     roles: tuple[Literal["read_only", "admin"], ...] = ()
     products: tuple[str, ...] = ()
     contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...]
     source_label: str = "service:authz-human-policy-grant"
 
@@ -157,6 +199,7 @@ class AuthzPolicyGitHubHumanGrant(BaseModel):
         self.teams = self._normalized_tuple(self.teams)
         self.products = self._normalized_tuple(self.products)
         self.contexts = self._normalized_tuple(self.contexts)
+        self.instances = self._normalized_tuple(self.instances)
         self.actions = self._normalized_tuple(self.actions)
         if not (self.logins or self.organizations or self.teams):
             raise ValueError("Authz human policy grant requires a login, organization, or team.")
@@ -173,6 +216,7 @@ class AuthzPolicyGitHubHumanGrant(BaseModel):
             roles=self.roles,
             products=self.products,
             contexts=self.contexts,
+            instances=self.instances,
             actions=self.actions,
         )
 
@@ -180,7 +224,7 @@ class AuthzPolicyGitHubHumanGrant(BaseModel):
 class AuthzPolicyGitHubHumanGrantEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: AuthzPolicySchemaVersion = 1
     product: str
     mode: Literal["dry_run", "apply"] = "apply"
     reason: str = ""
@@ -196,6 +240,11 @@ class AuthzPolicyGitHubHumanGrantEnvelope(BaseModel):
         self.related_issue = self.related_issue.strip()
         if self.mode == "apply" and not self.reason:
             raise ValueError("Authz human policy grant apply requires reason.")
+        _validate_instance_scoped_grant(
+            schema_version=self.schema_version,
+            actions=self.grant.actions,
+            instances=self.grant.instances,
+        )
         return self
 
 
@@ -206,6 +255,7 @@ class AuthzPolicyTerminalAgentGrant(BaseModel):
     token_labels: tuple[str, ...] = ()
     products: tuple[str, ...] = ()
     contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...]
     source_label: str = "service:authz-terminal-agent-policy-grant"
 
@@ -219,6 +269,7 @@ class AuthzPolicyTerminalAgentGrant(BaseModel):
         self.token_labels = self._normalized_tuple(self.token_labels)
         self.products = self._normalized_tuple(self.products)
         self.contexts = self._normalized_tuple(self.contexts)
+        self.instances = self._normalized_tuple(self.instances)
         self.actions = self._normalized_tuple(self.actions)
         if not self.subjects:
             raise ValueError("Authz terminal-agent policy grant requires a subject.")
@@ -235,6 +286,7 @@ class AuthzPolicyTerminalAgentGrant(BaseModel):
             token_labels=self.token_labels,
             products=self.products,
             contexts=self.contexts,
+            instances=self.instances,
             actions=self.actions,
         )
 
@@ -242,7 +294,7 @@ class AuthzPolicyTerminalAgentGrant(BaseModel):
 class AuthzPolicyTerminalAgentGrantEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: AuthzPolicySchemaVersion = 1
     product: str
     mode: Literal["dry_run", "apply"] = "apply"
     reason: str = ""
@@ -260,6 +312,11 @@ class AuthzPolicyTerminalAgentGrantEnvelope(BaseModel):
         self.related_issue = self.related_issue.strip()
         if self.mode == "apply" and not self.reason:
             raise ValueError("Authz terminal-agent policy grant apply requires reason.")
+        _validate_instance_scoped_grant(
+            schema_version=self.schema_version,
+            actions=self.grant.actions,
+            instances=self.grant.instances,
+        )
         return self
 
 
@@ -270,6 +327,7 @@ class AuthzPolicyLocalOperatorGrant(BaseModel):
     token_labels: tuple[str, ...] = ()
     products: tuple[str, ...] = ()
     contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...]
     source_label: str = "service:authz-local-operator-policy-grant"
 
@@ -283,6 +341,7 @@ class AuthzPolicyLocalOperatorGrant(BaseModel):
         self.token_labels = self._normalized_tuple(self.token_labels)
         self.products = self._normalized_tuple(self.products)
         self.contexts = self._normalized_tuple(self.contexts)
+        self.instances = self._normalized_tuple(self.instances)
         self.actions = self._normalized_tuple(self.actions)
         if not self.subjects:
             raise ValueError("Authz local-operator policy grant requires a subject.")
@@ -299,6 +358,7 @@ class AuthzPolicyLocalOperatorGrant(BaseModel):
             token_labels=self.token_labels,
             products=self.products,
             contexts=self.contexts,
+            instances=self.instances,
             actions=self.actions,
         )
 
@@ -306,7 +366,7 @@ class AuthzPolicyLocalOperatorGrant(BaseModel):
 class AuthzPolicyLocalOperatorGrantEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: AuthzPolicySchemaVersion = 1
     product: str
     mode: Literal["dry_run", "apply"] = "apply"
     reason: str = ""
@@ -324,6 +384,11 @@ class AuthzPolicyLocalOperatorGrantEnvelope(BaseModel):
         self.related_issue = self.related_issue.strip()
         if self.mode == "apply" and not self.reason:
             raise ValueError("Authz local-operator policy grant apply requires reason.")
+        _validate_instance_scoped_grant(
+            schema_version=self.schema_version,
+            actions=self.grant.actions,
+            instances=self.grant.instances,
+        )
         return self
 
 
@@ -334,6 +399,7 @@ class AuthzPolicyLocalAdminGrant(BaseModel):
     token_labels: tuple[str, ...] = ()
     products: tuple[str, ...] = ()
     contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...]
     source_label: str = "service:authz-local-admin-policy-grant"
 
@@ -347,6 +413,7 @@ class AuthzPolicyLocalAdminGrant(BaseModel):
         self.token_labels = self._normalized_tuple(self.token_labels)
         self.products = self._normalized_tuple(self.products)
         self.contexts = self._normalized_tuple(self.contexts)
+        self.instances = self._normalized_tuple(self.instances)
         self.actions = self._normalized_tuple(self.actions)
         if not self.subjects:
             raise ValueError("Authz local-admin policy grant requires a subject.")
@@ -363,6 +430,7 @@ class AuthzPolicyLocalAdminGrant(BaseModel):
             token_labels=self.token_labels,
             products=self.products,
             contexts=self.contexts,
+            instances=self.instances,
             actions=self.actions,
         )
 
@@ -370,7 +438,7 @@ class AuthzPolicyLocalAdminGrant(BaseModel):
 class AuthzPolicyLocalAdminGrantEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: AuthzPolicySchemaVersion = 1
     product: str
     mode: Literal["dry_run", "apply"] = "apply"
     reason: str = ""
@@ -386,6 +454,11 @@ class AuthzPolicyLocalAdminGrantEnvelope(BaseModel):
         self.related_issue = self.related_issue.strip()
         if self.mode == "apply" and not self.reason:
             raise ValueError("Authz local-admin policy grant apply requires reason.")
+        _validate_instance_scoped_grant(
+            schema_version=self.schema_version,
+            actions=self.grant.actions,
+            instances=self.grant.instances,
+        )
         return self
 
 
@@ -609,6 +682,7 @@ def authz_policy_grant_response_audit_payload(
                 "event_names": requested_grant.get("event_names") or (),
                 "products": requested_grant.get("products") or (),
                 "contexts": requested_grant.get("contexts") or (),
+                "instances": requested_grant.get("instances") or (),
                 "actions": requested_grant.get("actions") or (),
             }
         elif "subjects" in requested_grant or "token_labels" in requested_grant:
@@ -619,6 +693,7 @@ def authz_policy_grant_response_audit_payload(
                 "token_label_count": len(requested_grant.get("token_labels") or ()),
                 "products": requested_grant.get("products") or (),
                 "contexts": requested_grant.get("contexts") or (),
+                "instances": requested_grant.get("instances") or (),
                 "actions": requested_grant.get("actions") or (),
             }
         else:
@@ -630,6 +705,7 @@ def authz_policy_grant_response_audit_payload(
                 "roles": requested_grant.get("roles") or (),
                 "products": requested_grant.get("products") or (),
                 "contexts": requested_grant.get("contexts") or (),
+                "instances": requested_grant.get("instances") or (),
                 "actions": requested_grant.get("actions") or (),
             }
     return response_audit
@@ -649,6 +725,7 @@ def authz_policy_github_actions_removal_response_audit_payload(
             "event_names": requested_removal.get("event_names") or (),
             "products": requested_removal.get("products") or (),
             "contexts": requested_removal.get("contexts") or (),
+            "instances": requested_removal.get("instances") or (),
             "actions": requested_removal.get("actions") or (),
         }
     return response_audit
@@ -1264,6 +1341,14 @@ def execute_authz_policy_route(
     trace_id: str,
     now_timestamp: TimestampProvider,
 ) -> AuthzPolicyRouteResult:
+    active_records = record_store.list_authz_policy_records(status="active", limit=1)
+    if not active_records:
+        raise ValueError("No active Launchplane authz policy record found.")
+    active_schema_version = active_records[0].policy.schema_version
+    if request.schema_version != active_schema_version:
+        raise ValueError(
+            "Authz policy request schema_version must match the active policy schema_version."
+        )
     write_result: (
         tuple[
             LaunchplaneAuthzPolicy,

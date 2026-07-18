@@ -4325,8 +4325,10 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
     def _policy(
         self,
         *,
+        schema_version: int = 1,
         product: str = "odoo-tenant-cm",
         context: str = "cm",
+        instances: tuple[str, ...] = (),
         action: str = "odoo_target_replacement_apply.execute",
         repository: str = "cbusillo/launchplane",
         workflow_refs: tuple[str, ...] = (
@@ -4335,6 +4337,7 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
     ) -> LaunchplaneAuthzPolicy:
         return LaunchplaneAuthzPolicy.model_validate(
             {
+                "schema_version": schema_version,
                 "github_actions": [
                     {
                         "repository": repository,
@@ -4342,9 +4345,10 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
                         "event_names": ["workflow_dispatch"],
                         "products": [product],
                         "contexts": [context],
+                        "instances": list(instances),
                         "actions": [action],
                     }
-                ]
+                ],
             }
         )
 
@@ -4446,6 +4450,35 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_operation.finished_at, "")
             self.assertEqual(stored_operation.deployment_record_id, "")
             self.assertIsNone(stored_operation.result)
+
+    async def test_testing_instance_grant_denies_prod_in_shared_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state", include_prod_lane=True)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(
+                    schema_version=2,
+                    instances=("testing",),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            testing_response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(instance="testing"),
+                idempotency_key="apply-cm-testing",
+            )
+            prod_response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(instance="prod"),
+                idempotency_key="apply-cm-prod",
+            )
+
+        self.assertEqual(testing_response.status_code, 202)
+        self.assertEqual(prod_response.status_code, 403)
+        self.assertEqual(prod_response.json()["error"]["code"], "authorization_denied")
 
     async def test_odoo_target_replacement_apply_replays_existing_operation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

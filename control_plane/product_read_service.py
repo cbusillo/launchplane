@@ -23,6 +23,7 @@ class ProductEnvironmentReadServiceResult:
     payload: dict[str, object]
     authorization_product: str
     authorization_context: str
+    authorization_instances: tuple[str, ...]
     denial_message: str
 
 
@@ -106,6 +107,7 @@ def build_product_environment_read_service_result(
             payload={"activity": activity.model_dump(mode="json")},
             authorization_product=activity.product,
             authorization_context="launchplane",
+            authorization_instances=(),
             denial_message="Workflow cannot read the requested product activity.",
         )
 
@@ -136,6 +138,7 @@ def build_product_environment_read_service_result(
             payload={"config_status": config_status.model_dump(mode="json")},
             authorization_product=config_status.product,
             authorization_context=config_status.context,
+            authorization_instances=(config_status.environment,),
             denial_message="Workflow cannot read the requested product environment config status.",
         )
 
@@ -156,6 +159,7 @@ def build_product_environment_read_service_result(
             payload={"environment": detail.model_dump(mode="json")},
             authorization_product=detail.product,
             authorization_context=detail.context,
+            authorization_instances=(detail.environment,),
             denial_message="Workflow cannot read the requested product environment.",
         )
 
@@ -169,6 +173,9 @@ def build_product_environment_read_service_result(
             payload=_product_environments_payload(overview),
             authorization_product=overview.product,
             authorization_context="launchplane",
+            authorization_instances=tuple(
+                environment.environment for environment in overview.environments
+            ),
             denial_message="Workflow cannot list the requested product environments.",
         )
 
@@ -182,6 +189,9 @@ def build_product_environment_read_service_result(
             payload={"product": overview.model_dump(mode="json")},
             authorization_product=overview.product,
             authorization_context="launchplane",
+            authorization_instances=tuple(
+                environment.environment for environment in overview.environments
+            ),
             denial_message="Workflow cannot read the requested product overview.",
         )
 

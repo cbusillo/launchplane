@@ -277,7 +277,7 @@ def build_product_promotion_status(
     record_store: object,
     product: str,
     destination_environment: str,
-    action_allowed: Callable[[str, str, str], bool],
+    action_allowed: Callable[[str, str, str, tuple[str, ...]], bool],
     workflow_credentials_ready: Callable[[str], bool],
     now: datetime | None = None,
 ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile, ProductPromotionStatus]:
@@ -322,12 +322,14 @@ def build_product_promotion_status(
         "generic_web_prod_promotion.execute",
         profile.product,
         destination_lane.context,
+        (source_lane.instance, destination_lane.instance),
     ):
         direct_blockers.append("Caller is not authorized to dry-run generic-web promotion.")
     if not action_allowed(
         "generic_web_prod_promotion.dispatch",
         profile.product,
         destination_lane.context,
+        (source_lane.instance, destination_lane.instance),
     ):
         workflow_blockers.append("Caller is not authorized to dispatch the promotion workflow.")
     trust_state = _promotion_trust_state(

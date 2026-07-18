@@ -374,6 +374,13 @@ def authz_policies_import_toml(
     default="",
     help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
 )
+@click.option(
+    "--schema-version",
+    type=click.IntRange(1, 2),
+    default=1,
+    show_default=True,
+    help="Grant contract version. Use 2 only after the active policy is migrated to schema v2.",
+)
 @click.option("--repository", required=True, help="GitHub owner/repo grant target.")
 @click.option(
     "--workflow-ref", "workflow_refs", multiple=True, help="Allowed workflow_ref pattern."
@@ -389,6 +396,7 @@ def authz_policies_import_toml(
 @click.option("--environment", "environments", multiple=True, help="Allowed GitHub environment.")
 @click.option("--product", "products", multiple=True, required=True, help="Allowed product.")
 @click.option("--context", "contexts", multiple=True, help="Allowed Launchplane context.")
+@click.option("--instance", "instances", multiple=True, help="Allowed Launchplane instance.")
 @click.option(
     "--action", "actions", multiple=True, required=True, help="Allowed Launchplane action."
 )
@@ -408,6 +416,7 @@ def authz_policies_grant_workflow(
     service_url: str,
     bearer_token_env: str,
     session_cookie: str,
+    schema_version: int,
     repository: str,
     workflow_refs: tuple[str, ...],
     job_workflow_refs: tuple[str, ...],
@@ -416,6 +425,7 @@ def authz_policies_grant_workflow(
     environments: tuple[str, ...],
     products: tuple[str, ...],
     contexts: tuple[str, ...],
+    instances: tuple[str, ...],
     actions: tuple[str, ...],
     reason: str,
     related_issue: str,
@@ -432,7 +442,7 @@ def authz_policies_grant_workflow(
                 f"{token_env_key} is required unless --session-cookie is provided."
             )
     payload = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "product": "launchplane",
         "mode": mode,
         "reason": reason,
@@ -446,6 +456,7 @@ def authz_policies_grant_workflow(
             "environments": list(environments),
             "products": list(products),
             "contexts": list(contexts),
+            "instances": list(instances),
             "actions": list(actions),
             "source_label": source_label,
         },
@@ -478,6 +489,13 @@ def authz_policies_grant_workflow(
     default="",
     help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
 )
+@click.option(
+    "--schema-version",
+    type=click.IntRange(1, 2),
+    default=1,
+    show_default=True,
+    help="Removal contract version. Use 2 only after the active policy is migrated to schema v2.",
+)
 @click.option("--repository", required=True, help="GitHub owner/repo rule target.")
 @click.option("--workflow-ref", "workflow_refs", multiple=True, help="Exact workflow_ref pattern.")
 @click.option(
@@ -491,6 +509,7 @@ def authz_policies_grant_workflow(
 @click.option("--environment", "environments", multiple=True, help="Exact GitHub environment.")
 @click.option("--product", "products", multiple=True, required=True, help="Exact product.")
 @click.option("--context", "contexts", multiple=True, help="Exact Launchplane context.")
+@click.option("--instance", "instances", multiple=True, help="Exact Launchplane instance.")
 @click.option("--action", "actions", multiple=True, required=True, help="Exact Launchplane action.")
 @click.option("--reason", default="", help="Required audit reason when --apply is used.")
 @click.option(
@@ -508,6 +527,7 @@ def authz_policies_remove_workflow_rule(
     service_url: str,
     bearer_token_env: str,
     session_cookie: str,
+    schema_version: int,
     repository: str,
     workflow_refs: tuple[str, ...],
     job_workflow_refs: tuple[str, ...],
@@ -516,6 +536,7 @@ def authz_policies_remove_workflow_rule(
     environments: tuple[str, ...],
     products: tuple[str, ...],
     contexts: tuple[str, ...],
+    instances: tuple[str, ...],
     actions: tuple[str, ...],
     reason: str,
     related_issue: str,
@@ -532,7 +553,7 @@ def authz_policies_remove_workflow_rule(
                 f"{token_env_key} is required unless --session-cookie is provided."
             )
     payload = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "product": "launchplane",
         "mode": mode,
         "reason": reason,
@@ -546,6 +567,7 @@ def authz_policies_remove_workflow_rule(
             "environments": list(environments),
             "products": list(products),
             "contexts": list(contexts),
+            "instances": list(instances),
             "actions": list(actions),
             "source_label": source_label,
         },
@@ -578,6 +600,13 @@ def authz_policies_remove_workflow_rule(
     default="",
     help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
 )
+@click.option(
+    "--schema-version",
+    type=click.IntRange(1, 2),
+    default=1,
+    show_default=True,
+    help="Grant contract version. Use 2 only after the active policy is migrated to schema v2.",
+)
 @click.option("--login", "logins", multiple=True, help="Allowed GitHub login.")
 @click.option("--organization", "organizations", multiple=True, help="Allowed GitHub organization.")
 @click.option("--team", "teams", multiple=True, help="Allowed GitHub team.")
@@ -590,6 +619,7 @@ def authz_policies_remove_workflow_rule(
 )
 @click.option("--product", "products", multiple=True, required=True, help="Allowed product.")
 @click.option("--context", "contexts", multiple=True, help="Allowed Launchplane context.")
+@click.option("--instance", "instances", multiple=True, help="Allowed Launchplane instance.")
 @click.option(
     "--action", "actions", multiple=True, required=True, help="Allowed Launchplane action."
 )
@@ -609,12 +639,14 @@ def authz_policies_grant_human(
     service_url: str,
     bearer_token_env: str,
     session_cookie: str,
+    schema_version: int,
     logins: tuple[str, ...],
     organizations: tuple[str, ...],
     teams: tuple[str, ...],
     roles: tuple[str, ...],
     products: tuple[str, ...],
     contexts: tuple[str, ...],
+    instances: tuple[str, ...],
     actions: tuple[str, ...],
     reason: str,
     related_issue: str,
@@ -631,7 +663,7 @@ def authz_policies_grant_human(
                 f"{token_env_key} is required unless --session-cookie is provided."
             )
     payload = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "product": "launchplane",
         "mode": mode,
         "reason": reason,
@@ -643,6 +675,7 @@ def authz_policies_grant_human(
             "roles": list(roles),
             "products": list(products),
             "contexts": list(contexts),
+            "instances": list(instances),
             "actions": list(actions),
             "source_label": source_label,
         },
@@ -676,6 +709,13 @@ def authz_policies_grant_human(
     help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
 )
 @click.option(
+    "--schema-version",
+    type=click.IntRange(1, 2),
+    default=1,
+    show_default=True,
+    help="Grant contract version. Use 2 only after the active policy is migrated to schema v2.",
+)
+@click.option(
     "--subject", "subjects", multiple=True, required=True, help="Allowed terminal-agent subject."
 )
 @click.option(
@@ -687,6 +727,7 @@ def authz_policies_grant_human(
 )
 @click.option("--product", "products", multiple=True, required=True, help="Allowed product.")
 @click.option("--context", "contexts", multiple=True, help="Allowed Launchplane context.")
+@click.option("--instance", "instances", multiple=True, help="Allowed Launchplane instance.")
 @click.option(
     "--action", "actions", multiple=True, required=True, help="Allowed Launchplane action."
 )
@@ -706,10 +747,12 @@ def authz_policies_grant_terminal_agent(
     service_url: str,
     bearer_token_env: str,
     session_cookie: str,
+    schema_version: int,
     subjects: tuple[str, ...],
     token_labels: tuple[str, ...],
     products: tuple[str, ...],
     contexts: tuple[str, ...],
+    instances: tuple[str, ...],
     actions: tuple[str, ...],
     reason: str,
     related_issue: str,
@@ -726,7 +769,7 @@ def authz_policies_grant_terminal_agent(
                 f"{token_env_key} is required unless --session-cookie is provided."
             )
     payload = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "product": "launchplane",
         "mode": mode,
         "reason": reason,
@@ -736,6 +779,7 @@ def authz_policies_grant_terminal_agent(
             "token_labels": list(token_labels),
             "products": list(products),
             "contexts": list(contexts),
+            "instances": list(instances),
             "actions": list(actions),
             "source_label": source_label,
         },

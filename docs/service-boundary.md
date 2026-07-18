@@ -2278,9 +2278,9 @@ read-model contract documented in [driver-descriptors.md](driver-descriptors.md)
 
 The descriptor and driver-view routes use action `driver.read` and are native
 FastAPI routes. Descriptor discovery authorizes against context `launchplane`;
-context and instance views authorize against the requested context. These routes
-expose Launchplane capabilities and repository-backed read state, not
-runtime-provider primitives.
+context views authorize against the requested context, and instance views also
+authorize the exact requested instance. These routes expose Launchplane
+capabilities and repository-backed read state, not runtime-provider primitives.
 
 The logs route is the exception to the `driver.read` action because it reads live
 provider output. It is a native FastAPI route, uses action `target_logs.read`,
@@ -2293,6 +2293,11 @@ Launchplane verifies the selected deployment belongs to the requested tracked
 target before reading its detached log id. Provider failures expose only a
 bounded redacted operation label/detail, and the manual workflow preserves the
 redacted response artifact before reporting failure.
+
+Authorization policy schema v2 treats these instance targets as first-class
+selectors. An exact grant for `testing` cannot read `prod` logs or driver state
+even when both lanes share one context. Multi-lane operations must satisfy the
+rule for every resolved instance.
 
 The preview driver cut stays intentionally narrow but keeps topology in
 Launchplane: Launchplane owns preview URL derivation from the

@@ -1793,6 +1793,33 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    async def test_operation_status_authorizes_against_stored_operation_instance(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                _running_odoo_stable_bootstrap_record()
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_stable_bootstrap.execute",
+                    instances=("prod",),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_operation_status_missing_record_returns_not_found(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import cast
+from typing import Protocol, cast
 
+from control_plane.contracts.driver_descriptor import DriverActionScope
 from control_plane.drivers.generic_web_dispatch import (
     _GENERIC_WEB_DEPLOY_ROUTE,
     _GENERIC_WEB_PROD_PROMOTION_ROUTE,
@@ -63,6 +64,7 @@ from control_plane.verireel_read_http import (
     _VERIREEL_STABLE_ENVIRONMENT_ROUTE,
     _VERIREEL_TESTING_VERIFICATION_ROUTE,
 )
+from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 
 _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
     {
@@ -123,7 +125,20 @@ class _DriverRouteMetadata:
     method: str
     authz_action: str
     alternate_authz_actions: tuple[str, ...]
+    scope: DriverActionScope
     operator_visible: bool
+
+
+class _AuthorizationAllows(Protocol):
+    def __call__(
+        self,
+        *,
+        identity: LaunchplaneIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None,
+    ) -> bool: ...
 
 
 def _fastapi_route_paths_by_method(app: object, method: str) -> frozenset[str]:
@@ -190,6 +205,7 @@ def _driver_route_metadata_from_descriptors() -> dict[str, _DriverRouteMetadata]
                 method=method,
                 authz_action=authz_action,
                 alternate_authz_actions=alternate_authz_actions,
+                scope=action.scope,
                 operator_visible=action.operator_visible,
             )
     return route_metadata
@@ -246,6 +262,29 @@ def _native_driver_route_metadata_for_handler(endpoint: object) -> _DriverRouteM
 
 def _native_driver_route_authz_action(endpoint: object) -> str:
     return _native_driver_route_metadata_for_handler(endpoint).authz_action
+
+
+def _native_driver_route_authorization_allows(
+    *,
+    endpoint: object,
+    authorization_allows: _AuthorizationAllows,
+    identity: LaunchplaneIdentity,
+    product: str,
+    context: str,
+    instances: tuple[str, ...] = (),
+) -> bool:
+    route_metadata = _native_driver_route_metadata_for_handler(endpoint)
+    try:
+        target = AuthorizationTarget(scope=route_metadata.scope, instances=instances)
+    except ValueError:
+        return False
+    return authorization_allows(
+        identity=identity,
+        action=route_metadata.authz_action,
+        product=product,
+        context=context,
+        target=target,
+    )
 
 
 def _native_driver_route_alternate_authz_action(endpoint: object) -> str:

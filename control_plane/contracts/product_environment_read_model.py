@@ -44,7 +44,7 @@ from control_plane.drivers.registry import (
 )
 
 
-ActionAllowed = Callable[[str, str, str], bool]
+ActionAllowed = Callable[[str, str, str, tuple[str, ...]], bool]
 ProductSecretBindingTrustState = FreshnessStatus | Literal["disabled"]
 ProductConfigItemStatus = Literal[
     "configured",
@@ -526,6 +526,7 @@ def build_product_site_overview(
         action_allowed=action_allowed,
         include_unsupported=True,
         context_resolver=_product_action_context_resolver(profile=profile),
+        instances_resolver=_product_action_instances_resolver(profile=profile),
     )
     warnings = tuple(warning for warning in (descriptor_warning,) if warning)
     trust_state = _combine_trust_states(
@@ -611,6 +612,7 @@ def build_product_environment_detail(
             action_allowed=action_allowed,
             include_unsupported=True,
             context_resolver=_lane_context_resolver(context=lane.context),
+            instances_resolver=_lane_instances_resolver(instance=lane.instance),
         ),
         warnings=warnings,
         trust_state=_combine_trust_states(
@@ -682,7 +684,12 @@ def build_product_environment_config_status(
     )
 
 
-def _deny_action(_action: str, _product: str, _context: str) -> bool:
+def _deny_action(
+    _action: str,
+    _product: str,
+    _context: str,
+    _instances: tuple[str, ...],
+) -> bool:
     return False
 
 
@@ -714,6 +721,7 @@ def _product_config_write_availability(
             input_kind="runtime_settings",
             product=profile.product,
             context=lane.context,
+            instance=lane.instance,
             route_path=route_path,
             confirmation_text=confirmation_text,
             base_blockers=runtime_reasons,
@@ -727,6 +735,7 @@ def _product_config_write_availability(
             input_kind="managed_secrets",
             product=profile.product,
             context=lane.context,
+            instance=lane.instance,
             route_path=route_path,
             confirmation_text=confirmation_text,
             base_blockers=secret_reasons,
@@ -767,6 +776,7 @@ def _product_config_input_write_availability(
     input_kind: ProductConfigInputKind,
     product: str,
     context: str,
+    instance: str,
     route_path: str,
     confirmation_text: str,
     base_blockers: tuple[str, ...],
@@ -775,9 +785,9 @@ def _product_config_input_write_availability(
 ) -> ProductConfigInputWriteAvailability:
     plan_blockers = list(base_blockers)
     apply_blockers = list(base_blockers)
-    if not action_allowed("product_config.plan", product, context):
+    if not action_allowed("product_config.plan", product, context, (instance,)):
         plan_blockers.append("Caller is not authorized to plan product configuration.")
-    if not action_allowed("product_config.apply", product, context):
+    if not action_allowed("product_config.apply", product, context, (instance,)):
         apply_blockers.append("Caller is not authorized to apply product configuration.")
     return ProductConfigInputWriteAvailability(
         input_kind=input_kind,
@@ -1360,9 +1370,37 @@ def _product_action_context_resolver(
     return resolve
 
 
+def _product_action_instances_resolver(
+    *, profile: LaunchplaneProductProfileRecord
+) -> Callable[[DriverActionDescriptor], tuple[str, ...]]:
+    def resolve(action: DriverActionDescriptor) -> tuple[str, ...]:
+        if action.scope != "instance":
+            return ()
+        authorization_context = _product_action_authorization_context(
+            profile=profile,
+            action=action,
+        )
+        return tuple(
+            lane.instance
+            for lane in profile.lanes
+            if lane.context == authorization_context and lane.instance
+        )
+
+    return resolve
+
+
 def _lane_context_resolver(*, context: str) -> Callable[[DriverActionDescriptor], str]:
     def resolve(_action: DriverActionDescriptor) -> str:
         return context
+
+    return resolve
+
+
+def _lane_instances_resolver(
+    *, instance: str
+) -> Callable[[DriverActionDescriptor], tuple[str, ...]]:
+    def resolve(action: DriverActionDescriptor) -> tuple[str, ...]:
+        return (instance,) if action.scope == "instance" else ()
 
     return resolve
 
@@ -1429,6 +1467,7 @@ def _build_environment_summary(
             action_allowed=action_allowed,
             include_unsupported=False,
             context_resolver=_lane_context_resolver(context=lane.context),
+            instances_resolver=_lane_instances_resolver(instance=lane.instance),
         ),
     )
 
@@ -1603,6 +1642,7 @@ def _action_availability(
     action_allowed: ActionAllowed,
     include_unsupported: bool,
     context_resolver: Callable[[DriverActionDescriptor], str],
+    instances_resolver: Callable[[DriverActionDescriptor], tuple[str, ...]],
 ) -> tuple[ProductActionAvailability, ...]:
     descriptor_actions = {
         action.action_id: action
@@ -1635,6 +1675,7 @@ def _action_availability(
                 profile=profile,
                 product=product,
                 authorization_context=context_resolver(descriptor_action),
+                authorization_instances=instances_resolver(descriptor_action),
                 previews_enabled=previews_enabled,
                 action_allowed=action_allowed,
             )
@@ -1648,6 +1689,7 @@ def _availability_for_descriptor_action(
     profile: LaunchplaneProductProfileRecord,
     product: str,
     authorization_context: str,
+    authorization_instances: tuple[str, ...],
     previews_enabled: bool,
     action_allowed: ActionAllowed,
 ) -> ProductActionAvailability:
@@ -1662,7 +1704,12 @@ def _availability_for_descriptor_action(
     authz_action = action.authz_action or ACTION_AUTHZ_BY_ROUTE.get(
         action.route_path, action.action_id
     )
-    if not action_allowed(authz_action, product, authorization_context):
+    if not action_allowed(
+        authz_action,
+        product,
+        authorization_context,
+        authorization_instances,
+    ):
         disabled_reasons.append("Caller is not authorized for this action.")
     return ProductActionAvailability(
         action_id=action.action_id,
