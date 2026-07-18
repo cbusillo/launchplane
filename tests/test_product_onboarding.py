@@ -590,6 +590,10 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
         self.assertIn("publish.manifest=${{ steps.publish.outputs.manifest_file }}", workflow_text)
+        self.assertIn(
+            '{"schema_version":2,"publish":{"schema_version":2}}',
+            workflow_text,
+        )
         self.assertNotIn("short_sha=", workflow_text)
         self.assertNotIn("IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}", workflow_text)
         self.assertNotIn("repository: cbusillo/odoo-devkit", workflow_text)

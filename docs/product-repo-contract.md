@@ -751,7 +751,7 @@ and only needs to splice it into a static Launchplane request:
 
 ```yaml
 payload: >-
-  {"schema_version":1,"product":"odoo","publish":{"schema_version":1}}
+  {"schema_version":2,"product":"odoo","publish":{"schema_version":2}}
 payload-fields: |-
   publish.context=cm
   publish.instance=${{ github.event.inputs.instance }}

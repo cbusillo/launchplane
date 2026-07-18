@@ -357,7 +357,7 @@ jobs:
           audience: ${{ inputs.launchplane_audience }}
           route-path: /v1/drivers/odoo/artifact-publish
           payload: >-
-            {"schema_version":1,"publish":{"schema_version":1}}
+            {"schema_version":2,"publish":{"schema_version":2}}
           payload-fields: |-
             product=${{ steps.product.outputs.product }}
             publish.context=${{ inputs.context }}
