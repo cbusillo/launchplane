@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import MagicMock, patch
+
+from alembic import command
+from sqlalchemy import text
+
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.schema_adoption import (
+    LEGACY_BASELINE_REVISION,
+    LEGACY_CURRENT_SCHEMA_REVISION,
+)
+
+from control_plane.storage.schema_invariants import (
+    AUTHZ_COMPATIBILITY_FLOOR_REVISION,
+    EXPECTED_ALEMBIC_HEAD_REVISION,
+)
+from control_plane.storage.schema_migration import (
+    _alembic_config,
+    migrate_schema,
+    schema_migration_action,
+)
+
+
+class SchemaMigrationTests(unittest.TestCase):
+    def test_compatibility_floor_is_current_by_default(self) -> None:
+        self.assertEqual(
+            schema_migration_action(current_revision=AUTHZ_COMPATIBILITY_FLOOR_REVISION),
+            "current",
+        )
+
+    def test_supported_adoption_revisions_upgrade_to_compatibility_floor(self) -> None:
+        for revision in (LEGACY_BASELINE_REVISION, LEGACY_CURRENT_SCHEMA_REVISION):
+            with self.subTest(revision=revision):
+                self.assertEqual(
+                    schema_migration_action(current_revision=revision),
+                    "upgrade",
+                )
+
+    def test_migration_stamps_and_upgrades_supported_predecessor_schemas(self) -> None:
+        for revision in (LEGACY_BASELINE_REVISION, LEGACY_CURRENT_SCHEMA_REVISION):
+            with self.subTest(revision=revision):
+                engine = MagicMock()
+                engine.url.get_backend_name.return_value = "postgresql"
+                connection = MagicMock()
+                connection.execution_options.return_value = connection
+                engine.connect.return_value.__enter__.return_value = connection
+                with (
+                    patch(
+                        "control_plane.storage.schema_migration._build_engine",
+                        return_value=engine,
+                    ),
+                    patch(
+                        "control_plane.storage.schema_migration.schema_stamp_revision_for_engine",
+                        return_value=revision,
+                    ),
+                    patch(
+                        "control_plane.storage.schema_migration._current_revision",
+                        side_effect=(revision, AUTHZ_COMPATIBILITY_FLOOR_REVISION),
+                    ),
+                    patch("control_plane.storage.schema_migration.command.stamp") as stamp,
+                    patch("control_plane.storage.schema_migration.command.upgrade") as upgrade,
+                ):
+                    migrated_revision = migrate_schema(
+                        database_url="postgresql+psycopg://launchplane:test@postgres/launchplane"
+                    )
+
+                self.assertEqual(migrated_revision, AUTHZ_COMPATIBILITY_FLOOR_REVISION)
+                self.assertEqual(stamp.call_args.args[1], revision)
+                self.assertEqual(
+                    upgrade.call_args.args[1],
+                    AUTHZ_COMPATIBILITY_FLOOR_REVISION,
+                )
+
+    def test_fenced_revision_is_accepted_by_compatibility_release(self) -> None:
+        self.assertEqual(
+            schema_migration_action(current_revision=EXPECTED_ALEMBIC_HEAD_REVISION),
+            "compatible_ahead",
+        )
+
+    def test_fenced_release_upgrades_from_compatibility_floor(self) -> None:
+        self.assertEqual(
+            schema_migration_action(
+                current_revision=AUTHZ_COMPATIBILITY_FLOOR_REVISION,
+                target_revision=EXPECTED_ALEMBIC_HEAD_REVISION,
+            ),
+            "upgrade",
+        )
+
+    def test_unknown_revision_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsupported Launchplane database revision"):
+            schema_migration_action(current_revision="unknown")
+
+    def test_alembic_config_accepts_percent_encoded_database_url(self) -> None:
+        database_url = "postgresql+psycopg://launchplane:p%40ssword@postgres/launchplane"
+
+        self.assertEqual(
+            _alembic_config(database_url).get_main_option("sqlalchemy.url"),
+            database_url,
+        )
+
+    def test_sqlite_fenced_schema_allocates_revisions_for_compatibility_writer(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            command.upgrade(_alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
+            policy = LaunchplaneAuthzPolicy()
+            first_record = LaunchplaneAuthzPolicyRecord(
+                record_id="authz-sqlite-first",
+                source="test:sqlite-compat",
+                updated_at="2026-07-18T00:00:00Z",
+                policy=policy,
+            )
+            second_record = first_record.model_copy(
+                update={
+                    "record_id": "authz-sqlite-second",
+                    "updated_at": "2026-07-18T00:01:00Z",
+                }
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_authz_policy_record(first_record)
+                store.write_authz_policy_record(second_record)
+                active_records = store.list_authz_policy_records(status="active")
+                with store._engine.connect() as connection:
+                    revisions = tuple(
+                        connection.execute(
+                            text(
+                                "select revision from launchplane_authz_policies order by revision"
+                            )
+                        ).scalars()
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(revisions, (1, 2))
+        self.assertEqual(
+            tuple(record.record_id for record in active_records),
+            ("authz-sqlite-second",),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

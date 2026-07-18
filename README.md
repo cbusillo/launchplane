@@ -148,7 +148,10 @@ Human browser sessions use signed cookies backed by the Launchplane database whe
 `LAUNCHPLANE_DATABASE_URL` is configured. Human roles are authorized through
 DB-backed Launchplane authz policy records, with the bootstrap admin email list
 available for first-access recovery. Machine writes continue to use GitHub
-Actions OIDC bearer tokens.
+Actions OIDC bearer tokens. Hosted requests revalidate the active DB policy on
+every request; GitHub-derived human organization/team claims must be refreshed
+through OAuth at least every 24 hours, and new workflow grants bind both the
+repository name and GitHub's immutable repository and owner IDs.
 
 Launchplane now fails closed at startup when no explicit policy input is provided.
 The bootstrap policy input should be minimal; live product and workflow grants
@@ -170,8 +173,9 @@ laptop-side image swap. The current operator posture is:
   previously running digest before replacement.
 - Deploy automation should verify Launchplane health after rollout and immediately
   restore the previous digest when the new image fails health checks.
-- Until Launchplane has a formal schema migration system, Postgres schema changes
-  must remain additive and backward-compatible so code rollback stays viable.
+- Launchplane applies formal Alembic migrations under a database advisory lock at
+  service startup. Each rollout declares its target and compatible revisions so
+  mixed-version deploys and code rollback remain explicit and verifiable.
 
 The repo now includes `.github/workflows/deploy-launchplane.yml` for that path.
 Configure these GitHub settings before enabling it:

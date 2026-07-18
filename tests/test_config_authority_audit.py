@@ -2356,11 +2356,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "none",
                 "thin_connector_input",
             ),
-            (
-                "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY",
-                "true",
-                "thin_connector_input",
-            ),
+            ("environment", "launchplane-authz-admin", "thin_connector_input"),
             (
                 "LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON",
                 "${{ vars.LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON }}",
@@ -2430,6 +2426,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "${{ inputs.omit_npmplus_env || false }}",
                 "operator_supplied_runtime_input",
             ),
+            ("environment", "launchplane-authz-admin", "thin_connector_input"),
             ("environment", "launchplane-break-glass", "thin_connector_input"),
         )
 

@@ -169,6 +169,23 @@ class FastApiConstructionMetadataTests(unittest.TestCase):
         )
         self.assertIn("LaunchplaneErrorResponse", openapi["components"]["schemas"])
 
+    def test_non_health_v1_routes_document_authz_refresh_failures(self) -> None:
+        def read_example() -> dict[str, str]:
+            return {"status": "ok"}
+
+        app = _LaunchplaneFastAPI()
+        app.add_api_route("/v1/example", read_example, methods=["GET"])
+        app.add_api_route("/v1/health", read_example, methods=["GET"])
+
+        openapi = app.openapi()
+        example_responses = openapi["paths"]["/v1/example"]["get"]["responses"]
+        health_responses = openapi["paths"]["/v1/health"]["get"]["responses"]
+
+        self.assertIn("409", example_responses)
+        self.assertIn("503", example_responses)
+        self.assertNotIn("409", health_responses)
+        self.assertNotIn("503", health_responses)
+
     def test_error_response_metadata_reuses_one_model_field(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -1032,11 +1049,42 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(runtime["service_audience"], "launchplane.example.com")
         self.assertEqual(runtime["authz_policy_sha256"], "resolved-policy-sha256")
+        self.assertEqual(runtime["authz_policy_schema_version"], 1)
         self.assertEqual(runtime["authz_policy_source"], "db")
         self.assertEqual(
             runtime["bootstrap_authz_policy_sha256"],
             hashlib.sha256(policy_text.encode("utf-8")).hexdigest(),
         )
+
+    async def test_authz_policy_administrator_can_read_runtime_contract(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "local_operators": [
+                    {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-write"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_grant.write"],
+                    }
+                ]
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=policy,
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/service/runtime",
+            headers={"Authorization": "Bearer local-operator-token"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["runtime"]["authz_policy_schema_version"], 1)
 
     async def test_worker_status_reports_queue_status(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

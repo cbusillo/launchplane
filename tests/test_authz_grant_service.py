@@ -7,6 +7,7 @@ from typing import cast
 from pydantic import ValidationError
 
 from control_plane.authz_grant_service import (
+    AuthzPolicyConflictError,
     AuthzPolicyGitHubActionsGrant,
     AuthzPolicyGitHubActionsGrantEnvelope,
     AuthzPolicyGitHubActionsRemovalEnvelope,
@@ -33,11 +34,22 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 
+_GITHUB_REPOSITORY_IDS = {
+    "repository_id": "1001",
+    "repository_owner_id": "2001",
+}
+
 
 class _AuthzPolicyStore:
-    def __init__(self, records: tuple[LaunchplaneAuthzPolicyRecord, ...]) -> None:
+    def __init__(
+        self,
+        records: tuple[LaunchplaneAuthzPolicyRecord, ...],
+        *,
+        compare_write_allowed: bool = True,
+    ) -> None:
         self.records = records
         self.written_records: list[LaunchplaneAuthzPolicyRecord] = []
+        self.compare_write_allowed = compare_write_allowed
 
     def list_authz_policy_records(
         self,
@@ -54,11 +66,34 @@ class _AuthzPolicyStore:
         self.written_records.append(record)
         self.records = (record,) + self.records
 
+    def compare_and_write_authz_policy_record(
+        self,
+        *,
+        expected_record: LaunchplaneAuthzPolicyRecord,
+        replacement_record: LaunchplaneAuthzPolicyRecord,
+    ) -> bool:
+        if not self.compare_write_allowed:
+            return False
+        active_records = tuple(record for record in self.records if record.status == "active")
+        if len(active_records) != 1 or active_records[0] != expected_record:
+            return False
+        self.records = tuple(
+            record.model_copy(update={"status": "superseded"})
+            if record == expected_record
+            else record
+            for record in self.records
+        )
+        self.written_records.append(replacement_record)
+        self.records = (replacement_record,) + self.records
+        return True
+
 
 def _identity() -> GitHubActionsIdentity:
     return GitHubActionsIdentity(
         repository="cbusillo/launchplane",
         repository_owner="cbusillo",
+        repository_id="1001",
+        repository_owner_id="2001",
         workflow_ref="cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",
         job_workflow_ref="",
         event_name="workflow_dispatch",
@@ -107,6 +142,7 @@ def _grant_request(mode: str = "apply") -> AuthzPolicyGitHubActionsGrantEnvelope
             "related_issue": "cbusillo/launchplane#83",
             "grant": {
                 "repository": "cbusillo/launchplane",
+                **_GITHUB_REPOSITORY_IDS,
                 "workflow_refs": [
                     "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                 ],
@@ -158,6 +194,45 @@ def _human_grant_request(mode: str = "apply") -> AuthzPolicyGitHubHumanGrantEnve
 
 
 class AuthzGrantServiceTests(unittest.TestCase):
+    def test_github_actions_grant_requires_immutable_repository_ids(self) -> None:
+        payload = {
+            "product": "launchplane",
+            "mode": "dry_run",
+            "grant": {
+                "repository": "cbusillo/launchplane",
+                "actions": ["product_profile.read"],
+            },
+        }
+
+        with self.assertRaises(ValidationError):
+            AuthzPolicyGitHubActionsGrantEnvelope.model_validate(payload)
+
+        grant = cast(dict[str, object], payload["grant"])
+        grant.update({"repository_id": "", "repository_owner_id": ""})
+        with self.assertRaisesRegex(
+            ValidationError,
+            "require immutable repository_id and repository_owner_id selectors",
+        ):
+            AuthzPolicyGitHubActionsGrantEnvelope.model_validate(payload)
+
+        grant.update(_GITHUB_REPOSITORY_IDS)
+        envelope = AuthzPolicyGitHubActionsGrantEnvelope.model_validate(payload)
+        self.assertEqual(envelope.grant.repository_id, "1001")
+        self.assertEqual(envelope.grant.repository_owner_id, "2001")
+
+    def test_route_rejects_policy_change_after_authorization(self) -> None:
+        active_record = _active_record()
+
+        with self.assertRaisesRegex(AuthzPolicyConflictError, "after the caller was authorized"):
+            execute_authz_policy_route(
+                record_store=_AuthzPolicyStore((active_record,)),
+                request=_grant_request(mode="dry_run"),
+                identity=_identity(),
+                trace_id="trace-stale-authorization",
+                now_timestamp=lambda: "2026-07-18T00:00:00Z",
+                authorized_policy_sha256="different-policy",
+            )
+
     def test_route_request_schema_must_match_active_policy_schema(self) -> None:
         request = AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
             {
@@ -166,6 +241,7 @@ class AuthzGrantServiceTests(unittest.TestCase):
                 "mode": "dry_run",
                 "grant": {
                     "repository": "cbusillo/launchplane",
+                    **_GITHUB_REPOSITORY_IDS,
                     "actions": ["product_profile.read"],
                 },
             }
@@ -189,7 +265,11 @@ class AuthzGrantServiceTests(unittest.TestCase):
         grants = (
             (
                 AuthzPolicyGitHubActionsGrantEnvelope,
-                {"repository": "cbusillo/odoo-tenant", "actions": ["deployment.write"]},
+                {
+                    "repository": "cbusillo/odoo-tenant",
+                    **_GITHUB_REPOSITORY_IDS,
+                    "actions": ["deployment.write"],
+                },
             ),
             (
                 AuthzPolicyGitHubHumanGrantEnvelope,
@@ -250,6 +330,7 @@ class AuthzGrantServiceTests(unittest.TestCase):
                 "mode": "dry_run",
                 "grant": {
                     "repository": "cbusillo/odoo-tenant",
+                    **_GITHUB_REPOSITORY_IDS,
                     "actions": ["deployment.write"],
                 },
             }
@@ -269,6 +350,7 @@ class AuthzGrantServiceTests(unittest.TestCase):
                     "mode": "dry_run",
                     "grant": {
                         "repository": "cbusillo/odoo-tenant",
+                        **_GITHUB_REPOSITORY_IDS,
                         "instances": ["testing"],
                         "actions": ["deployment.write"],
                     },
@@ -305,6 +387,7 @@ class AuthzGrantServiceTests(unittest.TestCase):
                 "mode": "dry_run",
                 "grant": {
                     "repository": "cbusillo/launchplane",
+                    **_GITHUB_REPOSITORY_IDS,
                     "actions": ["product_environment.read"],
                 },
             }
@@ -316,6 +399,7 @@ class AuthzGrantServiceTests(unittest.TestCase):
                 "mode": "dry_run",
                 "grant": {
                     "repository": "cbusillo/launchplane",
+                    **_GITHUB_REPOSITORY_IDS,
                     "instances": ["testing"],
                     "actions": ["product_environment.read"],
                 },
@@ -337,6 +421,7 @@ class AuthzGrantServiceTests(unittest.TestCase):
                     "mode": "dry_run",
                     "grant": {
                         "repository": "cbusillo/launchplane",
+                        **_GITHUB_REPOSITORY_IDS,
                         "instances": ["testing"],
                         "actions": ["product_profile.read"],
                     },
@@ -352,6 +437,7 @@ class AuthzGrantServiceTests(unittest.TestCase):
                     "mode": "dry_run",
                     "grant": {
                         "repository": "cbusillo/launchplane",
+                        **_GITHUB_REPOSITORY_IDS,
                         "actions": ["product_profile.read"],
                     },
                 }
@@ -361,12 +447,16 @@ class AuthzGrantServiceTests(unittest.TestCase):
         grant = AuthzPolicyGitHubActionsGrant.model_validate(
             {
                 "repository": " cbusillo/launchplane ",
+                "repository_id": " 1001 ",
+                "repository_owner_id": " 2001 ",
                 "workflow_refs": [" workflow ", ""],
                 "actions": [" product_profile.read "],
             }
         )
 
         self.assertEqual(grant.repository, "cbusillo/launchplane")
+        self.assertEqual(grant.repository_id, "1001")
+        self.assertEqual(grant.repository_owner_id, "2001")
         self.assertEqual(grant.workflow_refs, ("workflow",))
         self.assertEqual(grant.actions, ("product_profile.read",))
 
@@ -421,10 +511,69 @@ class AuthzGrantServiceTests(unittest.TestCase):
             audit=audit,
         )
         self.assertEqual(result["authz_policy_record_id"], record.record_id)
+        authz_policy_summary = cast(dict[str, object], driver_result["authz_policy"])
+        self.assertEqual(authz_policy_summary["github_actions_immutable_repository_rule_count"], 1)
+        self.assertEqual(authz_policy_summary["github_actions_legacy_name_only_rule_count"], 1)
         driver_audit = cast(dict[str, object], driver_result["audit"])
         self.assertNotIn("requested_grant", driver_audit)
         requested_grant_summary = cast(dict[str, object], driver_audit["requested_grant_summary"])
         self.assertEqual(requested_grant_summary["workflow_ref_count"], 1)
+
+    def test_grant_upgrades_matching_legacy_rule_in_place(self) -> None:
+        request = _grant_request()
+        desired_rule = request.grant.to_policy_rule()
+        legacy_rule = desired_rule.model_copy(
+            update={"repository_id": "", "repository_owner_id": ""}
+        )
+        legacy_policy = LaunchplaneAuthzPolicy(github_actions=(legacy_rule,))
+        legacy_policy_sha256 = authz_policy_sha256(legacy_policy)
+        legacy_record = LaunchplaneAuthzPolicyRecord(
+            record_id=build_authz_policy_record_id(
+                updated_at="2026-05-07T15:00:00Z",
+                policy_sha256=legacy_policy_sha256,
+            ),
+            status="active",
+            source="test:legacy",
+            updated_at="2026-05-07T15:00:00Z",
+            policy_sha256=legacy_policy_sha256,
+            policy=legacy_policy,
+        )
+        store = _AuthzPolicyStore((legacy_record,))
+
+        _current_policy, _current_record, diff = plan_github_actions_authz_policy_grant(
+            record_store=store,
+            grant=request.grant,
+        )
+        self.assertEqual(diff["changed"], True)
+        self.assertEqual(diff["upgraded_legacy_github_actions_rule_count"], 1)
+        self.assertEqual(diff["new_github_actions_rule_count"], 1)
+
+        updated_policy, _record, changed, _write_diff, _audit = (
+            write_github_actions_authz_policy_grant(
+                record_store=store,
+                request=request,
+                identity=_identity(),
+                trace_id="trace-upgrade",
+                now_timestamp=lambda: "2026-05-07T16:00:00Z",
+            )
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(updated_policy.github_actions, (desired_rule,))
+
+    def test_write_rejects_stale_active_policy(self) -> None:
+        store = _AuthzPolicyStore((_active_record(),), compare_write_allowed=False)
+
+        with self.assertRaisesRegex(AuthzPolicyConflictError, "active authz policy changed"):
+            write_github_actions_authz_policy_grant(
+                record_store=store,
+                request=_grant_request(),
+                identity=_identity(),
+                trace_id="trace-stale",
+                now_timestamp=lambda: "2026-05-07T16:00:00Z",
+            )
+
+        self.assertEqual(store.written_records, [])
 
     def test_plan_and_write_human_grant_records_changed_policy(self) -> None:
         store = _AuthzPolicyStore((_active_record(),))
@@ -569,6 +718,105 @@ class AuthzGrantServiceTests(unittest.TestCase):
         self.assertEqual(same_diff["matched_rule_count"], 0)
         self.assertEqual(len(store.written_records), 1)
         self.assertEqual(same_audit["changed"], False)
+
+    def test_removal_rejects_last_policy_administrator(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_grant.write"],
+                    }
+                ]
+            }
+        )
+        record = LaunchplaneAuthzPolicyRecord(
+            record_id="authz-policy-admin",
+            source="test:policy-admin",
+            updated_at="2026-07-18T00:00:00Z",
+            policy=policy,
+        )
+        request = AuthzPolicyGitHubActionsRemovalEnvelope.model_validate(
+            {
+                "product": "launchplane",
+                "mode": "dry_run",
+                "removal": {
+                    "repository": "cbusillo/launchplane",
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["authz_policy_grant.write"],
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(AuthzPolicyConflictError, "retain at least one principal"):
+            plan_github_actions_authz_policy_removal(
+                record_store=_AuthzPolicyStore((record,)),
+                removal=request.removal,
+            )
+
+    def test_removal_ignores_unusable_policy_administrators(self) -> None:
+        for unusable_rules in (
+            {
+                "terminal_agents": [
+                    {
+                        "subjects": ["read-only-agent"],
+                        "actions": ["authz_policy_grant.write"],
+                    }
+                ]
+            },
+            {
+                "github_humans": [
+                    {
+                        "logins": ["read-only-human"],
+                        "roles": ["read_only"],
+                        "actions": ["authz_policy_grant.write"],
+                    }
+                ]
+            },
+        ):
+            with self.subTest(unusable_rules=unusable_rules):
+                policy = LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/launchplane",
+                                "products": ["launchplane"],
+                                "contexts": ["launchplane"],
+                                "actions": ["authz_policy_grant.write"],
+                            }
+                        ],
+                        **unusable_rules,
+                    }
+                )
+                record = LaunchplaneAuthzPolicyRecord(
+                    record_id="authz-policy-admin",
+                    source="test:policy-admin",
+                    updated_at="2026-07-18T00:00:00Z",
+                    policy=policy,
+                )
+                request = AuthzPolicyGitHubActionsRemovalEnvelope.model_validate(
+                    {
+                        "product": "launchplane",
+                        "mode": "dry_run",
+                        "removal": {
+                            "repository": "cbusillo/launchplane",
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        },
+                    }
+                )
+
+                with self.assertRaisesRegex(
+                    AuthzPolicyConflictError, "retain at least one principal"
+                ):
+                    plan_github_actions_authz_policy_removal(
+                        record_store=_AuthzPolicyStore((record,)),
+                        removal=request.removal,
+                    )
 
     def test_removal_requires_exact_rule_match(self) -> None:
         store = _AuthzPolicyStore((_active_record(),))

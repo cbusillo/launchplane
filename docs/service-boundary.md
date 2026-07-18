@@ -252,7 +252,14 @@ cleanup scope so the store is always closed.
   - `POST /v1/authz-policies/local-admins/grants`
     (native FastAPI for bearer-token and signed-in GitHub human-session
     callers, DB-backed policy records, apply-only `Idempotency-Key`
-    replay/conflict handling, and repeatable dry-runs)
+    replay/conflict handling, and repeatable dry-runs). New GitHub Actions grants
+    require immutable numeric `repository_id` and `repository_owner_id` selectors;
+    exact removals may omit them only to retire a legacy name-only rule.
+
+`GET /v1/service/runtime` is also readable by a principal that can administer
+authz policy, even when it lacks broader `launchplane_service.read` authority.
+That narrow exception lets the protected operator workflow bind reviewed grant
+batches to the current policy SHA and schema version before mutation.
 - Every Code local automation work-request routes:
   - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
@@ -497,8 +504,12 @@ envelopes, and signed session cookie issuance with the existing
 `HumanSessionManager`. Session read preserves the Launchplane human-session
 response shape, renews expiring signed session cookies, and returns
 `authentication_required` with the `configured` flag when no valid human session
-exists. Logout deletes the cookie-backed session when auth is configured and
-always emits the Launchplane session clearing cookie.
+exists. On hosted PostgreSQL requests, Launchplane refreshes the active DB-backed
+policy before authorization and re-evaluates the session's human role against
+that policy. Removed humans are rejected immediately, role changes take effect
+on the request, and an email that still matches the configured bootstrap-admin
+root of trust remains admin. Logout deletes the cookie-backed session when auth
+is configured and always emits the Launchplane session clearing cookie.
 
 ### Browser Mutation Boundary
 
@@ -577,7 +588,10 @@ removal requests support `dry_run` and `apply` modes. Apply requests must includ
 an audit reason and write a new active policy record only when the policy
 changes, then immediately refresh the in-process policy used by the current
 service worker. GitHub Actions removals match complete policy rules by exact
-equality; partial selectors do not remove broader or narrower rules.
+equality; partial selectors do not remove broader or narrower rules. Changed
+policies commit through compare-and-write so concurrent requests return a
+conflict instead of silently dropping another grant, and removal refuses to
+delete the final principal that can administer Launchplane authz policy.
 Responses return record metadata, rule counts, a compact diff, and redacted audit
 metadata rather than echoing workflow refs, human logins, owner-agent subjects,
 or the full policy body.
@@ -967,6 +981,15 @@ browser session after OAuth callback and sets an `HttpOnly`, `SameSite=Lax`
 session cookie signed with `LAUNCHPLANE_SESSION_SECRET`. Sessions are backed by
 the Launchplane database when `LAUNCHPLANE_DATABASE_URL` is configured. GitHub
 access tokens stay server-side and are not exposed to the React operator UI.
+Hosted requests reload the current DB policy before authorization and re-evaluate
+the session role. OAuth organization/team claims expire for authorization after
+24 hours; the session is revoked and the operator must sign in again to refresh
+those mutable GitHub claims.
+
+Every non-health `/v1` operation documents the refresh boundary: `503` means the
+active DB policy could not be loaded, and `409` means a fenced schema exposed an
+ambiguous active-policy state. These responses occur before route-specific
+authorization or handler execution.
 
 Local terminal agents should use the dedicated terminal-agent read bearer token
 when they only need redacted Launchplane context from a trusted operator shell.
@@ -980,7 +1003,7 @@ Launchplane normalizes authenticated callers into compact subject types before
 authorization checks and audit records consume them:
 
 - `github_actions`: GitHub Actions workflow subjects from verified GitHub OIDC
-  claims.
+  claims, including the immutable numeric repository and repository-owner IDs.
 - `github_human`: browser-session humans from GitHub OAuth and Launchplane
   session cookies.
 - `terminal_agent`: read-only trusted terminal agents authenticated by the

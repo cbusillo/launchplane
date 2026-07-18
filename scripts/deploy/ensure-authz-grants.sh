@@ -1,81 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${GITHUB_REPOSITORY:?Missing GitHub repository.}"
 : "${GITHUB_SHA:?Missing GitHub SHA.}"
 
-authz_grant_mode="${LAUNCHPLANE_AUTHZ_GRANT_MODE:-apply}"
-configured_grants_only="${LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY:-false}"
+authz_grant_mode="${LAUNCHPLANE_AUTHZ_GRANT_MODE:-dry_run}"
+authz_policy_schema_version="${LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION:-}"
 authz_grant_reason="${LAUNCHPLANE_AUTHZ_GRANT_REASON:-}"
-
-case "$authz_grant_mode" in
-	dry_run | apply) ;;
-	*)
-		echo "LAUNCHPLANE_AUTHZ_GRANT_MODE must be dry_run or apply." >&2
-		exit 1
-		;;
-esac
-case "$configured_grants_only" in
-	true | false) ;;
-	*)
-		echo "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY must be true or false." >&2
-		exit 1
-		;;
-esac
-if [ "$authz_grant_mode" = "dry_run" ] && [ "$configured_grants_only" != "true" ]; then
-	echo "Dry-run authz reconciliation requires configured-only mode." >&2
-	exit 1
-fi
-if [ "$configured_grants_only" = "true" ]; then
-	if [ "$authz_grant_mode" = "apply" ] && [[ -z "${authz_grant_reason//[[:space:]]/}" ]]; then
-		echo "Configured-only authz apply requires LAUNCHPLANE_AUTHZ_GRANT_REASON." >&2
-		exit 1
-	fi
-	if [[ -z "${authz_grant_reason//[[:space:]]/}" ]]; then
-		authz_grant_reason="Grant-only workflow reviewing authz grant"
-	fi
-elif [[ -z "${authz_grant_reason//[[:space:]]/}" ]]; then
-	authz_grant_reason="Deploy workflow ensuring authz grant"
-fi
-
+authz_grant_related_issue="${LAUNCHPLANE_AUTHZ_GRANT_RELATED_ISSUE:-}"
+authz_grants_json="${LAUNCHPLANE_AUTHZ_GRANTS_JSON:-}"
 authz_grants_output_dir="${LAUNCHPLANE_AUTHZ_GRANTS_OUTPUT_DIR:-${RUNNER_TEMP:-.}/launchplane-authz-grants}"
 github_actions_grants_file="${authz_grants_output_dir}/github-actions-grants.json"
-terminal_agents_grants_file="${authz_grants_output_dir}/terminal-agents-grants.json"
-local_operators_grants_file="${authz_grants_output_dir}/local-operators-grants.json"
-local_admins_grants_file="${authz_grants_output_dir}/local-admins-grants.json"
-github_humans_grants_file="${authz_grants_output_dir}/github-humans-grants.json"
-runtime_key_safety_policy_file="${authz_grants_output_dir}/runtime-key-safety-policy.json"
-runtime_key_safety_idempotency_key=""
-configured_grants_sha256=""
+
+case "$authz_grant_mode" in
+dry_run | apply) ;;
+*)
+	echo "LAUNCHPLANE_AUTHZ_GRANT_MODE must be dry_run or apply." >&2
+	exit 1
+	;;
+esac
+case "$authz_policy_schema_version" in
+1 | 2) ;;
+*)
+	echo "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION must be 1 or 2." >&2
+	exit 1
+	;;
+esac
+if [ "$authz_grant_mode" = "apply" ] && [[ -z "${authz_grant_reason//[[:space:]]/}" ]]; then
+	echo "Authz grant apply requires LAUNCHPLANE_AUTHZ_GRANT_REASON." >&2
+	exit 1
+fi
+if [[ -z "${authz_grant_reason//[[:space:]]/}" ]]; then
+	authz_grant_reason="Review operator-supplied authz grant"
+fi
+if [[ -z "${authz_grants_json//[[:space:]]/}" ]]; then
+	echo "LAUNCHPLANE_AUTHZ_GRANTS_JSON must contain operator-supplied grants." >&2
+	exit 1
+fi
 
 mkdir -p "$authz_grants_output_dir"
-printf '[]\n' >"$github_actions_grants_file"
-printf '[]\n' >"$terminal_agents_grants_file"
-printf '[]\n' >"$local_operators_grants_file"
-printf '[]\n' >"$local_admins_grants_file"
-printf '[]\n' >"$github_humans_grants_file"
-rm -f "$runtime_key_safety_policy_file"
 
-require_non_empty() {
-	local value="$1"
-	local field_name="$2"
-	if [[ -z "${value//[[:space:]]/}" ]]; then
-		echo "Configured authz grant is missing ${field_name}." >&2
-		return 1
+write_output() {
+	local output_name="$1"
+	local output_value="$2"
+	if [ -n "${GITHUB_OUTPUT:-}" ]; then
+		printf '%s=%s\n' "$output_name" "$output_value" >>"$GITHUB_OUTPUT"
 	fi
-}
-
-preflight_owner_authz_env() {
-	require_non_empty "${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-}" "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT"
-	require_non_empty "${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-}" "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL"
-	require_non_empty "${LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT:-}" "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT"
-	require_non_empty "${LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL:-}" "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL"
-	require_non_empty "${LAUNCHPLANE_LOCAL_ADMIN_SUBJECT:-}" "LAUNCHPLANE_LOCAL_ADMIN_SUBJECT"
-	require_non_empty "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL:-}" "LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL"
-}
-
-slugify() {
-	printf '%s' "$1" | tr -c '[:alnum:]_.-' '-'
 }
 
 sha256_stdin() {
@@ -88,871 +57,197 @@ sha256_stdin() {
 	fi
 }
 
-append_payload() {
-	local payload_file="$1"
-	local request_payload="$2"
-	local temporary_file
-
-	temporary_file="$(mktemp)"
-	jq --argjson request_payload "$request_payload" '. + [$request_payload]' \
-		"$payload_file" >"$temporary_file"
-	mv "$temporary_file" "$payload_file"
-}
-
-write_output() {
-	local output_name="$1"
-	local output_value="$2"
-
-	if [ -n "${GITHUB_OUTPUT:-}" ]; then
-		printf '%s=%s\n' "$output_name" "$output_value" >>"$GITHUB_OUTPUT"
-	fi
-}
-
-write_payload() {
-	local route_path="$1"
-	local idempotency_key="$2"
-	local request_payload="$3"
-	local _failure_message="${4:-}"
-
-	case "$route_path" in
-		/v1/authz-policies/github-actions/grants)
-			append_payload "$github_actions_grants_file" "$request_payload"
-			;;
-		/v1/authz-policies/terminal-agents/grants)
-			append_payload "$terminal_agents_grants_file" "$request_payload"
-			;;
-		/v1/authz-policies/local-operators/grants)
-			append_payload "$local_operators_grants_file" "$request_payload"
-			;;
-		/v1/authz-policies/local-admins/grants)
-			append_payload "$local_admins_grants_file" "$request_payload"
-			;;
-		/v1/authz-policies/github-humans/grants)
-			append_payload "$github_humans_grants_file" "$request_payload"
-			;;
-		/v1/runtime-key-safety/policies/apply)
-			printf '%s\n' "$request_payload" >"$runtime_key_safety_policy_file"
-			runtime_key_safety_idempotency_key="$idempotency_key"
-			;;
-		*)
-			echo "Unsupported Launchplane authz payload route ${route_path}." >&2
-			return 1
-			;;
-	esac
-}
-
-post_grant() {
-	local repository="$1"
-	local workflow_file="$2"
-	local product_name="$3"
-	local context_name="$4"
-	local action_name="$5"
-	local source_label="$6"
-	local idempotency_suffix="$7"
-	local event_name="${8:-workflow_dispatch}"
-	local workflow_ref_suffix="${9:-refs/heads/main}"
-	local job_workflow_ref="${10:-}"
-	local request_payload
-
-	request_payload="$({
-		jq -n \
-			--arg repository "$repository" \
-			--arg workflow_ref "${repository}/.github/workflows/${workflow_file}@${workflow_ref_suffix}" \
-			--arg event_name "$event_name" \
-			--arg product_name "$product_name" \
-			--arg context_name "$context_name" \
-			--arg action_name "$action_name" \
-			--arg source_label "$source_label" \
-			--arg mode "$authz_grant_mode" \
-			--arg reason "$authz_grant_reason" \
-			--arg job_workflow_ref "$job_workflow_ref" \
-			'{
-        schema_version: 1,
-        product: "launchplane",
-        mode: $mode,
-        reason: ($reason + " " + $source_label),
-        related_issue: "cbusillo/launchplane#83",
-        grant: {
-          repository: $repository,
-          workflow_refs: [$workflow_ref],
-          job_workflow_refs: (if $job_workflow_ref == "" then [] else [$job_workflow_ref] end),
-          event_names: [$event_name],
-          products: [$product_name],
-          contexts: [$context_name],
-          actions: [$action_name],
-          source_label: $source_label
-        }
-      }'
-	})"
-	write_payload \
-		/v1/authz-policies/github-actions/grants \
-		"launchplane-authz-grant:${idempotency_suffix}:${GITHUB_SHA}" \
-		"$request_payload" \
-		"Launchplane authz grant request failed with"
-}
-
-post_terminal_agent_grant() {
-	local product_name="$1"
-	local context_name="$2"
-	local action_name="$3"
-	local source_label="$4"
-	local idempotency_suffix="$5"
-	local terminal_agent_subject="${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-}"
-	local terminal_agent_token_label="${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-}"
-	local request_payload
-
-	require_non_empty "$terminal_agent_subject" "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT"
-	require_non_empty "$terminal_agent_token_label" "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL"
-
-	request_payload="$({
-		jq -n \
-			--arg product_name "$product_name" \
-			--arg context_name "$context_name" \
-			--arg action_name "$action_name" \
-			--arg source_label "$source_label" \
-			--arg terminal_agent_subject "$terminal_agent_subject" \
-			--arg terminal_agent_token_label "$terminal_agent_token_label" \
-			'{
-        schema_version: 1,
-        product: "launchplane",
-        mode: "apply",
-        reason: ("Deploy workflow ensuring terminal-agent authz grant " + $source_label),
-        related_issue: "cbusillo/launchplane#426",
-        grant: {
-          subjects: [$terminal_agent_subject],
-          token_labels: [$terminal_agent_token_label],
-          products: [$product_name],
-          contexts: [$context_name],
-          actions: [$action_name],
-          source_label: $source_label
-        }
-      }'
-	})"
-	write_payload \
-		/v1/authz-policies/terminal-agents/grants \
-		"launchplane-terminal-agent-authz-grant:${idempotency_suffix}:${GITHUB_SHA}" \
-		"$request_payload" \
-		"Launchplane terminal-agent authz grant request failed with"
-}
-
-post_local_owner_grant() {
-	local principal="$1"
-	local product_name="$2"
-	local context_name="$3"
-	local action_name="$4"
-	local source_label="$5"
-	local idempotency_suffix="$6"
-	local subject_env_key token_label_env_key route_path subject token_label
-	local request_payload
-
-	if [ "$principal" = "local-admin" ]; then
-		subject_env_key="LAUNCHPLANE_LOCAL_ADMIN_SUBJECT"
-		token_label_env_key="LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL"
-		route_path="/v1/authz-policies/local-admins/grants"
-	elif [ "$principal" = "local-operator" ]; then
-		subject_env_key="LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT"
-		token_label_env_key="LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL"
-		route_path="/v1/authz-policies/local-operators/grants"
-	else
-		echo "Unsupported local owner grant principal ${principal}." >&2
-		return 1
-	fi
-	subject="${!subject_env_key:-}"
-	token_label="${!token_label_env_key:-}"
-	require_non_empty "$subject" "$subject_env_key"
-	require_non_empty "$token_label" "$token_label_env_key"
-
-	request_payload="$({
-		jq -n \
-			--arg product_name "$product_name" \
-			--arg context_name "$context_name" \
-			--arg action_name "$action_name" \
-			--arg source_label "$source_label" \
-			--arg subject "$subject" \
-			--arg token_label "$token_label" \
-			--arg principal "$principal" \
-			'{
-        schema_version: 1,
-        product: "launchplane",
-        mode: "apply",
-        reason: ("Deploy workflow ensuring " + $principal + " authz grant " + $source_label),
-        related_issue: "cbusillo/launchplane#929",
-        grant: {
-          subjects: [$subject],
-          token_labels: [$token_label],
-          products: [$product_name],
-          contexts: [$context_name],
-          actions: [$action_name],
-          source_label: $source_label
-        }
-      }'
-	})"
-	write_payload \
-		"$route_path" \
-		"launchplane-${principal}-authz-grant:${idempotency_suffix}:${GITHUB_SHA}" \
-		"$request_payload" \
-		"Launchplane ${principal} authz grant request failed with"
-}
-
-local_operator_product_config_scopes_json() {
-	if [ -n "${LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON:-}" ]; then
-		jq -c \
-			'if type != "array" then error("LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON must be a JSON array") else . end
-       | map({product: (.product // ""), context: (.context // "")})
-       | map(select((.product | length) > 0 and (.context | length) > 0))
-       | unique_by(.product, .context)' \
-			<<<"${LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON}" ||
-			return 1
-		return 0
-	fi
-
-	printf '[]\n'
-}
-
-local_operator_private_health_endpoint_scopes_json() {
-	if [ -n "${LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON:-}" ]; then
-		jq -c \
-			'if type != "array" then error("LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON must be a JSON array") else . end
-       | map({product: (.product // ""), context: (.context // "")})
-       | map(select((.product | length) > 0 and (.context | length) > 0))
-       | if any(.[]; (.product | test("[\\*\\?\\[]")) or (.context | test("[\\*\\?\\[]"))) then error("LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON must use explicit product/context values") else . end
-       | unique_by(.product, .context)' \
-			<<<"${LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON}" ||
-			return 1
-		return 0
-	fi
-
-	printf '[]\n'
-}
-
-post_scoped_local_operator_grants() {
-	local action_name="$1"
-	local source_label_prefix="$2"
-	local idempotency_prefix="$3"
-	local scopes_json="$4"
-	local missing_message="$5"
-	local scope_count product_name context_name scope_suffix
-
-	scope_count="$(jq 'length' <<<"$scopes_json")"
-	if [ "$scope_count" = "0" ]; then
-		echo "$missing_message"
-		return 0
-	fi
-
-	jq -c '.[]' <<<"$scopes_json" | while IFS= read -r scope_json; do
-		product_name="$(jq -r '.product' <<<"$scope_json")"
-		context_name="$(jq -r '.context' <<<"$scope_json")"
-		scope_suffix="$(slugify "${product_name}-${context_name}")"
-		post_local_owner_grant \
-			local-operator \
-			"$product_name" \
-			"$context_name" \
-			"$action_name" \
-			"${source_label_prefix}-${scope_suffix}" \
-			"${idempotency_prefix}-${scope_suffix}"
-	done
-}
-
-post_local_operator_product_config_grants() {
-	local action_name="$1"
-	local source_label_prefix="$2"
-	local idempotency_prefix="$3"
-	local scopes_json
-
-	scopes_json="$(local_operator_product_config_scopes_json)"
-	post_scoped_local_operator_grants \
-		"$action_name" \
-		"$source_label_prefix" \
-		"$idempotency_prefix" \
-		"$scopes_json" \
-		"LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON is unset or empty; skipping local-operator ${action_name} grant reconciliation."
-}
-
-post_local_operator_private_health_endpoint_grants() {
-	local action_name="$1"
-	local source_label_prefix="$2"
-	local idempotency_prefix="$3"
-	local scopes_json
-
-	scopes_json="$(local_operator_private_health_endpoint_scopes_json)"
-	post_scoped_local_operator_grants \
-		"$action_name" \
-		"$source_label_prefix" \
-		"$idempotency_prefix" \
-		"$scopes_json" \
-		"LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON is unset or empty; skipping local-operator ${action_name} grant reconciliation."
-}
-
-ingress_canary_route_scopes_json() {
-	if [ -n "${LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON:-}" ]; then
-		jq -c \
-			'if type != "array" then error("LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON must be a JSON array") else . end
-       | map({product: (.product // ""), context: (.context // "")})
-       | map(select((.product | length) > 0 and (.context | length) > 0))
-       | unique_by(.product, .context)' \
-			<<<"${LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON}" ||
-			return 1
-		return 0
-	fi
-
-	jq -c -n '[{product: "launchplane", context: "launchplane"}]'
-}
-
-post_ingress_canary_route_apply_workflow_grants() {
-	local scopes_json scope_count product_name context_name scope_suffix
-
-	scopes_json="$(ingress_canary_route_scopes_json)"
-	scope_count="$(jq 'length' <<<"$scopes_json")"
-	if [ "$scope_count" = "0" ]; then
-		echo "LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON resolved to no scopes; skipping ingress canary workflow grant reconciliation."
-		return 0
-	fi
-
-	jq -c '.[]' <<<"$scopes_json" | while IFS= read -r scope_json; do
-		product_name="$(jq -r '.product' <<<"$scope_json")"
-		context_name="$(jq -r '.context' <<<"$scope_json")"
-		scope_suffix="$(slugify "${product_name}-${context_name}")"
-		post_grant \
-			"$GITHUB_REPOSITORY" \
-			ingress-route-canary-apply.yml \
-			"$product_name" \
-			"$context_name" \
-			ingress_route.apply \
-			"deploy:ingress-route-canary-apply-workflow-${scope_suffix}" \
-			"ingress-route-canary-apply-workflow-${scope_suffix}"
-	done
-}
-
-post_product_config_human_grant() {
-	local action_name="$1"
-	local source_label="$2"
-	local idempotency_suffix="$3"
-	local operator_logins="${LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS:-}"
-	local operator_products="${LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS:-}"
-	local operator_contexts="${LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS:-}"
-	local request_payload
-
-	if [ -z "$operator_logins" ] || [ -z "$operator_products" ] || [ -z "$operator_contexts" ]; then
-		echo "Skipping product-config human grant ${source_label}; operator login/product/context variables are not fully configured."
-		return 0
-	fi
-
-	request_payload="$({
-		jq -n \
-			--arg logins "$operator_logins" \
-			--arg products "$operator_products" \
-			--arg contexts "$operator_contexts" \
-			--arg action_name "$action_name" \
-			--arg source_label "$source_label" \
-			'def csv_list($value):
-        $value
-        | split(",")
-        | map(gsub("^\\s+|\\s+$"; ""))
-        | map(select(length > 0));
-      {
-        schema_version: 1,
-        product: "launchplane",
-        mode: "apply",
-        reason: ("Deploy workflow ensuring product-config human authz grant " + $source_label),
-        related_issue: "cbusillo/launchplane#521",
-        grant: {
-          logins: csv_list($logins),
-          roles: ["admin"],
-          products: csv_list($products),
-          contexts: csv_list($contexts),
-          actions: [$action_name],
-          source_label: $source_label
-        }
-      }'
-	})"
-	write_payload \
-		/v1/authz-policies/github-humans/grants \
-		"launchplane-product-config-human-grant:${idempotency_suffix}:${GITHUB_SHA}" \
-		"$request_payload" \
-		"Launchplane product-config human authz grant request failed with"
-}
-
-configured_github_action_grants_json() {
-	if [ -z "${LAUNCHPLANE_AUTHZ_GRANTS_JSON:-}" ]; then
-		printf '[]\n'
-		return 0
-	fi
-
-	jq -c \
-		'if type != "array" then error("LAUNCHPLANE_AUTHZ_GRANTS_JSON must be a JSON array") else . end
-     | map({
+canonical_grants="$({
+	jq -cS --argjson schema_version "$authz_policy_schema_version" '
+    def has_glob:
+      contains("*") or contains("?") or contains("[");
+    def trimmed:
+      gsub("^[[:space:]]+|[[:space:]]+$"; "");
+    def allowed_keys:
+      [
+        "repository",
+        "repository_id",
+        "repository_owner_id",
+        "workflow_file",
+        "product",
+        "context",
+        "action",
+        "source_label",
+        "event_name",
+        "workflow_ref_suffix",
+        "job_workflow_ref",
+        "environment",
+        "instance"
+      ];
+    if type != "array" or length == 0 then
+      error("LAUNCHPLANE_AUTHZ_GRANTS_JSON must be a non-empty JSON array")
+    else . end
+    | map(
+      if type != "object" then
+        error("Each configured authz grant must be a JSON object")
+      elif ((keys_unsorted - allowed_keys) | length) > 0 then
+        error("Configured authz grants contain unsupported fields")
+      else . end
+      | {
         repository: (.repository // ""),
+        repository_id: (.repository_id // ""),
+        repository_owner_id: (.repository_owner_id // ""),
         workflow_file: (.workflow_file // ""),
         product: (.product // ""),
         context: (.context // ""),
         action: (.action // ""),
         source_label: (.source_label // ""),
-        idempotency_suffix: (.idempotency_suffix // .source_label // ""),
         event_name: (.event_name // "workflow_dispatch"),
         workflow_ref_suffix: (.workflow_ref_suffix // "refs/heads/main"),
-        job_workflow_ref: (.job_workflow_ref // "")
-      })' \
-		<<<"${LAUNCHPLANE_AUTHZ_GRANTS_JSON}" ||
-		return 1
-}
+        job_workflow_ref: (.job_workflow_ref // ""),
+        environment: (.environment // ""),
+        instance: (.instance // "")
+      }
+    )
+    | if any(.[];
+        ([
+          .repository,
+          .repository_id,
+          .repository_owner_id,
+          .workflow_file,
+          .product,
+          .context,
+          .action,
+          .source_label,
+          .event_name,
+          .workflow_ref_suffix,
+          .job_workflow_ref,
+          .environment,
+          .instance
+        ] | any(.[]; type != "string"))
+      ) then
+        error("Configured authz grant fields must be strings")
+      else . end
+    | map(
+        .repository |= trimmed
+        | .repository_id |= trimmed
+        | .repository_owner_id |= trimmed
+        | .workflow_file |= trimmed
+        | .product |= trimmed
+        | .context |= trimmed
+        | .action |= trimmed
+        | .source_label |= trimmed
+        | .event_name |= trimmed
+        | .workflow_ref_suffix |= trimmed
+        | .job_workflow_ref |= trimmed
+        | .environment |= trimmed
+        | .instance |= trimmed
+      )
+    | if any(.[];
+        (.repository | length) == 0 or
+        (.repository_id | test("^[0-9]+$") | not) or
+        (.repository_owner_id | test("^[0-9]+$") | not) or
+        (.workflow_file | length) == 0 or
+        (.product | length) == 0 or
+        (.context | length) == 0 or
+        (.action | length) == 0 or
+        (.source_label | length) == 0 or
+        (.event_name | length) == 0 or
+        (.workflow_ref_suffix | length) == 0
+      ) then
+        error("Each configured authz grant must include repository, numeric-string repository_id and repository_owner_id, workflow_file, product, context, action, source_label, event_name, and workflow_ref_suffix")
+      elif any(.[];
+        ([
+          .repository,
+          .repository_id,
+          .repository_owner_id,
+          .workflow_file,
+          .product,
+          .context,
+          .action,
+          .source_label,
+          .event_name,
+          .workflow_ref_suffix,
+          .job_workflow_ref,
+          .environment,
+          .instance
+        ] | any(.[]; test("[[:cntrl:]]"))) or
+        (.repository | test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$") | not) or
+        (.workflow_file | test("^[A-Za-z0-9_.-]+\\.ya?ml$") | not) or
+        ([
+          .repository,
+          .workflow_file,
+          .product,
+          .context,
+          .action,
+          .event_name,
+          .workflow_ref_suffix,
+          .job_workflow_ref,
+          .environment,
+          .instance
+        ] | any(.[]; has_glob))
+      ) then
+        error("Configured authz grants must use printable exact repository, workflow, event, product, context, action, ref, and environment selectors without glob syntax")
+      else . end
+    | if $schema_version == 1 and any(.[]; .instance != "") then
+        error("Schema-v1 configured authz grants cannot declare instance")
+      else . end
+    | sort_by([
+        .repository,
+        .repository_id,
+        .repository_owner_id,
+        .workflow_file,
+        .product,
+        .context,
+        .action,
+        .source_label,
+        .event_name,
+        .workflow_ref_suffix,
+        .job_workflow_ref,
+        .environment,
+        .instance
+      ])
+  ' <<<"$authz_grants_json"
+})"
+canonical_review_set="$(
+	jq -cnS \
+		--argjson schema_version "$authz_policy_schema_version" \
+		--argjson grants "$canonical_grants" \
+		'{schema_version: $schema_version, grants: $grants}'
+)"
+configured_grants_sha256="$(printf '%s' "$canonical_review_set" | sha256_stdin)"
 
-configured_github_action_grants_sha256() {
-	configured_github_action_grants_json |
-		jq -cS 'sort_by([
-      .repository,
-      .workflow_file,
-      .product,
-      .context,
-      .action,
-      .source_label,
-      .idempotency_suffix,
-      .event_name,
-      .workflow_ref_suffix,
-      .job_workflow_ref
-    ])' |
-		sha256_stdin
-}
-
-post_configured_github_action_grants() {
-	local grants_json grant_count grant_json repository workflow_file product_name
-	local context_name action_name source_label idempotency_suffix event_name
-	local workflow_ref_suffix job_workflow_ref
-
-	grants_json="$(configured_github_action_grants_json)"
-	grant_count="$(jq 'length' <<<"$grants_json")"
-	if [ "$grant_count" = "0" ]; then
-		echo "LAUNCHPLANE_AUTHZ_GRANTS_JSON is unset or empty; skipping configured GitHub Actions grant reconciliation."
-		return 0
-	fi
-
-	jq -c '.[]' <<<"$grants_json" | while IFS= read -r grant_json; do
-		repository="$(jq -r '.repository' <<<"$grant_json")"
-		workflow_file="$(jq -r '.workflow_file' <<<"$grant_json")"
-		product_name="$(jq -r '.product' <<<"$grant_json")"
-		context_name="$(jq -r '.context' <<<"$grant_json")"
-		action_name="$(jq -r '.action' <<<"$grant_json")"
-		source_label="$(jq -r '.source_label' <<<"$grant_json")"
-		idempotency_suffix="$(jq -r '.idempotency_suffix' <<<"$grant_json")"
-		event_name="$(jq -r '.event_name' <<<"$grant_json")"
-		workflow_ref_suffix="$(jq -r '.workflow_ref_suffix' <<<"$grant_json")"
-		job_workflow_ref="$(jq -r '.job_workflow_ref' <<<"$grant_json")"
-
-		require_non_empty "$repository" repository
-		require_non_empty "$workflow_file" workflow_file
-		require_non_empty "$product_name" product
-		require_non_empty "$context_name" context
-		require_non_empty "$action_name" action
-		require_non_empty "$source_label" source_label
-		require_non_empty "$event_name" event_name
-		require_non_empty "$workflow_ref_suffix" workflow_ref_suffix
-
-		post_grant \
-			"$repository" \
-			"$workflow_file" \
-			"$product_name" \
-			"$context_name" \
-			"$action_name" \
-			"$source_label" \
-			"$idempotency_suffix" \
-			"$event_name" \
-			"$workflow_ref_suffix" \
-			"$job_workflow_ref"
-	done
-}
-
-post_launchplane_service_grant() {
-	local workflow_file="$1"
-	local action_name="$2"
-	local source_label="$3"
-	local idempotency_suffix="$4"
-	local event_name="${5:-workflow_dispatch}"
-	post_grant \
-		"$GITHUB_REPOSITORY" \
-		"$workflow_file" \
-		launchplane \
-		launchplane \
-		"$action_name" \
-		"$source_label" \
-		"$idempotency_suffix" \
-		"$event_name"
-}
-
-runtime_key_safety_rules_json() {
-	if [ -z "${LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON:-}" ]; then
-		printf '[]\n'
-		return 0
-	fi
-
-	jq -c \
-		'if type != "array" then error("LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON must be a JSON array") else . end
-     | if any(.[]; ((.binding_key // "") | length) == 0 or ((.secret_class // "") | length) == 0)
-       then error("Each runtime key-safety rule must include binding_key and secret_class")
-       else .
-       end
-     | if any(.[]; (.secret_class as $class | ["prod_only", "testing", "preview", "non_prod", "shared_safe"] | index($class) | not))
-       then error("Runtime key-safety secret_class must be one of prod_only, testing, preview, non_prod, shared_safe")
-       else .
-       end
-     | map({
-        binding_key: (.binding_key // ""),
-        secret_class: (.secret_class // ""),
-        allowed_contexts: (.allowed_contexts // []),
-        allowed_instances: (.allowed_instances // []),
-        allowed_instance_patterns: (.allowed_instance_patterns // []),
-        allowed_targets: (.allowed_targets // []),
-        description: (.description // "")
-      })' \
-		<<<"${LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON}" ||
-		return 1
-}
-
-post_runtime_key_safety_rules() {
-	local rules_json rule_count request_payload payload_sha256
-
-	rules_json="$(runtime_key_safety_rules_json)"
-	rule_count="$(jq 'length' <<<"$rules_json")"
-	if [ "$rule_count" = "0" ]; then
-		echo "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON is unset or empty; skipping runtime key-safety policy reconciliation."
-		return 0
-	fi
-
-	request_payload="$({
-		jq -n \
-			--argjson rules "$rules_json" \
-			'{
-        schema_version: 1,
+jq -c \
+	--argjson schema_version "$authz_policy_schema_version" \
+	--arg mode "$authz_grant_mode" \
+	--arg reason "$authz_grant_reason" \
+	--arg related_issue "$authz_grant_related_issue" \
+	'[
+    .[]
+    | {
+        schema_version: $schema_version,
         product: "launchplane",
-        source_label: "deploy:runtime-key-safety-rules",
-        rules: $rules
-      }'
-	})"
-	payload_sha256="$(printf '%s' "$request_payload" | sha256_stdin)"
-	write_payload \
-		/v1/runtime-key-safety/policies/apply \
-		"launchplane-runtime-key-safety-rules:${GITHUB_SHA}:${payload_sha256}" \
-		"$request_payload" \
-		"Launchplane runtime key-safety policy request failed with"
-}
+        mode: $mode,
+        reason: ($reason + " " + .source_label),
+        related_issue: $related_issue,
+        grant: {
+          repository: .repository,
+          repository_id: .repository_id,
+          repository_owner_id: .repository_owner_id,
+          workflow_refs: [(.repository + "/.github/workflows/" + .workflow_file + "@" + .workflow_ref_suffix)],
+          job_workflow_refs: (if .job_workflow_ref == "" then [] else [.job_workflow_ref] end),
+          event_names: [.event_name],
+          environments: (if .environment == "" then [] else [.environment] end),
+          products: [.product],
+          contexts: [.context],
+          instances: (if .instance == "" then [] else [.instance] end),
+          actions: [.action],
+          source_label: .source_label
+        }
+      }
+  ]' <<<"$canonical_grants" >"$github_actions_grants_file"
 
-if [ "$configured_grants_only" = "true" ]; then
-	post_configured_github_action_grants
-	configured_grants_sha256="$(configured_github_action_grants_sha256)"
-else
-	preflight_owner_authz_env
-
-post_launchplane_service_grant \
-	public-ingress-monitor.yml \
-	public_ingress_monitor.run_once \
-	deploy:public-ingress-monitor-grant \
-	public-ingress-monitor \
-	schedule
-post_launchplane_service_grant \
-	public-ingress-monitor.yml \
-	public_ingress_monitor.run_once \
-	deploy:public-ingress-monitor-manual-grant \
-	public-ingress-monitor-manual \
-	workflow_dispatch
-
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	runner-host-hygiene.yml \
-	launchplane \
-	launchplane \
-	runner_host_hygiene_audit.write \
-	deploy:runner-host-hygiene-audit-grant \
-	runner-host-hygiene-audit
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	runner-lane-registration.yml \
-	launchplane \
-	launchplane \
-	runner_lane_registration_audit.write \
-	deploy:runner-lane-registration-audit-grant \
-	runner-lane-registration-audit
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	work-graph-snapshot-validate.yml \
-	launchplane \
-	launchplane \
-	work_graph.rank \
-	deploy:work-graph-snapshot-validate-grant \
-	work-graph-snapshot-validate
-post_product_config_human_grant \
-	work_graph.issue_inbox.reconcile \
-	deploy:work-graph-issue-inbox-human-reconcile-grant \
-	work-graph-issue-inbox-human-reconcile
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	merge-train-runner.yml \
-	launchplane \
-	launchplane \
-	merge_train.policy_targets \
-	deploy:merge-train-runner-policy-targets-schedule-grant \
-	merge-train-runner-policy-targets-schedule \
-	schedule
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	merge-train-runner.yml \
-	launchplane \
-	launchplane \
-	merge_train.run_once \
-	deploy:merge-train-runner-manual-grant \
-	merge-train-runner-manual
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	merge-train-runner.yml \
-	launchplane \
-	launchplane \
-	merge_train.run_once \
-	deploy:merge-train-runner-schedule-grant \
-	merge-train-runner-schedule \
-	schedule
-post_launchplane_service_grant \
-	deploy-launchplane.yml \
-	authz_policy_grant.write \
-	deploy:authz-policy-grant-maintenance-dispatch \
-	authz-policy-grant-maintenance-dispatch
-post_launchplane_service_grant \
-	deploy-launchplane.yml \
-	authz_policy_grant.write \
-	deploy:authz-policy-grant-maintenance-run \
-	authz-policy-grant-maintenance-run \
-	workflow_run
-post_launchplane_service_grant \
-	deploy-launchplane.yml \
-	runtime_key_safety.write \
-	deploy:runtime-key-safety-policy-grant \
-	runtime-key-safety-policy
-post_launchplane_service_grant \
-	deploy-launchplane.yml \
-	runtime_key_safety.write \
-	deploy:runtime-key-safety-policy-run-grant \
-	runtime-key-safety-policy-run \
-	workflow_run
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	merge-train-policy-import.yml \
-	launchplane \
-	launchplane \
-	merge_train.policy_import \
-	deploy:merge-train-policy-import-grant \
-	merge-train-policy-import
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	provider-target-operations.yml \
-	launchplane \
-	launchplane \
-	provider_target.audit \
-	deploy:provider-target-operations-audit-grant \
-	provider-target-operations-audit
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	provider-target-operations.yml \
-	launchplane \
-	launchplane \
-	provider_target.backfill \
-	deploy:provider-target-operations-backfill-grant \
-	provider-target-operations-backfill
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	dokploy-target-inspect.yml \
-	launchplane \
-	launchplane \
-	dokploy_target.inspect \
-	deploy:dokploy-target-inspect-grant \
-	dokploy-target-inspect
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	dokploy-target-setup.yml \
-	launchplane \
-	launchplane \
-	dokploy_target.setup \
-	deploy:dokploy-target-setup-grant \
-	dokploy-target-setup
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	product-onboarding.yml \
-	launchplane \
-	launchplane \
-	product_onboarding.apply \
-	deploy:product-onboarding-grant \
-	product-onboarding
-post_launchplane_service_grant \
-	edge-endpoint-apply.yml \
-	edge_endpoint.apply \
-	deploy:edge-endpoint-apply-workflow-grant \
-	edge-endpoint-apply-workflow
-post_launchplane_service_grant \
-	edge-endpoint-apply.yml \
-	edge_endpoint.read \
-	deploy:edge-endpoint-read-workflow-grant \
-	edge-endpoint-read-workflow
-post_ingress_canary_route_apply_workflow_grants
-post_terminal_agent_grant \
-	launchplane \
-	launchplane \
-	product_profile.read \
-	deploy:terminal-agent-product-profile-read-grant \
-	terminal-agent-product-profile-read
-post_terminal_agent_grant \
-	launchplane \
-	launchplane \
-	product_environment.read \
-	deploy:terminal-agent-agent-context-product-read-grant \
-	terminal-agent-agent-context-product-read
-post_terminal_agent_grant \
-	launchplane \
-	launchplane \
-	work_graph.rank \
-	deploy:terminal-agent-agent-context-work-graph-grant \
-	terminal-agent-agent-context-work-graph
-post_terminal_agent_grant \
-	launchplane \
-	launchplane \
-	every_code_work_request.read \
-	deploy:terminal-agent-agent-context-every-code-grant \
-	terminal-agent-agent-context-every-code
-post_terminal_agent_grant \
-	launchplane \
-	launchplane \
-	every_code_preview_gate.read \
-	deploy:terminal-agent-agent-context-preview-grant \
-	terminal-agent-agent-context-preview
-post_local_owner_grant \
-	local-operator \
-	launchplane \
-	launchplane \
-	launchplane_service.read \
-	deploy:local-operator-launchplane-service-read-grant \
-	local-operator-launchplane-service-read
-post_local_owner_grant \
-	local-operator \
-	launchplane \
-	launchplane \
-	launchplane_service.reconcile_odoo_workers \
-	deploy:local-operator-launchplane-service-reconcile-odoo-workers-grant \
-	local-operator-launchplane-service-reconcile-odoo-workers
-post_local_owner_grant \
-	local-operator \
-	launchplane \
-	launchplane \
-	merge_train.policy_targets \
-	deploy:local-operator-merge-train-policy-targets-grant \
-	local-operator-merge-train-policy-targets
-post_local_owner_grant \
-	local-operator \
-	launchplane \
-	launchplane \
-	work_graph.issue_inbox.reconcile \
-	deploy:local-operator-work-graph-issue-inbox-reconcile-grant \
-	local-operator-work-graph-issue-inbox-reconcile
-post_local_owner_grant \
-	local-operator \
-	launchplane \
-	launchplane \
-	public_ingress_monitor.run_once \
-	deploy:local-operator-public-ingress-monitor-run-once-grant \
-	local-operator-public-ingress-monitor-run-once
-post_local_owner_grant \
-	local-operator \
-	launchplane \
-	launchplane \
-	public_ingress_notification_policy.apply \
-	deploy:local-operator-public-ingress-notification-policy-grant \
-	local-operator-public-ingress-notification-policy
-post_local_owner_grant \
-	local-operator \
-	launchplane \
-	launchplane \
-	edge_endpoint.apply \
-	deploy:local-operator-edge-endpoint-apply-grant \
-	local-operator-edge-endpoint-apply
-post_local_owner_grant \
-	local-operator \
-	launchplane \
-	launchplane \
-	edge_endpoint.read \
-	deploy:local-operator-edge-endpoint-read-grant \
-	local-operator-edge-endpoint-read
-post_local_operator_private_health_endpoint_grants \
-	private_health_endpoint.read \
-	deploy:local-operator-private-health-endpoint-read-grant \
-	local-operator-private-health-endpoint-read
-post_local_operator_private_health_endpoint_grants \
-	private_health_endpoint.apply \
-	deploy:local-operator-private-health-endpoint-apply-grant \
-	local-operator-private-health-endpoint-apply
-post_local_owner_grant \
-	local-operator \
-	launchplane \
-	launchplane \
-	ingress_canary_route.apply \
-	deploy:local-operator-ingress-canary-route-apply-grant \
-	local-operator-ingress-canary-route-apply
-post_local_owner_grant \
-	local-operator \
-	launchplane \
-	launchplane \
-	ingress_canary_route.read \
-	deploy:local-operator-ingress-canary-route-read-grant \
-	local-operator-ingress-canary-route-read
-post_local_operator_product_config_grants \
-	product_config.plan \
-	deploy:local-operator-product-config-plan-grant \
-	local-operator-product-config-plan
-post_local_operator_product_config_grants \
-	product_config.apply \
-	deploy:local-operator-product-config-apply-grant \
-	local-operator-product-config-apply
-post_local_owner_grant \
-	local-admin \
-	launchplane \
-	launchplane \
-	launchplane_service_deploy.execute \
-	deploy:local-admin-self-deploy-grant \
-	local-admin-self-deploy
-post_product_config_human_grant \
-	product_config.plan \
-	deploy:product-config-human-plan-grant \
-	product-config-human-plan
-post_product_config_human_grant \
-	product_config.apply \
-	deploy:product-config-human-apply-grant \
-	product-config-human-apply
-post_configured_github_action_grants
-post_runtime_key_safety_rules
-fi
-
-github_actions_grant_count="$(jq 'length' "$github_actions_grants_file")"
-terminal_agents_grant_count="$(jq 'length' "$terminal_agents_grants_file")"
-local_operators_grant_count="$(jq 'length' "$local_operators_grants_file")"
-local_admins_grant_count="$(jq 'length' "$local_admins_grants_file")"
-github_humans_grant_count="$(jq 'length' "$github_humans_grants_file")"
-
-if [ "$configured_grants_only" = "true" ] && [ "$github_actions_grant_count" = "0" ]; then
-	echo "Configured-only authz reconciliation requires at least one GitHub Actions grant." >&2
-	exit 1
-fi
-
+grant_count="$(jq 'length' "$github_actions_grants_file")"
 write_output authz_grants_output_dir "$authz_grants_output_dir"
 write_output github_actions_grants_file "$github_actions_grants_file"
-write_output github_actions_grant_count "$github_actions_grant_count"
-write_output has_github_actions_grants "$([ "$github_actions_grant_count" -gt 0 ] && echo true || echo false)"
+write_output github_actions_grant_count "$grant_count"
+write_output has_github_actions_grants true
 write_output configured_grants_sha256 "$configured_grants_sha256"
-write_output terminal_agents_grants_file "$terminal_agents_grants_file"
-write_output terminal_agents_grant_count "$terminal_agents_grant_count"
-write_output has_terminal_agents_grants "$([ "$terminal_agents_grant_count" -gt 0 ] && echo true || echo false)"
-write_output local_operators_grants_file "$local_operators_grants_file"
-write_output local_operators_grant_count "$local_operators_grant_count"
-write_output has_local_operators_grants "$([ "$local_operators_grant_count" -gt 0 ] && echo true || echo false)"
-write_output local_admins_grants_file "$local_admins_grants_file"
-write_output local_admins_grant_count "$local_admins_grant_count"
-write_output has_local_admins_grants "$([ "$local_admins_grant_count" -gt 0 ] && echo true || echo false)"
-write_output github_humans_grants_file "$github_humans_grants_file"
-write_output github_humans_grant_count "$github_humans_grant_count"
-write_output has_github_humans_grants "$([ "$github_humans_grant_count" -gt 0 ] && echo true || echo false)"
-write_output runtime_key_safety_policy_file "$runtime_key_safety_policy_file"
-write_output runtime_key_safety_idempotency_key "$runtime_key_safety_idempotency_key"
-write_output has_runtime_key_safety_policy "$([ -f "$runtime_key_safety_policy_file" ] && echo true || echo false)"
+write_output authz_policy_schema_version "$authz_policy_schema_version"
 
-echo "Rendered Launchplane authz grant payloads: github-actions=${github_actions_grant_count} terminal-agents=${terminal_agents_grant_count} local-operators=${local_operators_grant_count} local-admins=${local_admins_grant_count} github-humans=${github_humans_grant_count} runtime-key-safety=$([ -f "$runtime_key_safety_policy_file" ] && echo 1 || echo 0)."
+echo "Rendered ${grant_count} operator-supplied schema-v${authz_policy_schema_version} compatibility GitHub Actions authz grants."

@@ -77,6 +77,7 @@ def _run_authz_grants_generator(
             "GITHUB_SHA": "test-sha",
             "GITHUB_OUTPUT": str(github_output),
             "LAUNCHPLANE_AUTHZ_GRANTS_OUTPUT_DIR": str(output_directory),
+            "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION": "1",
         }
     )
     if extra_env:
@@ -84,6 +85,31 @@ def _run_authz_grants_generator(
 
     return subprocess.run(
         ["bash", "scripts/deploy/ensure-authz-grants.sh"],
+        check=False,
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _run_runtime_key_safety_generator(
+    temporary_directory: Path,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    output_directory = temporary_directory / "runtime-key-safety"
+    github_output = temporary_directory / "github-output.txt"
+    env = {
+        **os.environ,
+        "GITHUB_SHA": "test-sha",
+        "GITHUB_OUTPUT": str(github_output),
+        "LAUNCHPLANE_RUNTIME_KEY_SAFETY_OUTPUT_DIR": str(output_directory),
+    }
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        ["bash", "scripts/deploy/render-runtime-key-safety-policy.sh"],
         check=False,
         cwd=Path.cwd(),
         env=env,
@@ -328,29 +354,15 @@ def _assert_odoo_stable_lane_runtime_contract(
 
 
 class ProductOnboardingTests(unittest.TestCase):
-    def test_deploy_authz_grants_include_scheduled_merge_train_runner(
-        self,
-    ) -> None:
+    def test_deploy_authz_renderer_contains_no_checked_in_authority_catalog(self) -> None:
         script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
-        self.assertIn("deploy:merge-train-runner-manual-grant", script_text)
-        self.assertIn("merge-train-runner-manual", script_text)
-        self.assertIn("merge_train.policy_targets", script_text)
-        self.assertIn("deploy:merge-train-runner-policy-targets-schedule-grant", script_text)
-        self.assertIn("merge-train-runner-policy-targets-schedule", script_text)
-        self.assertIn("deploy:merge-train-runner-schedule-grant", script_text)
-        self.assertIn("merge-train-runner-schedule", script_text)
-        self.assertIn("schedule", script_text)
-
-    def test_deploy_authz_grants_include_runner_registration_audit_writer(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("runner-lane-registration.yml", script_text)
-        self.assertIn("runner_lane_registration_audit.write", script_text)
-        self.assertIn("deploy:runner-lane-registration-audit-grant", script_text)
-        self.assertIn("runner-lane-registration-audit", script_text)
+        self.assertIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", script_text)
+        self.assertNotIn("authz_policy_grant.write", script_text)
+        self.assertNotIn("launchplane_service_deploy.execute", script_text)
+        self.assertNotIn("local-admin-self-deploy", script_text)
+        self.assertNotIn("odoo-tenant-cm", script_text)
+        self.assertNotIn("odoo-tenant-opw", script_text)
 
     def test_deploy_authz_grants_accept_configured_github_action_grants(
         self,
@@ -358,6 +370,8 @@ class ProductOnboardingTests(unittest.TestCase):
         configured_grants = [
             {
                 "repository": "example-org/example-product",
+                "repository_id": "3001",
+                "repository_owner_id": "4001",
                 "workflow_file": "deploy.yml",
                 "product": "example-product",
                 "context": "example-context",
@@ -365,6 +379,7 @@ class ProductOnboardingTests(unittest.TestCase):
                 "source_label": "operator-config:example-product-deploy",
                 "event_name": "push",
                 "workflow_ref_suffix": "refs/heads/release",
+                "environment": "production",
                 "job_workflow_ref": (
                     "example-org/launchplane/.github/workflows/reusable.yml@refs/heads/main"
                 ),
@@ -387,6 +402,8 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(len(grants), 1)
         grant = grants[0]
         self.assertEqual(grant["repository"], "example-org/example-product")
+        self.assertEqual(grant["repository_id"], "3001")
+        self.assertEqual(grant["repository_owner_id"], "4001")
         self.assertEqual(
             grant["workflow_refs"],
             ["example-org/example-product/.github/workflows/deploy.yml@refs/heads/release"],
@@ -396,15 +413,57 @@ class ProductOnboardingTests(unittest.TestCase):
             ["example-org/launchplane/.github/workflows/reusable.yml@refs/heads/main"],
         )
         self.assertEqual(grant["event_names"], ["push"])
+        self.assertEqual(grant["environments"], ["production"])
         self.assertEqual(grant["products"], ["example-product"])
         self.assertEqual(grant["contexts"], ["example-context"])
         self.assertEqual(grant["actions"], ["example_action.execute"])
         self.assertEqual(grant["source_label"], "operator-config:example-product-deploy")
 
+    def test_deploy_authz_grants_reject_non_exact_or_unidentified_targets(self) -> None:
+        valid_grant = {
+            "repository": "example-org/example-product",
+            "repository_id": "3001",
+            "repository_owner_id": "4001",
+            "workflow_file": "deploy.yml",
+            "product": "example-product",
+            "context": "example-context",
+            "action": "example_action.execute",
+            "source_label": "operator-config:example-product-deploy",
+        }
+        cases = (
+            (
+                "missing immutable IDs",
+                {key: value for key, value in valid_grant.items() if key != "repository_id"},
+                "numeric-string repository_id and repository_owner_id",
+            ),
+            (
+                "unknown field",
+                {**valid_grant, "unexpected": "value"},
+                "unsupported fields",
+            ),
+            (
+                "glob selector",
+                {**valid_grant, "workflow_ref_suffix": "refs/heads/release-*"},
+                "without glob syntax",
+            ),
+        )
+
+        for label, configured_grant, expected_error in cases:
+            with self.subTest(label=label), TemporaryDirectory() as temporary_directory_name:
+                result = _run_authz_grants_generator(
+                    Path(temporary_directory_name),
+                    extra_env={"LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps([configured_grant])},
+                )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(expected_error, result.stderr)
+
     def test_deploy_authz_grants_support_configured_only_dry_run(self) -> None:
         configured_grants = [
             {
                 "repository": "cbusillo/launchplane",
+                "repository_id": "1001",
+                "repository_owner_id": "2001",
                 "workflow_file": "preview-lifecycle.yml",
                 "product": "example-product",
                 "context": "example-context",
@@ -416,10 +475,8 @@ class ProductOnboardingTests(unittest.TestCase):
             temporary_directory = Path(temporary_directory_name)
             result = _run_authz_grants_generator(
                 temporary_directory,
-                owner_authz_env={},
                 extra_env={
                     "LAUNCHPLANE_AUTHZ_GRANT_MODE": "dry_run",
-                    "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY": "true",
                     "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
                 },
             )
@@ -427,17 +484,6 @@ class ProductOnboardingTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             payloads = _read_authz_grant_payloads(temporary_directory, "github-actions-grants.json")
             outputs = _read_github_outputs(temporary_directory)
-            self.assertEqual(
-                _read_authz_grant_payloads(temporary_directory, "terminal-agents-grants.json"),
-                [],
-            )
-            self.assertEqual(
-                _read_authz_grant_payloads(temporary_directory, "local-operators-grants.json"),
-                [],
-            )
-            self.assertFalse(
-                (temporary_directory / "authz-grants" / "runtime-key-safety-policy.json").exists()
-            )
 
         self.assertEqual(len(payloads), 1)
         self.assertEqual(payloads[0]["mode"], "dry_run")
@@ -449,10 +495,8 @@ class ProductOnboardingTests(unittest.TestCase):
             apply_directory = Path(temporary_directory_name)
             apply_result = _run_authz_grants_generator(
                 apply_directory,
-                owner_authz_env={},
                 extra_env={
                     "LAUNCHPLANE_AUTHZ_GRANT_MODE": "apply",
-                    "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY": "true",
                     "LAUNCHPLANE_AUTHZ_GRANT_REASON": "Resolve reviewed authz gaps.",
                     "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
                 },
@@ -472,49 +516,119 @@ class ProductOnboardingTests(unittest.TestCase):
             apply_outputs["configured_grants_sha256"], outputs["configured_grants_sha256"]
         )
 
-    def test_deploy_authz_grants_reject_dry_run_without_configured_only(self) -> None:
+    def test_deploy_authz_grants_render_active_schema_v2_instance_scope(self) -> None:
+        configured_grants = [
+            {
+                "repository": "cbusillo/launchplane",
+                "repository_id": "1001",
+                "repository_owner_id": "2001",
+                "workflow_file": "deploy-launchplane.yml",
+                "product": "launchplane",
+                "context": "launchplane",
+                "instance": "testing",
+                "action": "deployment.write",
+                "source_label": "operator-config:testing-deploy",
+            }
+        ]
         with TemporaryDirectory() as temporary_directory_name:
-            result = _run_authz_grants_generator(
+            schema_v1_result = _run_authz_grants_generator(
                 Path(temporary_directory_name),
-                extra_env={"LAUNCHPLANE_AUTHZ_GRANT_MODE": "dry_run"},
+                extra_env={"LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants)},
             )
-
-        self.assertNotEqual(result.returncode, 0)
+        self.assertNotEqual(schema_v1_result.returncode, 0)
         self.assertIn(
-            "Dry-run authz reconciliation requires configured-only mode.",
-            result.stderr,
+            "Schema-v1 configured authz grants cannot declare instance", schema_v1_result.stderr
         )
 
-    def test_deploy_authz_grants_require_reason_for_configured_only_apply(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            result = _run_authz_grants_generator(
+                temporary_directory,
+                extra_env={
+                    "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION": "2",
+                    "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payloads = _read_authz_grant_payloads(temporary_directory, "github-actions-grants.json")
+            outputs = _read_github_outputs(temporary_directory)
+
+        self.assertEqual(payloads[0]["schema_version"], 2)
+        grant = cast(dict[str, object], payloads[0]["grant"])
+        self.assertEqual(grant["instances"], ["testing"])
+        self.assertEqual(outputs["authz_policy_schema_version"], "2")
+
+    def test_deploy_authz_grants_require_active_policy_schema_version(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             result = _run_authz_grants_generator(
                 Path(temporary_directory_name),
-                owner_authz_env={},
                 extra_env={
-                    "LAUNCHPLANE_AUTHZ_GRANT_MODE": "apply",
-                    "LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY": "true",
+                    "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION": "",
                     "LAUNCHPLANE_AUTHZ_GRANTS_JSON": "[]",
                 },
             )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "Configured-only authz apply requires LAUNCHPLANE_AUTHZ_GRANT_REASON.",
-            result.stderr,
-        )
+        self.assertIn("LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION must be 1 or 2", result.stderr)
 
-    def test_deploy_authz_grants_require_configured_owner_identities(
-        self,
-    ) -> None:
+    def test_deploy_authz_grant_review_hash_binds_policy_schema_version(self) -> None:
+        configured_grants = [
+            {
+                "repository": "cbusillo/launchplane",
+                "repository_id": "1001",
+                "repository_owner_id": "2001",
+                "workflow_file": "deploy-launchplane.yml",
+                "product": "launchplane",
+                "context": "launchplane",
+                "action": "product_profile.read",
+                "source_label": "operator-config:profile-read",
+            }
+        ]
+        observed_hashes: list[str] = []
+
+        for schema_version in ("1", "2"):
+            with TemporaryDirectory() as temporary_directory_name:
+                temporary_directory = Path(temporary_directory_name)
+                result = _run_authz_grants_generator(
+                    temporary_directory,
+                    extra_env={
+                        "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION": schema_version,
+                        "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
+                    },
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                observed_hashes.append(
+                    _read_github_outputs(temporary_directory)["configured_grants_sha256"]
+                )
+
+        self.assertNotEqual(observed_hashes[0], observed_hashes[1])
+
+    def test_deploy_authz_grants_require_reason_for_configured_only_apply(self) -> None:
+        configured_grants = [
+            {
+                "repository": "cbusillo/launchplane",
+                "repository_id": "1001",
+                "repository_owner_id": "2001",
+                "workflow_file": "preview-lifecycle.yml",
+                "product": "example-product",
+                "context": "example-context",
+                "action": "preview_lifecycle.plan",
+                "source_label": "operator-config:example-preview-plan",
+            }
+        ]
         with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(temporary_directory, owner_authz_env={})
+            result = _run_authz_grants_generator(
+                Path(temporary_directory_name),
+                extra_env={
+                    "LAUNCHPLANE_AUTHZ_GRANT_MODE": "apply",
+                    "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
+                },
+            )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "Configured authz grant is missing LAUNCHPLANE_",
-            result.stderr,
-        )
+        self.assertIn("Authz grant apply requires LAUNCHPLANE_AUTHZ_GRANT_REASON.", result.stderr)
 
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-artifact-publish.yml").read_text(
@@ -2113,78 +2227,32 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("must use the configured Launchplane image repository", validation_step)
         self.assertIn("between 8 and 500 printable characters", validation_step)
 
-    def test_deploy_authz_grants_seed_local_admin_self_deploy_authority(self) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("local-admin \\", script_text)
-        self.assertIn("deploy:local-admin-self-deploy-grant", script_text)
-        self.assertIn("local-admin-self-deploy", script_text)
-        self.assertIn("launchplane_service_deploy.execute", script_text)
-
-    def test_deploy_authz_grants_stage_dedicated_policy_grant_authority(self) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("deploy-launchplane.yml", script_text)
-        self.assertIn("authz_policy_grant.write", script_text)
-        self.assertIn("deploy:authz-policy-grant-maintenance-dispatch", script_text)
-        self.assertIn("authz-policy-grant-maintenance-dispatch", script_text)
-        self.assertIn("deploy:authz-policy-grant-maintenance-run", script_text)
-        self.assertIn("authz-policy-grant-maintenance-run", script_text)
-        self.assertIn("workflow_run", script_text)
-
-    def test_deploy_authz_grants_stage_runtime_key_safety_policy_authority(self) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("deploy-launchplane.yml", script_text)
-        self.assertIn("runtime_key_safety.write", script_text)
-        self.assertIn("deploy:runtime-key-safety-policy-grant", script_text)
-        self.assertIn("runtime-key-safety-policy", script_text)
-        self.assertIn("deploy:runtime-key-safety-policy-run-grant", script_text)
-        self.assertIn("workflow_run", script_text)
-
     def test_deploy_workflow_exposes_runtime_key_safety_rule_config(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
 
         self.assertIn("LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON", workflow_text)
         self.assertIn("vars.LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON", workflow_text)
 
-    def test_deploy_workflow_sends_authz_grants_through_shared_request(self) -> None:
+    def test_normal_deploy_does_not_mutate_authz_policy(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+        deploy_job = workflow_text.split("  deploy:\n", 1)[1].split(
+            "  operator-authz-grants:\n", 1
+        )[0]
         script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
-        self.assertIn("id: authz_grants", workflow_text)
-        self.assertIn("LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON", workflow_text)
-        self.assertIn("vars.LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON", workflow_text)
+        self.assertNotIn("/v1/authz-policies/", deploy_job)
+        self.assertNotIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", deploy_job)
+        self.assertNotIn("LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON", deploy_job)
+        self.assertIn("id: runtime_key_safety", deploy_job)
         self.assertIn(
-            "payload-list-file: ${{ steps.authz_grants.outputs.github_actions_grants_file }}",
-            workflow_text,
+            "payload-file: ${{ steps.runtime_key_safety.outputs.runtime_key_safety_policy_file }}",
+            deploy_job,
         )
         self.assertIn(
-            "payload-list-file: ${{ steps.authz_grants.outputs.terminal_agents_grants_file }}",
-            workflow_text,
+            "idempotency-key: ${{ steps.runtime_key_safety.outputs.runtime_key_safety_idempotency_key }}",
+            deploy_job,
         )
-        self.assertIn(
-            "payload-list-file: ${{ steps.authz_grants.outputs.local_operators_grants_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "payload-list-file: ${{ steps.authz_grants.outputs.local_admins_grants_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "payload-list-file: ${{ steps.authz_grants.outputs.github_humans_grants_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "payload-file: ${{ steps.authz_grants.outputs.runtime_key_safety_policy_file }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "idempotency-key: ${{ steps.authz_grants.outputs.runtime_key_safety_idempotency_key }}",
-            workflow_text,
-        )
-        self.assertIn("route-path: /v1/authz-policies/github-actions/grants", workflow_text)
-        self.assertIn("route-path: /v1/runtime-key-safety/policies/apply", workflow_text)
+        self.assertIn("route-path: /v1/runtime-key-safety/policies/apply", deploy_job)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", script_text)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", script_text)
         self.assertNotIn("Authorization: Bearer", script_text)
@@ -2201,21 +2269,38 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("- apply", workflow_text)
         self.assertIn("inputs.authz_grants_mode == 'none'", workflow_text)
         self.assertIn("authz_grants_expected_sha256:", workflow_text)
+        self.assertIn("authz_policy_expected_sha256:", workflow_text)
         self.assertIn("authz_grants_reason:", workflow_text)
         self.assertIn("LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON", grant_only_job)
+        self.assertIn("environment: launchplane-authz-admin", grant_only_job)
         self.assertNotIn("vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON", grant_only_job)
-        self.assertIn('LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY: "true"', grant_only_job)
+        self.assertNotIn("LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY", grant_only_job)
         self.assertIn("LAUNCHPLANE_SERVICE_AUDIENCE", grant_only_job)
+        self.assertIn("Read active authz policy contract", grant_only_job)
+        self.assertIn("route-path: /v1/service/runtime", grant_only_job)
+        self.assertIn(
+            "authz_policy_schema_version=runtime.authz_policy_schema_version",
+            grant_only_job,
+        )
+        self.assertIn(
+            "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION: ${{ steps.authz_policy.outputs.authz_policy_schema_version }}",
+            grant_only_job,
+        )
         self.assertIn("Verify reviewed authz grant set", grant_only_job)
         self.assertIn("Configured authz grants changed after the reviewed dry run.", grant_only_job)
+        self.assertIn("Active authz policy changed after the reviewed dry run.", grant_only_job)
         self.assertIn(
-            "Grant-only reconciliation cannot include break-glass rollback inputs.", grant_only_job
+            "Grant-only maintenance cannot include break-glass rollback inputs.", grant_only_job
         )
         self.assertIn("uses: ./.github/actions/launchplane-request", grant_only_job)
         self.assertIn("audience: ${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}", grant_only_job)
         self.assertIn("route-path: /v1/authz-policies/github-actions/grants", grant_only_job)
         self.assertIn("Verify and summarize authz grant results", grant_only_job)
         self.assertIn("Canonical grant-set SHA-256", grant_only_job)
+        self.assertIn("Active policy SHA-256", grant_only_job)
+        self.assertIn("Upload reviewed authz grant evidence", grant_only_job)
+        self.assertIn("uses: actions/upload-artifact@", grant_only_job)
+        self.assertIn("retention-days: 30", grant_only_job)
         self.assertNotIn("Build and push Launchplane image", grant_only_job)
         self.assertNotIn("Request Launchplane self deploy", grant_only_job)
         self.assertNotIn("runtime-key-safety/policies/apply", grant_only_job)
@@ -2223,7 +2308,7 @@ class ProductOnboardingTests(unittest.TestCase):
         emergency_job = workflow_text.split("  emergency-dokploy-rollback:\n", 1)[1]
         self.assertIn("AUTHZ_GRANTS_MODE: ${{ inputs.authz_grants_mode }}", emergency_job)
         self.assertIn(
-            "Break-glass rollback cannot be combined with authz grant reconciliation.",
+            "Break-glass rollback cannot be combined with authz grant maintenance.",
             emergency_job,
         )
 
@@ -2587,13 +2672,6 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("curl ", workflow_text)
         self.assertNotIn("| xargs", workflow_text)
 
-    def test_deploy_authz_grants_include_product_onboarding_apply(self) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("product-onboarding.yml", script_text)
-        self.assertIn("product_onboarding.apply", script_text)
-        self.assertIn("deploy:product-onboarding-grant", script_text)
-
     def test_deploy_authz_grants_do_not_hard_code_product_preview_tls_apply(self) -> None:
         script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
@@ -2609,16 +2687,6 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertNotIn("deploy:product-expected-config-grant", script_text)
         self.assertIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", script_text)
-
-    def test_deploy_authz_grants_do_not_restore_stale_import_self_deploy_rules(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertNotIn("/v1/authz-policies/github-actions/removals", script_text)
-        self.assertNotIn("launchplane-seed-import", script_text)
-        self.assertNotIn("stale-merge-train-policy-import-self-deploy", script_text)
-        self.assertIn("merge_train.policy_import", script_text)
 
     def test_deploy_authz_grants_do_not_carry_product_grant_catalog(
         self,
@@ -2648,7 +2716,7 @@ class ProductOnboardingTests(unittest.TestCase):
         ]
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(
+            result = _run_runtime_key_safety_generator(
                 temporary_directory,
                 extra_env={
                     "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(configured_rules)
@@ -2657,9 +2725,9 @@ class ProductOnboardingTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             policy_payload = json.loads(
-                (temporary_directory / "authz-grants" / "runtime-key-safety-policy.json").read_text(
-                    encoding="utf-8"
-                )
+                (
+                    temporary_directory / "runtime-key-safety" / "runtime-key-safety-policy.json"
+                ).read_text(encoding="utf-8")
             )
             policy_idempotency = _read_github_outputs(temporary_directory)[
                 "runtime_key_safety_idempotency_key"
@@ -2683,7 +2751,7 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_deploy_authz_grants_reject_incomplete_runtime_key_safety_rules(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(
+            result = _run_runtime_key_safety_generator(
                 temporary_directory,
                 extra_env={
                     "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(
@@ -2700,7 +2768,7 @@ class ProductOnboardingTests(unittest.TestCase):
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(
+            result = _run_runtime_key_safety_generator(
                 temporary_directory,
                 extra_env={
                     "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(
@@ -2731,326 +2799,6 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("result.post_deploy_status", workflow_text)
         self.assertIn("result.destination_health_status", workflow_text)
         self.assertNotIn('PRODUCT="${GITHUB_REPOSITORY#*/}"\n            CONTEXT=', workflow_text)
-
-    def test_deploy_authz_grants_scope_public_ingress_monitor_to_launchplane(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(temporary_directory)
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            grants = [
-                grant
-                for grant in _read_authz_grants(temporary_directory, "github-actions-grants.json")
-                if _grant_string_list(grant, "workflow_refs")[0].endswith(
-                    "/.github/workflows/public-ingress-monitor.yml@refs/heads/main"
-                )
-            ]
-
-        self.assertEqual(len(grants), 2)
-        grant_index = {_grant_string_list(grant, "event_names")[0]: grant for grant in grants}
-        self.assertEqual(set(grant_index), {"schedule", "workflow_dispatch"})
-        for grant in grants:
-            self.assertEqual(grant["repository"], "cbusillo/launchplane")
-            self.assertEqual(
-                grant["workflow_refs"],
-                [
-                    "cbusillo/launchplane/.github/workflows/public-ingress-monitor.yml@refs/heads/main"
-                ],
-            )
-            self.assertEqual(grant["products"], ["launchplane"])
-            self.assertEqual(grant["contexts"], ["launchplane"])
-            self.assertEqual(grant["actions"], ["public_ingress_monitor.run_once"])
-
-    def test_deploy_authz_grants_include_terminal_agent_product_profile_read(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("product_profile.read", script_text)
-        self.assertIn("deploy:terminal-agent-product-profile-read-grant", script_text)
-        self.assertIn("terminal-agent-product-profile-read", script_text)
-
-    def test_deploy_authz_grants_include_local_operator_notification_apply(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("/v1/authz-policies/local-operators/grants", script_text)
-        self.assertIn("public_ingress_notification_policy.apply", script_text)
-        self.assertIn(
-            "deploy:local-operator-public-ingress-notification-policy-grant",
-            script_text,
-        )
-
-    def test_deploy_authz_grants_include_local_operator_service_read(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("/v1/authz-policies/local-operators/grants", script_text)
-        self.assertIn("launchplane_service.read", script_text)
-        self.assertIn(
-            "deploy:local-operator-launchplane-service-read-grant",
-            script_text,
-        )
-        self.assertIn("local-operator-launchplane-service-read", script_text)
-
-    def test_deploy_authz_grants_include_local_operator_odoo_worker_reconcile(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("launchplane_service.reconcile_odoo_workers", script_text)
-        self.assertIn(
-            "deploy:local-operator-launchplane-service-reconcile-odoo-workers-grant",
-            script_text,
-        )
-        self.assertIn(
-            "local-operator-launchplane-service-reconcile-odoo-workers",
-            script_text,
-        )
-
-    def test_deploy_authz_grants_include_edge_endpoint_authority(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("edge-endpoint-apply.yml", script_text)
-        self.assertIn("edge_endpoint.apply", script_text)
-        self.assertIn("edge_endpoint.read", script_text)
-        self.assertIn("deploy:edge-endpoint-apply-workflow-grant", script_text)
-        self.assertIn("deploy:edge-endpoint-read-workflow-grant", script_text)
-        self.assertIn("deploy:local-operator-edge-endpoint-apply-grant", script_text)
-        self.assertIn("deploy:local-operator-edge-endpoint-read-grant", script_text)
-
-    def test_deploy_authz_grants_include_private_health_endpoint_authority(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("private_health_endpoint.apply", script_text)
-        self.assertIn("private_health_endpoint.read", script_text)
-        self.assertIn(
-            "deploy:local-operator-private-health-endpoint-apply-grant",
-            script_text,
-        )
-        self.assertIn(
-            "deploy:local-operator-private-health-endpoint-read-grant",
-            script_text,
-        )
-
-    def test_deploy_authz_grants_include_ingress_canary_route_authority(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("ingress-route-canary-apply.yml", script_text)
-        self.assertIn("ingress_route.apply", script_text)
-        self.assertIn("ingress_canary_route.apply", script_text)
-        self.assertIn("ingress_canary_route.read", script_text)
-        self.assertIn("LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON", script_text)
-        self.assertIn("deploy:ingress-route-canary-apply-workflow-${scope_suffix}", script_text)
-        self.assertIn("deploy:local-operator-ingress-canary-route-apply-grant", script_text)
-        self.assertIn("deploy:local-operator-ingress-canary-route-read-grant", script_text)
-
-    def test_deploy_authz_grants_skip_local_operator_product_config_without_scopes(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(temporary_directory)
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            grants = _read_authz_grants(temporary_directory, "local-operators-grants.json")
-
-        product_config_grants = [
-            grant
-            for grant in grants
-            if _grant_string_list(grant, "actions")[0].startswith("product_config.")
-            and "subjects" in grant
-            and "token_labels" in grant
-        ]
-        private_health_endpoint_grants = [
-            grant
-            for grant in grants
-            if _grant_string_list(grant, "actions")[0].startswith("private_health_endpoint.")
-            and "subjects" in grant
-            and "token_labels" in grant
-        ]
-        self.assertEqual(product_config_grants, [])
-        self.assertEqual(private_health_endpoint_grants, [])
-        self.assertIn(
-            "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON is unset or empty; skipping local-operator product_config.plan grant reconciliation.",
-            result.stdout,
-        )
-        self.assertIn(
-            "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON is unset or empty; skipping local-operator product_config.apply grant reconciliation.",
-            result.stdout,
-        )
-        self.assertIn(
-            "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON is unset or empty; skipping local-operator private_health_endpoint.read grant reconciliation.",
-            result.stdout,
-        )
-        self.assertIn(
-            "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON is unset or empty; skipping local-operator private_health_endpoint.apply grant reconciliation.",
-            result.stdout,
-        )
-
-    def test_deploy_authz_grants_fail_on_malformed_local_operator_product_config_scopes(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": "not-json",
-                },
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("parse error", result.stderr)
-
-    def test_deploy_authz_grants_fail_on_malformed_private_health_endpoint_scopes(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": "not-json",
-                },
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("parse error", result.stderr)
-
-    def test_deploy_authz_grants_reject_private_health_endpoint_wildcard_scopes(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": json.dumps(
-                        [{"product": "*", "context": "*"}]
-                    ),
-                },
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON must use explicit product/context values",
-            result.stderr,
-        )
-
-    def test_deploy_authz_grants_scope_configured_local_operator_product_config(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            configured_scopes = json.dumps(
-                [
-                    {"product": "discord-blue", "context": "discord-blue"},
-                    {"product": "verireel", "context": "verireel"},
-                ]
-            )
-            result = _run_authz_grants_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON": configured_scopes,
-                    "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": configured_scopes,
-                    "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": configured_scopes,
-                },
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            grants = _read_authz_grants(
-                temporary_directory,
-                "local-operators-grants.json",
-            ) + _read_authz_grants(temporary_directory, "github-actions-grants.json")
-
-        product_config_grants = [
-            grant
-            for grant in grants
-            if _grant_string_list(grant, "actions")[0].startswith("product_config.")
-            and "subjects" in grant
-            and "token_labels" in grant
-        ]
-        private_health_endpoint_grants = [
-            grant
-            for grant in grants
-            if _grant_string_list(grant, "actions")[0].startswith("private_health_endpoint.")
-            and "subjects" in grant
-            and "token_labels" in grant
-        ]
-        scoped_grants = {
-            (
-                _grant_string_list(grant, "products")[0],
-                _grant_string_list(grant, "contexts")[0],
-                _grant_string_list(grant, "actions")[0],
-            )
-            for grant in product_config_grants + private_health_endpoint_grants
-        }
-        canary_workflow_grants = [
-            grant
-            for grant in grants
-            if _grant_string_list(grant, "actions") == ["ingress_route.apply"]
-            and _grant_string_list(grant, "workflow_refs")[0].endswith(
-                "/.github/workflows/ingress-route-canary-apply.yml@refs/heads/main"
-            )
-        ]
-        canary_scoped_grants = {
-            (_grant_string_list(grant, "products")[0], _grant_string_list(grant, "contexts")[0])
-            for grant in canary_workflow_grants
-        }
-        expected_scopes = {
-            ("discord-blue", "discord-blue"),
-            ("verireel", "verireel"),
-        }
-
-        self.assertEqual(
-            scoped_grants,
-            {
-                (product, context, action)
-                for product, context in expected_scopes
-                for action in (
-                    "product_config.plan",
-                    "product_config.apply",
-                    "private_health_endpoint.read",
-                    "private_health_endpoint.apply",
-                )
-            },
-        )
-        self.assertEqual(canary_scoped_grants, expected_scopes)
-        for grant in product_config_grants:
-            self.assertNotEqual(grant["products"], ["*"])
-            self.assertNotEqual(grant["contexts"], ["*"])
-            self.assertTrue(
-                _grant_string(grant, "source_label").startswith(
-                    "deploy:local-operator-product-config-"
-                )
-            )
-        for grant in private_health_endpoint_grants:
-            self.assertNotEqual(grant["products"], ["*"])
-            self.assertNotEqual(grant["contexts"], ["*"])
-            self.assertTrue(
-                _grant_string(grant, "source_label").startswith(
-                    "deploy:local-operator-private-health-endpoint-"
-                )
-            )
-        for grant in canary_workflow_grants:
-            self.assertNotEqual(grant["products"], ["*"])
-            self.assertNotEqual(grant["contexts"], ["*"])
-            self.assertTrue(
-                _grant_string(grant, "source_label").startswith(
-                    "deploy:ingress-route-canary-apply-workflow-"
-                )
-            )
 
     def test_apply_product_onboarding_manifest_writes_canonical_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -143,8 +143,15 @@ def _policy_record_summary_base(record: _PolicyRecordSummaryFields) -> dict[str,
 
 
 def summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[str, object]:
+    immutable_repository_rule_count = sum(
+        1 for rule in record.policy.github_actions if rule.repository_id
+    )
     return _policy_record_summary_base(record) | {
         "github_actions_rule_count": len(record.policy.github_actions),
+        "github_actions_immutable_repository_rule_count": immutable_repository_rule_count,
+        "github_actions_legacy_name_only_rule_count": (
+            len(record.policy.github_actions) - immutable_repository_rule_count
+        ),
         "github_humans_rule_count": len(record.policy.github_humans),
     }
 
@@ -170,6 +177,31 @@ def summarize_merge_train_policy_record(record: MergeTrainPolicyRecord) -> dict[
             if repository_policy.scheduler.enabled
         ],
     }
+
+
+def _github_repository_id_pair(
+    *,
+    repository_id: str,
+    repository_owner_id: str,
+    required: bool,
+) -> tuple[str, str]:
+    normalized_repository_id = repository_id.strip()
+    normalized_repository_owner_id = repository_owner_id.strip()
+    if required and not normalized_repository_id and not normalized_repository_owner_id:
+        raise click.ClickException(
+            "--repository-id and --repository-owner-id are required for new workflow grants."
+        )
+    if bool(normalized_repository_id) != bool(normalized_repository_owner_id):
+        raise click.ClickException(
+            "--repository-id and --repository-owner-id must be provided together."
+        )
+    if normalized_repository_id and (
+        not normalized_repository_id.isdecimal() or not normalized_repository_owner_id.isdecimal()
+    ):
+        raise click.ClickException(
+            "--repository-id and --repository-owner-id must be numeric GitHub IDs."
+        )
+    return normalized_repository_id, normalized_repository_owner_id
 
 
 def _build_merge_train_policy_record(
@@ -383,6 +415,16 @@ def authz_policies_import_toml(
 )
 @click.option("--repository", required=True, help="GitHub owner/repo grant target.")
 @click.option(
+    "--repository-id",
+    required=True,
+    help="Immutable numeric GitHub repository ID for the grant target.",
+)
+@click.option(
+    "--repository-owner-id",
+    required=True,
+    help="Immutable numeric GitHub repository-owner ID for the grant target.",
+)
+@click.option(
     "--workflow-ref", "workflow_refs", multiple=True, help="Allowed workflow_ref pattern."
 )
 @click.option(
@@ -418,6 +460,8 @@ def authz_policies_grant_workflow(
     session_cookie: str,
     schema_version: int,
     repository: str,
+    repository_id: str,
+    repository_owner_id: str,
     workflow_refs: tuple[str, ...],
     job_workflow_refs: tuple[str, ...],
     event_names: tuple[str, ...],
@@ -433,6 +477,11 @@ def authz_policies_grant_workflow(
     idempotency_key: str,
     mode: str,
 ) -> None:
+    repository_id, repository_owner_id = _github_repository_id_pair(
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        required=True,
+    )
     bearer_token = ""
     if not session_cookie.strip():
         token_env_key = bearer_token_env.strip() or "LAUNCHPLANE_SERVICE_TOKEN"
@@ -449,6 +498,8 @@ def authz_policies_grant_workflow(
         "related_issue": related_issue,
         "grant": {
             "repository": repository,
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
             "workflow_refs": list(workflow_refs),
             "job_workflow_refs": list(job_workflow_refs),
             "event_names": list(event_names),
@@ -497,6 +548,16 @@ def authz_policies_grant_workflow(
     help="Removal contract version. Use 2 only after the active policy is migrated to schema v2.",
 )
 @click.option("--repository", required=True, help="GitHub owner/repo rule target.")
+@click.option(
+    "--repository-id",
+    default="",
+    help="Optional immutable numeric GitHub repository ID for an ID-bound rule.",
+)
+@click.option(
+    "--repository-owner-id",
+    default="",
+    help="Optional immutable numeric GitHub repository-owner ID for an ID-bound rule.",
+)
 @click.option("--workflow-ref", "workflow_refs", multiple=True, help="Exact workflow_ref pattern.")
 @click.option(
     "--job-workflow-ref",
@@ -529,6 +590,8 @@ def authz_policies_remove_workflow_rule(
     session_cookie: str,
     schema_version: int,
     repository: str,
+    repository_id: str,
+    repository_owner_id: str,
     workflow_refs: tuple[str, ...],
     job_workflow_refs: tuple[str, ...],
     event_names: tuple[str, ...],
@@ -544,6 +607,11 @@ def authz_policies_remove_workflow_rule(
     idempotency_key: str,
     mode: str,
 ) -> None:
+    repository_id, repository_owner_id = _github_repository_id_pair(
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        required=False,
+    )
     bearer_token = ""
     if not session_cookie.strip():
         token_env_key = bearer_token_env.strip() or "LAUNCHPLANE_SERVICE_TOKEN"
@@ -560,6 +628,8 @@ def authz_policies_remove_workflow_rule(
         "related_issue": related_issue,
         "removal": {
             "repository": repository,
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
             "workflow_refs": list(workflow_refs),
             "job_workflow_refs": list(job_workflow_refs),
             "event_names": list(event_names),

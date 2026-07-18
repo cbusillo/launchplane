@@ -2037,6 +2037,8 @@ export type ReadHumanAuthSessionData = {
 
 export type ReadHumanAuthSessionErrors = {
     401: AuthSessionRequiredResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
 };
 
 export type ReadHumanAuthSessionError = ReadHumanAuthSessionErrors[keyof ReadHumanAuthSessionErrors];
@@ -2063,6 +2065,8 @@ export type ReadDriverContextViewData = {
 export type ReadDriverContextViewErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
 };
 
 export type ReadDriverContextViewError = ReadDriverContextViewErrors[keyof ReadDriverContextViewErrors];
@@ -2090,6 +2094,8 @@ export type ReadDriverInstanceViewData = {
 export type ReadDriverInstanceViewErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
 };
 
 export type ReadDriverInstanceViewError = ReadDriverInstanceViewErrors[keyof ReadDriverInstanceViewErrors];
@@ -2114,6 +2120,8 @@ export type ReadDriverDescriptorsData = {
 export type ReadDriverDescriptorsErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
 };
 
 export type ReadDriverDescriptorsError = ReadDriverDescriptorsErrors[keyof ReadDriverDescriptorsErrors];
@@ -2146,6 +2154,7 @@ export type ReadEveryCodeSummaryErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2178,6 +2187,7 @@ export type ListEveryCodeWorkRequestsErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2211,6 +2221,7 @@ export type ReadPreviewReadinessErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2238,6 +2249,7 @@ export type ListProductProfilesData = {
 export type ListProductProfilesErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2265,6 +2277,7 @@ export type ListProductsErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2294,6 +2307,7 @@ export type ReadProductErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2323,6 +2337,7 @@ export type ReadProductActivityErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2352,6 +2367,7 @@ export type ListProductEnvironmentsErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2382,6 +2398,7 @@ export type ReadProductEnvironmentErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2412,6 +2429,7 @@ export type ReadProductEnvironmentConfigStatusErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2441,6 +2459,8 @@ export type ReadProductPromotionStatusErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
 };
 
 export type ReadProductPromotionStatusError = ReadProductPromotionStatusErrors[keyof ReadProductPromotionStatusErrors];
@@ -2470,6 +2490,7 @@ export type ReadProductPromotionWorkflowDeliveryErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2495,6 +2516,7 @@ export type ReadRepoProductMappingData = {
 export type ReadRepoProductMappingErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2520,6 +2542,7 @@ export type ReadWorkGraphIssueInboxData = {
 export type ReadWorkGraphIssueInboxErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2549,6 +2572,7 @@ export type ReadMergeTrainControllerStatusErrors = {
     400: LaunchplaneErrorResponse;
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2575,6 +2599,7 @@ export type ReadMergeTrainPolicyTargetsErrors = {
     400: LaunchplaneErrorResponse;
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2600,6 +2625,7 @@ export type ReadWorkGraphSnapshotData = {
 export type ReadWorkGraphSnapshotErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
 
@@ -2731,6 +2757,8 @@ export type RankWorkGraphSnapshotErrors = {
     400: LaunchplaneErrorResponse;
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
 };
 
 export type RankWorkGraphSnapshotError = RankWorkGraphSnapshotErrors[keyof RankWorkGraphSnapshotErrors];

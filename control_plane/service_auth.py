@@ -40,6 +40,8 @@ class GitHubActionsIdentity:
     subject: str
     sha: str
     raw_claims: dict[str, object]
+    repository_id: str = ""
+    repository_owner_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,41 @@ AuthzInstanceSelectors = Annotated[
     tuple[str, ...],
     AfterValidator(_validated_instance_selectors),
 ]
+
+
+_MANAGED_AUTHZ_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:/-]{0,127}$")
+
+
+class ManagedAuthzPolicyRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    managed_set_id: str | None = None
+    managed_rule_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_managed_identity(self) -> "ManagedAuthzPolicyRule":
+        managed_set_id = (self.managed_set_id or "").strip()
+        managed_rule_id = (self.managed_rule_id or "").strip()
+        if bool(managed_set_id) != bool(managed_rule_id):
+            raise ValueError(
+                "Managed authz policy rules require both managed_set_id and managed_rule_id."
+            )
+        if not managed_set_id:
+            self.managed_set_id = None
+            self.managed_rule_id = None
+            return self
+        for label, value in (
+            ("managed_set_id", managed_set_id),
+            ("managed_rule_id", managed_rule_id),
+        ):
+            if _MANAGED_AUTHZ_ID_PATTERN.fullmatch(value) is None:
+                raise ValueError(
+                    f"Authz {label} must be a lowercase stable identifier using "
+                    "letters, numbers, '.', '_', ':', '/', or '-'."
+                )
+        self.managed_set_id = managed_set_id
+        self.managed_rule_id = managed_rule_id
+        return self
 
 
 class AuthorizationTarget(BaseModel):
@@ -264,9 +301,17 @@ class GitHubOidcVerifier:
         )
         repository = str(claims.get("repository", "")).strip()
         repository_owner = str(claims.get("repository_owner", "")).strip()
+        repository_id = str(claims.get("repository_id", "")).strip()
+        repository_owner_id = str(claims.get("repository_owner_id", "")).strip()
         workflow_ref = str(claims.get("workflow_ref", "")).strip()
         if not repository:
             raise ValueError("OIDC token is missing repository claim.")
+        if not repository_owner:
+            raise ValueError("OIDC token is missing repository_owner claim.")
+        if not repository_id or not repository_id.isdecimal():
+            raise ValueError("OIDC token is missing numeric repository_id claim.")
+        if not repository_owner_id or not repository_owner_id.isdecimal():
+            raise ValueError("OIDC token is missing numeric repository_owner_id claim.")
         if not workflow_ref:
             raise ValueError("OIDC token is missing workflow_ref claim.")
         return GitHubActionsIdentity(
@@ -281,13 +326,17 @@ class GitHubOidcVerifier:
             subject=str(claims.get("sub", "")).strip(),
             sha=str(claims.get("sha", "")).strip(),
             raw_claims=dict(claims),
+            repository_id=repository_id,
+            repository_owner_id=repository_owner_id,
         )
 
 
-class GitHubActionsPolicyRule(BaseModel):
+class GitHubActionsPolicyRule(ManagedAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
 
     repository: str
+    repository_id: str = ""
+    repository_owner_id: str = ""
     workflow_refs: tuple[str, ...] = ()
     job_workflow_refs: tuple[str, ...] = ()
     event_names: tuple[str, ...] = ()
@@ -297,6 +346,24 @@ class GitHubActionsPolicyRule(BaseModel):
     contexts: tuple[str, ...] = ()
     instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_repository_identity(self) -> "GitHubActionsPolicyRule":
+        self.repository = self.repository.strip()
+        self.repository_id = self.repository_id.strip()
+        self.repository_owner_id = self.repository_owner_id.strip()
+        if bool(self.repository_id) != bool(self.repository_owner_id):
+            raise ValueError(
+                "GitHub Actions authz rules require both repository_id and "
+                "repository_owner_id when either immutable identifier is declared."
+            )
+        for label, value in (
+            ("repository_id", self.repository_id),
+            ("repository_owner_id", self.repository_owner_id),
+        ):
+            if value and not value.isdecimal():
+                raise ValueError(f"GitHub Actions authz {label} must be a numeric GitHub ID.")
+        return self
 
     @staticmethod
     def _matches_claim(value: str, allowed_values: tuple[str, ...]) -> bool:
@@ -314,6 +381,10 @@ class GitHubActionsPolicyRule(BaseModel):
         schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
         if self.repository.strip() != identity.repository:
+            return False
+        if self.repository_id and self.repository_id != identity.repository_id:
+            return False
+        if self.repository_owner_id and self.repository_owner_id != identity.repository_owner_id:
             return False
         if self.workflow_refs and not self._matches_claim(
             identity.workflow_ref, self.workflow_refs
@@ -344,7 +415,7 @@ class GitHubActionsPolicyRule(BaseModel):
         return True
 
 
-class GitHubHumanPolicyRule(BaseModel):
+class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
 
     logins: tuple[str, ...] = ()
@@ -420,7 +491,7 @@ class GitHubHumanPolicyRule(BaseModel):
         return True
 
 
-class TerminalAgentPolicyRule(BaseModel):
+class TerminalAgentPolicyRule(ManagedAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
 
     subjects: tuple[str, ...] = ()
@@ -464,7 +535,7 @@ class TerminalAgentPolicyRule(BaseModel):
         return True
 
 
-class LocalOperatorPolicyRule(BaseModel):
+class LocalOperatorPolicyRule(ManagedAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
 
     subjects: tuple[str, ...] = ()
@@ -508,7 +579,7 @@ class LocalOperatorPolicyRule(BaseModel):
         return True
 
 
-class LocalAdminPolicyRule(BaseModel):
+class LocalAdminPolicyRule(ManagedAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
 
     subjects: tuple[str, ...] = ()
@@ -744,6 +815,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
     def _validate_instance_rule_schema(self) -> "LaunchplaneAuthzPolicy":
         instance_actions = instance_scoped_authz_actions()
         exclusively_instance_actions = exclusively_instance_scoped_authz_actions()
+        managed_identities: set[tuple[str, str]] = set()
         for rules in (
             self.github_actions,
             self.github_humans,
@@ -752,8 +824,17 @@ class LaunchplaneAuthzPolicy(BaseModel):
             self.local_admins,
         ):
             for rule in rules:
+                if rule.managed_set_id is not None and rule.managed_rule_id is not None:
+                    managed_identity = (rule.managed_set_id, rule.managed_rule_id)
+                    if managed_identity in managed_identities:
+                        raise ValueError(
+                            "Authz managed rule identities must be unique across the policy."
+                        )
+                    managed_identities.add(managed_identity)
                 if self.schema_version == 1 and rule.instances:
                     raise ValueError("Schema-v1 authz policy rules cannot declare instances.")
+                if self.schema_version == 1 and rule.managed_set_id is not None:
+                    raise ValueError("Schema-v1 authz policy rules cannot declare managed IDs.")
                 if self.schema_version != 2 or not rule.actions:
                     continue
                 requested_actions = set(rule.actions)
@@ -771,6 +852,11 @@ class LaunchplaneAuthzPolicy(BaseModel):
     @model_serializer(mode="wrap")
     def _serialize_policy(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         payload = cast(dict[str, Any], handler(self))
+        for rule in payload.get("github_actions", ()):
+            if not rule.get("repository_id"):
+                rule.pop("repository_id", None)
+            if not rule.get("repository_owner_id"):
+                rule.pop("repository_owner_id", None)
         if self.schema_version == 1:
             for rule_collection_name in (
                 "github_actions",
@@ -781,6 +867,8 @@ class LaunchplaneAuthzPolicy(BaseModel):
             ):
                 for rule in payload.get(rule_collection_name, ()):
                     rule.pop("instances", None)
+                    rule.pop("managed_set_id", None)
+                    rule.pop("managed_rule_id", None)
         return payload
 
     def allows(

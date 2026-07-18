@@ -1880,11 +1880,10 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
                 "#/components/schemas/AcceptedEvidenceResponse",
             )
-            for status_code in ("400", "401", "403", "503"):
+            for status_code in ("400", "401", "403", "409", "503"):
                 self.assertIn(
                     "LaunchplaneErrorResponse", json.dumps(route["responses"][status_code])
                 )
-            self.assertNotIn("409", route["responses"])
         status_route = openapi["paths"]["/v1/every-code/pr-feedback/status"]["post"]
         self.assertEqual(status_route["operationId"], "write_every_code_pr_feedback_status")
         self.assertEqual(
