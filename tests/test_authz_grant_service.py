@@ -7,6 +7,9 @@ from typing import cast
 from pydantic import ValidationError
 
 from control_plane.authz_grant_service import (
+    AuthzManagedPolicyReconcileEnvelope,
+    AuthzPolicyConflictError,
+    AuthzPolicyRequestError,
     AuthzPolicyGitHubActionsGrant,
     AuthzPolicyGitHubActionsGrantEnvelope,
     AuthzPolicyGitHubActionsRemovalEnvelope,
@@ -22,16 +25,23 @@ from control_plane.authz_grant_service import (
     plan_github_actions_authz_policy_removal,
     plan_github_actions_authz_policy_grant,
     plan_github_human_authz_policy_grant,
+    plan_managed_authz_policy_reconcile,
     write_github_actions_authz_policy_removal,
     write_github_actions_authz_policy_grant,
     write_github_human_authz_policy_grant,
 )
 from control_plane.contracts.authz_policy_record import (
+    AuthzPolicyCompareWriteResult,
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
-from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    GitHubActionsIdentity,
+    GitHubActionsPolicyRule,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+)
 
 
 class _AuthzPolicyStore:
@@ -50,9 +60,28 @@ class _AuthzPolicyStore:
             return records[:limit]
         return records
 
-    def write_authz_policy_record(self, record: LaunchplaneAuthzPolicyRecord) -> None:
-        self.written_records.append(record)
-        self.records = (record,) + self.records
+    def compare_and_write_authz_policy_record(
+        self,
+        *,
+        expected_record: LaunchplaneAuthzPolicyRecord,
+        replacement_record: LaunchplaneAuthzPolicyRecord | None,
+    ) -> AuthzPolicyCompareWriteResult:
+        active_records = tuple(record for record in self.records if record.status == "active")
+        current_record = active_records[0]
+        if current_record != expected_record:
+            return AuthzPolicyCompareWriteResult("stale", current_record)
+        if replacement_record is None:
+            return AuthzPolicyCompareWriteResult("unchanged", current_record)
+        superseded_ids = {record.record_id for record in active_records}
+        superseded_records = tuple(
+            record.model_copy(update={"status": "superseded"})
+            if record.record_id in superseded_ids
+            else record
+            for record in self.records
+        )
+        self.written_records.append(replacement_record)
+        self.records = (replacement_record, *superseded_records)
+        return AuthzPolicyCompareWriteResult("written", replacement_record)
 
 
 def _identity() -> GitHubActionsIdentity:
@@ -87,12 +116,29 @@ def _active_record() -> LaunchplaneAuthzPolicyRecord:
     policy_sha256 = authz_policy_sha256(policy)
     return LaunchplaneAuthzPolicyRecord(
         record_id=build_authz_policy_record_id(
-            updated_at="2026-05-07T15:00:00Z",
+            revision=1,
             policy_sha256=policy_sha256,
         ),
+        revision=1,
         status="active",
         source="test:bootstrap",
         updated_at="2026-05-07T15:00:00Z",
+        policy_sha256=policy_sha256,
+        policy=policy,
+    )
+
+
+def _active_record_for_policy(policy: LaunchplaneAuthzPolicy) -> LaunchplaneAuthzPolicyRecord:
+    policy_sha256 = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(
+            revision=1,
+            policy_sha256=policy_sha256,
+        ),
+        revision=1,
+        status="active",
+        source="test:managed",
+        updated_at="2026-07-18T06:45:00Z",
         policy_sha256=policy_sha256,
         policy=policy,
     )
@@ -158,6 +204,599 @@ def _human_grant_request(mode: str = "apply") -> AuthzPolicyGitHubHumanGrantEnve
 
 
 class AuthzGrantServiceTests(unittest.TestCase):
+    def test_managed_reconcile_adopts_v1_rule_and_migrates_schema(self) -> None:
+        current_record = _active_record()
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "managed_set_id": "operator.launchplane",
+                "schema_migration": "migrate_v1_to_v2",
+                "unmanaged_adoption": "adopt_matching",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "managed_set_id": "operator.launchplane",
+                            "managed_rule_id": "service.deploy",
+                            "repository": "cbusillo/launchplane",
+                            "repository_id": "1001",
+                            "repository_owner_id": "2001",
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ],
+                },
+            }
+        )
+
+        current_policy, observed_record, updated_policy, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
+
+        self.assertEqual(current_policy.schema_version, 1)
+        self.assertEqual(observed_record, current_record)
+        self.assertEqual(updated_policy.schema_version, 2)
+        self.assertEqual(len(updated_policy.github_actions), 1)
+        self.assertEqual(
+            updated_policy.github_actions[0].managed_rule_id,
+            "service.deploy",
+        )
+        self.assertTrue(diff.schema_migrated)
+        self.assertTrue(diff.changed)
+        self.assertEqual(diff.adopted_rule_count, 1)
+        self.assertEqual(diff.added_rule_count, 0)
+
+    def test_managed_reconcile_updates_and_removes_only_its_managed_set(self) -> None:
+        current_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_actions": [
+                    {
+                        "managed_set_id": "operator.launchplane",
+                        "managed_rule_id": "service.read",
+                        "repository": "cbusillo/launchplane",
+                        "repository_id": "1001",
+                        "repository_owner_id": "2001",
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["launchplane_service.read"],
+                    },
+                    {
+                        "managed_set_id": "operator.launchplane",
+                        "managed_rule_id": "stale.rule",
+                        "repository": "cbusillo/launchplane",
+                        "repository_id": "1001",
+                        "repository_owner_id": "2001",
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["product_profile.read"],
+                    },
+                    {
+                        "managed_set_id": "another.manager",
+                        "managed_rule_id": "preserved.rule",
+                        "repository": "cbusillo/launchplane",
+                        "repository_id": "1001",
+                        "repository_owner_id": "2001",
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["product_profile.read"],
+                    },
+                ],
+            }
+        )
+        current_record = _active_record_for_policy(current_policy)
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "managed_set_id": "operator.launchplane",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "managed_set_id": "operator.launchplane",
+                            "managed_rule_id": "service.read",
+                            "repository": "cbusillo/launchplane",
+                            "repository_id": "1001",
+                            "repository_owner_id": "2001",
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.read"],
+                        }
+                    ],
+                },
+            }
+        )
+
+        _, _, updated_policy, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
+
+        rules_by_identity = {
+            (rule.managed_set_id, rule.managed_rule_id): rule
+            for rule in updated_policy.github_actions
+        }
+        self.assertEqual(
+            set(rules_by_identity),
+            {
+                ("operator.launchplane", "service.read"),
+                ("another.manager", "preserved.rule"),
+            },
+        )
+        self.assertEqual(diff.updated_rule_count, 1)
+        self.assertEqual(diff.removed_rule_count, 1)
+        self.assertEqual(diff.added_rule_count, 0)
+
+    def test_managed_reconcile_rejects_removing_last_policy_administrator(self) -> None:
+        current_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_admins": [
+                    {
+                        "managed_set_id": "operator.owner",
+                        "managed_rule_id": "authz.admin",
+                        "subjects": ["owner"],
+                        "token_labels": ["owner-admin"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_grant.write"],
+                    }
+                ],
+            }
+        )
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "managed_set_id": "operator.owner",
+                "desired_policy": {"schema_version": 2},
+            }
+        )
+
+        with self.assertRaisesRegex(AuthzPolicyConflictError, "retain at least one principal"):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((_active_record_for_policy(current_policy),)),
+                request=request,
+            )
+
+    def test_managed_reconcile_rejects_unreviewed_apply_plan(self) -> None:
+        current_record = _active_record()
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "apply",
+                "managed_set_id": "operator.launchplane",
+                "schema_migration": "migrate_v1_to_v2",
+                "reviewed_plan_sha256": "0" * 64,
+                "reason": "Apply the reviewed managed policy.",
+                "desired_policy": {"schema_version": 2},
+            }
+        )
+
+        with self.assertRaisesRegex(
+            AuthzPolicyConflictError,
+            "reviewed_plan_sha256 no longer matches",
+        ):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=request,
+            )
+
+    def test_managed_reconcile_requires_managed_desired_rules(self) -> None:
+        with self.assertRaisesRegex(
+            ValidationError,
+            "Every desired managed authz rule must declare",
+        ):
+            AuthzManagedPolicyReconcileEnvelope.model_validate(
+                {
+                    "schema_version": 2,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "managed_set_id": "operator.launchplane",
+                    "desired_policy": {
+                        "schema_version": 2,
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/launchplane",
+                                "repository_id": "1001",
+                                "repository_owner_id": "2001",
+                                "actions": ["product_profile.read"],
+                            }
+                        ],
+                    },
+                }
+            )
+
+    def test_managed_reconcile_requires_explicit_migration_and_adoption(self) -> None:
+        current_record = _active_record()
+        desired_policy = {
+            "schema_version": 2,
+            "github_actions": [
+                {
+                    "managed_set_id": "operator.launchplane",
+                    "managed_rule_id": "service.deploy",
+                    "repository": "cbusillo/launchplane",
+                    "repository_id": "1001",
+                    "repository_owner_id": "2001",
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["launchplane_service_deploy.execute"],
+                }
+            ],
+        }
+        without_migration = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.launchplane",
+                "desired_policy": desired_policy,
+            }
+        )
+        with self.assertRaisesRegex(AuthzPolicyConflictError, "explicit schema_migration"):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=without_migration,
+            )
+
+        without_adoption = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **without_migration.model_dump(mode="json"),
+                "schema_migration": "migrate_v1_to_v2",
+            }
+        )
+        with self.assertRaisesRegex(AuthzPolicyConflictError, "would adopt an unmanaged rule"):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=without_adoption,
+            )
+
+    def test_managed_reconcile_rejects_ambiguous_unmanaged_adoption(self) -> None:
+        unmanaged_rule = GitHubActionsPolicyRule(
+            repository="cbusillo/launchplane",
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("product_profile.read",),
+        )
+        current_record = _active_record_for_policy(
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(unmanaged_rule, unmanaged_rule),
+            )
+        )
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.launchplane",
+                "unmanaged_adoption": "adopt_matching",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "managed_set_id": "operator.launchplane",
+                            "managed_rule_id": "profile.read",
+                            "repository": "cbusillo/launchplane",
+                            "repository_id": "1001",
+                            "repository_owner_id": "2001",
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.read"],
+                        }
+                    ],
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(AuthzPolicyConflictError, "adoption is ambiguous"):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=request,
+            )
+
+    def test_managed_reconcile_adopts_semantically_equal_unordered_rule(self) -> None:
+        current_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "repository_id": "1001",
+                        "repository_owner_id": "2001",
+                        "event_names": ["workflow_dispatch", "push", "workflow_dispatch"],
+                        "products": ["launchplane", "launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["service.read", "product_profile.read", "service.read"],
+                    }
+                ],
+            }
+        )
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "managed_set_id": "operator.launchplane",
+                "unmanaged_adoption": "adopt_matching",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "managed_set_id": "operator.launchplane",
+                            "managed_rule_id": "service.read",
+                            "repository": "cbusillo/launchplane",
+                            "repository_id": "1001",
+                            "repository_owner_id": "2001",
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.read", "service.read"],
+                        }
+                    ],
+                },
+            }
+        )
+
+        _, _, adopted_policy, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((_active_record_for_policy(current_policy),)),
+            request=request,
+        )
+
+        self.assertEqual(diff.adopted_rule_count, 1)
+        self.assertEqual(len(adopted_policy.github_actions), 1)
+        self.assertEqual(adopted_policy.github_actions[0].managed_rule_id, "service.read")
+        removal_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **request.model_dump(mode="json"),
+                "unmanaged_adoption": "reject",
+                "desired_policy": {"schema_version": 2},
+            }
+        )
+        _, _, removed_policy, removal_diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((_active_record_for_policy(adopted_policy),)),
+            request=removal_request,
+        )
+        self.assertEqual(removal_diff.removed_rule_count, 1)
+        self.assertEqual(removed_policy.github_actions, ())
+
+    def test_managed_reconcile_preserves_other_set_order_without_hash_churn(self) -> None:
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    managed_set_id="operator.second",
+                    managed_rule_id="second.read",
+                    subjects=("owner",),
+                    token_labels=("operator",),
+                    actions=("product_profile.read",),
+                ),
+                LocalOperatorPolicyRule(
+                    managed_set_id="operator.first",
+                    managed_rule_id="first.read",
+                    subjects=("owner",),
+                    token_labels=("operator",),
+                    actions=("product_profile.read",),
+                ),
+            ),
+        )
+        current_record = _active_record_for_policy(current_policy)
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.first",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "local_operators": [current_policy.local_operators[1].model_dump(mode="json")],
+                },
+            }
+        )
+
+        _, _, updated_policy, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
+
+        self.assertEqual(updated_policy, current_policy)
+        self.assertFalse(diff.changed)
+        self.assertEqual(diff.unchanged_rule_count, 1)
+
+    def test_managed_reconcile_reports_principal_type_move_as_one_update(self) -> None:
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    managed_set_id="operator.owner",
+                    managed_rule_id="owner.read",
+                    subjects=("owner",),
+                    token_labels=("operator",),
+                    actions=("product_profile.read",),
+                ),
+            ),
+        )
+        current_record = _active_record_for_policy(current_policy)
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.owner",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "local_admins": [
+                        {
+                            "managed_set_id": "operator.owner",
+                            "managed_rule_id": "owner.read",
+                            "subjects": ["owner"],
+                            "token_labels": ["admin"],
+                            "actions": ["product_profile.read"],
+                        }
+                    ],
+                },
+            }
+        )
+
+        _, _, updated_policy, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
+
+        self.assertEqual(len(updated_policy.local_operators), 0)
+        self.assertEqual(len(updated_policy.local_admins), 1)
+        self.assertEqual(diff.updated_rule_count, 1)
+        self.assertEqual(diff.added_rule_count, 0)
+        self.assertEqual(diff.removed_rule_count, 0)
+        self.assertEqual(diff.changes[0].previous_principal_type, "local_operators")
+        self.assertEqual(diff.changes[0].desired_principal_type, "local_admins")
+
+    def test_managed_reconcile_binds_apply_to_normalized_reviewed_plan(self) -> None:
+        current_record = _active_record_for_policy(LaunchplaneAuthzPolicy(schema_version=2))
+        dry_run = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.owner",
+                "reason": "Review owner read authority.",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "local_operators": [
+                        {
+                            "managed_set_id": "operator.owner",
+                            "managed_rule_id": "owner.read",
+                            "subjects": ["owner", "owner"],
+                            "token_labels": ["secondary", "primary"],
+                            "actions": ["product_profile.read"],
+                        }
+                    ],
+                },
+            }
+        )
+        _, _, _, reviewed_diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=dry_run,
+        )
+        apply_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **dry_run.model_dump(mode="json"),
+                "mode": "apply",
+                "reviewed_plan_sha256": reviewed_diff.plan_sha256,
+            }
+        )
+
+        _, _, _, apply_diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=apply_request,
+        )
+
+        self.assertEqual(apply_diff.plan_sha256, reviewed_diff.plan_sha256)
+        self.assertEqual(
+            apply_request.desired_policy.local_operators[0].token_labels,
+            ("primary", "secondary"),
+        )
+
+    def test_managed_reconcile_allows_only_preexisting_mutable_privileged_overlap(self) -> None:
+        old_job_ref = (
+            "cbusillo/launchplane/.github/workflows/reusable-product-driver-prod-promotion.yml"
+            "@refs/heads/main"
+        )
+        new_job_ref = (
+            "cbusillo/launchplane/.github/workflows/reusable-product-driver-prod-promotion.yml"
+            "@" + "a" * 40
+        )
+        caller_workflow_ref = (
+            "cbusillo/odoo-tenant-cm/.github/workflows/odoo-prod-promotion.yml@refs/heads/main"
+        )
+        current_rule = GitHubActionsPolicyRule(
+            repository="cbusillo/odoo-tenant-cm",
+            workflow_refs=(caller_workflow_ref,),
+            job_workflow_refs=(old_job_ref,),
+            products=("odoo-tenant-cm",),
+            contexts=("odoo-tenant-cm",),
+            instances=("prod",),
+            actions=("odoo_prod_promotion.execute",),
+        )
+        current_record = _active_record_for_policy(
+            LaunchplaneAuthzPolicy(schema_version=2, github_actions=(current_rule,))
+        )
+        overlap_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.odoo",
+                "unmanaged_adoption": "adopt_matching",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "managed_set_id": "operator.odoo",
+                            "managed_rule_id": "cm.prod.promotion",
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "repository_id": "3001",
+                            "repository_owner_id": "2001",
+                            "workflow_refs": [caller_workflow_ref],
+                            "job_workflow_refs": [old_job_ref, new_job_ref],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["odoo-tenant-cm"],
+                            "instances": ["prod"],
+                            "actions": ["odoo_prod_promotion.execute"],
+                        }
+                    ],
+                },
+            }
+        )
+
+        _, _, overlapped_policy, overlap_diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=overlap_request,
+        )
+
+        self.assertEqual(overlap_diff.adopted_rule_count, 1)
+        self.assertEqual(
+            overlapped_policy.github_actions[0].job_workflow_refs,
+            (new_job_ref, old_job_ref),
+        )
+        mutable_only_payload = overlap_request.model_dump(mode="json")
+        mutable_only_payload["desired_policy"]["github_actions"][0]["job_workflow_refs"] = [
+            old_job_ref
+        ]
+        mutable_only_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            mutable_only_payload
+        )
+        with self.assertRaisesRegex(AuthzPolicyRequestError, "at least one reusable workflow"):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=mutable_only_request,
+            )
+        new_only_payload = overlap_request.model_dump(mode="json")
+        new_only_payload["desired_policy"]["github_actions"][0]["job_workflow_refs"] = [
+            new_job_ref
+        ]
+        new_only_request = AuthzManagedPolicyReconcileEnvelope.model_validate(new_only_payload)
+        with self.assertRaisesRegex(AuthzPolicyConflictError, "reviewed overlap plan"):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=new_only_request,
+            )
+        unsafe_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **overlap_request.model_dump(mode="json"),
+                "unmanaged_adoption": "reject",
+            }
+        )
+        with self.assertRaisesRegex(AuthzPolicyRequestError, "new refs must use a full commit SHA"):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore(
+                    (_active_record_for_policy(LaunchplaneAuthzPolicy(schema_version=2)),)
+                ),
+                request=unsafe_request,
+            )
+
     def test_route_request_schema_must_match_active_policy_schema(self) -> None:
         request = AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
             {
@@ -630,11 +1269,22 @@ class AuthzGrantServiceTests(unittest.TestCase):
         audit: dict[str, object] = {
             "requested_grant": _grant_request().grant.to_policy_rule().model_dump(mode="json"),
             "mode": "dry_run",
+            "operator": {
+                "type": "github_actions",
+                "repository": "cbusillo/launchplane",
+                "workflow_ref": "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",
+                "sha": "abc123",
+            },
         }
 
         response_audit = authz_policy_grant_response_audit_payload(audit)
 
         self.assertNotIn("requested_grant", response_audit)
+        self.assertEqual(response_audit["operator"], {"type": "github_actions"})
+        self.assertNotIn(
+            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",
+            json.dumps(response_audit, sort_keys=True),
+        )
         requested_grant_summary = cast(dict[str, object], response_audit["requested_grant_summary"])
         self.assertEqual(requested_grant_summary["actions"], ["product_profile.read"])
 

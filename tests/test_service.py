@@ -35,7 +35,11 @@ from control_plane.every_code_notifications_delivery import (
 )
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
-from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -1177,6 +1181,56 @@ class GitHubHumanAuthTests(unittest.TestCase):
 
         self.assertEqual(status_code, 401)
         self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    def test_human_session_role_is_revalidated_against_active_policy(self) -> None:
+        admin_policy = LaunchplaneAuthzPolicy.model_validate(
+            {"github_humans": [{"logins": ["alice"], "roles": ["admin"]}]}
+        )
+        authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(admin_policy)
+        session_manager = _fastapi_human_session_manager()
+        with TemporaryDirectory() as tmpdir:
+            app = create_launchplane_fastapi_test_app(
+                state_dir=Path(tmpdir) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=admin_policy,
+                authz_policy_runtime=authz_policy_runtime,
+                human_session_manager=session_manager,
+            )
+            cookie = _fastapi_signed_in_cookie(session_manager, role="admin")
+            read_only_policy = LaunchplaneAuthzPolicy.model_validate(
+                {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}
+            )
+            authz_policy_runtime.update(
+                read_only_policy,
+                policy_sha256=authz_policy_sha256(read_only_policy),
+                source="test:demoted",
+            )
+
+            demoted_status, demoted_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/auth/session",
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+            revoked_policy = LaunchplaneAuthzPolicy()
+            authz_policy_runtime.update(
+                revoked_policy,
+                policy_sha256=authz_policy_sha256(revoked_policy),
+                source="test:revoked",
+            )
+            revoked_status, revoked_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/auth/session",
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(demoted_status, 200)
+        self.assertEqual(demoted_payload["identity"]["role"], "read_only")
+        self.assertEqual(revoked_status, 401)
+        self.assertEqual(revoked_payload["error"]["code"], "authentication_required")
 
 
 class LaunchplaneServiceTests(unittest.TestCase):
@@ -4876,6 +4930,338 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(repeat_payload["result"]["changed"], False)
 
+    def test_managed_authz_reconcile_migrates_policy_and_rejects_stale_digest(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        },
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.read"],
+                        },
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            dry_run_payload = {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "managed_set_id": "operator.launchplane",
+                "schema_migration": "migrate_v1_to_v2",
+                "unmanaged_adoption": "adopt_matching",
+                "reason": "Adopt the active service grant into managed policy authority.",
+                "related_issue": "cbusillo/launchplane#1774",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "managed_set_id": "operator.launchplane",
+                            "managed_rule_id": "profile.read",
+                            "repository": "cbusillo/launchplane",
+                            "repository_id": "1001",
+                            "repository_owner_id": "2001",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.read"],
+                        }
+                    ],
+                },
+            }
+
+            dry_run_status, dry_run_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload=dry_run_payload,
+            )
+            request_payload = {
+                **dry_run_payload,
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response["result"]["diff"]["plan_sha256"],
+            }
+            missing_key_status, missing_key_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload=request_payload,
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload=request_payload,
+                headers={"Idempotency-Key": "managed-authz-reconcile"},
+            )
+            replay_status, replay_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload=request_payload,
+                headers={"Idempotency-Key": "managed-authz-reconcile"},
+            )
+            conflict_status, conflict_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload=request_payload,
+                headers={"Idempotency-Key": "managed-authz-reconcile-conflict"},
+            )
+            active_status, active_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/authz-policies/active",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_records = store.list_authz_policy_records(status="active")
+                superseded_records = store.list_authz_policy_records(status="superseded")
+            finally:
+                store.close()
+
+        self.assertEqual(dry_run_status, 202)
+        self.assertEqual(missing_key_status, 400)
+        self.assertEqual(missing_key_payload["error"]["code"], "idempotency_key_required")
+        self.assertEqual(status_code, 202)
+        self.assertEqual(replay_status, 202)
+        self.assertEqual(replay_payload["records"], payload["records"])
+        self.assertEqual(replay_payload["result"], payload["result"])
+        self.assertTrue(payload["result"]["changed"])
+        self.assertTrue(payload["result"]["diff"]["schema_migrated"])
+        self.assertEqual(payload["result"]["diff"]["adopted_rule_count"], 1)
+        self.assertEqual(conflict_status, 409)
+        self.assertEqual(conflict_payload["error"]["code"], "authz_policy_conflict")
+        self.assertEqual(active_status, 200)
+        self.assertEqual(active_payload["policy"]["revision"], 2)
+        self.assertEqual(
+            active_payload["policy"]["managed_rules"][0]["managed_rule_id"],
+            "profile.read",
+        )
+        self.assertNotIn("repository", active_payload["policy"]["managed_rules"][0])
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].policy.schema_version, 2)
+        self.assertEqual(
+            {
+                rule.managed_rule_id
+                for rule in active_records[0].policy.github_actions
+                if rule.managed_rule_id is not None
+            },
+            {"profile.read"},
+        )
+        self.assertEqual(len(superseded_records), 1)
+
+    def test_managed_authz_reconcile_noop_completes_replay_without_policy_history(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+            )
+            managed_rule = {
+                "managed_set_id": "operator.launchplane",
+                "managed_rule_id": "profile.read",
+                "repository": "cbusillo/launchplane",
+                "repository_id": "1001",
+                "repository_owner_id": "2001",
+                "workflow_refs": [workflow_ref],
+                "event_names": ["workflow_dispatch"],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+                "actions": ["product_profile.read"],
+            }
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        },
+                        managed_rule,
+                    ],
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            dry_run_payload = {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "managed_set_id": "operator.launchplane",
+                "reason": "Confirm the managed set is converged.",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [managed_rule],
+                },
+            }
+            dry_run_status, dry_run_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload=dry_run_payload,
+            )
+            apply_payload = {
+                **dry_run_payload,
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response["result"]["diff"]["plan_sha256"],
+            }
+            apply_status, apply_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload=apply_payload,
+                headers={"Idempotency-Key": "managed-authz-noop"},
+            )
+            replay_status, replay_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload=apply_payload,
+                headers={"Idempotency-Key": "managed-authz-noop"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_records = store.list_authz_policy_records(status="active")
+                superseded_records = store.list_authz_policy_records(status="superseded")
+            finally:
+                store.close()
+
+        self.assertEqual(dry_run_status, 202)
+        self.assertFalse(dry_run_response["result"]["changed"])
+        self.assertEqual(apply_status, 202)
+        self.assertFalse(apply_response["result"]["changed"])
+        self.assertEqual(replay_status, 202)
+        self.assertEqual(replay_response["result"], apply_response["result"])
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].revision, 1)
+        self.assertEqual(superseded_records, ())
+
+    def test_service_refreshes_active_authz_policy_revision_before_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service.read"],
+                        }
+                    ]
+                }
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            current_record = store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="seed",
+                    source="test:initial",
+                    updated_at="2026-07-18T00:00:00Z",
+                    policy=policy,
+                )
+            )
+            authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(
+                policy,
+                policy_sha256=current_record.policy_sha256,
+                source="db",
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                authz_policy_runtime=authz_policy_runtime,
+                control_plane_root_path=root,
+                record_store_factory=lambda: store,
+            )
+            replacement_policy = policy.model_copy(
+                update={"schema_version": 2}
+            )
+            replacement_record = LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=2,
+                    policy_sha256=authz_policy_sha256(replacement_policy),
+                ),
+                revision=2,
+                source="test:replacement",
+                updated_at="2026-07-18T00:01:00Z",
+                policy=replacement_policy,
+            )
+            store.compare_and_write_authz_policy_record(
+                expected_record=current_record,
+                replacement_record=replacement_record,
+            )
+            try:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/service/runtime",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["runtime"]["authz_policy_sha256"], replacement_record.policy_sha256)
+        self.assertEqual(authz_policy_runtime.policy_sha256, replacement_record.policy_sha256)
+
     def test_authz_policy_removal_endpoint_writes_db_record_and_updates_runtime(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -5237,7 +5623,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["changed"], True)
         self.assertEqual(payload["result"]["audit"]["operator"]["type"], "github_human")
-        self.assertEqual(payload["result"]["audit"]["operator"]["login"], "alice")
+        self.assertNotIn("login", payload["result"]["audit"]["operator"])
         human_operator = active_policy.audit["operator"]
         self.assertIsInstance(human_operator, dict)
         assert isinstance(human_operator, dict)
@@ -5394,7 +5780,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                store.write_authz_policy_record(
+                store.seed_authz_policy_if_absent(
                     LaunchplaneAuthzPolicyRecord(
                         record_id="launchplane-authz-policy-human-dry-run-test",
                         source="test",

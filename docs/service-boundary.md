@@ -244,6 +244,8 @@ cleanup scope so the store is always closed.
     bearer-token callers, DB-backed storage, local-operator reason enforcement,
     and optional `Idempotency-Key` replay/conflict handling)
 - authz policy maintenance routes:
+  - `GET /v1/authz-policies/active`
+  - `POST /v1/authz-policies/managed-rule-sets/reconcile`
   - `POST /v1/authz-policies/github-actions/grants`
   - `POST /v1/authz-policies/github-actions/removals`
   - `POST /v1/authz-policies/github-humans/grants`
@@ -251,8 +253,10 @@ cleanup scope so the store is always closed.
   - `POST /v1/authz-policies/local-operators/grants`
   - `POST /v1/authz-policies/local-admins/grants`
     (native FastAPI for bearer-token and signed-in GitHub human-session
-    callers, DB-backed policy records, apply-only `Idempotency-Key`
-    replay/conflict handling, and repeatable dry-runs)
+    callers and DB-backed policy records; managed-rule-set dry-runs return a
+    reviewed plan digest, while apply atomically couples policy CAS and
+    `Idempotency-Key` completion. The exact grant/removal routes remain a
+    bounded migration surface until configured callers move to managed sets.)
 - Every Code local automation work-request routes:
   - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
@@ -539,6 +543,7 @@ The cookie-capable mutation inventory is intentionally limited to:
 - `POST /v1/drivers/generic-web/prod-promotion-workflow`
 - `POST /v1/product-config/apply`
 - `POST /v1/merge-train/policies/import`
+- `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `POST /v1/authz-policies/github-actions/grants`
 - `POST /v1/authz-policies/github-actions/removals`
 - `POST /v1/authz-policies/github-humans/grants`
@@ -567,20 +572,41 @@ retain their existing request shape.
 Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
 deployment/promotion/preview lifecycle evidence over HTTP, and executes the
 current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,
-and preview mutations as authenticated Launchplane routes. The authz policy
-grant and removal routes accept GitHub Actions OIDC callers and authenticated
-admin human sessions, require the `authz_policy_grant.write` action, and remain
-the service-owned write/reload boundary for DB-backed GitHub Actions and GitHub
-human policy rules. Terminal-agent, local-operator, and local-admin grant routes
-use the same policy-admin boundary for DB-backed owner-agent rules. Grant and
-removal requests support `dry_run` and `apply` modes. Apply requests must include
-an audit reason and write a new active policy record only when the policy
-changes, then immediately refresh the in-process policy used by the current
-service worker. GitHub Actions removals match complete policy rules by exact
-equality; partial selectors do not remove broader or narrower rules.
-Responses return record metadata, rule counts, a compact diff, and redacted audit
-metadata rather than echoing workflow refs, human logins, owner-agent subjects,
-or the full policy body.
+and preview mutations as authenticated Launchplane routes. Authz administration
+accepts GitHub Actions OIDC callers and authenticated admin human sessions and
+requires `authz_policy_grant.write`. The managed-rule-set route is the durable
+write/reload boundary for every principal type. The exact grant/removal routes
+remain only for the bounded rollout from the previous append-oriented contract;
+they support `dry_run` and `apply`, require an audit reason for apply, and match
+complete rules rather than partial selectors. Responses return record metadata,
+rule counts, compact diffs, and redacted audit metadata rather than echoing
+workflow refs, human logins, owner-agent subjects, or the full policy body.
+
+Managed rule-set reconciliation is the durable authz write contract. A stable
+`(managed_set_id, managed_rule_id)` owns each managed rule independent of its
+content hash or principal type. Dry-run reads the one active DB-backed policy,
+normalizes selector order, and returns a redacted add/adopt/update/remove diff
+plus `plan_sha256`. Apply must repeat the same desired set, migration/adoption
+intent, reason, and related issue with that reviewed digest and an
+`Idempotency-Key`. The service then reserves idempotency, locks the singleton
+active policy, compares record ID/revision/digest, supersedes and inserts only
+when changed, completes replay evidence, and commits the transaction as one
+unit. No-op applies complete replay evidence without creating policy history.
+
+Schema-v1 migration and unmanaged-rule adoption are never implicit. The caller
+must request `schema_migration = migrate_v1_to_v2` and/or
+`unmanaged_adoption = adopt_matching` during both review and apply. Multiple
+matching unmanaged rules fail closed. `GET /v1/authz-policies/active` exposes
+only active record metadata, counts, managed IDs, principal types, and rule
+hashes; it never returns full workflow refs or principal selectors.
+
+New managed GitHub Actions rules require immutable GitHub `repository_id` and
+`repository_owner_id` selectors. Production-capable, destructive,
+secret-backed, or policy-admin reusable-workflow rules require exact caller
+workflow refs and a reusable `job_workflow_ref` pinned to a full commit SHA. A
+mutable reusable ref may appear only in a reviewed overlap plan when the active
+policy already authorizes that exact ref; narrowing removes it from the same
+stable managed rule after canary evidence.
 
 The service also serves the built operator UI shell at `/`, with `/ui` retained
 as a route alias. This route family is native FastAPI. Built assets live under
@@ -1034,6 +1060,8 @@ The first policy model should be allow-list based and fail closed.
 
 - `repository`
 - `repository_owner`
+- `repository_id`
+- `repository_owner_id`
 - `workflow_ref`
 - `job_workflow_ref` when reusable workflows are involved
 - `ref`
@@ -1059,7 +1087,7 @@ Launchplane should map verified claims to a small policy rule set:
 ```text
 rule
   - subject type: github-actions
-  - repository match
+  - repository name plus immutable repository and owner ID match
   - workflow_ref or job_workflow_ref match
   - event_name match
   - environment/ref constraints

@@ -24,6 +24,11 @@ from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation,
     complete_launchplane_mutation_reservation,
 )
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
@@ -65,6 +70,7 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
     run_durable_provider_operation,
 )
+from control_plane.service_auth import GitHubActionsPolicyRule, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import (
     DbOnlyMutationRequest,
     MutationReservationResult,
@@ -72,7 +78,10 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
-from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
+from control_plane.storage.schema_invariants import (
+    EXPECTED_ALEMBIC_HEAD_REVISION,
+    verify_postgres_schema_invariants,
+)
 from tests.support.artifact_manifests import artifact_manifest_v2
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
@@ -445,6 +454,194 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertIsNone(loaded.dependency_provenance)
         self.assertEqual(loaded.source_commit, "legacy-short-ref")
 
+    def test_authz_policy_migration_canonicalizes_active_history_and_revisions(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            alembic_command.upgrade(_alembic_config(database_url), "f3b5d7e9a1c2")
+            policy = LaunchplaneAuthzPolicy(
+                github_actions=(
+                    GitHubActionsPolicyRule(
+                        repository="cbusillo/launchplane",
+                        actions=("product_profile.read",),
+                    ),
+                ),
+            )
+            records = (
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="legacy-authz-older",
+                    source="test:legacy",
+                    updated_at="2026-07-17T00:00:00Z",
+                    policy=policy,
+                ),
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="legacy-authz-newer",
+                    source="test:legacy",
+                    updated_at="2026-07-18T00:00:00Z",
+                    policy=policy,
+                ),
+            )
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                for record in records:
+                    payload = record.model_dump(mode="json")
+                    payload.pop("revision", None)
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_authz_policies "
+                            "(record_id, status, source, updated_at, policy_sha256, payload) "
+                            "VALUES (:record_id, :status, :source, :updated_at, :policy_sha256, "
+                            "CAST(:payload AS jsonb))"
+                        ),
+                        {
+                            "record_id": record.record_id,
+                            "status": record.status,
+                            "source": record.source,
+                            "updated_at": record.updated_at,
+                            "policy_sha256": record.policy_sha256,
+                            "payload": json.dumps(payload),
+                        },
+                    )
+            engine.dispose()
+
+            _upgrade_empty_database_to_head(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.verify_schema()
+                active_records = store.list_authz_policy_records(status="active")
+                superseded_records = store.list_authz_policy_records(status="superseded")
+            finally:
+                store.close()
+
+        self.assertEqual(
+            tuple((record.record_id, record.revision) for record in active_records),
+            (("legacy-authz-newer", 2),),
+        )
+        self.assertEqual(
+            tuple((record.record_id, record.revision) for record in superseded_records),
+            (("legacy-authz-older", 1),),
+        )
+
+    def test_authz_policy_migration_rejects_tied_latest_active_records(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            alembic_command.upgrade(_alembic_config(database_url), "f3b5d7e9a1c2")
+            policy = LaunchplaneAuthzPolicy()
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                for record_id in ("legacy-authz-a", "legacy-authz-b"):
+                    record = LaunchplaneAuthzPolicyRecord(
+                        record_id=record_id,
+                        source="test:legacy",
+                        updated_at="2026-07-18T00:00:00Z",
+                        policy=policy,
+                    )
+                    payload = record.model_dump(mode="json")
+                    payload.pop("revision", None)
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_authz_policies "
+                            "(record_id, status, source, updated_at, policy_sha256, payload) "
+                            "VALUES (:record_id, :status, :source, :updated_at, :policy_sha256, "
+                            "CAST(:payload AS jsonb))"
+                        ),
+                        {
+                            "record_id": record.record_id,
+                            "status": record.status,
+                            "source": record.source,
+                            "updated_at": record.updated_at,
+                            "policy_sha256": record.policy_sha256,
+                            "payload": json.dumps(payload),
+                        },
+                    )
+            engine.dispose()
+
+            with self.assertRaisesRegex(RuntimeError, "share the latest updated_at timestamp"):
+                _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            try:
+                alembic_version = _current_alembic_version(engine)
+            finally:
+                engine.dispose()
+
+        self.assertEqual(alembic_version, "f3b5d7e9a1c2")
+
+    def test_authz_policy_write_fence_accepts_previous_binary_insert_shape(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            current_record = store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="seed",
+                    source="test:initial",
+                    updated_at="2026-07-18T00:00:00Z",
+                    policy=LaunchplaneAuthzPolicy(),
+                )
+            )
+            legacy_record = LaunchplaneAuthzPolicyRecord(
+                record_id="legacy-binary-active-write",
+                source="test:legacy-binary",
+                updated_at="2026-07-18T00:01:00Z",
+                policy=LaunchplaneAuthzPolicy(
+                    github_actions=(
+                        GitHubActionsPolicyRule(
+                            repository="example/legacy",
+                            actions=("product_profile.read",),
+                        ),
+                    ),
+                ),
+            )
+            legacy_payload = legacy_record.model_dump(mode="json")
+            legacy_payload.pop("revision", None)
+            engine = create_engine(store.database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_authz_policies "
+                        "(record_id, status, source, updated_at, policy_sha256, payload) "
+                        "VALUES (:record_id, :status, :source, :updated_at, :policy_sha256, "
+                        "CAST(:payload AS jsonb))"
+                    ),
+                    {
+                        "record_id": legacy_record.record_id,
+                        "status": legacy_record.status,
+                        "source": legacy_record.source,
+                        "updated_at": legacy_record.updated_at,
+                        "policy_sha256": legacy_record.policy_sha256,
+                        "payload": json.dumps(legacy_payload),
+                    },
+                )
+                stored_payload = connection.execute(
+                    text(
+                        "select payload from launchplane_authz_policies "
+                        "where record_id = :record_id"
+                    ),
+                    {"record_id": legacy_record.record_id},
+                ).scalar_one()
+            engine.dispose()
+            active_records = store.list_authz_policy_records(status="active")
+            superseded_records = store.list_authz_policy_records(status="superseded")
+
+        self.assertEqual(active_records[0].record_id, legacy_record.record_id)
+        self.assertEqual(active_records[0].revision, 2)
+        self.assertEqual(
+            superseded_records,
+            (current_record.model_copy(update={"status": "superseded"}),),
+        )
+        self.assertNotIn("revision", stored_payload)
+
+    def test_schema_verification_rejects_disabled_authz_policy_write_fence(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "ALTER TABLE launchplane_authz_policies DISABLE TRIGGER "
+                            "launchplane_authz_policy_write_fence"
+                        )
+                    )
+                with self.assertRaisesRegex(RuntimeError, "authz_policy_write_fence is disabled"):
+                    verify_postgres_schema_invariants(engine)
+            finally:
+                engine.dispose()
+
     def test_alembic_from_empty_database_reaches_exact_head_and_required_invariants(
         self,
     ) -> None:
@@ -468,6 +665,14 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 idempotency_columns = {
                     column["name"]: column
                     for column in inspector.get_columns("launchplane_idempotency_records")
+                }
+                authz_indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes("launchplane_authz_policies")
+                }
+                authz_columns = {
+                    column["name"]: column
+                    for column in inspector.get_columns("launchplane_authz_policies")
                 }
                 outbox_indexes = {
                     index["name"]: index
@@ -513,6 +718,9 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(outbox_attempt_type, "integer")
         self.assertEqual(outbox_max_attempts_type, "integer")
         self.assertTrue(idempotency_columns["response_status_code"]["nullable"])
+        self.assertFalse(authz_columns["revision"]["nullable"])
+        self.assertTrue(authz_indexes["launchplane_authz_policies_revision_uidx"]["unique"])
+        self.assertTrue(authz_indexes["launchplane_authz_policies_active_uidx"]["unique"])
         self.assertFalse(outbox_columns["payload"]["nullable"])
         self.assertTrue(outbox_indexes["launchplane_outbox_deliveries_dedupe_uidx"]["unique"])
         self.assertFalse(outbox_indexes["launchplane_outbox_deliveries_claim_idx"]["unique"])
@@ -875,6 +1083,29 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_startup_verification_rejects_wrong_authz_active_predicate(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(text("drop index launchplane_authz_policies_active_uidx"))
+                connection.execute(
+                    text(
+                        "create unique index launchplane_authz_policies_active_uidx "
+                        "on launchplane_authz_policies (status) where status <> 'active'"
+                    )
+                )
+            engine.dispose()
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "launchplane_authz_policies_active_uidx has predicate status<>'active'",
+                ):
+                    store.verify_schema()
+            finally:
+                store.close()
+
     def test_startup_verification_fails_closed_when_outbox_claim_index_is_missing(
         self,
     ) -> None:
@@ -920,6 +1151,75 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_authz_policy_compare_write_serializes_concurrent_writers(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            initial_record = store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="seed",
+                    source="test:initial",
+                    updated_at="2026-07-18T00:00:00Z",
+                    policy=LaunchplaneAuthzPolicy(),
+                )
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def reconcile(active_store: PostgresRecordStore, suffix: str) -> str:
+                policy = LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=(
+                        GitHubActionsPolicyRule(
+                            repository=f"example/{suffix}",
+                            actions=("product_profile.read",),
+                        ),
+                    ),
+                )
+                replacement = LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(
+                        revision=2,
+                        policy_sha256=authz_policy_sha256(policy),
+                    ),
+                    revision=2,
+                    source="service:authz-managed-rule-set-reconcile",
+                    updated_at=f"2026-07-18T00:00:0{suffix[-1]}Z",
+                    policy=policy,
+                )
+                barrier.wait(timeout=5)
+                return active_store.compare_and_write_authz_policy_record(
+                    expected_record=initial_record,
+                    replacement_record=replacement,
+                    mutation=DbOnlyMutationRequest(
+                        scope="github-actions:authz-concurrency",
+                        route_path="/v1/authz-policies/managed-rule-sets/reconcile",
+                        idempotency_key=f"authz:concurrent:{suffix}",
+                        request_fingerprint=f"fingerprint-{suffix}",
+                        lease_owner=f"trace-{suffix}",
+                        response_status_code=202,
+                        response_trace_id=f"trace-{suffix}",
+                        response_payload={"status": "accepted", "suffix": suffix},
+                    ),
+                ).status
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: reconcile(*arguments),
+                            ((store, "writer-1"), (second_store, "writer-2")),
+                        )
+                    )
+                active_records = store.list_authz_policy_records(status="active")
+                superseded_records = store.list_authz_policy_records(status="superseded")
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["stale", "written"])
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].revision, 2)
+        self.assertEqual(
+            superseded_records, (initial_record.model_copy(update={"status": "superseded"}),)
+        )
+
     def test_concurrent_outbox_enqueue_reuses_one_delivery(self) -> None:
         with _store_for_fresh_head_database() as store:
             delivery = _outbox_delivery(suffix="concurrent-enqueue")

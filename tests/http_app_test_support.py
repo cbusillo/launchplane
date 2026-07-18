@@ -1738,7 +1738,7 @@ def _seed_product_environment_read_records(database_url: str) -> None:
                 ]
             }
         )
-        store.write_authz_policy_record(
+        store.seed_authz_policy_if_absent(
             LaunchplaneAuthzPolicyRecord(
                 record_id="launchplane-authz-policy-product-environment-read-test",
                 source="test",

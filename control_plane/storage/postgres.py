@@ -8,6 +8,7 @@ from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast
 
 from pydantic import BaseModel
 from sqlalchemy import (
+    BigInteger,
     JSON,
     Index,
     Integer,
@@ -28,7 +29,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
-from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.authz_policy_record import (
+    AuthzPolicyCompareWriteResult,
+    LaunchplaneAuthzPolicyRecord,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -734,9 +739,24 @@ class LaunchplaneReleaseTupleRow(Base):
 
 class LaunchplaneAuthzPolicyRow(Base):
     __tablename__ = "launchplane_authz_policies"
-    __table_args__ = (Index("launchplane_authz_policies_updated_idx", desc("updated_at")),)
+    __table_args__ = (
+        Index("launchplane_authz_policies_updated_idx", desc("updated_at")),
+        Index(
+            "launchplane_authz_policies_revision_uidx",
+            "revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_authz_policies_active_uidx",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
@@ -1924,6 +1944,9 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
 
     def _after_product_authority_bundle_step(self, step_name: str) -> None:
+        return None
+
+    def _after_authz_policy_write_step(self, step_name: str) -> None:
         return None
 
     def _merge_authority_row(self, session: Any, row: Base, *, step_name: str) -> None:
@@ -6755,16 +6778,297 @@ class PostgresRecordStore(HumanSessionStore):
             ),
         )
 
-    def write_authz_policy_record(self, record: LaunchplaneAuthzPolicyRecord) -> None:
-        self._write_row(
-            LaunchplaneAuthzPolicyRow(
-                record_id=record.record_id,
-                status=record.status,
-                source=record.source,
-                updated_at=record.updated_at,
-                policy_sha256=record.policy_sha256,
-                payload=self._payload_dict(record),
+    def _lock_active_authz_policy(self, session: Any) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "launchplane:active-authz-policy"},
+        )
+
+    @staticmethod
+    def _authz_policy_payload(record: LaunchplaneAuthzPolicyRecord) -> PayloadDict:
+        payload = cast(PayloadDict, record.model_dump(mode="json"))
+        payload.pop("revision", None)
+        return payload
+
+    @classmethod
+    def _authz_policy_row(cls, record: LaunchplaneAuthzPolicyRecord) -> LaunchplaneAuthzPolicyRow:
+        return LaunchplaneAuthzPolicyRow(
+            record_id=record.record_id,
+            revision=record.revision,
+            status=record.status,
+            source=record.source,
+            updated_at=record.updated_at,
+            policy_sha256=record.policy_sha256,
+            payload=cls._authz_policy_payload(record),
+        )
+
+    @staticmethod
+    def _read_authz_policy_row(row: LaunchplaneAuthzPolicyRow) -> LaunchplaneAuthzPolicyRecord:
+        return LaunchplaneAuthzPolicyRecord.model_validate(
+            {**row.payload, "revision": row.revision}
+        )
+
+    def seed_authz_policy_if_absent(
+        self, record: LaunchplaneAuthzPolicyRecord
+    ) -> LaunchplaneAuthzPolicyRecord:
+        if record.status != "active":
+            raise ValueError("Authz policy seed record must be active.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_active_authz_policy(session)
+            active_rows = tuple(
+                session.scalars(
+                    select(LaunchplaneAuthzPolicyRow)
+                    .where(LaunchplaneAuthzPolicyRow.status == "active")
+                    .order_by(desc(LaunchplaneAuthzPolicyRow.revision))
+                ).all()
             )
+            if len(active_rows) > 1:
+                session.rollback()
+                raise ValueError("Multiple active Launchplane authz policy records found.")
+            if active_rows:
+                session.rollback()
+                return self._read_authz_policy_row(active_rows[0])
+            latest_revision = session.scalar(select(func.max(LaunchplaneAuthzPolicyRow.revision)))
+            revision = int(latest_revision or 0) + 1
+            seeded_record = record.model_copy(
+                update={
+                    "revision": revision,
+                    "record_id": build_authz_policy_record_id(
+                        revision=revision,
+                        policy_sha256=record.policy_sha256,
+                    ),
+                }
+            )
+            session.add(self._authz_policy_row(seeded_record))
+            session.commit()
+            return seeded_record
+
+    def compare_and_write_authz_policy_record(
+        self,
+        *,
+        expected_record: LaunchplaneAuthzPolicyRecord,
+        replacement_record: LaunchplaneAuthzPolicyRecord | None,
+        mutation: DbOnlyMutationRequest | None = None,
+    ) -> AuthzPolicyCompareWriteResult:
+        if expected_record.status != "active":
+            raise ValueError("Authz policy compare-and-write expected record must be active.")
+        if replacement_record is not None and replacement_record.status != "active":
+            raise ValueError("Authz policy compare-and-write replacement must be active.")
+        if (
+            replacement_record is not None
+            and replacement_record.revision != expected_record.revision + 1
+        ):
+            raise ValueError(
+                "Authz policy compare-and-write replacement revision must follow the expected record."
+            )
+        if mutation is not None:
+            if not 100 <= mutation.response_status_code <= 599:
+                raise ValueError("DB-only mutation response status must be between 100 and 599.")
+            if not mutation.response_trace_id.strip():
+                raise ValueError("DB-only mutation response trace id is required.")
+        statement = (
+            select(LaunchplaneAuthzPolicyRow)
+            .where(LaunchplaneAuthzPolicyRow.status == "active")
+            .order_by(desc(LaunchplaneAuthzPolicyRow.revision))
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        if mutation is None:
+            with self._session_factory() as session:
+                self._begin_serialized_write(session)
+                return self._compare_and_write_authz_policy_locked(
+                    session=session,
+                    statement=statement,
+                    expected_record=expected_record,
+                    replacement_record=replacement_record,
+                )
+
+        reservation_insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_at = self._database_mutation_timestamp(session)
+            stored_reservation = build_launchplane_mutation_reservation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                reserved_at=observed_at,
+            )
+            reservation_row = self._idempotency_row(stored_reservation)
+            session.add(reservation_row)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                session.rollback()
+                reservation_insert_error = error
+            if reservation_insert_error is None:
+                return self._compare_and_write_authz_policy_locked(
+                    session=session,
+                    statement=statement,
+                    expected_record=expected_record,
+                    replacement_record=replacement_record,
+                    reservation_row=reservation_row,
+                    mutation_reservation=stored_reservation,
+                    mutation=mutation,
+                )
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_row = session.scalar(
+                self._idempotency_statement(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if reservation_row is None:
+                assert reservation_insert_error is not None
+                raise reservation_insert_error
+            current_reservation = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=reservation_row.payload,
+            )
+            if current_reservation.request_fingerprint != mutation.request_fingerprint:
+                return AuthzPolicyCompareWriteResult(
+                    status="idempotency_conflict",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "completed":
+                return AuthzPolicyCompareWriteResult(
+                    status="replayed",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "reconcile_required":
+                return AuthzPolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=current_reservation,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_reservation.lease_expires_at,
+                field_name="lease_expires_at",
+            ) > parse_launchplane_mutation_timestamp(
+                observed_at,
+                field_name="observed_at",
+            ):
+                return AuthzPolicyCompareWriteResult(
+                    status="reservation_in_progress",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.reconciliation_key:
+                reconcile_record = self._updated_idempotency_record(
+                    current_reservation,
+                    state="reconcile_required",
+                    updated_at=observed_at,
+                )
+                self._sync_idempotency_row(reservation_row, reconcile_record)
+                session.commit()
+                return AuthzPolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=reconcile_record,
+                )
+            reclaimed_reservation = self._updated_idempotency_record(
+                current_reservation,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                attempt=current_reservation.attempt + 1,
+                updated_at=observed_at,
+                response_status_code=None,
+                response_trace_id="",
+                recorded_at="",
+                response_payload={},
+            )
+            self._sync_idempotency_row(reservation_row, reclaimed_reservation)
+            return self._compare_and_write_authz_policy_locked(
+                session=session,
+                statement=statement,
+                expected_record=expected_record,
+                replacement_record=replacement_record,
+                reservation_row=reservation_row,
+                mutation_reservation=reclaimed_reservation,
+                mutation=mutation,
+            )
+
+    def _compare_and_write_authz_policy_locked(
+        self,
+        *,
+        session: Any,
+        statement: Any,
+        expected_record: LaunchplaneAuthzPolicyRecord,
+        replacement_record: LaunchplaneAuthzPolicyRecord | None,
+        reservation_row: LaunchplaneIdempotencyRow | None = None,
+        mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
+        mutation: DbOnlyMutationRequest | None = None,
+    ) -> AuthzPolicyCompareWriteResult:
+        self._lock_active_authz_policy(session)
+        active_rows = tuple(session.scalars(statement).all())
+        if not active_rows:
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return AuthzPolicyCompareWriteResult(status="missing")
+        if len(active_rows) > 1:
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return AuthzPolicyCompareWriteResult(status="ambiguous_active")
+        active_row = active_rows[0]
+        current_record = self._read_authz_policy_row(active_row)
+        if (
+            current_record.record_id != expected_record.record_id
+            or current_record.revision != expected_record.revision
+            or current_record.policy_sha256 != expected_record.policy_sha256
+        ):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return AuthzPolicyCompareWriteResult(status="stale", current_record=current_record)
+
+        result_record = current_record
+        status: Literal["written", "unchanged"] = "unchanged"
+        if replacement_record is not None:
+            superseded_record = current_record.model_copy(update={"status": "superseded"})
+            active_row.status = "superseded"
+            active_row.payload = self._authz_policy_payload(superseded_record)
+            session.flush()
+            self._after_authz_policy_write_step("supersede_active")
+            session.add(self._authz_policy_row(replacement_record))
+            session.flush()
+            self._after_authz_policy_write_step("insert_active")
+            result_record = replacement_record
+            status = "written"
+
+        stored_completion: LaunchplaneIdempotencyRecord | None = None
+        if reservation_row is not None:
+            if mutation_reservation is None or mutation is None:
+                raise RuntimeError("Authz policy mutation completion evidence is incomplete.")
+            completed_at = self._database_mutation_timestamp(session)
+            stored_completion = complete_launchplane_mutation_reservation(
+                mutation_reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=completed_at,
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(reservation_row, stored_completion)
+            self._after_authz_policy_write_step("complete_idempotency")
+        session.commit()
+        return AuthzPolicyCompareWriteResult(
+            status=status,
+            current_record=result_record,
+            idempotency_record=stored_completion,
         )
 
     def list_authz_policy_records(
@@ -6773,21 +7077,14 @@ class PostgresRecordStore(HumanSessionStore):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
-        filters: list[object] = []
+        statement = select(LaunchplaneAuthzPolicyRow)
         if status:
-            filters.append(LaunchplaneAuthzPolicyRow.status == status)
-        records = self._list_models(
-            model_type=LaunchplaneAuthzPolicyRecord,
-            orm_model=LaunchplaneAuthzPolicyRow,
-            filters=filters,
-            order_by=(
-                desc(LaunchplaneAuthzPolicyRow.updated_at),
-                desc(LaunchplaneAuthzPolicyRow.record_id),
-            ),
-        )
+            statement = statement.where(LaunchplaneAuthzPolicyRow.status == status)
+        statement = statement.order_by(desc(LaunchplaneAuthzPolicyRow.revision))
         if limit is not None:
-            return records[:limit]
-        return records
+            statement = statement.limit(max(limit, 0))
+        with self._session_factory() as session:
+            return tuple(self._read_authz_policy_row(row) for row in session.scalars(statement))
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None:
         self._write_row(self._product_profile_row(record))
@@ -8403,9 +8700,6 @@ class PostgresRecordStore(HumanSessionStore):
         for artifact_manifest in filesystem_store.list_artifact_manifests():
             self.write_artifact_manifest(artifact_manifest)
             counts["artifacts"] += 1
-        for authz_policy_record in filesystem_store.list_authz_policy_records():
-            self.write_authz_policy_record(authz_policy_record)
-            counts["authz_policies"] += 1
         for policy_record in filesystem_store.list_runtime_key_safety_policy_records():
             self.write_runtime_key_safety_policy_record(policy_record)
             counts["runtime_key_safety_policies"] += 1

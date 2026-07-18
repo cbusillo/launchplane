@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import re
 from typing import Protocol
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-EXPECTED_ALEMBIC_HEAD_REVISION = "f3b5d7e9a1c2"
+EXPECTED_ALEMBIC_HEAD_REVISION = "f4c6e8a0b2d4"
+_AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
+_AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
+_AUTHZ_POLICY_WRITE_FENCE_FUNCTION = "launchplane_fence_authz_policy_write"
 
 
 class SchemaInspectorProtocol(Protocol):
@@ -36,6 +40,7 @@ class CriticalIndex:
     column_names: tuple[str, ...]
     unique: bool = False
     predicate_tokens: tuple[str, ...] = ()
+    predicate_expression: str = ""
 
 
 @dataclass(frozen=True)
@@ -130,11 +135,34 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "payload",
         ("jsonb",),
     ),
+    CriticalColumnType(
+        "launchplane_authz_policies",
+        "revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_authz_policies",
+        "payload",
+        ("jsonb",),
+    ),
 )
 
 _ACTIVE_OPERATION_PREDICATE_TOKENS = ("status", "pending", "running")
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    CriticalIndex(
+        "launchplane_authz_policies",
+        "launchplane_authz_policies_revision_uidx",
+        ("revision",),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_authz_policies",
+        "launchplane_authz_policies_active_uidx",
+        ("status",),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
     CriticalIndex(
         "launchplane_idempotency_records",
         "launchplane_idempotency_scope_route_key_idx",
@@ -270,6 +298,7 @@ def verify_postgres_schema_invariants(engine: Engine) -> None:
             inspector,
             table_names=set(inspector.get_table_names()),
         ),
+        *authz_policy_write_fence_errors(engine),
     ]
     if errors:
         joined_errors = "; ".join(errors)
@@ -386,6 +415,22 @@ def critical_index_errors(
                     f"{predicate_text or '<none>'}; expected tokens "
                     f"{', '.join(expected_index.predicate_tokens)}"
                 )
+        if expected_index.predicate_expression:
+            predicate_text = _normalized_predicate_text(
+                observed_index,
+                resolved_index_definitions.get(
+                    (expected_index.table_name, expected_index.index_name), ""
+                ),
+            )
+            observed_expression = _canonical_predicate_expression(predicate_text)
+            expected_expression = _canonical_predicate_expression(
+                expected_index.predicate_expression
+            )
+            if observed_expression != expected_expression:
+                errors.append(
+                    f"{expected_index.index_name} has predicate "
+                    f"{observed_expression or '<none>'}; expected {expected_expression}"
+                )
     return errors
 
 
@@ -408,6 +453,87 @@ def _verify_alembic_head(engine: Engine) -> None:
             f"observed {observed}; expected {EXPECTED_ALEMBIC_HEAD_REVISION}. Run "
             "Alembic migrations before starting the hosted service."
         )
+
+
+def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
+    with engine.connect() as connection:
+        trigger_row = (
+            connection.execute(
+                text(
+                    "select p.proname as function_name, t.tgenabled as enabled, "
+                    "pg_get_triggerdef(t.oid) as definition "
+                    "from pg_trigger t "
+                    "join pg_class c on c.oid = t.tgrelid "
+                    "join pg_namespace n on n.oid = c.relnamespace "
+                    "join pg_proc p on p.oid = t.tgfoid "
+                    "where n.nspname = current_schema() "
+                    "and c.relname = :table_name "
+                    "and t.tgname = :trigger_name "
+                    "and not t.tgisinternal"
+                ),
+                {
+                    "table_name": _AUTHZ_POLICY_TABLE,
+                    "trigger_name": _AUTHZ_POLICY_WRITE_FENCE_TRIGGER,
+                },
+            )
+            .mappings()
+            .one_or_none()
+        )
+        function_row = (
+            connection.execute(
+                text(
+                    "select pg_get_functiondef(p.oid) as definition "
+                    "from pg_proc p "
+                    "join pg_namespace n on n.oid = p.pronamespace "
+                    "where n.nspname = current_schema() "
+                    "and p.proname = :function_name "
+                    "and pg_get_function_identity_arguments(p.oid) = ''"
+                ),
+                {"function_name": _AUTHZ_POLICY_WRITE_FENCE_FUNCTION},
+            )
+            .mappings()
+            .one_or_none()
+        )
+    errors: list[str] = []
+    if trigger_row is None:
+        errors.append(
+            f"{_AUTHZ_POLICY_TABLE} missing required trigger "
+            f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER}"
+        )
+    else:
+        if str(trigger_row["function_name"]) != _AUTHZ_POLICY_WRITE_FENCE_FUNCTION:
+            errors.append(
+                f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER} invokes "
+                f"{trigger_row['function_name']}; expected {_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}"
+            )
+        if str(trigger_row["enabled"]) not in {"O", "A"}:
+            errors.append(f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER} is disabled")
+        trigger_definition = " ".join(str(trigger_row["definition"]).lower().split())
+        for expected_fragment in (
+            "before insert or update of status",
+            f"execute function {_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}()",
+        ):
+            if expected_fragment not in trigger_definition:
+                errors.append(
+                    f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER} definition is missing "
+                    f"{expected_fragment!r}"
+                )
+    if function_row is None:
+        errors.append(f"missing required function {_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}()")
+    else:
+        function_definition = " ".join(str(function_row["definition"]).lower().split())
+        for expected_fragment in (
+            "pg_advisory_xact_lock",
+            "new.revision is null",
+            "new.status = 'active'",
+            "jsonb_set",
+        ):
+            if expected_fragment not in function_definition:
+                errors.append(
+                    f"{_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}() is missing "
+                    f"{expected_fragment!r}"
+                )
+    return errors
 
 
 def postgres_index_definitions(engine: Engine) -> dict[tuple[str, str], str]:
@@ -473,3 +599,12 @@ def _normalized_predicate_text(index: Mapping[str, object], index_definition: st
             if str(key).endswith("_where") and value is not None:
                 predicate_parts.append(str(value))
     return " ".join(predicate_parts).lower().replace('"', "")
+
+
+def _canonical_predicate_expression(value: str) -> str:
+    normalized = value.lower().replace('"', "")
+    if " where " in normalized:
+        normalized = normalized.split(" where ", maxsplit=1)[1]
+    normalized = re.sub(r"::[a-z0-9_]+", "", normalized)
+    normalized = normalized.replace("(", "").replace(")", "")
+    return "".join(normalized.split())

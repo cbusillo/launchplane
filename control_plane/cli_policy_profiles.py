@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 
 import click
 from pydantic import ValidationError
@@ -14,11 +14,6 @@ from control_plane.cli_shared import (
     DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
     direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
     require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
-)
-from control_plane.contracts.authz_policy_record import (
-    LaunchplaneAuthzPolicyRecord,
-    authz_policy_sha256,
-    build_authz_policy_record_id,
 )
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
@@ -43,7 +38,6 @@ from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
 )
-from control_plane.service_auth import load_authz_policy
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.launchplane import LAUNCHPLANE_PREVIEW_ENABLE_LABEL
 from control_plane.workflows.ship import utc_now_timestamp
@@ -93,28 +87,6 @@ def _post_launchplane_service_json(**kwargs: object) -> dict[str, object]:
     return _policy_profile_callbacks().post_launchplane_service_json(**kwargs)
 
 
-def _build_authz_policy_record(
-    *,
-    policy_file: Path,
-    source_label: str,
-    status: Literal["active", "superseded"] = "active",
-) -> LaunchplaneAuthzPolicyRecord:
-    policy = load_authz_policy(policy_file)
-    updated_at = utc_now_timestamp()
-    policy_sha256 = authz_policy_sha256(policy)
-    return LaunchplaneAuthzPolicyRecord(
-        record_id=build_authz_policy_record_id(
-            updated_at=updated_at,
-            policy_sha256=policy_sha256,
-        ),
-        status=status,
-        source=source_label,
-        updated_at=updated_at,
-        policy_sha256=policy_sha256,
-        policy=policy,
-    )
-
-
 class _PolicyRecordSummaryFields(Protocol):
     @property
     def record_id(self) -> str: ...
@@ -139,13 +111,6 @@ def _policy_record_summary_base(record: _PolicyRecordSummaryFields) -> dict[str,
         "source": record.source,
         "updated_at": record.updated_at,
         "policy_sha256": record.policy_sha256,
-    }
-
-
-def summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[str, object]:
-    return _policy_record_summary_base(record) | {
-        "github_actions_rule_count": len(record.policy.github_actions),
-        "github_humans_rule_count": len(record.policy.github_humans),
     }
 
 
@@ -292,69 +257,59 @@ def product_profiles() -> None:
     """DB-backed Launchplane product profile commands."""
 
 
-@authz_policies.command("list")
+@authz_policies.command("reconcile-managed")
 @click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
+    "--service-url",
     required=True,
-    help="Postgres connection string for Launchplane authz policy records.",
-)
-@click.option("--status", "status_filter", default="", help="Optional policy status filter.")
-def authz_policies_list(database_url: str, status_filter: str) -> None:
-    postgres_store = PostgresRecordStore(database_url=database_url)
-    try:
-        records = postgres_store.list_authz_policy_records(status=status_filter)
-    finally:
-        postgres_store.close()
-    click.echo(
-        json.dumps(
-            {
-                "status": "ok",
-                "count": len(records),
-                "records": [summarize_authz_policy_record(record) for record in records],
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-
-
-@authz_policies.command("import-toml")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane authz policy records.",
+    help="Deployed Launchplane service base URL.",
 )
 @click.option(
-    "--policy-file",
-    type=click.Path(exists=True, path_type=Path),
-    required=True,
-    help="TOML policy file to import into DB-backed authz policy records.",
+    "--bearer-token-env",
+    default="LAUNCHPLANE_SERVICE_TOKEN",
+    show_default=True,
+    help="Environment variable containing a short-lived bearer token for the service.",
 )
-@click.option("--source-label", default="cli:import-toml", show_default=True)
-@_direct_db_mutation_acknowledgement_option
-def authz_policies_import_toml(
-    database_url: str,
-    policy_file: Path,
-    source_label: str,
-    allow_direct_db_mutation: bool,
+@click.option(
+    "--session-cookie",
+    default="",
+    help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
+)
+@click.option(
+    "--request-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="Managed reconciliation request JSON produced from operator-managed desired state.",
+)
+@click.option(
+    "--idempotency-key",
+    default="",
+    help="Required stable Idempotency-Key when the request mode is apply.",
+)
+def authz_policies_reconcile_managed(
+    service_url: str,
+    bearer_token_env: str,
+    session_cookie: str,
+    request_file: Path,
+    idempotency_key: str,
 ) -> None:
-    _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
-    postgres_store = PostgresRecordStore(database_url=database_url)
-    postgres_store.ensure_schema()
-    record = _build_authz_policy_record(policy_file=policy_file, source_label=source_label)
-    try:
-        postgres_store.write_authz_policy_record(record)
-    finally:
-        postgres_store.close()
-    click.echo(
-        json.dumps(
-            {"status": "ok", "record": summarize_authz_policy_record(record)},
-            indent=2,
-            sort_keys=True,
-        )
+    bearer_token = ""
+    if not session_cookie.strip():
+        token_env_key = bearer_token_env.strip() or "LAUNCHPLANE_SERVICE_TOKEN"
+        bearer_token = os.environ.get(token_env_key, "").strip()
+        if not bearer_token:
+            raise click.ClickException(
+                f"{token_env_key} is required unless --session-cookie is provided."
+            )
+    payload = _load_json_file(request_file)
+    response_payload = _post_launchplane_service_json(
+        service_url=service_url,
+        path="/v1/authz-policies/managed-rule-sets/reconcile",
+        payload=payload,
+        bearer_token=bearer_token,
+        session_cookie=session_cookie,
+        idempotency_key=idempotency_key,
     )
+    click.echo(json.dumps(response_payload, indent=2, sort_keys=True))
 
 
 @authz_policies.command("grant-workflow")

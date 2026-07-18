@@ -714,9 +714,6 @@ class FilesystemRecordStore:
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> Path:
         return self._write_model("release_tuples", f"{record.context}-{record.channel}", record)
 
-    def write_authz_policy_record(self, record: LaunchplaneAuthzPolicyRecord) -> Path:
-        return self._write_model("launchplane_authz_policies", record.record_id, record)
-
     def write_runtime_key_safety_policy_record(self, record: RuntimeKeySafetyPolicyRecord) -> Path:
         return self._write_model(
             "launchplane_runtime_key_safety_policies", record.record_id, record

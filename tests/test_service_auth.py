@@ -43,6 +43,8 @@ def _actions_identity(**overrides: object) -> GitHubActionsIdentity:
     claims: dict[str, object] = {
         "repository": "cbusillo/verireel",
         "repository_owner": "cbusillo",
+        "repository_id": "1001",
+        "repository_owner_id": "2001",
         "workflow_ref": "cbusillo/verireel/.github/workflows/preview.yml@refs/heads/main",
         "job_workflow_ref": "cbusillo/launchplane/.github/workflows/reusable.yml@refs/heads/main",
         "ref": "refs/heads/main",
@@ -65,6 +67,8 @@ def _actions_identity(**overrides: object) -> GitHubActionsIdentity:
         subject=str(claims["subject"]),
         sha=str(claims["sha"]),
         raw_claims=claims,
+        repository_id=str(claims["repository_id"]),
+        repository_owner_id=str(claims["repository_owner_id"]),
     )
 
 
@@ -142,6 +146,8 @@ class GitHubOidcVerifierBoundaryTests(unittest.TestCase):
         claims = {
             "repository": "cbusillo/verireel",
             "repository_owner": "cbusillo",
+            "repository_id": "1001",
+            "repository_owner_id": "2001",
             "workflow_ref": "cbusillo/verireel/.github/workflows/preview.yml@refs/heads/main",
             "job_workflow_ref": "cbusillo/launchplane/.github/workflows/reusable.yml@refs/heads/main",
             "ref": "refs/heads/main",
@@ -169,6 +175,8 @@ class GitHubOidcVerifierBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(identity.repository, "cbusillo/verireel")
         self.assertEqual(identity.repository_owner, "cbusillo")
+        self.assertEqual(identity.repository_id, "1001")
+        self.assertEqual(identity.repository_owner_id, "2001")
         self.assertEqual(identity.workflow_ref, claims["workflow_ref"])
         self.assertEqual(identity.job_workflow_ref, claims["job_workflow_ref"])
         self.assertEqual(identity.raw_claims, claims)
@@ -176,6 +184,9 @@ class GitHubOidcVerifierBoundaryTests(unittest.TestCase):
     def test_requires_repository_and_workflow_claims(self) -> None:
         required_claims = {
             "repository": "OIDC token is missing repository claim",
+            "repository_owner": "OIDC token is missing repository_owner claim",
+            "repository_id": "OIDC token is missing numeric repository_id claim",
+            "repository_owner_id": ("OIDC token is missing numeric repository_owner_id claim"),
             "workflow_ref": "OIDC token is missing workflow_ref claim",
         }
         for missing_claim, expected_message in required_claims.items():
@@ -186,6 +197,9 @@ class GitHubOidcVerifierBoundaryTests(unittest.TestCase):
                 )
                 claims = {
                     "repository": "cbusillo/verireel",
+                    "repository_owner": "cbusillo",
+                    "repository_id": "1001",
+                    "repository_owner_id": "2001",
                     "workflow_ref": "cbusillo/verireel/.github/workflows/preview.yml@refs/heads/main",
                 }
                 claims[missing_claim] = ""
@@ -1018,6 +1032,8 @@ class GitHubOidcVerifierHardeningTests(unittest.TestCase):
         claims = {
             "repository": " cbusillo/site ",
             "repository_owner": " cbusillo ",
+            "repository_id": " 1001 ",
+            "repository_owner_id": " 2001 ",
             "workflow_ref": " cbusillo/site/.github/workflows/deploy.yml@refs/heads/main ",
             "event_name": "workflow_dispatch",
         }
@@ -1029,6 +1045,8 @@ class GitHubOidcVerifierHardeningTests(unittest.TestCase):
 
         jwk_client.get_signing_key_from_jwt.assert_called_once_with("token")
         self.assertEqual(identity.repository, "cbusillo/site")
+        self.assertEqual(identity.repository_id, "1001")
+        self.assertEqual(identity.repository_owner_id, "2001")
         self.assertEqual(
             identity.workflow_ref, "cbusillo/site/.github/workflows/deploy.yml@refs/heads/main"
         )
@@ -1058,6 +1076,32 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
         ).hexdigest()
 
         self.assertEqual(authz_policy_sha256(policy), legacy_sha256)
+
+    def test_schema_v2_policy_hash_omits_unset_immutable_repository_ids(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/launchplane",
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("product_profile.read",),
+                ),
+            ),
+        )
+        payload = policy.model_dump(mode="json", exclude_none=True)
+        payload.pop("terminal_agents", None)
+        payload.pop("local_operators", None)
+        payload.pop("local_admins", None)
+
+        self.assertNotIn("repository_id", payload["github_actions"][0])
+        self.assertNotIn("repository_owner_id", payload["github_actions"][0])
+        self.assertEqual(
+            authz_policy_sha256(policy),
+            hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        )
 
     def test_unknown_policy_schema_version_fails_closed(self) -> None:
         with self.assertRaises(ValidationError):
@@ -1132,6 +1176,108 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
                         repository="cbusillo/verireel",
                         instances=("testing",),
                         actions=("product_profile.read",),
+                    ),
+                ),
+            )
+
+    def test_schema_v2_managed_rule_ids_are_stable_and_unique(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    managed_set_id="operator.odoo",
+                    managed_rule_id="cm.testing.deploy",
+                    repository="cbusillo/odoo-tenant-cm",
+                    instances=("testing",),
+                    actions=("odoo_target_replacement_apply.execute",),
+                ),
+            ),
+        )
+
+        self.assertEqual(policy.github_actions[0].managed_set_id, "operator.odoo")
+        self.assertEqual(policy.github_actions[0].managed_rule_id, "cm.testing.deploy")
+        with self.assertRaisesRegex(
+            ValidationError,
+            "require both managed_set_id and managed_rule_id",
+        ):
+            GitHubActionsPolicyRule(
+                managed_set_id="operator.odoo",
+                repository="cbusillo/odoo-tenant-cm",
+            )
+        with self.assertRaisesRegex(ValidationError, "lowercase stable identifier"):
+            GitHubActionsPolicyRule(
+                managed_set_id="Operator Odoo",
+                managed_rule_id="cm.testing.deploy",
+                repository="cbusillo/odoo-tenant-cm",
+            )
+        with self.assertRaisesRegex(ValidationError, "must be unique across the policy"):
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(
+                    policy.github_actions[0],
+                    policy.github_actions[0],
+                ),
+            )
+        with self.assertRaisesRegex(ValidationError, "cannot declare managed IDs"):
+            LaunchplaneAuthzPolicy(
+                github_actions=(
+                    GitHubActionsPolicyRule(
+                        managed_set_id="operator.odoo",
+                        managed_rule_id="cm.testing.deploy",
+                        repository="cbusillo/odoo-tenant-cm",
+                    ),
+                ),
+            )
+
+    def test_schema_v2_github_rules_match_immutable_repository_ids(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/verireel",
+                    repository_id="1001",
+                    repository_owner_id="2001",
+                    products=("verireel",),
+                    contexts=("verireel",),
+                    actions=("product_profile.read",),
+                ),
+            ),
+        )
+
+        self.assertTrue(
+            policy.allows(
+                identity=_actions_identity(),
+                action="product_profile.read",
+                product="verireel",
+                context="verireel",
+            )
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=_actions_identity(repository_id="9999"),
+                action="product_profile.read",
+                product="verireel",
+                context="verireel",
+            )
+        )
+        with self.assertRaisesRegex(ValidationError, "require both repository_id"):
+            GitHubActionsPolicyRule(
+                repository="cbusillo/verireel",
+                repository_id="1001",
+            )
+        with self.assertRaisesRegex(ValidationError, "must be a numeric GitHub ID"):
+            GitHubActionsPolicyRule(
+                repository="cbusillo/verireel",
+                repository_id="not-numeric",
+                repository_owner_id="2001",
+            )
+        with self.assertRaisesRegex(ValidationError, "cannot declare immutable repository IDs"):
+            LaunchplaneAuthzPolicy(
+                github_actions=(
+                    GitHubActionsPolicyRule(
+                        repository="cbusillo/verireel",
+                        repository_id="1001",
+                        repository_owner_id="2001",
                     ),
                 ),
             )

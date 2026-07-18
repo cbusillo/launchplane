@@ -20,6 +20,60 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 
 
 class EveryCodeIssueReconciliationTests(unittest.TestCase):
+    def test_cli_authz_reconcile_managed_posts_operator_request_file(self) -> None:
+        runner = CliRunner()
+        captured_request: dict[str, object] = {}
+
+        def fake_post(**kwargs: object) -> dict[str, object]:
+            captured_request.update(kwargs)
+            return {
+                "status": "accepted",
+                "result": {"mode": "dry_run", "changed": True},
+            }
+
+        with tempfile.TemporaryDirectory() as temporary_directory_name:
+            request_file = Path(temporary_directory_name) / "managed-authz.json"
+            request_payload = {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "managed_set_id": "operator.launchplane",
+                "desired_policy": {"schema_version": 2},
+            }
+            request_file.write_text(json.dumps(request_payload), encoding="utf-8")
+            with patch(
+                "control_plane.cli._post_launchplane_service_json",
+                side_effect=fake_post,
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "authz-policies",
+                        "reconcile-managed",
+                        "--service-url",
+                        "https://launchplane.example",
+                        "--session-cookie",
+                        "launchplane_session=signed",
+                        "--request-file",
+                        str(request_file),
+                        "--idempotency-key",
+                        "managed-authz:operator.launchplane",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(captured_request["bearer_token"], "")
+        self.assertEqual(captured_request["session_cookie"], "launchplane_session=signed")
+        self.assertEqual(
+            captured_request["path"],
+            "/v1/authz-policies/managed-rule-sets/reconcile",
+        )
+        self.assertEqual(captured_request["payload"], request_payload)
+        self.assertEqual(
+            captured_request["idempotency_key"],
+            "managed-authz:operator.launchplane",
+        )
+
     def test_cli_authz_grant_workflow_posts_service_dry_run_request(self) -> None:
         runner = CliRunner()
         captured_request: dict[str, object] = {}

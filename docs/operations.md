@@ -346,6 +346,8 @@ Current implementation scope:
 - `POST /v1/evidence/promotions`
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
+- `GET /v1/authz-policies/active`
+- `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `POST /v1/authz-policies/github-actions/grants`
 - `POST /v1/authz-policies/github-actions/removals`
 - `POST /v1/authz-policies/github-humans/grants`
@@ -380,30 +382,42 @@ The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
 Additional evidence routes should land against the same authn/authz boundary
 rather than creating separate ad hoc ingress patterns.
 
-Authz policy grant and removal routes are native FastAPI service routes. They
-require DB-backed policy storage, enforce `authz_policy_grant.write` through
-the active runtime policy, preserve signed-in GitHub human-session callers,
-store `Idempotency-Key` replay/conflict evidence for apply requests, and keep
-dry-runs stateless. The retired compatibility branches for these paths are not
-production surfaces.
+Managed authz policy reconciliation is a native FastAPI service route. It
+requires DB-backed policy storage, enforces `authz_policy_grant.write`,
+preserves signed-in GitHub human-session callers, and keeps dry-runs stateless.
+Apply atomically commits the active-policy compare-and-swap and completed
+`Idempotency-Key` replay evidence. The exact grant/removal routes remain a
+bounded rollout bridge for callers that have not yet moved to managed rule
+sets; they are not the desired-state authority.
 
-Operators should mutate shared or production authz through the deployed service,
-not by running arbitrary local DB writes from a checkout. Use
-`uv run launchplane authz-policies grant-workflow --service-url ... --dry-run`
-or `uv run launchplane authz-policies grant-human --service-url ... --dry-run`
-to inspect grant diffs. Use
-`uv run launchplane authz-policies remove-workflow-rule --service-url ... --dry-run`
-to inspect exact GitHub Actions rule removals, such as broad workflow
-`launchplane_service_deploy.execute` rules left behind after route narrowing.
-Removal requests match the complete persisted rule; partial selectors do not
-remove broader or narrower rules. Rerun with `--apply --reason ...` and an
-idempotency key only after the dry-run diff is reviewed. The CLI is a thin
-service client: it sends a short-lived bearer token or a Launchplane browser
-session cookie, and the service validates the caller's
-`authz_policy_grant.write` authority, writes any new active policy record,
-stores audit metadata, and reloads the current service worker's active policy.
-Launchplane self-deploy authority is separate and does not authorize authz
-policy grant maintenance.
+Operators mutate shared or production authz through the deployed service, not
+through direct DB commands from a checkout. Store the complete desired rules
+for one `managed_set_id` in operator-managed JSON, then run:
+
+```bash
+uv run launchplane authz-policies reconcile-managed \
+  --service-url "$LAUNCHPLANE_SERVICE_URL" \
+  --request-file managed-authz-dry-run.json
+```
+
+Review `result.diff.plan_sha256`, rule IDs/hashes, counts, migration intent, and
+adoption intent. Build the apply request from the same normalized desired set,
+reason, and related issue; change only `mode` to `apply` and add that digest as
+`reviewed_plan_sha256`. Apply with a stable key:
+
+```bash
+uv run launchplane authz-policies reconcile-managed \
+  --service-url "$LAUNCHPLANE_SERVICE_URL" \
+  --request-file managed-authz-apply.json \
+  --idempotency-key "authz-managed:<set>:<reviewed-plan>"
+```
+
+Schema-v1 migration requires `schema_migration: "migrate_v1_to_v2"` in both
+requests. Taking ownership of an existing matching unmanaged rule requires
+`unmanaged_adoption: "adopt_matching"`; ambiguous matches fail closed. The CLI
+is only a thin service client. Direct authz policy list/import DB commands are
+not supported. Launchplane self-deploy authority remains separate and does not
+authorize authz policy administration.
 
 Authz policy schema v1 remains the compatibility contract for an active v1
 policy and retains its existing product/context breadth. Schema v2 adds exact
@@ -628,18 +642,18 @@ Launchplane keeps the legacy context in the product profile's
 show pre-cutover evidence while deploy and config authority use the current lane
 contexts.
 
-Render an explicit emergency bootstrap policy or import a policy into DB-backed
-records with:
+Render an explicit emergency bootstrap policy for service startup with:
 
 ```bash
 uv run launchplane service render-authz-policy --policy-file ./bootstrap-policy.toml
 uv run launchplane service render-authz-policy \
   --policy-file ./bootstrap-policy.toml \
   --format b64
-uv run launchplane authz-policies import-toml \
-  --policy-file ./bootstrap-policy.toml \
-  --allow-direct-db-mutation
 ```
+
+Do not import or replace the active DB-backed authz policy directly. Once the
+service can start, policy changes use managed rule-set reconciliation and its
+reviewed plan/CAS boundary.
 
 When operators need to preview or apply an explicit emergency bootstrap policy to
 the live Launchplane Dokploy target without editing any rendered host-side env

@@ -345,15 +345,18 @@ an ORM column/table or remains only in the evidence payload.
 - Release tuple: modeled fields are `context`, `channel`, `tuple_id`,
   `artifact_id`, `minted_at`, and `provenance`. Repo SHA maps and source
   provenance details stay payload-only.
-- Authz policy: modeled fields are `record_id`, `status`, `source`,
-  `updated_at`, `policy_sha256`, and optional service-owned `audit` metadata.
-  The parsed GitHub Actions and human grant policy stays payload-only until
-  Launchplane needs per-rule filtering or browser-side policy editing. Authz
-  grant audit metadata records the operator identity, reason, related issue,
-  previous/new policy ids and shas, trace id, mode, and requested grant details;
-  service responses redact that requested-grant detail to counts and scope
-  summaries. During a future OpenFGA migration, these DB-backed policy records
-  remain the source evidence for dry-run tuple proposals and parity checks.
+- Authz policy: modeled fields are `record_id`, monotonic `revision`, `status`,
+  `source`, `updated_at`, `policy_sha256`, and optional service-owned `audit`
+  metadata. PostgreSQL enforces unique revisions and at most one active row.
+  Managed rules persist stable `(managed_set_id, managed_rule_id)` identities in
+  the schema-v2 policy payload; content hashes describe versions rather than
+  ownership. Managed reconciliation audit records the operator identity, reason,
+  related issue, reviewed plan and desired-set digests, migration/adoption
+  intent, previous/new revisions and policy digests, trace/request fingerprints,
+  idempotency evidence, and a redacted rule-ID/hash diff. Policy CAS and
+  completed replay evidence commit in one transaction; a no-op apply creates no
+  policy-history row. During a future OpenFGA migration, these DB-backed policy
+  records remain the source evidence for dry-run tuple proposals and parity checks.
   After a proven cutover, records should store import/audit/model-version
   evidence rather than remain a second live authorization source.
 - Merge train stack collapse plan: modeled fields are `record_id`, `status`,
