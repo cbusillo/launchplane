@@ -976,6 +976,12 @@ def _contains_workflow_ref_glob(value: str) -> bool:
     return any(character in value for character in _WORKFLOW_REF_GLOB_CHARACTERS)
 
 
+def _is_immutable_job_workflow_ref(value: str) -> bool:
+    return _IMMUTABLE_JOB_WORKFLOW_REF_PATTERN.fullmatch(
+        value
+    ) is not None and not _contains_workflow_ref_glob(value)
+
+
 def _github_transition_selector_payload(rule: GitHubActionsPolicyRule) -> dict[str, Any]:
     return _normalize_authz_rule(rule).model_dump(
         mode="json",
@@ -1073,7 +1079,7 @@ def _validate_github_managed_workflow_transition(
                 f"workflow identity ({desired_rule.managed_rule_id})."
             )
         if not any(
-            _IMMUTABLE_JOB_WORKFLOW_REF_PATTERN.fullmatch(job_workflow_ref)
+            _is_immutable_job_workflow_ref(job_workflow_ref)
             for job_workflow_ref in desired_rule.job_workflow_refs
         ):
             raise AuthzPolicyRequestError(
@@ -1082,7 +1088,7 @@ def _validate_github_managed_workflow_transition(
                 f"({desired_rule.managed_rule_id})."
             )
         for job_workflow_ref in desired_rule.job_workflow_refs:
-            if _IMMUTABLE_JOB_WORKFLOW_REF_PATTERN.fullmatch(job_workflow_ref):
+            if _is_immutable_job_workflow_ref(job_workflow_ref):
                 continue
             if _contains_workflow_ref_glob(job_workflow_ref) or not any(
                 _github_rule_preserves_existing_mutable_ref(

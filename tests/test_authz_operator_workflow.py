@@ -118,7 +118,17 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         upload_step = self.workflow.step_named("reconcile", "Upload managed authz evidence")
         self.assertIsNotNone(upload_step)
         assert upload_step is not None
+        self.assertEqual(
+            upload_step.with_values["path"],
+            "${{ steps.request.outputs.evidence_directory }}",
+        )
         self.assertEqual(upload_step.with_values["retention-days"], 30)
+        cleanup_step = self.workflow.step_named(
+            "reconcile", "Remove managed authz request material"
+        )
+        self.assertIsNotNone(cleanup_step)
+        assert cleanup_step is not None
+        self.assertIn('rm -rf -- "$PRIVATE_DIRECTORY"', cleanup_step.run)
 
     def test_render_step_builds_review_bound_requests(self) -> None:
         render_step = self.workflow.step_named(
@@ -169,6 +179,13 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             self.assertEqual(request["reviewed_plan_sha256"], "")
             self.assertEqual(outputs["idempotency_key"], "")
             self.assertRegex(outputs["configuration_sha256"], r"^[0-9a-f]{64}$")
+            evidence_directory = Path(outputs["evidence_directory"])
+            self.assertNotEqual(Path(outputs["request_file"]).parent, evidence_directory)
+            request_summary = json.loads(
+                (evidence_directory / "request-summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(request_summary["managed_set_id"], "operator.launchplane")
+            self.assertNotIn("desired_policy", request_summary)
 
     def test_render_step_rejects_unreviewed_apply(self) -> None:
         render_step = self.workflow.step_named(

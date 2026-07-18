@@ -154,16 +154,39 @@ jobs:
               f"{os.environ['GITHUB_RUN_ATTEMPT']}"
           )
           output_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-          configuration_file = output_directory / "managed-set.json"
-          request_file = output_directory / "request.json"
-          response_file = output_directory / "response.json"
+          private_directory = output_directory / "private"
+          evidence_directory = output_directory / "evidence"
+          private_directory.mkdir(mode=0o700)
+          evidence_directory.mkdir(mode=0o700)
+          configuration_file = private_directory / "managed-set.json"
+          request_file = private_directory / "request.json"
+          response_file = private_directory / "response.json"
+          request_summary_file = evidence_directory / "request-summary.json"
           configuration_file.write_text(canonical_configuration + "\n", encoding="utf-8")
           request_file.write_text(
               json.dumps(request, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
+          request_summary_file.write_text(
+              json.dumps(
+                  {
+                      "configuration_sha256": configuration_sha256,
+                      "managed_set_id": managed_set_id,
+                      "mode": mode,
+                      "related_issue": related_issue,
+                      "reviewed_plan_sha256": reviewed_plan_sha256,
+                      "schema_migration": configuration.get("schema_migration", "reject"),
+                      "unmanaged_adoption": configuration.get("unmanaged_adoption", "reject"),
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
           configuration_file.chmod(0o600)
           request_file.chmod(0o600)
+          request_summary_file.chmod(0o600)
           idempotency_key = (
               f"authz-managed:{managed_set_id}:{reviewed_plan_sha256}"
               if mode == "apply"
@@ -171,9 +194,11 @@ jobs:
           )
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
               output.write(f"configuration_sha256={configuration_sha256}\n")
+              output.write(f"evidence_directory={evidence_directory}\n")
               output.write(f"idempotency_key={idempotency_key}\n")
               output.write(f"managed_set_id={managed_set_id}\n")
               output.write(f"output_directory={output_directory}\n")
+              output.write(f"private_directory={private_directory}\n")
               output.write(f"request_file={request_file}\n")
               output.write(f"response_file={response_file}\n")
           PY
@@ -194,9 +219,9 @@ jobs:
         shell: bash
         env:
           CONFIGURATION_SHA256: ${{ steps.request.outputs.configuration_sha256 }}
+          EVIDENCE_DIRECTORY: ${{ steps.request.outputs.evidence_directory }}
           MANAGED_SET_ID: ${{ steps.request.outputs.managed_set_id }}
           MODE: ${{ inputs.mode }}
-          OUTPUT_DIRECTORY: ${{ steps.request.outputs.output_directory }}
           RESPONSE_FILE: ${{ steps.request.outputs.response_file }}
           REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
         run: |
@@ -226,7 +251,7 @@ jobs:
             changed: .result.changed,
             authz_policy: .result.authz_policy,
             diff: .result.diff
-          }' "$RESPONSE_FILE" > "$OUTPUT_DIRECTORY/summary.json"
+          }' "$RESPONSE_FILE" > "$EVIDENCE_DIRECTORY/summary.json"
           changed="$(jq -r '.result.changed' "$RESPONSE_FILE")"
           schema_migrated="$(jq -r '.result.diff.schema_migrated' "$RESPONSE_FILE")"
           authorization_changed="$(jq -r '.result.diff.authorization_changed' "$RESPONSE_FILE")"
@@ -254,11 +279,27 @@ jobs:
             printf '%s\n' "- Reviewed plan SHA-256: $plan_sha256"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Remove managed authz request material
+        if: always() && steps.request.outputs.private_directory != ''
+        shell: bash
+        env:
+          PRIVATE_DIRECTORY: ${{ steps.request.outputs.private_directory }}
+        run: |
+          set -euo pipefail
+          case "$PRIVATE_DIRECTORY" in
+            "$RUNNER_TEMP"/launchplane-authz-managed-*/private) ;;
+            *)
+              echo "Refusing to remove an unexpected managed authz path." >&2
+              exit 1
+              ;;
+          esac
+          rm -rf -- "$PRIVATE_DIRECTORY"
+
       - name: Upload managed authz evidence
-        if: always() && steps.request.outputs.output_directory != ''
+        if: always() && steps.request.outputs.evidence_directory != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: launchplane-authz-managed-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.request.outputs.output_directory }}
+          path: ${{ steps.request.outputs.evidence_directory }}
           if-no-files-found: error
           retention-days: 30

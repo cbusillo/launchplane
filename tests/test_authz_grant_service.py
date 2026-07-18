@@ -888,6 +888,20 @@ class AuthzGrantServiceTests(unittest.TestCase):
                 ),
                 request=unsafe_request,
             )
+        globbed_immutable_payload = overlap_request.model_dump(mode="json")
+        globbed_immutable_payload["desired_policy"]["github_actions"][0]["job_workflow_refs"] = [
+            "cbusillo/launchplane/.github/workflows/reusable-*.yml@" + "a" * 40
+        ]
+        globbed_immutable_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            globbed_immutable_payload
+        )
+        with self.assertRaisesRegex(AuthzPolicyRequestError, "full commit SHA"):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore(
+                    (_active_record_for_policy(LaunchplaneAuthzPolicy(schema_version=2)),)
+                ),
+                request=globbed_immutable_request,
+            )
 
     def test_managed_reconcile_adopts_unconstrained_job_identity_by_narrowing(self) -> None:
         caller_workflow_ref = (
