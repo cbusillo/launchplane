@@ -597,23 +597,36 @@ workflow refs, human logins, owner-agent subjects, or the full policy body.
 Managed rule-set reconciliation is the durable authz write contract. A stable
 `(managed_set_id, managed_rule_id)` owns each managed rule independent of its
 content hash or principal type. Dry-run reads the one active DB-backed policy,
-normalizes selector order, and returns a redacted add/adopt/update/remove diff
-plus `plan_sha256`. Apply must repeat the same desired set, migration/adoption
-intent, reason, and related issue with that reviewed digest and an
-`Idempotency-Key`. The service then reserves idempotency, locks the singleton
-active policy, compares record ID/revision/digest, supersedes and inserts only
-when changed, completes replay evidence, and commits the transaction as one
-unit. No-op applies complete replay evidence without creating policy history.
+normalizes selector order, and returns a redacted add/adopt/update/remove diff,
+unmanaged compatibility candidate and retirement evidence, plus `plan_sha256`.
+Apply must repeat the same desired set, migration/adoption intent, reason, and
+related issue with that reviewed digest and an `Idempotency-Key`. The service
+then reserves idempotency, locks the singleton active policy, compares record
+ID/revision/digest, supersedes and inserts only when changed, completes replay
+evidence, and commits the transaction as one unit. No-op applies complete replay
+evidence without creating policy history.
 
 Schema-v1 migration and unmanaged-rule adoption are never implicit. The caller
 must request `schema_migration = migrate_v1_to_v2` and/or
-`unmanaged_adoption = adopt_matching` during both review and apply. Multiple
-matching unmanaged rules fail closed. `GET /v1/authz-policies/active` exposes
-only active record metadata, counts, managed IDs, principal types, and rule
-hashes; it never returns full workflow refs or principal selectors. Its removal
-readiness fields include managed and unmanaged rule totals, unmanaged counts by
-principal type, and the count of privileged GitHub Actions rules that still
-lack an immutable reusable-workflow identity.
+`unmanaged_adoption = adopt_matching` during both review and apply. Once a
+desired managed GitHub Actions rule already exists unchanged, `adopt_matching`
+also converges one matching name-only compatibility rule by retiring it from the
+same candidate policy. Retirement requires an exact repository and action set,
+no immutable IDs on the compatibility rule, and proof that every other managed
+selector is equal or narrower than the compatibility authorization. Ambiguous,
+cross-principal, ID-bound, broader-action, or unmatched rules are not retired.
+Ambiguity is evaluated against the complete desired managed set before unchanged
+rules become retirement candidates, so a broad compatibility rule cannot be
+removed during another matching rule's transition. The service also evaluates
+the candidate policy with the applying identity and rejects retirement if that
+identity would lose policy-administration authority. The diff separates stale
+managed-rule removals from unmanaged compatibility retirements and exposes only
+managed IDs and rule hashes. `GET /v1/authz-policies/active` exposes only active
+record metadata, counts, managed IDs, principal types, and rule hashes; it never
+returns full workflow refs or principal selectors. Its removal readiness fields
+include managed and unmanaged rule totals, unmanaged counts by principal type,
+and the count of privileged GitHub Actions rules that still lack an immutable
+reusable-workflow identity.
 
 New managed GitHub Actions rules require immutable GitHub `repository_id` and
 `repository_owner_id` selectors. Production-capable, destructive,

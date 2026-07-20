@@ -412,12 +412,13 @@ worker without building or deploying an image.
 Review the job summary and 30-day evidence artifact. The review must cover
 `result.diff.plan_sha256`, previous and desired policy hashes, desired-set and
 configuration hashes, migration/adoption intent, rule IDs/hashes, add/adopt/
-update/remove counts, and whether authorization changed. Apply from the same
-default-branch workflow with the identical protected desired-set secret, reason,
-and issue reference; change only mode to `apply` and supply the reviewed plan
-SHA-256. The worker derives the stable idempotency key from the managed set and
-reviewed plan. The service recomputes the plan against the active policy and
-rejects drift before mutation.
+update/remove counts, unmanaged compatibility candidate and retirement counts,
+and whether authorization changed. Apply from the same default-branch workflow
+with the identical protected desired-set secret, reason, and issue reference;
+change only mode to `apply` and supply the reviewed plan SHA-256. The worker
+derives the stable idempotency key from the managed set and reviewed plan. The
+service recomputes the plan against the active policy and rejects drift before
+mutation.
 
 The artifact contains only request hashes/intent and the service's redacted
 summary. Failed requests add a bounded error summary containing only the
@@ -427,11 +428,23 @@ material before upload so repository-secret contents do not become
 artifact-readable runtime authority.
 
 Schema-v1 migration requires `schema_migration: "migrate_v1_to_v2"` in the
-protected desired-set JSON. Taking ownership of an existing matching unmanaged rule requires
-`unmanaged_adoption: "adopt_matching"`; ambiguous matches fail closed. The CLI
-remains only a thin service client for local/rehearsal use. Direct authz policy
-list/import DB commands are not supported. Launchplane self-deploy authority
-remains separate and does not authorize authz policy administration.
+protected desired-set JSON. Taking ownership of an existing matching unmanaged
+rule requires `unmanaged_adoption: "adopt_matching"`. The same explicit intent
+retires one name-only GitHub Actions compatibility rule after the desired managed
+rule already exists unchanged, but only when the managed rule is a demonstrable
+authorization narrowing of that legacy rule. Action sets must match exactly;
+immutable repository identity, caller/reusable-workflow, ref, environment,
+product, context, and instance selectors may only narrow. Multiple candidates,
+one candidate matching multiple desired managed identities (including identities
+being updated), rules with repository IDs, and non-GitHub principals fail closed
+or remain untouched. A retirement plan must also leave the applying identity
+authorized to administer policy under the candidate policy, so stale immutable
+IDs or workflow selectors cannot remove the final usable operator path. The
+redacted diff reports candidate and retirement counts plus rule hashes without
+returning selectors. The CLI remains only a thin service client for local/
+rehearsal use. Direct authz policy list/import DB commands are not supported.
+Launchplane self-deploy authority remains separate and does not authorize authz
+policy administration.
 
 The exact grant/removal commands remain a bounded migration bridge while
 configured callers move to managed sets. New workflow grants require numeric

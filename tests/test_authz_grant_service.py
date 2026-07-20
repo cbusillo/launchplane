@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import unittest
 from typing import cast
@@ -659,6 +660,397 @@ class AuthzGrantServiceTests(unittest.TestCase):
         )
         self.assertEqual(removal_diff.removed_rule_count, 1)
         self.assertEqual(removed_policy.github_actions, ())
+
+    def test_managed_reconcile_retires_one_safe_name_only_compatibility_rule(self) -> None:
+        caller_workflow_ref = (
+            "cbusillo/odoo-tenant-cm/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+        )
+        managed_rule = GitHubActionsPolicyRule(
+            managed_set_id="operator.launchplane",
+            managed_rule_id="odoo.cm.artifact-publish.inputs",
+            repository="cbusillo/odoo-tenant-cm",
+            repository_id="3001",
+            repository_owner_id="2001",
+            workflow_refs=(caller_workflow_ref,),
+            job_workflow_refs=(
+                "cbusillo/launchplane/.github/workflows/"
+                "reusable-odoo-artifact-publish.yml@" + "a" * 40,
+            ),
+            event_names=("workflow_dispatch",),
+            refs=("refs/heads/main",),
+            products=("odoo-tenant-cm",),
+            contexts=("cm",),
+            instances=("*",),
+            actions=("odoo_artifact_publish_inputs.read",),
+        )
+        compatibility_rule = GitHubActionsPolicyRule(
+            repository="cbusillo/odoo-tenant-cm",
+            workflow_refs=(caller_workflow_ref,),
+            contexts=("*",),
+            instances=("*",),
+            actions=("odoo_artifact_publish_inputs.read",),
+        )
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(compatibility_rule, managed_rule),
+        )
+        current_record = _active_record_for_policy(current_policy)
+        request_payload = {
+            "schema_version": 2,
+            "product": "launchplane",
+            "managed_set_id": "operator.launchplane",
+            "desired_policy": {
+                "schema_version": 2,
+                "github_actions": [managed_rule.model_dump(mode="json")],
+            },
+        }
+
+        preserve_request = AuthzManagedPolicyReconcileEnvelope.model_validate(request_payload)
+        _, _, preserved_policy, preserve_diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=preserve_request,
+        )
+
+        self.assertEqual(preserved_policy, current_policy)
+        self.assertFalse(preserve_diff.changed)
+        self.assertEqual(preserve_diff.unmanaged_compatibility_candidate_count, 1)
+        self.assertEqual(preserve_diff.retired_unmanaged_compatibility_rule_count, 0)
+
+        retirement_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {**request_payload, "unmanaged_adoption": "adopt_matching"}
+        )
+        _, _, retired_policy, retirement_diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=retirement_request,
+        )
+
+        self.assertEqual(retired_policy.github_actions, (managed_rule,))
+        self.assertTrue(retirement_diff.changed)
+        self.assertTrue(retirement_diff.authorization_changed)
+        self.assertEqual(retirement_diff.unmanaged_compatibility_candidate_count, 1)
+        self.assertEqual(retirement_diff.retired_unmanaged_compatibility_rule_count, 1)
+        self.assertEqual(retirement_diff.removed_rule_count, 0)
+        self.assertEqual(retirement_diff.unchanged_rule_count, 1)
+        retirement = retirement_diff.retired_unmanaged_compatibility_rules[0]
+        self.assertEqual(retirement.managed_rule_id, managed_rule.managed_rule_id)
+        self.assertEqual(retirement.principal_type, "github_actions")
+        self.assertEqual(
+            retirement.match_type,
+            "github_actions_name_only_authorization_narrowing",
+        )
+
+    def test_managed_reconcile_treats_star_as_universal_glob_compatibility(self) -> None:
+        managed_rule = GitHubActionsPolicyRule(
+            managed_set_id="operator.launchplane",
+            managed_rule_id="profile.read",
+            repository="cbusillo/launchplane",
+            repository_id="1001",
+            repository_owner_id="2001",
+            products=("launch*",),
+            actions=("product_profile.read",),
+        )
+        compatibility_rule = GitHubActionsPolicyRule(
+            repository="cbusillo/launchplane",
+            products=("*",),
+            contexts=("*",),
+            actions=("product_profile.read",),
+        )
+        current_record = _active_record_for_policy(
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(compatibility_rule, managed_rule),
+            )
+        )
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.launchplane",
+                "unmanaged_adoption": "adopt_matching",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [managed_rule.model_dump(mode="json")],
+                },
+            }
+        )
+
+        _, _, updated_policy, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
+
+        self.assertEqual(updated_policy.github_actions, (managed_rule,))
+        self.assertEqual(diff.unmanaged_compatibility_candidate_count, 1)
+        self.assertEqual(diff.retired_unmanaged_compatibility_rule_count, 1)
+
+    def test_managed_route_requires_retirement_to_retain_applying_admin(self) -> None:
+        identity = replace(
+            _identity(),
+            job_workflow_ref=(
+                "cbusillo/launchplane/.github/workflows/reusable-manage-authorization.yml@"
+                + "a" * 40
+            ),
+        )
+        compatibility_rule = GitHubActionsPolicyRule(
+            repository="cbusillo/launchplane",
+            workflow_refs=(identity.workflow_ref,),
+            products=("*",),
+            contexts=("*",),
+            actions=("authz_policy_grant.write",),
+        )
+
+        def managed_admin_rule(*, repository_id: str) -> GitHubActionsPolicyRule:
+            return GitHubActionsPolicyRule(
+                managed_set_id="operator.launchplane",
+                managed_rule_id="authz.admin",
+                repository="cbusillo/launchplane",
+                repository_id=repository_id,
+                repository_owner_id=identity.repository_owner_id,
+                workflow_refs=(identity.workflow_ref,),
+                job_workflow_refs=(identity.job_workflow_ref,),
+                products=("launchplane",),
+                contexts=("launchplane",),
+                actions=("authz_policy_grant.write",),
+            )
+
+        def reconcile_request(
+            managed_rule: GitHubActionsPolicyRule,
+        ) -> AuthzManagedPolicyReconcileEnvelope:
+            return AuthzManagedPolicyReconcileEnvelope.model_validate(
+                {
+                    "schema_version": 2,
+                    "product": "launchplane",
+                    "managed_set_id": "operator.launchplane",
+                    "unmanaged_adoption": "adopt_matching",
+                    "desired_policy": {
+                        "schema_version": 2,
+                        "github_actions": [managed_rule.model_dump(mode="json")],
+                    },
+                }
+            )
+
+        stale_managed_rule = managed_admin_rule(repository_id="9999")
+        stale_record = _active_record_for_policy(
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(compatibility_rule, stale_managed_rule),
+            )
+        )
+        with self.assertRaisesRegex(
+            AuthzPolicyConflictError,
+            "retain policy administration authority for the applying identity",
+        ):
+            execute_authz_policy_route(
+                record_store=_AuthzPolicyStore((stale_record,)),
+                request=reconcile_request(stale_managed_rule),
+                identity=identity,
+                trace_id="trace-retirement-lockout",
+                now_timestamp=lambda: "2026-07-20T00:00:00Z",
+                authorized_policy_sha256=stale_record.policy_sha256,
+            )
+
+        active_managed_rule = managed_admin_rule(repository_id=identity.repository_id)
+        active_record = _active_record_for_policy(
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(compatibility_rule, active_managed_rule),
+            )
+        )
+        result = execute_authz_policy_route(
+            record_store=_AuthzPolicyStore((active_record,)),
+            request=reconcile_request(active_managed_rule),
+            identity=identity,
+            trace_id="trace-retirement-authorized",
+            now_timestamp=lambda: "2026-07-20T00:00:00Z",
+            authorized_policy_sha256=active_record.policy_sha256,
+        )
+
+        result_diff = cast(dict[str, object], result.driver_result["diff"])
+        self.assertEqual(result_diff["retired_unmanaged_compatibility_rule_count"], 1)
+
+    def test_managed_reconcile_rejects_ambiguous_compatibility_retirement(self) -> None:
+        managed_rule = GitHubActionsPolicyRule(
+            managed_set_id="operator.launchplane",
+            managed_rule_id="profile.read",
+            repository="cbusillo/launchplane",
+            repository_id="1001",
+            repository_owner_id="2001",
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("product_profile.read",),
+        )
+        compatibility_rule = GitHubActionsPolicyRule(
+            repository="cbusillo/launchplane",
+            actions=("product_profile.read",),
+        )
+        current_record = _active_record_for_policy(
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(compatibility_rule, compatibility_rule, managed_rule),
+            )
+        )
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.launchplane",
+                "unmanaged_adoption": "adopt_matching",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [managed_rule.model_dump(mode="json")],
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(
+            AuthzPolicyConflictError,
+            "compatibility retirement is ambiguous",
+        ):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=request,
+            )
+
+    def test_managed_reconcile_checks_ambiguity_before_unchanged_eligibility(self) -> None:
+        compatibility_rule = GitHubActionsPolicyRule(
+            repository="cbusillo/launchplane",
+            actions=("product_profile.read",),
+        )
+        unchanged_rule = GitHubActionsPolicyRule(
+            managed_set_id="operator.launchplane",
+            managed_rule_id="profile.first",
+            repository="cbusillo/launchplane",
+            repository_id="1001",
+            repository_owner_id="2001",
+            products=("first",),
+            contexts=("first",),
+            actions=("product_profile.read",),
+        )
+        changing_rule = GitHubActionsPolicyRule(
+            managed_set_id="operator.launchplane",
+            managed_rule_id="profile.second",
+            repository="cbusillo/launchplane",
+            repository_id="1001",
+            repository_owner_id="2001",
+            products=("second-old",),
+            contexts=("second",),
+            actions=("product_profile.read",),
+        )
+        desired_changing_rule = changing_rule.model_copy(update={"products": ("second-new",)})
+        current_record = _active_record_for_policy(
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(compatibility_rule, unchanged_rule, changing_rule),
+            )
+        )
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.launchplane",
+                "unmanaged_adoption": "adopt_matching",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [
+                        unchanged_rule.model_dump(mode="json"),
+                        desired_changing_rule.model_dump(mode="json"),
+                    ],
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(
+            AuthzPolicyConflictError,
+            "compatibility retirement is ambiguous",
+        ):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=request,
+            )
+
+    def test_managed_reconcile_preserves_id_bound_unmanaged_rule(self) -> None:
+        managed_rule = GitHubActionsPolicyRule(
+            managed_set_id="operator.launchplane",
+            managed_rule_id="profile.read",
+            repository="cbusillo/launchplane",
+            repository_id="1001",
+            repository_owner_id="2001",
+            actions=("product_profile.read",),
+        )
+        id_bound_rule = GitHubActionsPolicyRule(
+            repository="cbusillo/launchplane",
+            repository_id="1001",
+            repository_owner_id="2001",
+            actions=("product_profile.read",),
+        )
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(id_bound_rule, managed_rule),
+        )
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.launchplane",
+                "unmanaged_adoption": "adopt_matching",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [managed_rule.model_dump(mode="json")],
+                },
+            }
+        )
+
+        _, _, updated_policy, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((_active_record_for_policy(current_policy),)),
+            request=request,
+        )
+
+        self.assertEqual(updated_policy, current_policy)
+        self.assertEqual(diff.unmanaged_compatibility_candidate_count, 0)
+        self.assertEqual(diff.retired_unmanaged_compatibility_rule_count, 0)
+
+    def test_managed_reconcile_preserves_non_equivalent_unmanaged_rule(self) -> None:
+        managed_rule = GitHubActionsPolicyRule(
+            managed_set_id="operator.launchplane",
+            managed_rule_id="profile.read",
+            repository="cbusillo/launchplane",
+            repository_id="1001",
+            repository_owner_id="2001",
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("product_profile.read",),
+        )
+        broader_action_rule = GitHubActionsPolicyRule(
+            repository="cbusillo/launchplane",
+            actions=("product_profile.read", "service.read"),
+        )
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(broader_action_rule, managed_rule),
+        )
+        current_record = _active_record_for_policy(current_policy)
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.launchplane",
+                "unmanaged_adoption": "adopt_matching",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [managed_rule.model_dump(mode="json")],
+                },
+            }
+        )
+
+        _, _, updated_policy, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
+
+        self.assertEqual(updated_policy, current_policy)
+        self.assertFalse(diff.changed)
+        self.assertEqual(diff.unmanaged_compatibility_candidate_count, 0)
+        self.assertEqual(diff.retired_unmanaged_compatibility_rule_count, 0)
 
     def test_managed_reconcile_preserves_other_set_order_without_hash_churn(self) -> None:
         current_policy = LaunchplaneAuthzPolicy(
