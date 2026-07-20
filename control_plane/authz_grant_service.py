@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from fnmatch import fnmatchcase
 import hashlib
 import json
 import re
@@ -730,6 +731,18 @@ class AuthzManagedRuleChange(BaseModel):
     desired_rule_sha256: str = ""
 
 
+class AuthzManagedCompatibilityRetirement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    managed_rule_id: str
+    principal_type: Literal["github_actions"] = "github_actions"
+    retired_rule_sha256: str
+    retained_managed_rule_sha256: str
+    match_type: Literal["github_actions_name_only_authorization_narrowing"] = (
+        "github_actions_name_only_authorization_narrowing"
+    )
+
+
 class AuthzManagedPolicyDiff(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -749,6 +762,9 @@ class AuthzManagedPolicyDiff(BaseModel):
     updated_rule_count: int = 0
     removed_rule_count: int = 0
     unchanged_rule_count: int = 0
+    unmanaged_compatibility_candidate_count: int = 0
+    retired_unmanaged_compatibility_rule_count: int = 0
+    retired_unmanaged_compatibility_rules: tuple[AuthzManagedCompatibilityRetirement, ...] = ()
     changes: tuple[AuthzManagedRuleChange, ...] = ()
 
 
@@ -1133,6 +1149,103 @@ def _managed_rule_adoption_matches(
     ) and set(current_rule.job_workflow_refs).issubset(desired_rule.job_workflow_refs)
 
 
+def _glob_selectors_cover(
+    *, compatibility_values: tuple[str, ...], managed_values: tuple[str, ...]
+) -> bool:
+    if not compatibility_values or "*" in compatibility_values:
+        return True
+    if not managed_values:
+        return False
+    return all(
+        (
+            managed_value in compatibility_values
+            if _contains_workflow_ref_glob(managed_value)
+            else any(
+                fnmatchcase(managed_value, compatibility_value)
+                for compatibility_value in compatibility_values
+            )
+        )
+        for managed_value in managed_values
+    )
+
+
+def _exact_selectors_cover(
+    *, compatibility_values: tuple[str, ...], managed_values: tuple[str, ...]
+) -> bool:
+    if not compatibility_values:
+        return True
+    if not managed_values:
+        return False
+    return set(managed_values).issubset(compatibility_values)
+
+
+def _instance_selectors_cover(
+    *, compatibility_values: AuthzInstanceSelectors, managed_values: AuthzInstanceSelectors
+) -> bool:
+    if not compatibility_values or not managed_values:
+        return compatibility_values == managed_values
+    if compatibility_values == ("*",):
+        return True
+    if managed_values == ("*",):
+        return False
+    return set(managed_values).issubset(compatibility_values)
+
+
+def _managed_github_compatibility_retirement_matches(
+    *, current_rule: AuthzPolicyRule, desired_rule: AuthzPolicyRule
+) -> bool:
+    if not isinstance(current_rule, GitHubActionsPolicyRule) or not isinstance(
+        desired_rule, GitHubActionsPolicyRule
+    ):
+        return False
+    if (
+        current_rule.managed_set_id is not None
+        or current_rule.managed_rule_id is not None
+        or current_rule.repository_id
+        or current_rule.repository_owner_id
+    ):
+        return False
+    normalized_current_rule = cast(GitHubActionsPolicyRule, _normalize_authz_rule(current_rule))
+    normalized_desired_rule = cast(GitHubActionsPolicyRule, _normalize_authz_rule(desired_rule))
+    return (
+        normalized_current_rule.repository == normalized_desired_rule.repository
+        and bool(normalized_current_rule.actions)
+        and normalized_current_rule.actions == normalized_desired_rule.actions
+        and _glob_selectors_cover(
+            compatibility_values=normalized_current_rule.workflow_refs,
+            managed_values=normalized_desired_rule.workflow_refs,
+        )
+        and _glob_selectors_cover(
+            compatibility_values=normalized_current_rule.job_workflow_refs,
+            managed_values=normalized_desired_rule.job_workflow_refs,
+        )
+        and _exact_selectors_cover(
+            compatibility_values=normalized_current_rule.event_names,
+            managed_values=normalized_desired_rule.event_names,
+        )
+        and _exact_selectors_cover(
+            compatibility_values=normalized_current_rule.refs,
+            managed_values=normalized_desired_rule.refs,
+        )
+        and _exact_selectors_cover(
+            compatibility_values=normalized_current_rule.environments,
+            managed_values=normalized_desired_rule.environments,
+        )
+        and _glob_selectors_cover(
+            compatibility_values=normalized_current_rule.products,
+            managed_values=normalized_desired_rule.products,
+        )
+        and _glob_selectors_cover(
+            compatibility_values=normalized_current_rule.contexts,
+            managed_values=normalized_desired_rule.contexts,
+        )
+        and _instance_selectors_cover(
+            compatibility_values=normalized_current_rule.instances,
+            managed_values=normalized_desired_rule.instances,
+        )
+    )
+
+
 def _managed_rules_by_id(
     *, policy: LaunchplaneAuthzPolicy, managed_set_id: str
 ) -> dict[str, tuple[AuthzPrincipalType, AuthzPolicyRule]]:
@@ -1201,7 +1314,13 @@ def _reconcile_managed_policy(
     desired_policy: LaunchplaneAuthzPolicy,
     managed_set_id: str,
     unmanaged_adoption: AuthzUnmanagedAdoptionMode,
-) -> tuple[LaunchplaneAuthzPolicy, tuple[AuthzManagedRuleChange, ...], int]:
+) -> tuple[
+    LaunchplaneAuthzPolicy,
+    tuple[AuthzManagedRuleChange, ...],
+    int,
+    int,
+    tuple[AuthzManagedCompatibilityRetirement, ...],
+]:
     current_managed_rules = _managed_rules_by_id(
         policy=current_policy,
         managed_set_id=managed_set_id,
@@ -1263,10 +1382,70 @@ def _reconcile_managed_policy(
         adoption_locations[candidate] = managed_rule_id
         adopted_rule_ids.add(managed_rule_id)
 
+    retirement_matches_by_location: dict[tuple[AuthzPrincipalType, int], tuple[str, ...]] = {}
+    retirement_locations_by_managed_rule_id: dict[
+        str, tuple[tuple[AuthzPrincipalType, int], ...]
+    ] = {}
+    for principal_type, rules in _authz_policy_rule_collections(current_policy):
+        for index, current_rule in enumerate(rules):
+            if principal_type != "github_actions" or current_rule.managed_set_id is not None:
+                continue
+            matching_managed_rule_ids = tuple(
+                managed_rule_id
+                for managed_rule_id, (desired_principal_type, desired_rule) in sorted(
+                    desired_managed_rules.items()
+                )
+                if desired_principal_type == "github_actions"
+                and _managed_github_compatibility_retirement_matches(
+                    current_rule=current_rule,
+                    desired_rule=desired_rule,
+                )
+            )
+            if matching_managed_rule_ids:
+                retirement_matches_by_location[(principal_type, index)] = matching_managed_rule_ids
+                for managed_rule_id in matching_managed_rule_ids:
+                    retirement_locations_by_managed_rule_id[managed_rule_id] = (
+                        *retirement_locations_by_managed_rule_id.get(managed_rule_id, ()),
+                        (principal_type, index),
+                    )
+
+    retirement_candidates = {
+        location: managed_rule_ids[0]
+        for location, managed_rule_ids in retirement_matches_by_location.items()
+        if len(managed_rule_ids) == 1
+        and len(retirement_locations_by_managed_rule_id[managed_rule_ids[0]]) == 1
+        and current_managed_rules.get(managed_rule_ids[0])
+        == desired_managed_rules[managed_rule_ids[0]]
+    }
+    retirement_locations: dict[tuple[AuthzPrincipalType, int], str] = {}
+    if unmanaged_adoption == "adopt_matching":
+        ambiguous_locations = tuple(
+            location
+            for location, managed_rule_ids in retirement_matches_by_location.items()
+            if len(managed_rule_ids) > 1
+        )
+        ambiguous_managed_rule_ids = tuple(
+            managed_rule_id
+            for managed_rule_id, locations in retirement_locations_by_managed_rule_id.items()
+            if len(locations) > 1
+        )
+        if ambiguous_locations or ambiguous_managed_rule_ids:
+            raise AuthzPolicyConflictError(
+                "Managed authz compatibility retirement is ambiguous; each unmanaged rule and "
+                "managed identity must have exactly one safe match."
+            )
+        for location, managed_rule_id in retirement_candidates.items():
+            if location in adoption_locations:
+                raise AuthzPolicyConflictError(
+                    "Managed authz compatibility retirement conflicts with unmanaged adoption."
+                )
+            retirement_locations[location] = managed_rule_id
+
     updated_collections: dict[AuthzPrincipalType, list[AuthzPolicyRule]] = {
         principal_type: [] for principal_type in current_collections
     }
     placed_desired_rule_ids: set[str] = set()
+    compatibility_retirements: list[AuthzManagedCompatibilityRetirement] = []
     for principal_type, current_rules in _authz_policy_rule_collections(current_policy):
         for index, current_rule in enumerate(current_rules):
             if current_rule.managed_set_id == managed_set_id:
@@ -1282,6 +1461,17 @@ def _reconcile_managed_policy(
                     desired_managed_rules[adopted_rule_id][1]
                 )
                 placed_desired_rule_ids.add(adopted_rule_id)
+                continue
+            retired_managed_rule_id = retirement_locations.get((principal_type, index))
+            if retired_managed_rule_id is not None:
+                desired_rule = desired_managed_rules[retired_managed_rule_id][1]
+                compatibility_retirements.append(
+                    AuthzManagedCompatibilityRetirement(
+                        managed_rule_id=retired_managed_rule_id,
+                        retired_rule_sha256=_authz_rule_sha256(current_rule),
+                        retained_managed_rule_sha256=_authz_rule_sha256(desired_rule),
+                    )
+                )
                 continue
             updated_collections[principal_type].append(current_rule)
 
@@ -1352,7 +1542,13 @@ def _reconcile_managed_policy(
                 desired_rule_sha256=_authz_rule_sha256(desired_entry[1]),
             )
         )
-    return updated_policy, tuple(changes), unchanged_rule_count
+    return (
+        updated_policy,
+        tuple(changes),
+        unchanged_rule_count,
+        len(retirement_candidates),
+        tuple(compatibility_retirements),
+    )
 
 
 def plan_managed_authz_policy_reconcile(
@@ -1383,7 +1579,13 @@ def plan_managed_authz_policy_reconcile(
         current_rules=dict(_authz_policy_rule_collections(base_policy))["github_actions"],
         desired_rules=desired_collections["github_actions"],
     )
-    updated_policy, changes, unchanged_rule_count = _reconcile_managed_policy(
+    (
+        updated_policy,
+        changes,
+        unchanged_rule_count,
+        unmanaged_compatibility_candidate_count,
+        compatibility_retirements,
+    ) = _reconcile_managed_policy(
         current_policy=base_policy,
         desired_policy=request.desired_policy,
         managed_set_id=request.managed_set_id,
@@ -1408,7 +1610,7 @@ def plan_managed_authz_policy_reconcile(
     ).hexdigest()
     candidate_revision = current_record.revision + int(changed)
     plan_payload = {
-        "contract_version": 1,
+        "contract_version": 2,
         "managed_set_id": request.managed_set_id,
         "observed_record_id": current_record.record_id,
         "observed_revision": current_record.revision,
@@ -1450,6 +1652,9 @@ def plan_managed_authz_policy_reconcile(
         updated_rule_count=sum(change.change == "updated" for change in changes),
         removed_rule_count=sum(change.change == "removed" for change in changes),
         unchanged_rule_count=unchanged_rule_count,
+        unmanaged_compatibility_candidate_count=unmanaged_compatibility_candidate_count,
+        retired_unmanaged_compatibility_rule_count=len(compatibility_retirements),
+        retired_unmanaged_compatibility_rules=compatibility_retirements,
         changes=changes,
     )
     return current_policy, current_record, updated_policy, diff
@@ -2366,6 +2571,16 @@ def execute_authz_policy_route(
             current_record=current_record,
             expected_policy_sha256=authorized_policy_sha256,
         )
+        if managed_diff.retired_unmanaged_compatibility_rule_count and not updated_policy.allows(
+            identity=identity,
+            action=_AUTHZ_POLICY_ADMIN_ACTION,
+            product=request.product,
+            context="launchplane",
+        ):
+            raise AuthzPolicyConflictError(
+                "Managed authz compatibility retirement must retain policy administration "
+                "authority for the applying identity."
+            )
         diff = managed_diff.model_dump(mode="json")
         audit = authz_managed_policy_reconcile_audit_payload(
             request=request,
