@@ -243,28 +243,16 @@ cleanup scope so the store is always closed.
   - `POST /v1/public-ingress/notification-policies/apply` (native FastAPI for
     bearer-token callers, DB-backed storage, local-operator reason enforcement,
     and optional `Idempotency-Key` replay/conflict handling)
-- authz policy maintenance routes:
+- authz policy administration routes:
   - `GET /v1/authz-policies/active`
   - `POST /v1/authz-policies/managed-rule-sets/reconcile`
-  - `POST /v1/authz-policies/github-actions/grants`
-  - `POST /v1/authz-policies/github-actions/removals`
-  - `POST /v1/authz-policies/github-humans/grants`
-  - `POST /v1/authz-policies/terminal-agents/grants`
-  - `POST /v1/authz-policies/local-operators/grants`
-  - `POST /v1/authz-policies/local-admins/grants`
     (native FastAPI for bearer-token and signed-in GitHub human-session
     callers and DB-backed policy records; managed-rule-set dry-runs return a
     reviewed plan digest, while apply atomically couples policy CAS and
-    `Idempotency-Key` completion. The exact grant/removal routes remain a
-    bounded migration surface until configured callers move to managed sets;
-    new GitHub Actions grants require immutable numeric `repository_id` and
-    `repository_owner_id` selectors, while exact removals may omit both only to
-    retire a name-only compatibility rule.)
+    `Idempotency-Key` completion. Managed reconciliation is the sole policy
+    write contract and requires immutable numeric `repository_id` and
+    `repository_owner_id` selectors for GitHub Actions rules.)
 
-`GET /v1/service/runtime` is also readable by a principal that can administer
-authz policy, even when it lacks broader `launchplane_service.read` authority.
-That narrow exception lets the protected operator workflow bind reviewed grant
-batches to the current policy SHA and schema version before mutation.
 - Every Code local automation work-request routes:
   - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
@@ -556,12 +544,6 @@ The cookie-capable mutation inventory is intentionally limited to:
 - `POST /v1/product-config/apply`
 - `POST /v1/merge-train/policies/import`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
-- `POST /v1/authz-policies/github-actions/grants`
-- `POST /v1/authz-policies/github-actions/removals`
-- `POST /v1/authz-policies/github-humans/grants`
-- `POST /v1/authz-policies/terminal-agents/grants`
-- `POST /v1/authz-policies/local-operators/grants`
-- `POST /v1/authz-policies/local-admins/grants`
 
 Every other authenticated mutation route intentionally rejects session-cookie
 authentication and continues to require its existing GitHub Actions OIDC,
@@ -586,13 +568,11 @@ deployment/promotion/preview lifecycle evidence over HTTP, and executes the
 current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,
 and preview mutations as authenticated Launchplane routes. Authz administration
 accepts GitHub Actions OIDC callers and authenticated admin human sessions and
-requires `authz_policy_grant.write`. The managed-rule-set route is the durable
-write/reload boundary for every principal type. The exact grant/removal routes
-remain only for the bounded rollout from the previous append-oriented contract;
-they support `dry_run` and `apply`, require an audit reason for apply, and match
-complete rules rather than partial selectors. Responses return record metadata,
-rule counts, compact diffs, and redacted audit metadata rather than echoing
-workflow refs, human logins, owner-agent subjects, or the full policy body.
+requires `authz_policy_grant.write`. Managed-rule-set reconciliation is the
+only durable write/reload boundary for every principal type. Responses return
+record metadata, rule counts, compact diffs, and redacted audit metadata rather
+than echoing workflow refs, human logins, owner-agent subjects, or the full
+policy body.
 
 Managed rule-set reconciliation is the durable authz write contract. A stable
 `(managed_set_id, managed_rule_id)` owns each managed rule independent of its
@@ -636,12 +616,6 @@ mutable reusable ref may appear only in a reviewed overlap plan when the active
 policy already authorizes that exact ref; narrowing removes it from the same
 stable managed rule after canary evidence.
 
-The exact grant/removal routes use the same policy-admin boundary for every
-principal type. They support repeatable dry-runs, require an audit reason for
-apply, compare-and-write changed policies, reload the current worker, and refuse
-to remove the final policy administrator. Exact removals match complete rules;
-responses expose compact counts/diffs and redacted audit metadata rather than
-workflow refs, human logins, owner-agent subjects, or the full policy body.
 
 The service also serves the built operator UI shell at `/`, with `/ui` retained
 as a route alias. This route family is native FastAPI. Built assets live under
@@ -1338,13 +1312,13 @@ relations without storing real tuple assignments in this repo:
 - policy/admin action: `authz_policy_grant.write` and related policy routes
   check policy administration permission on a Launchplane policy resource.
 
-Grant and removal routes remain the only supported tuple-write boundary during
-migration. They may derive tuple proposals from active DB policy records,
-compare OpenFGA decisions with existing DB decisions, and later write provider
-tuples after parity is proven. Missing, ambiguous, stale, or unreachable tuple
-state denies access; it must not fall back to checked-in tuples, local files,
-workflow defaults, ambient GitHub CLI identity, or broader DB grants after
-cutover.
+Managed rule-set reconciliation remains the only supported policy-write
+boundary during migration. It may derive tuple proposals from active DB policy
+records, compare OpenFGA decisions with existing DB decisions, and later write
+provider tuples after parity is proven. Missing, ambiguous, stale, or
+unreachable tuple state denies access; it must not fall back to checked-in
+tuples, local files, workflow defaults, ambient GitHub CLI identity, or broader
+DB grants after cutover.
 
 For first access, `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS` may name comma-separated
 verified GitHub email addresses that receive the `admin` role even before a
@@ -1531,8 +1505,8 @@ Concurrent same-key requests cannot both write; matching requests replay the
 committed response and changed fingerprints fail with
 `409 idempotency_key_reused`. The operator workflow
 receives the real target product as dispatch input, and its product-specific
-authz grant comes from operator-supplied configuration rather than checked-in
-runtime authority.
+authz rule comes from operator-managed desired state reconciled through the
+service rather than checked-in runtime authority.
 
 Public ingress notification policy writes use
 `POST /v1/public-ingress/notification-policies/apply`. The request carries
@@ -2367,7 +2341,7 @@ bounded redacted operation label/detail, and the manual workflow preserves the
 redacted response artifact before reporting failure.
 
 Authorization policy schema v2 treats these instance targets as first-class
-selectors. An exact grant for `testing` cannot read `prod` logs or driver state
+selectors. A grant scoped to `testing` cannot read `prod` logs or driver state
 even when both lanes share one context. Multi-lane operations must satisfy the
 rule for every resolved instance.
 

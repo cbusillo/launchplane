@@ -1056,7 +1056,7 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             hashlib.sha256(policy_text.encode("utf-8")).hexdigest(),
         )
 
-    async def test_authz_policy_administrator_can_read_runtime_contract(self) -> None:
+    async def test_authz_policy_administrator_cannot_read_runtime_contract(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
                 "local_operators": [
@@ -1083,8 +1083,8 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": "Bearer local-operator-token"},
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["runtime"]["authz_policy_schema_version"], 1)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
     async def test_worker_status_reports_queue_status(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

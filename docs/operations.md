@@ -348,12 +348,6 @@ Current implementation scope:
 - `POST /v1/evidence/previews/destroyed`
 - `GET /v1/authz-policies/active`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
-- `POST /v1/authz-policies/github-actions/grants`
-- `POST /v1/authz-policies/github-actions/removals`
-- `POST /v1/authz-policies/github-humans/grants`
-- `POST /v1/authz-policies/terminal-agents/grants`
-- `POST /v1/authz-policies/local-operators/grants`
-- `POST /v1/authz-policies/local-admins/grants`
 - `POST /v1/provider-targets/operations`
 - `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
@@ -386,9 +380,8 @@ Managed authz policy reconciliation is a native FastAPI service route. It
 requires DB-backed policy storage, enforces `authz_policy_grant.write`,
 preserves signed-in GitHub human-session callers, and keeps dry-runs stateless.
 Apply atomically commits the active-policy compare-and-swap and completed
-`Idempotency-Key` replay evidence. The exact grant/removal routes remain a
-bounded rollout bridge for callers that have not yet moved to managed rule
-sets; they are not the desired-state authority.
+`Idempotency-Key` replay evidence. Managed reconciliation is the sole policy
+write contract for every principal type.
 
 Operators mutate shared or production authz through the deployed service, not
 through direct DB commands or a local CLI from an arbitrary checkout. Store the
@@ -446,29 +439,19 @@ rehearsal use. Direct authz policy list/import DB commands are not supported.
 Launchplane self-deploy authority remains separate and does not authorize authz
 policy administration.
 
-The exact grant/removal commands remain a bounded migration bridge while
-configured callers move to managed sets. New workflow grants require numeric
-`--repository-id` and `--repository-owner-id` selectors. Exact removals include
-both IDs for an ID-bound rule and omit both only when retiring a name-only
-compatibility rule. They match the complete persisted rule, reject concurrent
-policy changes, and cannot delete the final policy-administration principal.
-
 Authz policy schema v1 remains the compatibility contract for an active v1
-policy and retains its existing product/context breadth. Schema v2 adds exact
-instance selectors to every principal rule and grant contract. Selectors are
-exact names or the lone `*` wildcard; an empty schema-v2 selector authorizes
-non-instance scope only and is never an implicit instance wildcard. Actions
-that can operate at either context or instance scope, such as `driver.read` and
-`product_environment.read`, use separate context and instance rules. Promotion
-and other multi-lane decisions require every affected instance.
-
-Grant and removal requests must use the same schema version as the active
-policy. The CLI therefore defaults to `--schema-version 1`; after an operator
-has explicitly migrated and activated a schema-v2 policy, pass
-`--schema-version 2 --instance <lane>`. Migration splits mixed or actionless v1
-rules into explicit context and `*` instance representations so their current
-breadth is preserved without teaching new schema-v2 rules that an empty
-selector means all instances.
+policy and retains its existing product/context breadth. Managed desired sets
+must use schema v2; reconciling an active v1 policy requires the explicit
+`migrate_v1_to_v2` plan intent. Schema v2 adds exact instance selectors to
+every principal rule. Selectors are exact names or the lone `*` wildcard; an
+empty schema-v2 selector authorizes non-instance scope only and is never an
+implicit instance wildcard. Actions that can operate at either context or
+instance scope, such as `driver.read` and `product_environment.read`, use
+separate context and instance rules. Promotion and other multi-lane decisions
+require every affected instance. Migration splits mixed or actionless v1 rules
+into explicit context and `*` instance representations so their current breadth
+is preserved without teaching new schema-v2 rules that an empty selector means
+all instances.
 
 When the CLI uses `--session-cookie`, it first reads `GET /v1/auth/session` and
 then sends the returned single-use CSRF token with strict same-origin fetch
@@ -482,113 +465,29 @@ the reviewed image and may reconcile runtime key-safety policy, but authz grants
 remain DB-backed service state. This prevents a checked-in catalog or ordinary
 image rollout from silently expanding or replacing live authority.
 
-During the bounded compatibility window, exact GitHub Actions grants can still
-be maintained through the dedicated `operator-authz-grants` job. Manually
-dispatch `Deploy Launchplane` with `authz_grants_mode=dry_run` after staging only
-the candidate batch in the temporary
-`LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON` repository variable. The job validates
-the operator-managed JSON, renders exact grant requests, submits
-stateless service dry-runs, and reports changed versus already-present rules
-without building or deploying an image or mutating other runtime records. The
-job reads the current service runtime first, renders requests with the active
-authz policy schema version, and includes both the active policy SHA-256 and a
-canonical SHA-256 of the schema-bound normalized grant set in its summary.
-Configure the
-`launchplane-authz-admin` GitHub environment with required reviewers before using
-this job; both dry-run and apply dispatches cross that deliberate operator gate.
-
-Each configured grant must contain exact string selectors and immutable numeric
-GitHub IDs. Unknown fields and glob syntax are rejected. A minimal example is:
-
-```json
-[
-  {
-    "repository": "example-org/example-product",
-    "repository_id": "3001",
-    "repository_owner_id": "4001",
-    "workflow_file": "deploy.yml",
-    "workflow_ref_suffix": "refs/heads/main",
-    "event_name": "workflow_dispatch",
-    "product": "example-product",
-    "context": "example-product",
-    "action": "product_profile.read",
-    "source_label": "operator:example-product-deploy"
-  }
-]
-```
-
-For an active schema-v2 policy, add `instance` only when the selected action is
-instance-scoped; schema-v1 requests and context-scoped actions must omit it.
-
-Verify the IDs against the intended GitHub repository and owner before review.
-Launchplane checks the name and both IDs at authorization time, so a mismatched
-pair creates a nonfunctional grant rather than broadening authority. When an
-otherwise identical name-only compatibility rule exists, applying the reviewed
-ID-bound grant replaces that rule instead of keeping both authority paths live.
-Repository and workflow names remain exact fail-closed selectors: a rename or
-transfer is denied until an operator reviews and updates the affected rule.
-The redacted active-policy endpoint and managed workflow evidence expose
-immutable-ID versus name-only counts, managed versus unmanaged counts by
-principal type, and the number of privileged GitHub Actions rules that still
-lack an immutable reusable-workflow identity. Use those counts to declare the
-compatibility removal gate; do not reconstruct live selectors from checked-in
-catalogs.
-
-Review the dry-run changes, then dispatch `authz_grants_mode=apply` with the
-reported grant-set SHA-256, the reported active policy SHA-256, an operator
-reason, and the identical repository-variable value. Apply fails before mutation
-when the active policy, active schema version, or configured grant set no longer
-matches the reviewed dry run. Grant-only mode rejects deploy, compatibility, and break-glass inputs,
-and the rollback path independently rejects grant maintenance. The request
-honors `LAUNCHPLANE_SERVICE_AUDIENCE` when set and otherwise uses the public URL
-host. Remove the temporary maintenance variable after the reviewed operation.
-Every run uploads the canonical request and redacted response evidence for 30
-days. The temporary exact route uses active-policy compare-and-write to prevent
-lost authority updates. Its compatibility idempotency evidence is recorded after
-that policy commit, so a concurrent duplicate can return a conflict rather than
-an immediate replay; retry the same reviewed request only after refreshing the
-active policy state. The later managed-set route makes policy mutation and
-idempotency completion one database transaction.
-The exact-grant job is an explicit removable compatibility bridge, not desired
-state reconciliation; steady-state authz changes belong in the service/operator
-surface and the later managed-set contract.
+The former append-oriented authz maintenance bridge is retired. Do not add
+per-rule grant/removal endpoints, deploy-time grant catalogs, or workflow inputs
+that bypass the managed desired-state review/apply contract. Use managed-set
+reconciliation for GitHub Actions, GitHub human, terminal-agent, local-operator,
+and local-admin policy changes.
 
 The #1049 compatibility cleanup removed stale
 `launchplane_service_deploy.execute` GitHub Actions rules for policy import
-workflows through the service-backed removals route. Do not reintroduce those
-broad rules; keep those workflows paired with narrow action grants such as
-`merge_train.policy_import`.
+workflows. Do not reintroduce those broad rules; keep those workflows paired
+with narrow managed actions such as `merge_train.policy_import`.
 
-The deploy workflow also reconciles the manual `Provider Target Operations`
-workflow grants. `provider_target.audit` covers audit and dry-run requests;
-`provider_target.backfill` covers apply requests. The route is intentionally
-Launchplane-scoped and single-route per request, so production rows are seeded
-through explicit audited workflow runs rather than local live-target commands.
+The operator-managed desired set owns workflow and local-operator authority for
+`Provider Target Operations`, product config, private health endpoints, and
+`Ingress Route Canary Apply`. Keep those rules explicitly scoped by product,
+context, instance, action, and immutable workflow identity as applicable. Use
+local-admin rules only for rare broader repair authority instead of widening
+routine local-operator access. Checked-in catalogs and deploy-time variables are
+not authority for these scopes.
 
-Routine local-operator product-config grants are scoped, not wildcard, and the
-deploy reconciliation skips them unless explicit product/context scopes are
-configured. Set `LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON` only for
-operator-reviewed routine write access; use local-admin grants for rare broader
-repair authority instead of widening routine local-operator access. Checked-in
-catalogs are not deploy-time authority for these operator scopes.
-
-Private health endpoint grants follow the same scoped local-operator pattern.
-Set `LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON` to an array of
-product/context objects when the local operator should manage DB-backed private
-health endpoint records for those scopes. Scopes must use explicit product and
-context values; wildcard/glob scopes fail closed. Leave it unset to skip
-reconciliation, and do not place endpoint URLs in repo files.
-
-The `Ingress Route Canary Apply` workflow grant is also scoped by operator input,
-not a checked-in product catalog. By default the deploy reconciliation grants the
-workflow `ingress_route.apply` only for `launchplane`/`launchplane`. Set
-`LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON` to an array of product/context
-objects when DB-backed canary route records are intentionally scoped elsewhere;
-the workflow still passes only the canary key while the service resolves route
-topology from records.
-
-Grant requests return only authz policy record metadata and rule counts; they do
-not echo workflow refs, human logins, or the full policy body.
+Managed reconciliation responses return only authz policy record metadata,
+rule counts, managed IDs and hashes, compact diffs, and redacted audit evidence;
+they do not echo workflow refs, human logins, owner-agent subjects, or the full
+policy body.
 
 Lane health monitoring is Launchplane-owned synthetic monitoring for
 generic-web stable lanes, including drivers that inherit generic-web behavior.
