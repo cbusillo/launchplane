@@ -16,7 +16,7 @@ from control_plane.http_routes.support import (
     ApiRouteRegistrar,
     ReadRouteDependencies,
 )
-from control_plane.service_auth import LaunchplaneIdentity
+from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 
 
 class EdgeEndpointRecordResponse(BaseModel):
@@ -235,12 +235,18 @@ def _ensure_route_binding_read_allowed(
     trace_id: str,
     product: str,
     context_name: str,
+    instance_name: str,
 ) -> None:
     if not dependencies.authorization_allows(
         identity=identity,
         action="route_binding.read",
         product=product,
         context=context_name,
+        target=(
+            AuthorizationTarget(scope="instance", instances=(instance_name,))
+            if instance_name
+            else AuthorizationTarget(scope="context")
+        ),
     ):
         raise dependencies.http_error(
             status_code=403,
@@ -281,6 +287,7 @@ def register_topology_read_routes(
             trace_id=trace_id,
             product=normalized_product,
             context_name=context_name,
+            instance_name=instance_name,
         )
         try:
             normalized_limit = control_plane_service_status.query_int_value(
@@ -350,6 +357,7 @@ def register_topology_read_routes(
             trace_id=trace_id,
             product=normalized_product,
             context_name=context_name,
+            instance_name=instance_name,
         )
         try:
             route_binding_store = require_route_binding_read_store(record_store)

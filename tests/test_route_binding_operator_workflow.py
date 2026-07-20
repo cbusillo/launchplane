@@ -9,6 +9,48 @@ from tests.support.workflows import SELF_HOSTED_RUNNER, load_workflow
 class RouteBindingOperatorWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = load_workflow(".github/workflows/route-binding-reconcile.yml")
+        self.worker = load_workflow(".github/workflows/reusable-route-binding-reconcile.yml")
+
+    def test_reusable_worker_is_manual_oidc_and_service_backed(self) -> None:
+        trigger = self.worker.data["on"]
+        assert isinstance(trigger, dict)
+        self.assertEqual(set(trigger), {"workflow_call"})
+        self.assertEqual(self.worker.permissions, {"contents": "read", "id-token": "write"})
+        self.assertEqual(set(self.worker.jobs), {"reconcile"})
+        job = self.worker.job("reconcile")
+        runs_on = job["runs-on"]
+        assert isinstance(runs_on, list)
+        self.assertEqual(tuple(runs_on), SELF_HOSTED_RUNNER)
+
+        current_step = self.worker.step_named("reconcile", "Read current route binding")
+        self.assertIsNotNone(current_step)
+        assert current_step is not None
+        self.assertEqual(
+            current_step.uses,
+            "cbusillo/launchplane/.github/actions/launchplane-request@"
+            "adcf937c6aef14e02478724040852d1d2a82a850",
+        )
+        self.assertEqual(current_step.with_values["method"], "GET")
+        self.assertEqual(current_step.with_values["expected-status"], "200,404")
+        self.assertEqual(current_step.with_values["log-response-body"], "false")
+
+        reconcile_step = self.worker.step_named("reconcile", "Request route-binding reconcile")
+        self.assertIsNotNone(reconcile_step)
+        assert reconcile_step is not None
+        self.assertEqual(
+            reconcile_step.uses,
+            "cbusillo/launchplane/.github/actions/launchplane-request@"
+            "adcf937c6aef14e02478724040852d1d2a82a850",
+        )
+        self.assertEqual(
+            reconcile_step.with_values["route-path"],
+            "/v1/route-bindings/reconcile",
+        )
+        self.assertEqual(reconcile_step.with_values["fail-result-paths"], "result.status")
+        self.assertEqual(
+            reconcile_step.with_values["fail-result-statuses"],
+            "blocked,conflict",
+        )
 
     def test_workflow_is_manual_oidc_and_service_backed(self) -> None:
         trigger = self.workflow.data["on"]

@@ -1116,9 +1116,14 @@ class RouteBindingReconcileTests(unittest.TestCase):
         self.assertEqual(plan.findings[0].code, "evidence_timestamp_future")
 
 
-def _route_binding_policy(*, action: str = "route_binding.read") -> LaunchplaneAuthzPolicy:
+def _route_binding_policy(
+    *,
+    action: str = "route_binding.read",
+    instances: tuple[str, ...] = ("web",),
+) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
+            "schema_version": 2,
             "github_actions": [
                 {
                     "repository": "every/verireel",
@@ -1128,9 +1133,10 @@ def _route_binding_policy(*, action: str = "route_binding.read") -> LaunchplaneA
                     "event_names": ["pull_request"],
                     "products": ["example-product"],
                     "contexts": ["example-testing"],
+                    "instances": list(instances),
                     "actions": [action],
                 }
-            ]
+            ],
         }
     )
 
@@ -1139,12 +1145,13 @@ def _route_binding_reconcile_payload(
     *,
     mode: str = "apply",
     current_record: EnvironmentRouteBindingRecord | None = None,
+    instance: str = "web",
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "mode": mode,
         "product": "example-product",
         "context": "example-testing",
-        "instance": "web",
+        "instance": instance,
         "expected_current": _route_binding_expected_current(current_record).model_dump(mode="json"),
     }
     if mode == "apply":
@@ -1169,7 +1176,7 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
             )
 
             read_response = await _get_route_binding_record(app)
-            list_response = await _get_route_binding_records(app)
+            list_response = await _get_route_binding_records(app, instance="web")
 
         self.assertEqual(read_response.status_code, 200)
         self.assertEqual(list_response.status_code, 200)
@@ -1188,7 +1195,7 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_route_binding_reads_require_scoped_authz(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
-            authz_policy=_route_binding_policy(action="edge_endpoint.read"),
+            authz_policy=_route_binding_policy(action="edge_endpoint.read", instances=()),
             record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
         )
 
@@ -1196,6 +1203,35 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_route_binding_reads_require_instance_authority(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_route_binding_policy(),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
+        )
+
+        response = await _get_route_binding_record(app, instance="other")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_route_binding_context_list_uses_context_authority(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_route_binding_record(_route_binding_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_route_binding_policy(instances=()),
+                record_store_factory=lambda: store,
+            )
+
+            list_response = await _get_route_binding_records(app)
+            current_response = await _get_route_binding_record(app)
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(current_response.status_code, 403)
+        self.assertEqual(current_response.json()["error"]["code"], "authorization_denied")
 
     async def test_route_binding_reconcile_apply_requires_scoped_authz(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -1213,6 +1249,27 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
                 "Idempotency-Key": "route-binding-reconcile-denied",
             },
             payload=_route_binding_reconcile_payload(),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_route_binding_reconcile_apply_requires_instance_authority(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_route_binding_policy(action="route_binding.apply"),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/route-bindings/reconcile",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Idempotency-Key": "route-binding-reconcile-wrong-instance",
+            },
+            payload=_route_binding_reconcile_payload(instance="other"),
         )
 
         self.assertEqual(response.status_code, 403)

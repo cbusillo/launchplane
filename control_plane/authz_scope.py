@@ -20,6 +20,8 @@ _DUAL_SCOPE_AUTHZ_ACTIONS = frozenset(
         "product_config.apply",
         "product_config.plan",
         "product_environment.read",
+        "route_binding.apply",
+        "route_binding.read",
         "secret.list",
         "secret.read",
     }

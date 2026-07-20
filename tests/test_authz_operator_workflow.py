@@ -20,23 +20,45 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         trigger = self.dispatch_workflow.data["on"]
         assert isinstance(trigger, dict)
         self.assertEqual(set(trigger), {"workflow_dispatch"})
-        self.assertEqual(set(self.dispatch_workflow.jobs), {"reconcile"})
+        dispatch = trigger["workflow_dispatch"]
+        assert isinstance(dispatch, dict)
+        dispatch_inputs = dispatch["inputs"]
+        assert isinstance(dispatch_inputs, dict)
+        managed_set_input = dispatch_inputs["managed_set"]
+        assert isinstance(managed_set_input, dict)
+        self.assertEqual(managed_set_input["default"], "primary")
         self.assertEqual(
-            self.dispatch_workflow.job_uses("reconcile"),
-            "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@"
-            "4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd",
+            managed_set_input["options"],
+            ["primary", "odoo-route-binding"],
         )
-        self.assertEqual(
-            self.dispatch_workflow.job_permissions("reconcile"),
-            {"contents": "read", "id-token": "write"},
-        )
-        dispatch_job = self.dispatch_workflow.job("reconcile")
-        dispatch_secrets = dispatch_job["secrets"]
-        assert isinstance(dispatch_secrets, dict)
-        self.assertEqual(
-            dispatch_secrets["managed_set_json"],
-            "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}",
-        )
+        expected_jobs = {
+            "reconcile-primary": (
+                "${{ inputs.managed_set == 'primary' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-odoo-route-binding": (
+                "${{ inputs.managed_set == 'odoo-route-binding' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON }}",
+            ),
+        }
+        self.assertEqual(set(self.dispatch_workflow.jobs), set(expected_jobs))
+        for job_name, (condition, expected_secret) in expected_jobs.items():
+            with self.subTest(job=job_name):
+                self.assertEqual(
+                    self.dispatch_workflow.job_uses(job_name),
+                    "cbusillo/launchplane/.github/workflows/"
+                    "reusable-authz-policy-reconcile.yml@"
+                    "4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd",
+                )
+                self.assertEqual(
+                    self.dispatch_workflow.job_permissions(job_name),
+                    {"contents": "read", "id-token": "write"},
+                )
+                dispatch_job = self.dispatch_workflow.job(job_name)
+                self.assertEqual(dispatch_job["if"], condition)
+                dispatch_secrets = dispatch_job["secrets"]
+                assert isinstance(dispatch_secrets, dict)
+                self.assertEqual(dispatch_secrets["managed_set_json"], expected_secret)
 
     def test_deploy_workflow_bootstraps_managed_authz_without_deploying(self) -> None:
         deploy_job = self.deploy_workflow.job("deploy")
