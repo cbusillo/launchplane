@@ -2953,6 +2953,10 @@
           "provider_target": {
             "$ref": "#/components/schemas/RouteBindingProviderTargetReadModel"
           },
+          "record_sha256": {
+            "title": "Record Sha256",
+            "type": "string"
+          },
           "schema_version": {
             "title": "Schema Version",
             "type": "integer"
@@ -2987,7 +2991,8 @@
           "tls",
           "status",
           "source",
-          "updated_at"
+          "updated_at",
+          "record_sha256"
         ],
         "title": "EnvironmentRouteBindingReadModel",
         "type": "object"
@@ -15855,60 +15860,6 @@
         "title": "RollbackExecutionEvidence",
         "type": "object"
       },
-      "RouteBindingBackfillApplyEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "confirmation": {
-            "default": "",
-            "title": "Confirmation",
-            "type": "string"
-          },
-          "context": {
-            "title": "Context",
-            "type": "string"
-          },
-          "instance": {
-            "title": "Instance",
-            "type": "string"
-          },
-          "mode": {
-            "default": "dry-run",
-            "enum": [
-              "dry-run",
-              "apply"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "product": {
-            "title": "Product",
-            "type": "string"
-          },
-          "reason": {
-            "default": "",
-            "title": "Reason",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "source_label": {
-            "default": "operator-backfill",
-            "title": "Source Label",
-            "type": "string"
-          }
-        },
-        "required": [
-          "product",
-          "context",
-          "instance"
-        ],
-        "title": "RouteBindingBackfillApplyEnvelope",
-        "type": "object"
-      },
       "RouteBindingDomain": {
         "additionalProperties": false,
         "properties": {
@@ -15930,6 +15881,29 @@
           "domain_name"
         ],
         "title": "RouteBindingDomain",
+        "type": "object"
+      },
+      "RouteBindingExpectedCurrent": {
+        "additionalProperties": false,
+        "properties": {
+          "record_sha256": {
+            "default": "",
+            "title": "Record Sha256",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "absent",
+              "present"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "RouteBindingExpectedCurrent",
         "type": "object"
       },
       "RouteBindingIngressReadModel": {
@@ -15988,6 +15962,64 @@
           "target_name"
         ],
         "title": "RouteBindingProviderTargetReadModel",
+        "type": "object"
+      },
+      "RouteBindingReconcileEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmation": {
+            "default": "",
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "expected_current": {
+            "$ref": "#/components/schemas/RouteBindingExpectedCurrent"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_label": {
+            "default": "operator-reconcile",
+            "title": "Source Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "expected_current"
+        ],
+        "title": "RouteBindingReconcileEnvelope",
         "type": "object"
       },
       "RouteBindingRecordResponse": {
@@ -42965,9 +42997,9 @@
         "summary": "Read repository product mapping"
       }
     },
-    "/v1/route-bindings/backfill/apply": {
+    "/v1/route-bindings/reconcile": {
       "post": {
-        "operationId": "apply_route_binding_backfill",
+        "operationId": "reconcile_route_binding",
         "parameters": [
           {
             "in": "header",
@@ -42994,7 +43026,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RouteBindingBackfillApplyEnvelope"
+                "$ref": "#/components/schemas/RouteBindingReconcileEnvelope"
               }
             }
           },
@@ -43062,7 +43094,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Plan or apply one provider-neutral environment route binding"
+        "summary": "Dry-run or apply one provider-neutral route-binding reconcile"
       }
     },
     "/v1/route-bindings/records": {

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -17,14 +17,16 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingProviderTarget,
     RouteBindingSource,
     RouteBindingTls,
+    route_binding_record_sha256,
 )
 
 
 _EVIDENCE_SCAN_LIMIT = 1000
-_EVIDENCE_MAX_AGE = timedelta(hours=24)
+_EVIDENCE_FRESHNESS_WINDOW = timedelta(hours=24)
+_EVIDENCE_REFRESH_THRESHOLD = timedelta(hours=12)
 
 
-class RouteBindingBackfillStore(Protocol):
+class RouteBindingReconcileStore(Protocol):
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
     ) -> ProviderTargetRecord: ...
@@ -53,55 +55,131 @@ class RouteBindingBackfillStore(Protocol):
         limit: int | None = None,
     ) -> tuple[IngressRouteAuditRecord, ...]: ...
 
+    def read_route_binding_record(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentRouteBindingRecord: ...
 
-class RouteBindingBackfillFinding(BaseModel):
+
+class RouteBindingReconcileFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: str
     detail: str
 
 
-class RouteBindingBackfillRequest(BaseModel):
+class RouteBindingExpectedCurrent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["absent", "present"]
+    record_sha256: str = ""
+
+    @model_validator(mode="after")
+    def _validate_expected_current(self) -> "RouteBindingExpectedCurrent":
+        self.record_sha256 = self.record_sha256.strip().lower()
+        if self.state == "absent":
+            if self.record_sha256:
+                raise ValueError("absent route binding expectation cannot include record_sha256")
+            return self
+        if len(self.record_sha256) != 64:
+            raise ValueError("present route binding expectation requires a SHA-256 record digest")
+        try:
+            int(self.record_sha256, 16)
+        except ValueError as error:
+            raise ValueError(
+                "present route binding expectation requires a SHA-256 record digest"
+            ) from error
+        return self
+
+
+class RouteBindingReconcileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
     product: str
     context: str
     instance: str
-    source_label: str = "operator-backfill"
+    expected_current: RouteBindingExpectedCurrent = Field(
+        default_factory=lambda: RouteBindingExpectedCurrent(state="absent")
+    )
+    source_label: str = "operator-reconcile"
     evaluated_at: str
 
     @model_validator(mode="after")
-    def _validate_request(self) -> "RouteBindingBackfillRequest":
+    def _validate_request(self) -> "RouteBindingReconcileRequest":
         if self.schema_version != 1:
-            raise ValueError("Unsupported route binding backfill schema version")
-        self.product = _required_text(self.product, "route binding backfill requires product")
-        self.context = _required_text(self.context, "route binding backfill requires context")
-        self.instance = _required_text(self.instance, "route binding backfill requires instance")
+            raise ValueError("Unsupported route binding reconcile schema version")
+        self.product = _required_text(self.product, "route binding reconcile requires product")
+        self.context = _required_text(self.context, "route binding reconcile requires context")
+        self.instance = _required_text(self.instance, "route binding reconcile requires instance")
         self.source_label = _required_text(
-            self.source_label, "route binding backfill requires source_label"
+            self.source_label, "route binding reconcile requires source_label"
         )
         self.evaluated_at = _required_text(
-            self.evaluated_at, "route binding backfill requires evaluated_at"
+            self.evaluated_at, "route binding reconcile requires evaluated_at"
         )
         _parse_utc_timestamp(self.evaluated_at)
         return self
 
 
-class RouteBindingBackfillPlan(BaseModel):
+class RouteBindingReconcilePlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: str
-    findings: tuple[RouteBindingBackfillFinding, ...] = ()
-    record: EnvironmentRouteBindingRecord | None = None
+    status: Literal["ready", "unchanged", "blocked", "conflict"]
+    operation: Literal["create", "refresh", "none"] = "none"
+    findings: tuple[RouteBindingReconcileFinding, ...] = ()
+    current_record_sha256: str = ""
+    candidate_record_sha256: str = ""
+    current_record: EnvironmentRouteBindingRecord | None = Field(default=None, exclude=True)
+    record: EnvironmentRouteBindingRecord | None = Field(default=None, exclude=True)
 
 
-def plan_route_binding_backfill(
+def plan_route_binding_reconcile(
     *,
-    record_store: RouteBindingBackfillStore,
-    request: RouteBindingBackfillRequest,
-) -> RouteBindingBackfillPlan:
-    findings: list[RouteBindingBackfillFinding] = []
+    record_store: RouteBindingReconcileStore,
+    request: RouteBindingReconcileRequest,
+) -> RouteBindingReconcilePlan:
+    try:
+        current_record = record_store.read_route_binding_record(
+            product=request.product,
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+    except FileNotFoundError:
+        current_record = None
+    current_record_sha256 = (
+        route_binding_record_sha256(current_record) if current_record is not None else ""
+    )
+    expected_current = request.expected_current
+    if expected_current.state == "absent" and current_record is not None:
+        return _conflict_plan(
+            code="expected_current_present",
+            detail=(
+                "A route-binding record exists, but the request expected the tuple to be absent."
+            ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+    if expected_current.state == "present" and current_record is None:
+        return _conflict_plan(
+            code="expected_current_missing",
+            detail=("No route-binding record exists, but the request expected a current record."),
+        )
+    if (
+        expected_current.state == "present"
+        and expected_current.record_sha256 != current_record_sha256
+    ):
+        return _conflict_plan(
+            code="expected_current_changed",
+            detail=("The current route-binding record changed after the caller inspected it."),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+
+    findings: list[RouteBindingReconcileFinding] = []
     provider_target = _read_provider_target(
         record_store=record_store, request=request, findings=findings
     )
@@ -112,7 +190,11 @@ def plan_route_binding_backfill(
         record_store=record_store, request=request, findings=findings
     )
     if provider_target is None or dokploy_target is None or dokploy_target_id is None:
-        return RouteBindingBackfillPlan(status="blocked", findings=tuple(findings))
+        return _blocked_plan(
+            findings=findings,
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
     expected_provider_target = ProviderTargetRecord.from_dokploy_records(
         target_record=dokploy_target,
         target_id_record=dokploy_target_id,
@@ -120,10 +202,9 @@ def plan_route_binding_backfill(
     if _provider_target_projection(provider_target) != _provider_target_projection(
         expected_provider_target
     ):
-        return RouteBindingBackfillPlan(
-            status="blocked",
+        return _blocked_plan(
             findings=(
-                RouteBindingBackfillFinding(
+                RouteBindingReconcileFinding(
                     code="provider_target_projection_conflict",
                     detail=(
                         "The provider-target record does not match the canonical projection "
@@ -131,20 +212,30 @@ def plan_route_binding_backfill(
                     ),
                 ),
             ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
         )
 
     domains, domain_finding = _normalized_domains(dokploy_target.domains)
     if domain_finding is not None:
         findings.append(domain_finding)
-        return RouteBindingBackfillPlan(status="blocked", findings=tuple(findings))
+        return _blocked_plan(
+            findings=findings,
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
     if not domains:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="domains_missing",
                 detail="Tracked provider target has no recorded domains for this environment.",
             )
         )
-        return RouteBindingBackfillPlan(status="blocked", findings=tuple(findings))
+        return _blocked_plan(
+            findings=findings,
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
 
     edge_endpoint = _resolve_edge_endpoint(
         record_store=record_store,
@@ -158,13 +249,16 @@ def plan_route_binding_backfill(
         findings=findings,
     )
     if edge_endpoint is None or audit_record is None:
-        return RouteBindingBackfillPlan(status="blocked", findings=tuple(findings))
+        return _blocked_plan(
+            findings=findings,
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
     if audit_record.edge_endpoint_key != edge_endpoint.endpoint_key:
-        return RouteBindingBackfillPlan(
-            status="blocked",
+        return _blocked_plan(
             findings=(
                 *findings,
-                RouteBindingBackfillFinding(
+                RouteBindingReconcileFinding(
                     code="ingress_edge_endpoint_conflict",
                     detail=(
                         "The matching ingress audit points at a different edge endpoint than "
@@ -172,17 +266,20 @@ def plan_route_binding_backfill(
                     ),
                 ),
             ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
         )
     if audit_record.tls_owner == "unknown":
-        return RouteBindingBackfillPlan(
-            status="blocked",
+        return _blocked_plan(
             findings=(
                 *findings,
-                RouteBindingBackfillFinding(
+                RouteBindingReconcileFinding(
                     code="tls_ownership_unknown",
                     detail="The matching ingress audit does not record TLS ownership evidence.",
                 ),
             ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
         )
 
     source_record_ids = (
@@ -203,9 +300,10 @@ def plan_route_binding_backfill(
         ),
     )
     if freshness_finding is not None:
-        return RouteBindingBackfillPlan(
-            status="blocked",
+        return _blocked_plan(
             findings=(*findings, freshness_finding),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
         )
 
     record = EnvironmentRouteBindingRecord(
@@ -246,7 +344,7 @@ def plan_route_binding_backfill(
         ),
         status="active",
         source=RouteBindingSource(
-            source_kind="backfill",
+            source_kind="service",
             source_label=request.source_label,
             source_record_ids=source_record_ids,
             source_versions=source_versions,
@@ -256,14 +354,94 @@ def plan_route_binding_backfill(
         ),
         updated_at=request.evaluated_at,
     )
-    return RouteBindingBackfillPlan(status="ready", findings=(), record=record)
+    candidate_record_sha256 = route_binding_record_sha256(record)
+    if current_record is None:
+        return RouteBindingReconcilePlan(
+            status="ready",
+            operation="create",
+            candidate_record_sha256=candidate_record_sha256,
+            record=record,
+        )
+    if current_record.source.source_kind not in {"backfill", "service"}:
+        return _conflict_plan(
+            code="route_binding_ownership_conflict",
+            detail=("Reconcile cannot replace a route-binding record owned by an operator source."),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+            candidate_record_sha256=candidate_record_sha256,
+        )
+    if _route_binding_authority_projection(current_record) != (
+        _route_binding_authority_projection(record)
+    ):
+        return _conflict_plan(
+            code="route_binding_authority_conflict",
+            detail=(
+                "Current source records describe different route authority. Reconcile will not "
+                "silently change provider target, domains, ingress, TLS ownership, or status."
+            ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+            candidate_record_sha256=candidate_record_sha256,
+        )
+    if _route_binding_evidence_projection(current_record) != (
+        _route_binding_evidence_projection(record)
+    ) or _route_binding_refresh_due(
+        current_record=current_record,
+        evaluated_at=request.evaluated_at,
+    ):
+        return RouteBindingReconcilePlan(
+            status="ready",
+            operation="refresh",
+            current_record_sha256=current_record_sha256,
+            candidate_record_sha256=candidate_record_sha256,
+            current_record=current_record,
+            record=record,
+        )
+    return RouteBindingReconcilePlan(
+        status="unchanged",
+        current_record_sha256=current_record_sha256,
+        candidate_record_sha256=current_record_sha256,
+        current_record=current_record,
+        record=current_record,
+    )
+
+
+def _blocked_plan(
+    *,
+    findings: tuple[RouteBindingReconcileFinding, ...] | list[RouteBindingReconcileFinding],
+    current_record: EnvironmentRouteBindingRecord | None,
+    current_record_sha256: str,
+) -> RouteBindingReconcilePlan:
+    return RouteBindingReconcilePlan(
+        status="blocked",
+        findings=tuple(findings),
+        current_record_sha256=current_record_sha256,
+        current_record=current_record,
+    )
+
+
+def _conflict_plan(
+    *,
+    code: str,
+    detail: str,
+    current_record: EnvironmentRouteBindingRecord | None = None,
+    current_record_sha256: str = "",
+    candidate_record_sha256: str = "",
+) -> RouteBindingReconcilePlan:
+    return RouteBindingReconcilePlan(
+        status="conflict",
+        findings=(RouteBindingReconcileFinding(code=code, detail=detail),),
+        current_record_sha256=current_record_sha256,
+        candidate_record_sha256=candidate_record_sha256,
+        current_record=current_record,
+    )
 
 
 def _read_provider_target(
     *,
-    record_store: RouteBindingBackfillStore,
-    request: RouteBindingBackfillRequest,
-    findings: list[RouteBindingBackfillFinding],
+    record_store: RouteBindingReconcileStore,
+    request: RouteBindingReconcileRequest,
+    findings: list[RouteBindingReconcileFinding],
 ) -> ProviderTargetRecord | None:
     try:
         return record_store.read_provider_target_record(
@@ -272,7 +450,7 @@ def _read_provider_target(
         )
     except FileNotFoundError:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="provider_target_missing",
                 detail="No provider-target record exists for the requested context/instance.",
             )
@@ -282,9 +460,9 @@ def _read_provider_target(
 
 def _read_dokploy_target(
     *,
-    record_store: RouteBindingBackfillStore,
-    request: RouteBindingBackfillRequest,
-    findings: list[RouteBindingBackfillFinding],
+    record_store: RouteBindingReconcileStore,
+    request: RouteBindingReconcileRequest,
+    findings: list[RouteBindingReconcileFinding],
 ) -> DokployTargetRecord | None:
     try:
         return record_store.read_dokploy_target_record(
@@ -293,7 +471,7 @@ def _read_dokploy_target(
         )
     except FileNotFoundError:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="dokploy_target_missing",
                 detail="No tracked Dokploy target record exists for the requested context/instance.",
             )
@@ -303,9 +481,9 @@ def _read_dokploy_target(
 
 def _read_dokploy_target_id(
     *,
-    record_store: RouteBindingBackfillStore,
-    request: RouteBindingBackfillRequest,
-    findings: list[RouteBindingBackfillFinding],
+    record_store: RouteBindingReconcileStore,
+    request: RouteBindingReconcileRequest,
+    findings: list[RouteBindingReconcileFinding],
 ) -> DokployTargetIdRecord | None:
     try:
         return record_store.read_dokploy_target_id_record(
@@ -314,7 +492,7 @@ def _read_dokploy_target_id(
         )
     except FileNotFoundError:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="dokploy_target_id_missing",
                 detail=(
                     "No tracked Dokploy target-id record exists for the requested context/instance."
@@ -326,9 +504,9 @@ def _read_dokploy_target_id(
 
 def _resolve_edge_endpoint(
     *,
-    record_store: RouteBindingBackfillStore,
+    record_store: RouteBindingReconcileStore,
     provider_target: ProviderTargetRecord,
-    findings: list[RouteBindingBackfillFinding],
+    findings: list[RouteBindingReconcileFinding],
 ) -> EdgeEndpointRecord | None:
     active_endpoints = record_store.list_edge_endpoint_records(
         provider=provider_target.provider_id,
@@ -337,10 +515,10 @@ def _resolve_edge_endpoint(
     )
     if len(active_endpoints) > _EVIDENCE_SCAN_LIMIT:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="edge_endpoint_scan_limit_exceeded",
                 detail=(
-                    "Backfill cannot resolve edge endpoint evidence because the bounded "
+                    "Reconcile cannot resolve edge endpoint evidence because the bounded "
                     "active-endpoint scan was exhausted."
                 ),
             )
@@ -348,7 +526,7 @@ def _resolve_edge_endpoint(
         return None
     if not active_endpoints:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="edge_endpoint_missing",
                 detail="No active edge endpoint records are available for Dokploy-backed ingress.",
             )
@@ -357,7 +535,7 @@ def _resolve_edge_endpoint(
     project_name = provider_target.provider_evidence.get("project_name", "").strip()
     if not project_name:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="edge_endpoint_evidence_missing",
                 detail=(
                     "Provider-target evidence does not identify the edge endpoint server name."
@@ -370,10 +548,10 @@ def _resolve_edge_endpoint(
     )
     if len(candidates) != 1:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="edge_endpoint_ambiguous" if candidates else "edge_endpoint_conflict",
                 detail=(
-                    "Backfill could not resolve exactly one active edge endpoint for the "
+                    "Reconcile could not resolve exactly one active edge endpoint for the "
                     "provider target."
                 ),
             )
@@ -384,10 +562,10 @@ def _resolve_edge_endpoint(
 
 def _resolve_ingress_audit(
     *,
-    record_store: RouteBindingBackfillStore,
-    request: RouteBindingBackfillRequest,
+    record_store: RouteBindingReconcileStore,
+    request: RouteBindingReconcileRequest,
     domains: tuple[str, ...],
-    findings: list[RouteBindingBackfillFinding],
+    findings: list[RouteBindingReconcileFinding],
 ) -> IngressRouteAuditRecord | None:
     domain_set = set(domains)
     audit_records = record_store.list_ingress_route_audit_records(
@@ -397,10 +575,10 @@ def _resolve_ingress_audit(
     )
     if len(audit_records) > _EVIDENCE_SCAN_LIMIT:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="ingress_audit_scan_limit_exceeded",
                 detail=(
-                    "Backfill cannot resolve ingress evidence because the bounded audit "
+                    "Reconcile cannot resolve ingress evidence because the bounded audit "
                     "scan was exhausted."
                 ),
             )
@@ -418,7 +596,7 @@ def _resolve_ingress_audit(
                 recorded_at = _parse_utc_timestamp(record.recorded_at)
             except ValueError:
                 findings.append(
-                    RouteBindingBackfillFinding(
+                    RouteBindingReconcileFinding(
                         code="ingress_audit_timestamp_invalid",
                         detail="A matching ingress audit has an invalid recorded_at timestamp.",
                     )
@@ -427,10 +605,10 @@ def _resolve_ingress_audit(
             matching_records.append((record, recorded_at))
     if not matching_records:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="ingress_audit_missing",
                 detail=(
-                    "Backfill requires exactly one applied ingress audit matching the "
+                    "Reconcile requires exactly one applied ingress audit matching the "
                     "tracked domain set for the requested product/context."
                 ),
             )
@@ -442,7 +620,7 @@ def _resolve_ingress_audit(
     )
     if any(record.status not in {"applied", "unchanged"} for record in latest_records):
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="ingress_audit_unresolved",
                 detail=(
                     "The latest matching ingress audit is not terminal, so route evidence "
@@ -462,7 +640,7 @@ def _resolve_ingress_audit(
     }
     if len(latest_routes) != 1:
         findings.append(
-            RouteBindingBackfillFinding(
+            RouteBindingReconcileFinding(
                 code="ingress_audit_ambiguous",
                 detail=(
                     "The latest matching ingress audits disagree about provider or edge endpoint."
@@ -487,14 +665,64 @@ def _provider_target_projection(record: ProviderTargetRecord) -> tuple[object, .
     )
 
 
+def _route_binding_authority_projection(
+    record: EnvironmentRouteBindingRecord,
+) -> tuple[object, ...]:
+    return (
+        record.schema_version,
+        record.product,
+        record.context,
+        record.instance,
+        record.provider_target.provider_id,
+        record.provider_target.target_category,
+        record.provider_target.provider_target_type,
+        record.provider_target.target_name,
+        record.ingress.provider,
+        record.ingress.endpoint_key,
+        record.ingress.termination_kind,
+        tuple(sorted((domain.role, domain.domain_name) for domain in record.domains)),
+        record.tls.owner,
+        record.status,
+    )
+
+
+def _route_binding_evidence_projection(
+    record: EnvironmentRouteBindingRecord,
+) -> tuple[object, ...]:
+    return (
+        tuple(sorted(record.provider_target.provider_evidence.items())),
+        tuple(sorted(record.ingress.provider_evidence.items())),
+        tuple(sorted(record.tls.provider_evidence.items())),
+        record.source.source_kind,
+        record.source.source_label,
+        record.source.source_record_ids,
+        tuple(sorted(record.source.source_versions.items())),
+        record.source.freshness_status,
+    )
+
+
+def _route_binding_refresh_due(
+    *,
+    current_record: EnvironmentRouteBindingRecord,
+    evaluated_at: str,
+) -> bool:
+    evaluated_timestamp = _parse_utc_timestamp(evaluated_at)
+    try:
+        stale_after = _parse_utc_timestamp(current_record.source.stale_after)
+    except ValueError:
+        return True
+    if stale_after > evaluated_timestamp + _EVIDENCE_FRESHNESS_WINDOW:
+        return True
+    return stale_after <= evaluated_timestamp + _EVIDENCE_REFRESH_THRESHOLD
+
+
 def _source_freshness(
     *,
     evaluated_at: str,
     evidence: tuple[tuple[str, str], ...],
-) -> tuple[dict[str, str], str, RouteBindingBackfillFinding | None]:
+) -> tuple[dict[str, str], str, RouteBindingReconcileFinding | None]:
     evaluated_timestamp = _parse_utc_timestamp(evaluated_at)
     source_versions: dict[str, str] = {}
-    stale_timestamps: list[datetime] = []
     for source_id, version in evidence:
         try:
             source_timestamp = _parse_utc_timestamp(version)
@@ -502,7 +730,7 @@ def _source_freshness(
             return (
                 {},
                 "",
-                RouteBindingBackfillFinding(
+                RouteBindingReconcileFinding(
                     code="evidence_timestamp_invalid",
                     detail=f"Route-binding evidence {source_id!r} has an invalid timestamp.",
                 ),
@@ -511,27 +739,17 @@ def _source_freshness(
             return (
                 {},
                 "",
-                RouteBindingBackfillFinding(
+                RouteBindingReconcileFinding(
                     code="evidence_timestamp_future",
                     detail=f"Route-binding evidence {source_id!r} is timestamped in the future.",
                 ),
             )
-        stale_timestamp = source_timestamp + _EVIDENCE_MAX_AGE
-        if stale_timestamp <= evaluated_timestamp:
-            return (
-                {},
-                "",
-                RouteBindingBackfillFinding(
-                    code="evidence_stale",
-                    detail=(
-                        f"Route-binding evidence {source_id!r} is older than the 24-hour "
-                        "freshness window."
-                    ),
-                ),
-            )
         source_versions[source_id] = version
-        stale_timestamps.append(stale_timestamp)
-    return source_versions, _format_utc_timestamp(min(stale_timestamps)), None
+    return (
+        source_versions,
+        _format_utc_timestamp(evaluated_timestamp + _EVIDENCE_FRESHNESS_WINDOW),
+        None,
+    )
 
 
 def _parse_utc_timestamp(value: str) -> datetime:
@@ -553,7 +771,7 @@ def _format_utc_timestamp(value: datetime) -> str:
 
 def _normalized_domains(
     raw_domains: tuple[str, ...],
-) -> tuple[tuple[str, ...], RouteBindingBackfillFinding | None]:
+) -> tuple[tuple[str, ...], RouteBindingReconcileFinding | None]:
     domains: list[str] = []
     for raw_domain in raw_domains:
         if not raw_domain.strip():
@@ -561,7 +779,7 @@ def _normalized_domains(
         try:
             domain = RouteBindingDomain(domain_name=raw_domain).domain_name
         except (ValueError, ValidationError):
-            return (), RouteBindingBackfillFinding(
+            return (), RouteBindingReconcileFinding(
                 code="domains_invalid",
                 detail="Tracked route domains must be bare DNS names without schemes, paths, ports, or whitespace.",
             )

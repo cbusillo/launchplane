@@ -154,7 +154,7 @@ owner checks and fail closed for stale owners.
 
 DB-only mutations should reserve and complete inside the same transaction as
 their business write. `POST /v1/product-profiles/preview-tls/apply` and
-`POST /v1/route-bindings/backfill/apply` use that boundary: the reservation
+`POST /v1/route-bindings/reconcile` use that boundary: the reservation
 insert occurs before the domain write, and the domain record plus completed
 response commit atomically. A no-op apply still commits the completed
 reservation so concurrent and later same-key requests replay the original
@@ -164,12 +164,14 @@ orphan reservation when the route could not have committed the atomic domain
 write; active or reconciliation-bound claims remain fail-closed. Persisted
 reservation and completion timestamps come from the database clock.
 
-Route-binding backfill additionally releases its unbound reservation when a
-fresh plan proves the operation is blocked, stale, or already satisfied before
-any record can be written. PostgreSQL apply is the supported service mutation
-boundary. Filesystem storage retains typed route-binding read/write parity for
-local rehearsal, but the service does not emulate the PostgreSQL transaction by
-performing a split filesystem apply.
+Route-binding reconcile compares the full current record under a per-binding
+PostgreSQL transaction lock. Expected-absent create, expected-current refresh,
+and unchanged no-op all complete idempotency evidence atomically. A missing or
+changed expected record removes the uncommitted reservation and returns a CAS
+conflict without changing authority. PostgreSQL apply is the supported service
+mutation boundary. Filesystem storage retains typed route-binding read/write
+parity for local rehearsal, but the service does not emulate the PostgreSQL
+transaction by performing a split filesystem apply.
 
 Product authority bundle writes are the same atomicity boundary for product
 runtime/config ownership. PostgreSQL storage exposes a single
@@ -542,16 +544,22 @@ an ORM column/table or remains only in the evidence payload.
   IP address, or Dokploy target id. Native FastAPI
   `GET /v1/route-bindings/records` and
   `GET /v1/route-bindings/records/current` return redacted read models that omit
-  provider evidence. Native FastAPI
-  `POST /v1/route-bindings/backfill/apply` plans or writes one binding by
+  provider evidence and include an opaque full-record SHA-256 for compare-and-
+  swap. Native FastAPI `POST /v1/route-bindings/reconcile` plans or writes one
+  binding by
   comparing existing Launchplane provider-target, tracked Dokploy target, edge
   endpoint, and applied ingress audit records. The provider-target record must
   equal the projection of the Dokploy target plus target-id record; the latest
   matching apply audit must be terminal and include explicit TLS ownership.
-  Source record timestamps are retained as versions and must be within the
-  service-owned 24-hour freshness window. Backfill fails closed when any join is
-  missing, ambiguous, stale, conflicting, unresolved, or exceeds the bounded
-  evidence scan, and it never overwrites an existing route-binding record.
+  Source record timestamps are retained as versions. Each successful service
+  re-evaluation attests the derived binding for 24 hours; reconcile is an
+  unchanged no-op while more than 12 hours remain and refreshes at half-life or
+  when evidence changes. Invalid or future source timestamps remain blocked.
+  Reconcile supports expected-absent create and expected-current evidence
+  refresh, but any provider target, domain, ingress, TLS owner, lifecycle status,
+  operator ownership, missing join, ambiguity, unresolved audit, bounded-scan
+  exhaustion, or CAS drift is an explicit conflict or blocker rather than an
+  overwrite.
   Product repositories must not own route bindings, TLS ownership, provider
   host ids, certificate ids, or edge topology.
 

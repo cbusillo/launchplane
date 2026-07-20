@@ -348,6 +348,8 @@ Current implementation scope:
 - `POST /v1/evidence/previews/destroyed`
 - `GET /v1/authz-policies/active`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
+- `GET /v1/route-bindings/records/current`
+- `POST /v1/route-bindings/reconcile`
 - `POST /v1/provider-targets/operations`
 - `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
@@ -419,6 +421,32 @@ service error code, at most 500 message characters, and the trace ID. The
 worker removes the protected desired policy, raw request, and raw response
 material before upload so repository-secret contents do not become
 artifact-readable runtime authority.
+
+Use the `Route Binding Reconcile` workflow on the default branch for shared or
+production route authority. Supply only the product/context/instance tuple from
+Launchplane records. The workflow reads the current redacted binding through the
+deployed service, captures its opaque full-record SHA-256 or an explicit absent
+expectation, and submits the same provider-neutral reconcile contract used by
+the API. It never accepts domains, provider target IDs, ingress host IDs,
+certificate references, edge addresses, or provider payloads as workflow
+inputs, and it performs no provider mutation.
+
+Dispatch `mode=dry-run` first. Review the create, unchanged, refresh, blocked, or
+conflict outcome, source-record identities and versions, current/candidate
+digests, and redacted route authority. Apply requires a unique
+`idempotency_key`, an operator reason, and the exact confirmation
+`APPLY LAUNCHPLANE ROUTE BINDING RECONCILE`. The service re-plans from current
+DB-backed records and compare-and-writes the full record; a concurrent change
+returns a conflict instead of overwriting newer authority.
+
+Each successful reconcile attests the current source-record set for 24 hours.
+Run reconciliation after any provider-target, tracked target, edge-endpoint, or
+ingress-audit authority change and on a cadence no slower than every 12 hours
+for active stable lanes. Calls made before half-life are unchanged no-ops; calls
+at or after half-life refresh evidence even when the underlying source versions
+are unchanged. A domain, target, ingress, TLS-owner, lifecycle, or operator-
+ownership difference is not a refresh and must be resolved through the owning
+authority workflow before retrying.
 
 Schema-v1 migration requires `schema_migration: "migrate_v1_to_v2"` in the
 protected desired-set JSON. Taking ownership of an existing matching unmanaged
