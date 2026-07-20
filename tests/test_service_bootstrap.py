@@ -60,12 +60,14 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
         fastapi_response: Any | None = None
         ui_response: Any | None = None
         denied_config_response: Any | None = None
-        grant_response: Any | None = None
+        managed_dry_run_response: Any | None = None
+        managed_apply_response: Any | None = None
         authorized_config_response: Any | None = None
 
         def capture_uvicorn_run(app: Any, **_kwargs: object) -> None:
             nonlocal fastapi_response, ui_response, denied_config_response
-            nonlocal grant_response, authorized_config_response
+            nonlocal managed_dry_run_response, managed_apply_response
+            nonlocal authorized_config_response
             fastapi_response = asyncio.run(_http_get_for_service_test(app, "/openapi.json"))
             ui_response = asyncio.run(_http_get_for_service_test(app, "/ui"))
             denied_config_response = asyncio.run(
@@ -76,33 +78,80 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
                     authorization="Bearer valid-token",
                 )
             )
-            grant_response = asyncio.run(
-                _http_request_for_service_test(
-                    app,
-                    method="POST",
-                    path="/v1/authz-policies/github-actions/grants",
-                    authorization="Bearer valid-token",
-                    payload={
-                        "schema_version": 1,
-                        "product": "launchplane",
-                        "mode": "apply",
-                        "reason": "Grant FastAPI config-status read for runtime policy refresh test.",
-                        "related_issue": "cbusillo/launchplane#1323",
-                        "grant": {
+            pinned_job_workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@"
+                + "a" * 40
+            )
+            managed_request = {
+                "schema_version": 2,
+                "product": "launchplane",
+                "mode": "dry_run",
+                "managed_set_id": "operator.launchplane",
+                "schema_migration": "migrate_v1_to_v2",
+                "unmanaged_adoption": "adopt_matching",
+                "reason": "Reconcile FastAPI runtime policy refresh test authority.",
+                "related_issue": "cbusillo/launchplane#1323",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "managed_set_id": "operator.launchplane",
+                            "managed_rule_id": "authz.admin",
                             "repository": "cbusillo/launchplane",
                             "repository_id": "1001",
                             "repository_owner_id": "2001",
                             "workflow_refs": [
-                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                                "cbusillo/launchplane/.github/workflows/"
+                                "deploy-launchplane.yml@refs/heads/main"
                             ],
+                            "job_workflow_refs": [pinned_job_workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        },
+                        {
+                            "managed_set_id": "operator.launchplane",
+                            "managed_rule_id": "example-site.environment.read",
+                            "repository": "cbusillo/launchplane",
+                            "repository_id": "1001",
+                            "repository_owner_id": "2001",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/"
+                                "deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "job_workflow_refs": [pinned_job_workflow_ref],
                             "event_names": ["workflow_dispatch"],
                             "products": ["example-site"],
                             "contexts": ["example-site"],
+                            "instances": ["prod"],
                             "actions": ["product_environment.read"],
-                            "source_label": "test:fastapi-runtime-policy-refresh",
                         },
+                    ],
+                },
+            }
+            managed_dry_run_response = asyncio.run(
+                _http_request_for_service_test(
+                    app,
+                    method="POST",
+                    path="/v1/authz-policies/managed-rule-sets/reconcile",
+                    authorization="Bearer valid-token",
+                    payload=managed_request,
+                )
+            )
+            reviewed_plan_sha256 = managed_dry_run_response.json()["result"]["diff"]["plan_sha256"]
+            managed_apply_response = asyncio.run(
+                _http_request_for_service_test(
+                    app,
+                    method="POST",
+                    path="/v1/authz-policies/managed-rule-sets/reconcile",
+                    authorization="Bearer valid-token",
+                    payload={
+                        **managed_request,
+                        "mode": "apply",
+                        "reviewed_plan_sha256": reviewed_plan_sha256,
                     },
-                    headers={"Idempotency-Key": "authz-grant:fastapi-runtime-refresh"},
+                    headers={"Idempotency-Key": "authz-managed:fastapi-runtime-refresh"},
                 )
             )
             authorized_config_response = asyncio.run(
@@ -158,6 +207,10 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
                             workflow_ref=(
                                 "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                             ),
+                            job_workflow_ref=(
+                                "cbusillo/launchplane/.github/workflows/"
+                                "reusable-authz-policy-reconcile.yml@" + "a" * 40
+                            ),
                             event_name="workflow_dispatch",
                         )
                     ),
@@ -177,12 +230,14 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
         self.assertIsNotNone(fastapi_response)
         self.assertIsNotNone(ui_response)
         self.assertIsNotNone(denied_config_response)
-        self.assertIsNotNone(grant_response)
+        self.assertIsNotNone(managed_dry_run_response)
+        self.assertIsNotNone(managed_apply_response)
         self.assertIsNotNone(authorized_config_response)
         assert fastapi_response is not None
         assert ui_response is not None
         assert denied_config_response is not None
-        assert grant_response is not None
+        assert managed_dry_run_response is not None
+        assert managed_apply_response is not None
         assert authorized_config_response is not None
         self.assertEqual(fastapi_response.status_code, 200)
         self.assertIn(
@@ -197,8 +252,10 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
             403,
             msg=denied_config_response.content.decode("utf-8"),
         )
-        self.assertEqual(grant_response.status_code, 202)
-        self.assertEqual(grant_response.json()["result"]["changed"], True)
+        self.assertEqual(managed_dry_run_response.status_code, 202)
+        self.assertEqual(managed_dry_run_response.json()["result"]["changed"], True)
+        self.assertEqual(managed_apply_response.status_code, 202)
+        self.assertEqual(managed_apply_response.json()["result"]["changed"], True)
         self.assertEqual(authorized_config_response.status_code, 200)
         self.assertEqual(
             authorized_config_response.json()["config_status"]["product"], "example-site"

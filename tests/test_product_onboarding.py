@@ -48,49 +48,6 @@ SYO_RUNTIME_KEYS = (
     "CONTACT_EMAIL_RESEND_TIMEOUT_MS",
     "NEXT_PUBLIC_META_PIXEL_ID",
 )
-OWNER_AUTHZ_ENV = {
-    "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT": "test-terminal-agent-subject",
-    "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL": "test-terminal-agent-read-token",
-    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "test-local-operator-subject",
-    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "test-local-operator-write-token",
-    "LAUNCHPLANE_LOCAL_ADMIN_SUBJECT": "test-local-admin-subject",
-    "LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL": "test-local-admin-token",
-}
-
-
-def _run_authz_grants_generator(
-    temporary_directory: Path,
-    *,
-    extra_env: dict[str, str] | None = None,
-    owner_authz_env: dict[str, str] | None = OWNER_AUTHZ_ENV,
-) -> subprocess.CompletedProcess[str]:
-    output_directory = temporary_directory / "authz-grants"
-    github_output = temporary_directory / "github-output.txt"
-    env = {**os.environ}
-    for key in OWNER_AUTHZ_ENV:
-        env.pop(key, None)
-    if owner_authz_env is not None:
-        env.update(owner_authz_env)
-    env.update(
-        {
-            "GITHUB_REPOSITORY": "cbusillo/launchplane",
-            "GITHUB_SHA": "test-sha",
-            "GITHUB_OUTPUT": str(github_output),
-            "LAUNCHPLANE_AUTHZ_GRANTS_OUTPUT_DIR": str(output_directory),
-            "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION": "1",
-        }
-    )
-    if extra_env:
-        env.update(extra_env)
-
-    return subprocess.run(
-        ["bash", "scripts/deploy/ensure-authz-grants.sh"],
-        check=False,
-        cwd=Path.cwd(),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
 
 
 def _run_runtime_key_safety_generator(
@@ -116,26 +73,6 @@ def _run_runtime_key_safety_generator(
         capture_output=True,
         text=True,
     )
-
-
-def _read_authz_grant_payloads(temporary_directory: Path, filename: str) -> list[dict[str, object]]:
-    payload_path = temporary_directory / "authz-grants" / filename
-    return cast(list[dict[str, object]], json.loads(payload_path.read_text(encoding="utf-8")))
-
-
-def _read_authz_grants(temporary_directory: Path, filename: str) -> list[dict[str, object]]:
-    return [
-        cast(dict[str, object], payload["grant"])
-        for payload in _read_authz_grant_payloads(temporary_directory, filename)
-    ]
-
-
-def _grant_string(grant: dict[str, object], key: str) -> str:
-    return cast(str, grant[key])
-
-
-def _grant_string_list(grant: dict[str, object], key: str) -> list[str]:
-    return cast(list[str], grant[key])
 
 
 def _read_github_outputs(temporary_directory: Path) -> dict[str, str]:
@@ -354,282 +291,6 @@ def _assert_odoo_stable_lane_runtime_contract(
 
 
 class ProductOnboardingTests(unittest.TestCase):
-    def test_deploy_authz_renderer_contains_no_checked_in_authority_catalog(self) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", script_text)
-        self.assertNotIn("authz_policy_grant.write", script_text)
-        self.assertNotIn("launchplane_service_deploy.execute", script_text)
-        self.assertNotIn("local-admin-self-deploy", script_text)
-        self.assertNotIn("odoo-tenant-cm", script_text)
-        self.assertNotIn("odoo-tenant-opw", script_text)
-
-    def test_deploy_authz_grants_accept_configured_github_action_grants(
-        self,
-    ) -> None:
-        configured_grants = [
-            {
-                "repository": "example-org/example-product",
-                "repository_id": "3001",
-                "repository_owner_id": "4001",
-                "workflow_file": "deploy.yml",
-                "product": "example-product",
-                "context": "example-context",
-                "action": "example_action.execute",
-                "source_label": "operator-config:example-product-deploy",
-                "event_name": "push",
-                "workflow_ref_suffix": "refs/heads/release",
-                "environment": "production",
-                "job_workflow_ref": (
-                    "example-org/launchplane/.github/workflows/reusable.yml@refs/heads/main"
-                ),
-            }
-        ]
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(
-                temporary_directory,
-                extra_env={"LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants)},
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            grants = [
-                grant
-                for grant in _read_authz_grants(temporary_directory, "github-actions-grants.json")
-                if grant["source_label"] == "operator-config:example-product-deploy"
-            ]
-
-        self.assertEqual(len(grants), 1)
-        grant = grants[0]
-        self.assertEqual(grant["repository"], "example-org/example-product")
-        self.assertEqual(grant["repository_id"], "3001")
-        self.assertEqual(grant["repository_owner_id"], "4001")
-        self.assertEqual(
-            grant["workflow_refs"],
-            ["example-org/example-product/.github/workflows/deploy.yml@refs/heads/release"],
-        )
-        self.assertEqual(
-            grant["job_workflow_refs"],
-            ["example-org/launchplane/.github/workflows/reusable.yml@refs/heads/main"],
-        )
-        self.assertEqual(grant["event_names"], ["push"])
-        self.assertEqual(grant["environments"], ["production"])
-        self.assertEqual(grant["products"], ["example-product"])
-        self.assertEqual(grant["contexts"], ["example-context"])
-        self.assertEqual(grant["actions"], ["example_action.execute"])
-        self.assertEqual(grant["source_label"], "operator-config:example-product-deploy")
-
-    def test_deploy_authz_grants_reject_non_exact_or_unidentified_targets(self) -> None:
-        valid_grant = {
-            "repository": "example-org/example-product",
-            "repository_id": "3001",
-            "repository_owner_id": "4001",
-            "workflow_file": "deploy.yml",
-            "product": "example-product",
-            "context": "example-context",
-            "action": "example_action.execute",
-            "source_label": "operator-config:example-product-deploy",
-        }
-        cases = (
-            (
-                "missing immutable IDs",
-                {key: value for key, value in valid_grant.items() if key != "repository_id"},
-                "numeric-string repository_id and repository_owner_id",
-            ),
-            (
-                "unknown field",
-                {**valid_grant, "unexpected": "value"},
-                "unsupported fields",
-            ),
-            (
-                "glob selector",
-                {**valid_grant, "workflow_ref_suffix": "refs/heads/release-*"},
-                "without glob syntax",
-            ),
-        )
-
-        for label, configured_grant, expected_error in cases:
-            with self.subTest(label=label), TemporaryDirectory() as temporary_directory_name:
-                result = _run_authz_grants_generator(
-                    Path(temporary_directory_name),
-                    extra_env={"LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps([configured_grant])},
-                )
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(expected_error, result.stderr)
-
-    def test_deploy_authz_grants_support_configured_only_dry_run(self) -> None:
-        configured_grants = [
-            {
-                "repository": "cbusillo/launchplane",
-                "repository_id": "1001",
-                "repository_owner_id": "2001",
-                "workflow_file": "preview-lifecycle.yml",
-                "product": "example-product",
-                "context": "example-context",
-                "action": "preview_lifecycle.plan",
-                "source_label": "operator-config:example-preview-plan",
-            }
-        ]
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_AUTHZ_GRANT_MODE": "dry_run",
-                    "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
-                },
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            payloads = _read_authz_grant_payloads(temporary_directory, "github-actions-grants.json")
-            outputs = _read_github_outputs(temporary_directory)
-
-        self.assertEqual(len(payloads), 1)
-        self.assertEqual(payloads[0]["mode"], "dry_run")
-        self.assertEqual(outputs["github_actions_grant_count"], "1")
-        self.assertEqual(outputs["has_github_actions_grants"], "true")
-        self.assertRegex(outputs["configured_grants_sha256"], r"^[0-9a-f]{64}$")
-
-        with TemporaryDirectory() as temporary_directory_name:
-            apply_directory = Path(temporary_directory_name)
-            apply_result = _run_authz_grants_generator(
-                apply_directory,
-                extra_env={
-                    "LAUNCHPLANE_AUTHZ_GRANT_MODE": "apply",
-                    "LAUNCHPLANE_AUTHZ_GRANT_REASON": "Resolve reviewed authz gaps.",
-                    "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
-                },
-            )
-
-            self.assertEqual(apply_result.returncode, 0, apply_result.stderr)
-            apply_payloads = _read_authz_grant_payloads(
-                apply_directory, "github-actions-grants.json"
-            )
-            apply_outputs = _read_github_outputs(apply_directory)
-
-        self.assertEqual(apply_payloads[0]["mode"], "apply")
-        self.assertTrue(
-            cast(str, apply_payloads[0]["reason"]).startswith("Resolve reviewed authz gaps.")
-        )
-        self.assertEqual(
-            apply_outputs["configured_grants_sha256"], outputs["configured_grants_sha256"]
-        )
-
-    def test_deploy_authz_grants_render_active_schema_v2_instance_scope(self) -> None:
-        configured_grants = [
-            {
-                "repository": "cbusillo/launchplane",
-                "repository_id": "1001",
-                "repository_owner_id": "2001",
-                "workflow_file": "deploy-launchplane.yml",
-                "product": "launchplane",
-                "context": "launchplane",
-                "instance": "testing",
-                "action": "deployment.write",
-                "source_label": "operator-config:testing-deploy",
-            }
-        ]
-        with TemporaryDirectory() as temporary_directory_name:
-            schema_v1_result = _run_authz_grants_generator(
-                Path(temporary_directory_name),
-                extra_env={"LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants)},
-            )
-        self.assertNotEqual(schema_v1_result.returncode, 0)
-        self.assertIn(
-            "Schema-v1 configured authz grants cannot declare instance", schema_v1_result.stderr
-        )
-
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_authz_grants_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION": "2",
-                    "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
-                },
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            payloads = _read_authz_grant_payloads(temporary_directory, "github-actions-grants.json")
-            outputs = _read_github_outputs(temporary_directory)
-
-        self.assertEqual(payloads[0]["schema_version"], 2)
-        grant = cast(dict[str, object], payloads[0]["grant"])
-        self.assertEqual(grant["instances"], ["testing"])
-        self.assertEqual(outputs["authz_policy_schema_version"], "2")
-
-    def test_deploy_authz_grants_require_active_policy_schema_version(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            result = _run_authz_grants_generator(
-                Path(temporary_directory_name),
-                extra_env={
-                    "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION": "",
-                    "LAUNCHPLANE_AUTHZ_GRANTS_JSON": "[]",
-                },
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION must be 1 or 2", result.stderr)
-
-    def test_deploy_authz_grant_review_hash_binds_policy_schema_version(self) -> None:
-        configured_grants = [
-            {
-                "repository": "cbusillo/launchplane",
-                "repository_id": "1001",
-                "repository_owner_id": "2001",
-                "workflow_file": "deploy-launchplane.yml",
-                "product": "launchplane",
-                "context": "launchplane",
-                "action": "product_profile.read",
-                "source_label": "operator-config:profile-read",
-            }
-        ]
-        observed_hashes: list[str] = []
-
-        for schema_version in ("1", "2"):
-            with TemporaryDirectory() as temporary_directory_name:
-                temporary_directory = Path(temporary_directory_name)
-                result = _run_authz_grants_generator(
-                    temporary_directory,
-                    extra_env={
-                        "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION": schema_version,
-                        "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
-                    },
-                )
-
-                self.assertEqual(result.returncode, 0, result.stderr)
-                observed_hashes.append(
-                    _read_github_outputs(temporary_directory)["configured_grants_sha256"]
-                )
-
-        self.assertNotEqual(observed_hashes[0], observed_hashes[1])
-
-    def test_deploy_authz_grants_require_reason_for_configured_only_apply(self) -> None:
-        configured_grants = [
-            {
-                "repository": "cbusillo/launchplane",
-                "repository_id": "1001",
-                "repository_owner_id": "2001",
-                "workflow_file": "preview-lifecycle.yml",
-                "product": "example-product",
-                "context": "example-context",
-                "action": "preview_lifecycle.plan",
-                "source_label": "operator-config:example-preview-plan",
-            }
-        ]
-        with TemporaryDirectory() as temporary_directory_name:
-            result = _run_authz_grants_generator(
-                Path(temporary_directory_name),
-                extra_env={
-                    "LAUNCHPLANE_AUTHZ_GRANT_MODE": "apply",
-                    "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
-                },
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Authz grant apply requires LAUNCHPLANE_AUTHZ_GRANT_REASON.", result.stderr)
-
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-artifact-publish.yml").read_text(
             encoding="utf-8"
@@ -2203,7 +1864,7 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_deploy_launchplane_break_glass_limits_credentials_and_permissions(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
         deploy_job = workflow_text.split("  deploy:\n", 1)[1].split(
-            "  operator-authz-grants:\n", 1
+            "  operator-authz-managed-validate:\n", 1
         )[0]
         emergency_job = workflow_text.split("  emergency-dokploy-rollback:\n", 1)[1]
         validation_step = emergency_job.split("- name: Validate manual break-glass request", 1)[
@@ -2237,12 +1898,10 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_normal_deploy_does_not_mutate_authz_policy(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
         deploy_job = workflow_text.split("  deploy:\n", 1)[1].split(
-            "  operator-authz-grants:\n", 1
+            "  operator-authz-managed-validate:\n", 1
         )[0]
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
         self.assertNotIn("/v1/authz-policies/", deploy_job)
-        self.assertNotIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", deploy_job)
         self.assertNotIn("LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON", deploy_job)
         self.assertIn("id: runtime_key_safety", deploy_job)
         self.assertIn(
@@ -2254,64 +1913,24 @@ class ProductOnboardingTests(unittest.TestCase):
             deploy_job,
         )
         self.assertIn("route-path: /v1/runtime-key-safety/policies/apply", deploy_job)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", script_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", script_text)
-        self.assertNotIn("Authorization: Bearer", script_text)
-        self.assertNotIn("curl ", script_text)
 
-    def test_deploy_workflow_supports_grant_only_dry_run_and_apply(self) -> None:
+    def test_deploy_workflow_removes_exact_authz_bridge(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
-        grant_only_job = workflow_text.split("  operator-authz-grants:\n", 1)[1].split(
-            "  emergency-dokploy-rollback:\n", 1
-        )[0]
 
-        self.assertIn("authz_grants_mode:", workflow_text)
-        self.assertIn("- dry_run", workflow_text)
-        self.assertIn("- apply", workflow_text)
-        self.assertIn("inputs.authz_grants_mode == 'none'", workflow_text)
-        self.assertIn("authz_grants_expected_sha256:", workflow_text)
-        self.assertIn("authz_policy_expected_sha256:", workflow_text)
-        self.assertIn("authz_grants_reason:", workflow_text)
-        self.assertIn("LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON", grant_only_job)
-        self.assertIn("environment: launchplane-authz-admin", grant_only_job)
-        self.assertNotIn("vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON", grant_only_job)
-        self.assertNotIn("LAUNCHPLANE_AUTHZ_GRANTS_CONFIGURED_ONLY", grant_only_job)
-        self.assertIn("LAUNCHPLANE_SERVICE_AUDIENCE", grant_only_job)
-        self.assertIn("Read active authz policy contract", grant_only_job)
-        self.assertIn("route-path: /v1/service/runtime", grant_only_job)
-        self.assertIn(
-            "authz_policy_schema_version=runtime.authz_policy_schema_version",
-            grant_only_job,
-        )
-        self.assertIn(
-            "LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION: ${{ steps.authz_policy.outputs.authz_policy_schema_version }}",
-            grant_only_job,
-        )
-        self.assertIn("Verify reviewed authz grant set", grant_only_job)
-        self.assertIn("Configured authz grants changed after the reviewed dry run.", grant_only_job)
-        self.assertIn("Active authz policy changed after the reviewed dry run.", grant_only_job)
-        self.assertIn(
-            "Grant-only maintenance cannot include break-glass rollback inputs.", grant_only_job
-        )
-        self.assertIn("uses: ./.github/actions/launchplane-request", grant_only_job)
-        self.assertIn("audience: ${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}", grant_only_job)
-        self.assertIn("route-path: /v1/authz-policies/github-actions/grants", grant_only_job)
-        self.assertIn("Verify and summarize authz grant results", grant_only_job)
-        self.assertIn("Canonical grant-set SHA-256", grant_only_job)
-        self.assertIn("Active policy SHA-256", grant_only_job)
-        self.assertIn("Upload reviewed authz grant evidence", grant_only_job)
-        self.assertIn("uses: actions/upload-artifact@", grant_only_job)
-        self.assertIn("retention-days: 30", grant_only_job)
-        self.assertNotIn("Build and push Launchplane image", grant_only_job)
-        self.assertNotIn("Request Launchplane self deploy", grant_only_job)
-        self.assertNotIn("runtime-key-safety/policies/apply", grant_only_job)
-
-        emergency_job = workflow_text.split("  emergency-dokploy-rollback:\n", 1)[1]
-        self.assertIn("AUTHZ_GRANTS_MODE: ${{ inputs.authz_grants_mode }}", emergency_job)
-        self.assertIn(
-            "Break-glass rollback cannot be combined with authz grant maintenance.",
-            emergency_job,
-        )
+        self.assertFalse(Path("scripts/deploy/ensure-authz-grants.sh").exists())
+        self.assertIn("operator-authz-managed-validate:", workflow_text)
+        self.assertIn("operator-authz-managed:", workflow_text)
+        for retired_token in (
+            "operator-authz-grants:",
+            "authz_grants_mode",
+            "authz_grants_expected_sha256",
+            "authz_policy_expected_sha256",
+            "authz_grants_reason",
+            "LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON",
+            "/v1/authz-policies/github-actions/grants",
+        ):
+            with self.subTest(retired_token=retired_token):
+                self.assertNotIn(retired_token, workflow_text)
 
     def test_deploy_workflow_reads_deployed_runtime_through_shared_request(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
@@ -2520,7 +2139,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
         rollback_request_block = workflow_text.split(
             "- name: Render Launchplane rollback request", 1
-        )[1].split("- name: Render product context workflow authz grants", 1)[0]
+        )[1].split("- name: Request Launchplane rollback through service", 1)[0]
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", rollback_request_block)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", rollback_request_block)
         self.assertNotIn("Authorization: Bearer", rollback_request_block)
@@ -2673,38 +2292,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("curl ", workflow_text)
         self.assertNotIn("| xargs", workflow_text)
 
-    def test_deploy_authz_grants_do_not_hard_code_product_preview_tls_apply(self) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertNotIn("product-preview-tls.yml", script_text)
-        self.assertNotIn("product_profile.preview_tls.apply", script_text)
-        self.assertNotIn("deploy:product-preview-tls-grant", script_text)
-        self.assertIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", script_text)
-
-    def test_deploy_authz_grants_do_not_hard_code_product_expected_config_apply(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertNotIn("deploy:product-expected-config-grant", script_text)
-        self.assertIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", script_text)
-
-    def test_deploy_authz_grants_do_not_carry_product_grant_catalog(
-        self,
-    ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
-
-        self.assertIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", script_text)
-        self.assertNotIn("discord-blue", script_text)
-        self.assertNotIn("sellyouroutboard", script_text)
-        self.assertNotIn("verireel", script_text)
-        self.assertNotIn("odoo-tenant-cm", script_text)
-        self.assertNotIn("odoo-tenant-opw", script_text)
-        self.assertNotIn("reon-prod", script_text)
-        self.assertNotIn("live-target-runtime.yml", script_text)
-        self.assertNotIn("product-environment-evidence.yml", script_text)
-
-    def test_deploy_authz_grants_accept_configured_runtime_key_safety_rules(
+    def test_runtime_key_safety_accepts_configured_rules(
         self,
     ) -> None:
         configured_rules = [
@@ -2749,7 +2337,7 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertEqual(policy_payload["rules"][0]["description"], "Example testing token.")
 
-    def test_deploy_authz_grants_reject_incomplete_runtime_key_safety_rules(self) -> None:
+    def test_runtime_key_safety_rejects_incomplete_rules(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
             result = _run_runtime_key_safety_generator(
@@ -2764,7 +2352,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("binding_key and secret_class", result.stderr)
 
-    def test_deploy_authz_grants_reject_unknown_runtime_key_safety_secret_class(
+    def test_runtime_key_safety_rejects_unknown_secret_class(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -367,11 +367,9 @@ an ORM column/table or remains only in the evidence payload.
   intent, previous/new revisions and policy digests, trace/request fingerprints,
   idempotency evidence, and a redacted rule-ID/hash diff. Policy CAS and
   completed replay evidence commit in one transaction; a no-op apply creates no
-  policy-history row. Exact compatibility grants persist immutable GitHub
-  repository/owner IDs, replace otherwise-identical name-only rules, compare the
-  active record before commit, and redact requested-grant details to counts and
-  scope summaries. Their post-commit idempotency evidence remains a temporary
-  bridge; managed reconciliation commits policy and replay evidence together.
+  policy-history row. Managed reconciliation can adopt matching unmanaged rules
+  and retire covered name-only compatibility rules in the same reviewed policy
+  transaction.
   During a future OpenFGA migration, these DB-backed policy records remain the
   source evidence for dry-run tuple proposals and parity checks.
   After a proven cutover, records should store import/audit/model-version
@@ -690,8 +688,8 @@ settings, and it never removes existing expected-config entries. The manual
 metadata changes; real product, context, instance, and binding values are
 workflow inputs, not checked-in defaults. Because the route authorizes against
 the target product in the Launchplane service context, product-specific workflow
-grants must come from the service/operator UI or the temporary dedicated authz
-maintenance workflow input, not a checked-in product catalog.
+authority must come from managed authz reconciliation through the service or
+operator UI, not a checked-in product catalog.
 
 Odoo preview certificate-policy changes use
 `POST /v1/product-profiles/preview-tls/apply`. The route reads the current

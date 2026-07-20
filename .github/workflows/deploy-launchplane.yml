@@ -12,27 +12,6 @@ on:
         description: Exact immutable Launchplane image digest to deploy instead of building a new one.
         required: false
         type: string
-      authz_grants_mode:
-        description: Review or apply only operator-configured exact GitHub Actions grants without deploying Launchplane.
-        required: false
-        default: none
-        type: choice
-        options:
-          - none
-          - dry_run
-          - apply
-      authz_grants_expected_sha256:
-        description: Canonical grant-set SHA-256 reported by the reviewed dry run; required for apply.
-        required: false
-        type: string
-      authz_policy_expected_sha256:
-        description: Active authz policy SHA-256 reported by the reviewed dry run; required for apply.
-        required: false
-        type: string
-      authz_grants_reason:
-        description: Operator reason recorded on each grant request; required for apply.
-        required: false
-        type: string
       authz_managed_mode:
         description: Bootstrap review or apply of managed authorization without deploying Launchplane.
         required: false
@@ -108,7 +87,6 @@ jobs:
        github.ref_type == 'branch' &&
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
        inputs.break_glass_confirm == '' &&
-       inputs.authz_grants_mode == 'none' &&
        inputs.authz_managed_mode == 'none')
     runs-on:
       - self-hosted
@@ -1209,7 +1187,6 @@ jobs:
       - name: Validate managed authz isolation
         shell: bash
         env:
-          AUTHZ_GRANTS_MODE: ${{ inputs.authz_grants_mode }}
           BREAK_GLASS_CONFIRM: ${{ inputs.break_glass_confirm }}
           BREAK_GLASS_IMAGE_REFERENCE: ${{ inputs.break_glass_image_reference }}
           BREAK_GLASS_REASON: ${{ inputs.break_glass_reason }}
@@ -1220,10 +1197,6 @@ jobs:
           OMIT_TERMINAL_AGENT_ENV: ${{ inputs.omit_terminal_agent_env }}
         run: |
           set -euo pipefail
-          if [ "$AUTHZ_GRANTS_MODE" != "none" ]; then
-            echo "Managed authz reconciliation cannot be combined with exact grant maintenance." >&2
-            exit 1
-          fi
           if [ -n "$DEPLOY_IMAGE_REFERENCE" ]; then
             echo "Managed authz reconciliation cannot include a deploy image input." >&2
             exit 1
@@ -1261,193 +1234,6 @@ jobs:
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}
 
-  operator-authz-grants:
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      github.ref_type == 'branch' &&
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
-      inputs.authz_grants_mode != 'none'
-    permissions:
-      contents: read
-      id-token: write
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
-    environment: launchplane-authz-admin
-    env:
-      LAUNCHPLANE_PUBLIC_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-      LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON: >-
-        ${{ vars.LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON }}
-      LAUNCHPLANE_AUTHZ_GRANT_MODE: ${{ inputs.authz_grants_mode }}
-      LAUNCHPLANE_AUTHZ_GRANT_REASON: ${{ inputs.authz_grants_reason }}
-    steps:
-      - name: Validate grant-only request
-        shell: bash
-        env:
-          REVIEWED_GRANTS_SHA256: ${{ inputs.authz_grants_expected_sha256 }}
-          REVIEWED_POLICY_SHA256: ${{ inputs.authz_policy_expected_sha256 }}
-          AUTHZ_MANAGED_MODE: ${{ inputs.authz_managed_mode }}
-          DEPLOY_IMAGE_REFERENCE: ${{ inputs.image_reference }}
-          OMIT_EVERY_CODE_ENV: ${{ inputs.omit_every_code_env }}
-          OMIT_TERMINAL_AGENT_ENV: ${{ inputs.omit_terminal_agent_env }}
-          OMIT_OWNER_AGENT_ENV: ${{ inputs.omit_owner_agent_env }}
-          OMIT_NPMPLUS_ENV: ${{ inputs.omit_npmplus_env }}
-          BREAK_GLASS_CONFIRM: ${{ inputs.break_glass_confirm }}
-          BREAK_GLASS_IMAGE_REFERENCE: ${{ inputs.break_glass_image_reference }}
-          BREAK_GLASS_REASON: ${{ inputs.break_glass_reason }}
-        run: |
-          set -euo pipefail
-          : "${LAUNCHPLANE_PUBLIC_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
-          : "${LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON:?Missing LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON variable}"
-          if [ "$AUTHZ_MANAGED_MODE" != "none" ]; then
-            echo "Exact grant maintenance cannot be combined with managed authz reconciliation." >&2
-            exit 1
-          fi
-          if [ -n "$DEPLOY_IMAGE_REFERENCE" ]; then
-            echo "Grant-only maintenance cannot include a deploy image input." >&2
-            exit 1
-          fi
-          if [ "$OMIT_EVERY_CODE_ENV" = "true" ] ||
-            [ "$OMIT_TERMINAL_AGENT_ENV" = "true" ] ||
-            [ "$OMIT_OWNER_AGENT_ENV" = "true" ] ||
-            [ "$OMIT_NPMPLUS_ENV" = "true" ]; then
-            echo "Grant-only maintenance cannot include deploy compatibility inputs." >&2
-            exit 1
-          fi
-          if [ -n "$BREAK_GLASS_CONFIRM" ] ||
-            [ -n "$BREAK_GLASS_IMAGE_REFERENCE" ] ||
-            [ -n "$BREAK_GLASS_REASON" ]; then
-            echo "Grant-only maintenance cannot include break-glass rollback inputs." >&2
-            exit 1
-          fi
-          if [ "$LAUNCHPLANE_AUTHZ_GRANT_MODE" = "apply" ]; then
-            if [[ ! "$REVIEWED_GRANTS_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-              echo "Apply requires the canonical SHA-256 reported by the reviewed dry run." >&2
-              exit 1
-            fi
-            if [[ ! "$REVIEWED_POLICY_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-              echo "Apply requires the active policy SHA-256 reported by the reviewed dry run." >&2
-              exit 1
-            fi
-            if [[ -z "${LAUNCHPLANE_AUTHZ_GRANT_REASON//[[:space:]]/}" ]]; then
-              echo "Apply requires an operator reason." >&2
-              exit 1
-            fi
-          elif [ -n "$REVIEWED_GRANTS_SHA256" ] || [ -n "$REVIEWED_POLICY_SHA256" ]; then
-            echo "Reviewed grant-set and policy SHA-256 inputs are only valid for apply." >&2
-            exit 1
-          fi
-          jq -e 'type == "array" and length > 0' \
-            <<<"$LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON" >/dev/null || {
-            echo "LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON must be a non-empty JSON array." >&2
-            exit 1
-          }
-
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Read active authz policy contract
-        id: authz_policy
-        uses: ./.github/actions/launchplane-request
-        with:
-          launchplane-url: ${{ env.LAUNCHPLANE_PUBLIC_URL }}
-          audience: ${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}
-          method: GET
-          route-path: /v1/service/runtime
-          expected-status: "200"
-          output-paths: authz_policy_schema_version=runtime.authz_policy_schema_version,authz_policy_sha256=runtime.authz_policy_sha256
-          log-response-body: "false"
-
-      - name: Render operator-configured authz grants
-        id: authz_grants
-        shell: bash
-        env:
-          LAUNCHPLANE_AUTHZ_GRANTS_JSON: ${{ env.LAUNCHPLANE_AUTHZ_GRANT_MAINTENANCE_JSON }}
-          LAUNCHPLANE_AUTHZ_POLICY_SCHEMA_VERSION: ${{ steps.authz_policy.outputs.authz_policy_schema_version }}
-        run: bash scripts/deploy/ensure-authz-grants.sh
-
-      - name: Verify reviewed authz grant set
-        if: inputs.authz_grants_mode == 'apply'
-        shell: bash
-        env:
-          REVIEWED_GRANTS_SHA256: ${{ inputs.authz_grants_expected_sha256 }}
-          REVIEWED_POLICY_SHA256: ${{ inputs.authz_policy_expected_sha256 }}
-          RENDERED_GRANTS_SHA256: ${{ steps.authz_grants.outputs.configured_grants_sha256 }}
-          ACTIVE_POLICY_SHA256: ${{ steps.authz_policy.outputs.authz_policy_sha256 }}
-        run: |
-          set -euo pipefail
-          if [ "$RENDERED_GRANTS_SHA256" != "$REVIEWED_GRANTS_SHA256" ]; then
-            echo "Configured authz grants changed after the reviewed dry run." >&2
-            echo "Reviewed: $REVIEWED_GRANTS_SHA256" >&2
-            echo "Current:  $RENDERED_GRANTS_SHA256" >&2
-            exit 1
-          fi
-          if [ "$ACTIVE_POLICY_SHA256" != "$REVIEWED_POLICY_SHA256" ]; then
-            echo "Active authz policy changed after the reviewed dry run." >&2
-            echo "Reviewed: $REVIEWED_POLICY_SHA256" >&2
-            echo "Current:  $ACTIVE_POLICY_SHA256" >&2
-            exit 1
-          fi
-
-      - name: Apply operator-configured exact authz grants
-        id: authz_grant_request
-        uses: ./.github/actions/launchplane-request
-        with:
-          launchplane-url: ${{ env.LAUNCHPLANE_PUBLIC_URL }}
-          audience: ${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}
-          route-path: /v1/authz-policies/github-actions/grants
-          payload-list-file: ${{ steps.authz_grants.outputs.github_actions_grants_file }}
-          idempotency-key-prefix: launchplane-operator-authz-grant:${{ github.run_id }}:${{ github.run_attempt }}
-          expected-status: "200,202"
-          response-output-file: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/github-actions-grants-responses.json
-          log-response-body: "false"
-
-      - name: Verify and summarize authz grant results
-        shell: bash
-        env:
-          CONFIGURED_GRANTS_SHA256: ${{ steps.authz_grants.outputs.configured_grants_sha256 }}
-          ACTIVE_POLICY_SCHEMA_VERSION: ${{ steps.authz_policy.outputs.authz_policy_schema_version }}
-          ACTIVE_POLICY_SHA256: ${{ steps.authz_policy.outputs.authz_policy_sha256 }}
-          GRANTS_FILE: ${{ steps.authz_grants.outputs.github_actions_grants_file }}
-          RESPONSES_FILE: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}/github-actions-grants-responses.json
-        run: |
-          set -euo pipefail
-          request_count="$(jq 'length' "$GRANTS_FILE")"
-          response_count="$(jq 'length' "$RESPONSES_FILE")"
-          if [ "$response_count" != "$request_count" ]; then
-            echo "Launchplane returned $response_count responses for $request_count authz grants." >&2
-            exit 1
-          fi
-          jq -e --arg mode "$LAUNCHPLANE_AUTHZ_GRANT_MODE" \
-            'all(.[]; .result.mode == $mode and (.result.changed | type == "boolean"))' \
-            "$RESPONSES_FILE" >/dev/null || {
-            echo "Launchplane authz grant responses did not match the requested mode or result shape." >&2
-            exit 1
-          }
-          changed_count="$(jq '[.[] | select(.result.changed == true)] | length' "$RESPONSES_FILE")"
-          unchanged_count="$((request_count - changed_count))"
-          {
-            echo "## Operator exact authz grant maintenance"
-            echo
-            echo "- Mode: $LAUNCHPLANE_AUTHZ_GRANT_MODE"
-            echo "- Requests: $request_count"
-            echo "- Changed: $changed_count"
-            echo "- Already present: $unchanged_count"
-            echo "- Active policy schema: v$ACTIVE_POLICY_SCHEMA_VERSION"
-            printf '%s\n' "- Active policy SHA-256: $ACTIVE_POLICY_SHA256"
-            printf '%s\n' "- Canonical grant-set SHA-256: $CONFIGURED_GRANTS_SHA256"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload reviewed authz grant evidence
-        if: always() && steps.authz_grants.outputs.authz_grants_output_dir != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: launchplane-authz-grants-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.authz_grants.outputs.authz_grants_output_dir }}
-          if-no-files-found: error
-          retention-days: 30
-
   emergency-dokploy-rollback:
     if: >-
       github.event_name == 'workflow_dispatch' &&
@@ -1473,16 +1259,11 @@ jobs:
       - name: Validate manual break-glass request
         shell: bash
         env:
-          AUTHZ_GRANTS_MODE: ${{ inputs.authz_grants_mode }}
           AUTHZ_MANAGED_MODE: ${{ inputs.authz_managed_mode }}
           BREAK_GLASS_IMAGE_REFERENCE: ${{ inputs.break_glass_image_reference }}
           BREAK_GLASS_REASON: ${{ inputs.break_glass_reason }}
         run: |
           set -euo pipefail
-          if [ "$AUTHZ_GRANTS_MODE" != "none" ]; then
-            echo "Break-glass rollback cannot be combined with authz grant maintenance." >&2
-            exit 1
-          fi
           if [ "$AUTHZ_MANAGED_MODE" != "none" ]; then
             echo "Break-glass rollback cannot be combined with managed authz reconciliation." >&2
             exit 1

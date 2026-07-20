@@ -41,6 +41,14 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
     def test_deploy_workflow_bootstraps_managed_authz_without_deploying(self) -> None:
         deploy_job = self.deploy_workflow.job("deploy")
         self.assertIn("inputs.authz_managed_mode == 'none'", str(deploy_job["if"]))
+        self.assertNotIn("operator-authz-grants", self.deploy_workflow.jobs)
+        dispatch = self.deploy_workflow.data["on"]
+        assert isinstance(dispatch, dict)
+        workflow_dispatch = dispatch["workflow_dispatch"]
+        assert isinstance(workflow_dispatch, dict)
+        dispatch_inputs = workflow_dispatch["inputs"]
+        assert isinstance(dispatch_inputs, dict)
+        self.assertFalse(any(name.startswith("authz_grants_") for name in dispatch_inputs))
         managed_job = self.deploy_workflow.job("operator-authz-managed")
         self.assertEqual(
             self.deploy_workflow.job_uses("operator-authz-managed"),
@@ -70,21 +78,8 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         )
         self.assertIsNotNone(validation_step)
         assert validation_step is not None
-        self.assertIn("cannot be combined with exact grant maintenance", validation_step.run)
         self.assertIn("cannot include a deploy image input", validation_step.run)
         self.assertIn("cannot include break-glass rollback inputs", validation_step.run)
-
-    def test_exact_bridge_reads_runtime_outputs_with_supported_separator(self) -> None:
-        runtime_step = self.deploy_workflow.step_named(
-            "operator-authz-grants", "Read active authz policy contract"
-        )
-        self.assertIsNotNone(runtime_step)
-        assert runtime_step is not None
-        self.assertEqual(
-            runtime_step.with_values["output-paths"],
-            "authz_policy_schema_version=runtime.authz_policy_schema_version,"
-            "authz_policy_sha256=runtime.authz_policy_sha256",
-        )
 
     def test_reusable_workflow_is_protected_and_service_backed(self) -> None:
         workflow_call = self.workflow.data["on"]
@@ -136,9 +131,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(request_step.with_values["log-response-body"], "false")
 
-        failure_step = self.workflow.step_named(
-            "reconcile", "Summarize managed authz failure"
-        )
+        failure_step = self.workflow.step_named("reconcile", "Summarize managed authz failure")
         self.assertIsNotNone(failure_step)
         assert failure_step is not None
         self.assertEqual(
@@ -147,7 +140,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         )
         self.assertIn("error-summary.json", failure_step.run)
         self.assertIn(".[0:500]", failure_step.run)
-        self.assertNotIn("cat \"$RESPONSE_FILE\"", failure_step.run)
+        self.assertNotIn('cat "$RESPONSE_FILE"', failure_step.run)
 
         upload_step = self.workflow.step_named("reconcile", "Upload managed authz evidence")
         self.assertIsNotNone(upload_step)

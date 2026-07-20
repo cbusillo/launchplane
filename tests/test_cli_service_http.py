@@ -47,8 +47,8 @@ class LaunchplaneServiceHttpClientTests(unittest.TestCase):
         with patch("control_plane.cli.urlopen", side_effect=fake_urlopen):
             response = _post_launchplane_service_json(
                 service_url="https://launchplane.example",
-                path="/v1/authz-policies/github-humans/grants",
-                payload={"mode": "dry-run"},
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload={"mode": "dry_run"},
                 session_cookie="launchplane_session=signed",
             )
 
