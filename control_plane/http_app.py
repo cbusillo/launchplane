@@ -3602,25 +3602,14 @@ def create_launchplane_fastapi_app(
         *,
         identity: LaunchplaneIdentity,
         trace_id: str,
-        allow_authz_policy_administrator: bool = False,
     ) -> None:
-        service_read_allowed = resolved_authz_policy_runtime.policy.allows(
+        if resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="launchplane_service.read",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
             target=AuthorizationTarget(scope="context"),
-        )
-        authz_policy_administration_allowed = (
-            allow_authz_policy_administrator
-            and resolved_authz_policy_runtime.policy.allows(
-                identity=identity,
-                action="authz_policy_grant.write",
-                product="launchplane",
-                context=_LAUNCHPLANE_SERVICE_CONTEXT,
-            )
-        )
-        if service_read_allowed or authz_policy_administration_allowed:
+        ):
             return
         raise _launchplane_http_error(
             status_code=403,
@@ -3669,7 +3658,6 @@ def create_launchplane_fastapi_app(
         require_launchplane_service_read_authorization(
             identity=identity,
             trace_id=trace_id,
-            allow_authz_policy_administrator=True,
         )
         schema_revision_reader = getattr(record_store, "schema_revision", None)
         database_schema_revision = (

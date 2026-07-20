@@ -253,10 +253,6 @@ cleanup scope so the store is always closed.
     write contract and requires immutable numeric `repository_id` and
     `repository_owner_id` selectors for GitHub Actions rules.)
 
-`GET /v1/service/runtime` is also readable by a principal that can administer
-authz policy, even when it lacks broader `launchplane_service.read` authority.
-That narrow exception lets the protected operator workflow bind reviewed grant
-batches to the current policy SHA and schema version before mutation.
 - Every Code local automation work-request routes:
   - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
@@ -1316,13 +1312,13 @@ relations without storing real tuple assignments in this repo:
 - policy/admin action: `authz_policy_grant.write` and related policy routes
   check policy administration permission on a Launchplane policy resource.
 
-Grant and removal routes remain the only supported tuple-write boundary during
-migration. They may derive tuple proposals from active DB policy records,
-compare OpenFGA decisions with existing DB decisions, and later write provider
-tuples after parity is proven. Missing, ambiguous, stale, or unreachable tuple
-state denies access; it must not fall back to checked-in tuples, local files,
-workflow defaults, ambient GitHub CLI identity, or broader DB grants after
-cutover.
+Managed rule-set reconciliation remains the only supported policy-write
+boundary during migration. It may derive tuple proposals from active DB policy
+records, compare OpenFGA decisions with existing DB decisions, and later write
+provider tuples after parity is proven. Missing, ambiguous, stale, or
+unreachable tuple state denies access; it must not fall back to checked-in
+tuples, local files, workflow defaults, ambient GitHub CLI identity, or broader
+DB grants after cutover.
 
 For first access, `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS` may name comma-separated
 verified GitHub email addresses that receive the `admin` role even before a

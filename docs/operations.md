@@ -476,36 +476,18 @@ The #1049 compatibility cleanup removed stale
 workflows. Do not reintroduce those broad rules; keep those workflows paired
 with narrow managed actions such as `merge_train.policy_import`.
 
-The deploy workflow also reconciles the manual `Provider Target Operations`
-workflow grants. `provider_target.audit` covers audit and dry-run requests;
-`provider_target.backfill` covers apply requests. The route is intentionally
-Launchplane-scoped and single-route per request, so production rows are seeded
-through explicit audited workflow runs rather than local live-target commands.
+The operator-managed desired set owns workflow and local-operator authority for
+`Provider Target Operations`, product config, private health endpoints, and
+`Ingress Route Canary Apply`. Keep those rules explicitly scoped by product,
+context, instance, action, and immutable workflow identity as applicable. Use
+local-admin rules only for rare broader repair authority instead of widening
+routine local-operator access. Checked-in catalogs and deploy-time variables are
+not authority for these scopes.
 
-Routine local-operator product-config grants are scoped, not wildcard, and the
-deploy reconciliation skips them unless explicit product/context scopes are
-configured. Set `LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON` only for
-operator-reviewed routine write access; use local-admin grants for rare broader
-repair authority instead of widening routine local-operator access. Checked-in
-catalogs are not deploy-time authority for these operator scopes.
-
-Private health endpoint grants follow the same scoped local-operator pattern.
-Set `LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON` to an array of
-product/context objects when the local operator should manage DB-backed private
-health endpoint records for those scopes. Scopes must use explicit product and
-context values; wildcard/glob scopes fail closed. Leave it unset to skip
-reconciliation, and do not place endpoint URLs in repo files.
-
-The `Ingress Route Canary Apply` workflow grant is also scoped by operator input,
-not a checked-in product catalog. By default the deploy reconciliation grants the
-workflow `ingress_route.apply` only for `launchplane`/`launchplane`. Set
-`LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON` to an array of product/context
-objects when DB-backed canary route records are intentionally scoped elsewhere;
-the workflow still passes only the canary key while the service resolves route
-topology from records.
-
-Grant requests return only authz policy record metadata and rule counts; they do
-not echo workflow refs, human logins, or the full policy body.
+Managed reconciliation responses return only authz policy record metadata,
+rule counts, managed IDs and hashes, compact diffs, and redacted audit evidence;
+they do not echo workflow refs, human logins, owner-agent subjects, or the full
+policy body.
 
 Lane health monitoring is Launchplane-owned synthetic monitoring for
 generic-web stable lanes, including drivers that inherit generic-web behavior.
