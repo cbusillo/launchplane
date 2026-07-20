@@ -38,6 +38,9 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/deploy-launchplane.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml"}
     ),
+    Path(".github/workflows/route-binding-reconcile.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-route-binding-reconcile.yml"}
+    ),
 }
 
 
@@ -91,6 +94,9 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     ),
     "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml": (
         ActionClassification("First-party same-repository", "authorization policy administration")
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-route-binding-reconcile.yml": (
+        ActionClassification("First-party same-repository", "route authority reconciliation")
     ),
     "docker/build-push-action": ActionClassification(
         "Third-party publisher", "container build and publication"
