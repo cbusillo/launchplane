@@ -123,13 +123,15 @@ cleanup scope so the store is always closed.
     the requested product/context, resolving the stored canary route and edge
     endpoint before provider apply, and requiring an `Idempotency-Key`
 - native FastAPI environment route-binding reads and reconciliation:
-  - `GET /v1/route-bindings/records`, requiring `route_binding.read` for the
-    requested product/context and supporting `instance`, `status`, and bounded
-    `limit` filters
+  - `GET /v1/route-bindings/records`, requiring context-scoped
+    `route_binding.read` for an unfiltered product/context list or instance-
+    scoped authority when an `instance` filter is supplied, and supporting
+    `status` and bounded `limit` filters
   - `GET /v1/route-bindings/records/current`, requiring `route_binding.read` for
     the requested product/context/instance tuple
-  - `POST /v1/route-bindings/reconcile`, requiring `route_binding.read` for
-    `dry-run` and `route_binding.apply` for `apply`. The request must explicitly
+  - `POST /v1/route-bindings/reconcile`, requiring instance-scoped
+    `route_binding.read` for `dry-run` and `route_binding.apply` for `apply`.
+    The request must explicitly
     expect either an absent binding or the opaque SHA-256 returned by the current
     record read. The service derives topology only from DB-backed provider-target,
     tracked Dokploy target and target-id, edge-endpoint, and terminal ingress

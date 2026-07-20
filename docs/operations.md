@@ -387,17 +387,22 @@ write contract for every principal type.
 
 Operators mutate shared or production authz through the deployed service, not
 through direct DB commands or a local CLI from an arbitrary checkout. Store the
-complete desired rules for one `managed_set_id` in the repository secret
-`LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON`. Each dispatch wrapper explicitly forwards
-that secret into the reusable worker, whose OIDC-minting job remains gated by
-the `launchplane-authz-admin` environment. The JSON owns desired state only:
+complete desired rules for one `managed_set_id` in a protected repository
+secret. `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` owns the primary operator set;
+`LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
+Odoo stable route-binding set. The `Manage Launchplane Authorization` wrapper
+selects one of those explicit secrets and forwards it into the reusable worker,
+whose OIDC-minting job remains gated by the `launchplane-authz-admin`
+environment. Never replace the unreadable primary secret with a partial set;
+use a distinct managed set and protected secret instead. The JSON owns desired state only:
 `schema_version`, `product`, `managed_set_id`, migration/adoption intent, and
 `desired_policy`. Dispatch-time mode, reason, issue reference, and reviewed plan
 digest are deliberately excluded from that secret.
 
 Use the `Manage Launchplane Authorization` workflow on the default branch.
-Dispatch `mode=dry_run` with the final single-line reason and related issue that
-will also be used for apply. The environment gate protects the OIDC-minting job,
+Select the intended `managed_set`, then dispatch `mode=dry_run` with the final
+single-line reason and related issue that will also be used for apply. The
+environment gate protects the OIDC-minting job,
 the worker is pinned to a reviewed immutable revision, and all authz runs share
 one non-canceling concurrency group. During the one-time bootstrap before the
 dedicated wrapper is present in active policy, dispatch `Deploy Launchplane`
@@ -430,6 +435,12 @@ expectation, and submits the same provider-neutral reconcile contract used by
 the API. It never accepts domains, provider target IDs, ingress host IDs,
 certificate references, edge addresses, or provider payloads as workflow
 inputs, and it performs no provider mutation.
+
+Route-binding read and apply authority is instance-aware. Context-scoped rules
+may list bindings only when no instance filter is supplied; current-record reads
+and reconcile calls require the requested instance. Production-instance grants
+must bind the dispatch wrapper and a reviewed reusable worker pinned to a full
+commit SHA.
 
 Dispatch `mode=dry-run` first. Review the create, unchanged, refresh, blocked, or
 conflict outcome, source-record identities and versions, current/candidate

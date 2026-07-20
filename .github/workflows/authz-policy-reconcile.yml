@@ -12,6 +12,14 @@ name: Manage Launchplane Authorization
         options:
           - dry_run
           - apply
+      managed_set:
+        description: Protected operator-managed desired rule set to reconcile.
+        required: true
+        default: primary
+        type: choice
+        options:
+          - primary
+          - odoo-route-binding
       reviewed_plan_sha256:
         description: Plan SHA-256 returned by the reviewed dry run; required for apply.
         required: false
@@ -30,7 +38,8 @@ permissions:
   id-token: write
 
 jobs:
-  reconcile:
+  reconcile-primary:
+    if: ${{ inputs.managed_set == 'primary' }}
     uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
     with:
       mode: ${{ inputs.mode }}
@@ -39,3 +48,14 @@ jobs:
       related_issue: ${{ inputs.related_issue }}
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}
+
+  reconcile-odoo-route-binding:
+    if: ${{ inputs.managed_set == 'odoo-route-binding' }}
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    with:
+      mode: ${{ inputs.mode }}
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON }}

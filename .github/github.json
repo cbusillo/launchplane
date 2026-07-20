@@ -124,6 +124,7 @@
     "Preview Lifecycle",
     "Public Ingress Monitor",
     "Route Binding Reconcile",
+    "Reusable Route Binding Reconcile",
     "Product Context Cutover Audit",
     "Product Context Cutover",
     "Product Environment Evidence",

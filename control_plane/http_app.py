@@ -8556,6 +8556,7 @@ def create_launchplane_fastapi_app(
         action: str,
         product: str,
         context_name: str,
+        instance_name: str,
         message: str,
     ) -> None:
         if not resolved_authz_policy_runtime.policy.allows(
@@ -8563,6 +8564,7 @@ def create_launchplane_fastapi_app(
             action=action,
             product=product,
             context=context_name,
+            target=AuthorizationTarget(scope="instance", instances=(instance_name,)),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -11981,6 +11983,7 @@ def create_launchplane_fastapi_app(
             action=authorization_action,
             product=binding_request.product,
             context_name=binding_request.context,
+            instance_name=binding_request.instance,
             message=("Workflow cannot reconcile route bindings for the requested product/context."),
         )
         if binding_request.mode == "apply" and not idempotency_key.strip():
