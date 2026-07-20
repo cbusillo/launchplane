@@ -122,26 +122,26 @@ cleanup scope so the store is always closed.
   - `POST /v1/ingress/canary-routes/apply`, requiring `ingress_route.apply` for
     the requested product/context, resolving the stored canary route and edge
     endpoint before provider apply, and requiring an `Idempotency-Key`
-- native FastAPI environment route-binding reads and backfill writes:
+- native FastAPI environment route-binding reads and reconciliation:
   - `GET /v1/route-bindings/records`, requiring `route_binding.read` for the
     requested product/context and supporting `instance`, `status`, and bounded
     `limit` filters
   - `GET /v1/route-bindings/records/current`, requiring `route_binding.read` for
     the requested product/context/instance tuple
-  - `POST /v1/route-bindings/backfill/apply`, requiring `route_binding.apply`
-    for the requested product/context, requiring the provider-target projection
-    to match its tracked Dokploy target and target-id records, comparing bounded
-    edge-endpoint and ingress-audit evidence, and rejecting unknown TLS
-    ownership, unresolved newer applies, evidence older than 24 hours, or an
-    existing binding. `dry-run` does not require an `Idempotency-Key`; `apply`
-    does. Apply reserves before planning, releases an unbound reservation for a
-    blocked or already-satisfied plan, and commits the route-binding record plus
-    completed replay evidence in one PostgreSQL transaction. Concurrent
-    same-key requests replay or report the active claim, while different keys
-    racing the same product/context/instance cannot both create the binding.
-    Filesystem-backed service apply fails closed because it cannot provide that
-    atomic boundary; filesystem route-binding storage remains available for
-    explicit local rehearsal.
+  - `POST /v1/route-bindings/reconcile`, requiring `route_binding.read` for
+    `dry-run` and `route_binding.apply` for `apply`. The request must explicitly
+    expect either an absent binding or the opaque SHA-256 returned by the current
+    record read. The service derives topology only from DB-backed provider-target,
+    tracked Dokploy target and target-id, edge-endpoint, and terminal ingress
+    audit records. It returns create, unchanged, evidence-refresh, blocked, or
+    authority-conflict findings without accepting caller-supplied domains or
+    provider identifiers. `dry-run` does not require an `Idempotency-Key`;
+    `apply` does. Apply compare-and-writes the full expected record and commits
+    create, refresh, or unchanged no-op plus completed replay evidence in one
+    PostgreSQL transaction. Per-binding transaction locks serialize absent-row
+    creates and current-row refreshes. Filesystem-backed service apply fails
+    closed because it cannot provide that atomic boundary; filesystem storage
+    remains available for explicit local rehearsal.
 - native FastAPI ingress route apply write:
   - `POST /v1/drivers/ingress/route-apply`, requiring `ingress_route.plan` for
     `dry-run` and `ingress_route.apply` for `apply`, resolving optional edge
@@ -2095,12 +2095,19 @@ product/context before storage access and require product/context for list reads
 and product/context/instance for the singleton read. Responses are redacted read
 models: provider-specific host ids, certificate ids, target ids, edge addresses,
 provider payload evidence, and certificate references remain stored evidence
-and are omitted from the ordinary operator/API read contract. The backfill apply
-route checks `route_binding.apply` for the requested product/context, accepts no
-caller-supplied domains, provider identifiers, or freshness timestamps, and
-fails closed unless the provider-target projection matches its Dokploy target
-and target-id records and bounded, terminal, explicitly owned, fresh evidence
-resolves exactly one binding for the requested tuple.
+and are omitted from the ordinary operator/API read contract. Each read includes
+an opaque SHA-256 over the complete stored record so a caller can prove which
+redacted authority it inspected without receiving hidden provider evidence. The
+reconcile route checks `route_binding.read` for dry-run and `route_binding.apply`
+for apply, accepts no caller-supplied domains, provider identifiers, or freshness
+timestamps, and fails closed unless the provider-target projection matches its
+Dokploy target and target-id records and bounded, terminal, explicitly owned
+evidence resolves exactly one binding for the requested tuple. A successful
+re-evaluation attests that source-record set for 24 hours. Reconcile is a no-op
+while more than 12 hours remain, refreshes service/backfill-owned evidence at
+half-life or when source versions change, and reports an explicit conflict if
+provider target, domains, ingress, TLS ownership, lifecycle status, operator
+ownership, or the expected-current digest differs.
 
 Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.

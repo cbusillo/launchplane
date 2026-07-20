@@ -24,10 +24,12 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTls,
     build_route_binding_key,
     redacted_route_binding_record,
+    route_binding_record_sha256,
 )
-from control_plane.route_binding_backfill import (
-    RouteBindingBackfillRequest,
-    plan_route_binding_backfill,
+from control_plane.route_binding_reconcile import (
+    RouteBindingExpectedCurrent,
+    RouteBindingReconcileRequest,
+    plan_route_binding_reconcile,
 )
 from control_plane.http_app import (
     create_launchplane_fastapi_app,
@@ -36,7 +38,7 @@ from control_plane.http_app import (
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -86,6 +88,23 @@ def _route_binding_record(
             freshness_status="recorded",
         ),
         updated_at="2026-07-12T00:00:00Z",
+    )
+
+
+def _route_binding_mutation(
+    *,
+    idempotency_key: str,
+    trace_id: str,
+) -> DbOnlyMutationRequest:
+    return DbOnlyMutationRequest(
+        scope="github-actions:route-binding-test",
+        route_path="/v1/route-bindings/reconcile",
+        idempotency_key=idempotency_key,
+        request_fingerprint=f"fingerprint:{idempotency_key}",
+        lease_owner=trace_id,
+        response_status_code=202,
+        response_trace_id=trace_id,
+        response_payload={"status": "accepted", "trace_id": trace_id},
     )
 
 
@@ -205,7 +224,7 @@ def _ingress_audit_record(
     )
 
 
-class _RouteBindingBackfillFakeStore:
+class _RouteBindingReconcileFakeStore:
     def __init__(
         self,
         *,
@@ -214,6 +233,7 @@ class _RouteBindingBackfillFakeStore:
         dokploy_target_id: DokployTargetIdRecord | None = None,
         edge_endpoints: tuple[EdgeEndpointRecord, ...] = (),
         ingress_audits: tuple[IngressRouteAuditRecord, ...] = (),
+        route_binding: EnvironmentRouteBindingRecord | None = None,
     ) -> None:
         self.provider_target = provider_target
         self.dokploy_target = dokploy_target
@@ -222,6 +242,7 @@ class _RouteBindingBackfillFakeStore:
         )
         self.edge_endpoints = edge_endpoints
         self.ingress_audits = ingress_audits
+        self.route_binding = route_binding
 
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
@@ -273,6 +294,42 @@ class _RouteBindingBackfillFakeStore:
             and (not context_name or audit.context == context_name)
         )
         return records[:limit] if limit is not None else records
+
+    def read_route_binding_record(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentRouteBindingRecord:
+        if self.route_binding is None:
+            raise FileNotFoundError("missing route binding")
+        return self.route_binding
+
+
+def _route_binding_expected_current(
+    record: EnvironmentRouteBindingRecord | None,
+) -> RouteBindingExpectedCurrent:
+    if record is None:
+        return RouteBindingExpectedCurrent(state="absent")
+    return RouteBindingExpectedCurrent(
+        state="present",
+        record_sha256=route_binding_record_sha256(record),
+    )
+
+
+def _route_binding_reconcile_request(
+    *,
+    evaluated_at: str = "2026-07-20T00:00:00Z",
+    current_record: EnvironmentRouteBindingRecord | None = None,
+) -> RouteBindingReconcileRequest:
+    return RouteBindingReconcileRequest(
+        product="example-product",
+        context="example-testing",
+        instance="web",
+        expected_current=_route_binding_expected_current(current_record),
+        evaluated_at=evaluated_at,
+    )
 
 
 class RouteBindingContractTests(unittest.TestCase):
@@ -385,7 +442,7 @@ class RouteBindingStorageTests(unittest.TestCase):
         )
         self.assertEqual(records, (record,))
 
-    def test_sqlite_route_binding_mutation_commits_record_and_completion_atomically(
+    def test_sqlite_route_binding_reconcile_creates_record_and_completion_atomically(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -396,20 +453,15 @@ class RouteBindingStorageTests(unittest.TestCase):
             )
             store.ensure_schema()
             record = _route_binding_record()
-            reservation = store.reserve_mutation(
-                scope="github-actions:route-binding-test",
-                route_path="/v1/route-bindings/backfill/apply",
+            mutation = _route_binding_mutation(
                 idempotency_key="route-binding-create",
-                request_fingerprint="route-binding-fingerprint",
-                lease_owner="trace-route-binding-create",
-            ).record
+                trace_id="trace-route-binding-create",
+            )
 
-            result = store.create_route_binding_record_with_mutation(
-                record=record,
-                reservation=reservation,
-                response_status_code=202,
-                response_trace_id="trace-route-binding-create",
-                response_payload={"status": "accepted"},
+            result = store.reconcile_route_binding_record(
+                expected_record=None,
+                replacement_record=record,
+                mutation=mutation,
             )
             loaded_record = store.read_route_binding_record(
                 product=record.product,
@@ -417,9 +469,9 @@ class RouteBindingStorageTests(unittest.TestCase):
                 instance_name=record.instance,
             )
             stored_completion = store.read_idempotency_record(
-                scope=reservation.scope,
-                route_path=reservation.route_path,
-                idempotency_key=reservation.idempotency_key,
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
             )
             store.close()
 
@@ -430,7 +482,7 @@ class RouteBindingStorageTests(unittest.TestCase):
         self.assertEqual(stored_completion.state, "completed")
         self.assertEqual(stored_completion.response_trace_id, "trace-route-binding-create")
 
-    def test_sqlite_route_binding_existing_record_releases_reservation(self) -> None:
+    def test_sqlite_route_binding_reconcile_completes_unchanged_noop(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(
@@ -440,30 +492,129 @@ class RouteBindingStorageTests(unittest.TestCase):
             store.ensure_schema()
             record = _route_binding_record()
             store.write_route_binding_record(record)
-            reservation = store.reserve_mutation(
-                scope="github-actions:route-binding-test",
-                route_path="/v1/route-bindings/backfill/apply",
-                idempotency_key="route-binding-existing",
-                request_fingerprint="route-binding-existing-fingerprint",
-                lease_owner="trace-route-binding-existing",
-            ).record
-
-            result = store.create_route_binding_record_with_mutation(
-                record=record,
-                reservation=reservation,
-                response_status_code=202,
-                response_trace_id="trace-route-binding-existing",
-                response_payload={"status": "accepted"},
+            mutation = _route_binding_mutation(
+                idempotency_key="route-binding-unchanged",
+                trace_id="trace-route-binding-unchanged",
             )
-            stored_reservation = store.read_idempotency_record(
-                scope=reservation.scope,
-                route_path=reservation.route_path,
-                idempotency_key=reservation.idempotency_key,
+
+            result = store.reconcile_route_binding_record(
+                expected_record=record,
+                replacement_record=record,
+                mutation=mutation,
+            )
+            stored_completion = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
             )
             store.close()
 
-        self.assertEqual(result.status, "exists")
-        self.assertEqual(result.route_binding, record)
+        self.assertEqual(result.status, "unchanged")
+        self.assertEqual(result.current_record, record)
+        self.assertIsNotNone(stored_completion)
+        assert stored_completion is not None
+        self.assertEqual(stored_completion.state, "completed")
+
+    def test_sqlite_route_binding_reconcile_refreshes_matching_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            current = _route_binding_record()
+            replacement = current.model_copy(
+                update={
+                    "source": current.source.model_copy(
+                        update={
+                            "refreshed_at": "2026-07-20T00:00:00Z",
+                            "stale_after": "2026-07-21T00:00:00Z",
+                        }
+                    ),
+                    "updated_at": "2026-07-20T00:00:00Z",
+                }
+            )
+            store.write_route_binding_record(current)
+            mutation = _route_binding_mutation(
+                idempotency_key="route-binding-refresh",
+                trace_id="trace-route-binding-refresh",
+            )
+
+            result = store.reconcile_route_binding_record(
+                expected_record=current,
+                replacement_record=replacement,
+                mutation=mutation,
+            )
+            loaded = store.read_route_binding_record(
+                product=current.product,
+                context_name=current.context,
+                instance_name=current.instance,
+            )
+            store.close()
+
+        self.assertEqual(result.status, "refreshed")
+        self.assertEqual(loaded, replacement)
+
+    def test_sqlite_route_binding_reconcile_rejects_stale_expected_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            expected = _route_binding_record()
+            current = _route_binding_record(domain="changed.example.test")
+            store.write_route_binding_record(current)
+            mutation = _route_binding_mutation(
+                idempotency_key="route-binding-stale",
+                trace_id="trace-route-binding-stale",
+            )
+
+            result = store.reconcile_route_binding_record(
+                expected_record=expected,
+                replacement_record=expected,
+                mutation=mutation,
+            )
+            stored_reservation = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(result.status, "changed")
+        self.assertEqual(result.current_record, current)
+        self.assertIsNone(stored_reservation)
+
+    def test_sqlite_route_binding_reconcile_rejects_missing_expected_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            expected = _route_binding_record()
+            mutation = _route_binding_mutation(
+                idempotency_key="route-binding-missing",
+                trace_id="trace-route-binding-missing",
+            )
+
+            result = store.reconcile_route_binding_record(
+                expected_record=expected,
+                replacement_record=expected,
+                mutation=mutation,
+            )
+            stored_reservation = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(result.status, "missing")
         self.assertIsNone(stored_reservation)
 
     def test_sqlite_route_binding_completion_failure_rolls_back_record(self) -> None:
@@ -475,13 +626,10 @@ class RouteBindingStorageTests(unittest.TestCase):
             )
             store.ensure_schema()
             record = _route_binding_record()
-            reservation = store.reserve_mutation(
-                scope="github-actions:route-binding-test",
-                route_path="/v1/route-bindings/backfill/apply",
+            mutation = _route_binding_mutation(
                 idempotency_key="route-binding-fault",
-                request_fingerprint="route-binding-fault-fingerprint",
-                lease_owner="trace-route-binding-fault",
-            ).record
+                trace_id="trace-route-binding-fault",
+            )
 
             with patch.object(
                 store,
@@ -492,12 +640,10 @@ class RouteBindingStorageTests(unittest.TestCase):
                     RuntimeError,
                     "injected route binding completion failure",
                 ):
-                    store.create_route_binding_record_with_mutation(
-                        record=record,
-                        reservation=reservation,
-                        response_status_code=202,
-                        response_trace_id="trace-route-binding-fault",
-                        response_payload={"status": "accepted"},
+                    store.reconcile_route_binding_record(
+                        expected_record=None,
+                        replacement_record=record,
+                        mutation=mutation,
                     )
             with self.assertRaises(FileNotFoundError):
                 store.read_route_binding_record(
@@ -506,27 +652,25 @@ class RouteBindingStorageTests(unittest.TestCase):
                     instance_name=record.instance,
                 )
             stored_reservation = store.read_idempotency_record(
-                scope=reservation.scope,
-                route_path=reservation.route_path,
-                idempotency_key=reservation.idempotency_key,
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
             )
             store.close()
 
-        self.assertIsNotNone(stored_reservation)
-        assert stored_reservation is not None
-        self.assertEqual(stored_reservation.state, "running")
+        self.assertIsNone(stored_reservation)
 
 
-class RouteBindingBackfillTests(unittest.TestCase):
-    def test_backfill_plans_route_binding_from_unambiguous_launchplane_records(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+class RouteBindingEvidenceTests(unittest.TestCase):
+    def test_reconcile_derives_binding_from_unambiguous_launchplane_records(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 edge_endpoints=(_edge_endpoint_record(),),
                 ingress_audits=(_ingress_audit_record(),),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -540,21 +684,21 @@ class RouteBindingBackfillTests(unittest.TestCase):
         self.assertEqual(plan.record.ingress.endpoint_key, "example-edge")
         self.assertEqual(plan.record.tls.owner, "provider")
         self.assertEqual(plan.record.source.freshness_status, "recorded")
-        self.assertEqual(plan.record.source.stale_after, "2026-07-13T00:00:00Z")
+        self.assertEqual(plan.record.source.stale_after, "2026-07-13T00:15:00Z")
         self.assertEqual(
             set(plan.record.source.source_versions),
             set(plan.record.source.source_record_ids),
         )
 
-    def test_backfill_fails_closed_when_edge_endpoint_evidence_conflicts(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_fails_closed_when_edge_endpoint_evidence_conflicts(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 edge_endpoints=(_edge_endpoint_record(server_name="different-server"),),
                 ingress_audits=(_ingress_audit_record(),),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -565,16 +709,16 @@ class RouteBindingBackfillTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "edge_endpoint_conflict")
 
-    def test_backfill_fails_closed_when_provider_target_projection_conflicts(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_fails_closed_when_provider_target_projection_conflicts(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 dokploy_target_id=_dokploy_target_id_record(target_id="different-target-id"),
                 edge_endpoints=(_edge_endpoint_record(),),
                 ingress_audits=(_ingress_audit_record(),),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -585,9 +729,9 @@ class RouteBindingBackfillTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "provider_target_projection_conflict")
 
-    def test_backfill_fails_closed_when_edge_endpoint_evidence_is_ambiguous(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_fails_closed_when_edge_endpoint_evidence_is_ambiguous(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 edge_endpoints=(
@@ -596,7 +740,7 @@ class RouteBindingBackfillTests(unittest.TestCase):
                 ),
                 ingress_audits=(_ingress_audit_record(),),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -607,9 +751,9 @@ class RouteBindingBackfillTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "edge_endpoint_ambiguous")
 
-    def test_backfill_fails_closed_when_edge_endpoint_scan_is_exhausted(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_fails_closed_when_edge_endpoint_scan_is_exhausted(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 edge_endpoints=tuple(
@@ -618,7 +762,7 @@ class RouteBindingBackfillTests(unittest.TestCase):
                 ),
                 ingress_audits=(_ingress_audit_record(),),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -629,15 +773,15 @@ class RouteBindingBackfillTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "edge_endpoint_scan_limit_exceeded")
 
-    def test_backfill_fails_closed_when_ingress_endpoint_conflicts(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_fails_closed_when_ingress_endpoint_conflicts(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 edge_endpoints=(_edge_endpoint_record(),),
                 ingress_audits=(_ingress_audit_record(endpoint_key="different-edge"),),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -648,9 +792,9 @@ class RouteBindingBackfillTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "ingress_edge_endpoint_conflict")
 
-    def test_backfill_fails_closed_when_ingress_audit_is_ambiguous(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_fails_closed_when_ingress_audit_is_ambiguous(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 edge_endpoints=(_edge_endpoint_record(),),
@@ -659,7 +803,7 @@ class RouteBindingBackfillTests(unittest.TestCase):
                     _ingress_audit_record(record_id="audit-2", endpoint_key="different-edge"),
                 ),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -670,9 +814,9 @@ class RouteBindingBackfillTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "ingress_audit_ambiguous")
 
-    def test_backfill_fails_closed_when_latest_ingress_audit_is_unresolved(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_fails_closed_when_latest_ingress_audit_is_unresolved(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 edge_endpoints=(_edge_endpoint_record(),),
@@ -685,7 +829,7 @@ class RouteBindingBackfillTests(unittest.TestCase):
                     ),
                 ),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -696,9 +840,9 @@ class RouteBindingBackfillTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "ingress_audit_unresolved")
 
-    def test_backfill_fails_closed_when_tls_ownership_is_unknown(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_fails_closed_when_tls_ownership_is_unknown(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 edge_endpoints=(_edge_endpoint_record(),),
@@ -709,7 +853,7 @@ class RouteBindingBackfillTests(unittest.TestCase):
                     ),
                 ),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -720,15 +864,15 @@ class RouteBindingBackfillTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "tls_ownership_unknown")
 
-    def test_backfill_fails_closed_when_source_evidence_is_stale(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_accepts_old_authoritative_source_versions(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 edge_endpoints=(_edge_endpoint_record(),),
                 ingress_audits=(_ingress_audit_record(),),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -736,12 +880,13 @@ class RouteBindingBackfillTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(plan.status, "blocked")
-        self.assertEqual(plan.findings[0].code, "evidence_stale")
+        self.assertEqual(plan.status, "ready")
+        assert plan.record is not None
+        self.assertEqual(plan.record.source.stale_after, "2026-07-14T00:00:01Z")
 
-    def test_backfill_fails_closed_when_ingress_audit_scan_is_exhausted(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_fails_closed_when_ingress_audit_scan_is_exhausted(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(),
                 edge_endpoints=(_edge_endpoint_record(),),
@@ -749,7 +894,7 @@ class RouteBindingBackfillTests(unittest.TestCase):
                     _ingress_audit_record(record_id=f"audit-{index}") for index in range(1001)
                 ),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -760,15 +905,15 @@ class RouteBindingBackfillTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "ingress_audit_scan_limit_exceeded")
 
-    def test_backfill_fails_closed_when_tracked_domains_are_invalid(self) -> None:
-        plan = plan_route_binding_backfill(
-            record_store=_RouteBindingBackfillFakeStore(
+    def test_reconcile_fails_closed_when_tracked_domains_are_invalid(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
                 provider_target=_provider_target_record(),
                 dokploy_target=_dokploy_target_record(domains=("https://app.example.test",)),
                 edge_endpoints=(_edge_endpoint_record(),),
                 ingress_audits=(_ingress_audit_record(),),
             ),
-            request=RouteBindingBackfillRequest(
+            request=RouteBindingReconcileRequest(
                 product="example-product",
                 context="example-testing",
                 instance="web",
@@ -778,6 +923,197 @@ class RouteBindingBackfillTests(unittest.TestCase):
 
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "domains_invalid")
+
+
+def _ready_route_binding_reconcile_store(
+    *,
+    route_binding: EnvironmentRouteBindingRecord | None = None,
+    dokploy_target: DokployTargetRecord | None = None,
+    ingress_audits: tuple[IngressRouteAuditRecord, ...] | None = None,
+) -> _RouteBindingReconcileFakeStore:
+    return _RouteBindingReconcileFakeStore(
+        provider_target=_provider_target_record(),
+        dokploy_target=dokploy_target or _dokploy_target_record(),
+        edge_endpoints=(_edge_endpoint_record(),),
+        ingress_audits=ingress_audits or (_ingress_audit_record(),),
+        route_binding=route_binding,
+    )
+
+
+class RouteBindingReconcileTests(unittest.TestCase):
+    def test_reconcile_plans_create_with_service_owned_freshness(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(),
+            request=_route_binding_reconcile_request(),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.operation, "create")
+        assert plan.record is not None
+        self.assertEqual(plan.record.source.source_kind, "service")
+        self.assertEqual(plan.record.source.stale_after, "2026-07-21T00:00:00Z")
+
+    def test_reconcile_is_unchanged_before_refresh_half_life(self) -> None:
+        created = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(),
+            request=_route_binding_reconcile_request(),
+        )
+        assert created.record is not None
+
+        plan = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(route_binding=created.record),
+            request=_route_binding_reconcile_request(
+                evaluated_at="2026-07-20T01:00:00Z",
+                current_record=created.record,
+            ),
+        )
+
+        self.assertEqual(plan.status, "unchanged")
+        self.assertEqual(plan.operation, "none")
+        self.assertEqual(
+            plan.candidate_record_sha256,
+            route_binding_record_sha256(created.record),
+        )
+
+    def test_reconcile_refreshes_at_half_life(self) -> None:
+        created = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(),
+            request=_route_binding_reconcile_request(),
+        )
+        assert created.record is not None
+
+        plan = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(route_binding=created.record),
+            request=_route_binding_reconcile_request(
+                evaluated_at="2026-07-20T12:00:00Z",
+                current_record=created.record,
+            ),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.operation, "refresh")
+        assert plan.record is not None
+        self.assertEqual(plan.record.source.stale_after, "2026-07-21T12:00:00Z")
+
+    def test_reconcile_refreshes_changed_evidence_without_changing_authority(self) -> None:
+        created = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(),
+            request=_route_binding_reconcile_request(),
+        )
+        assert created.record is not None
+        refreshed_audit = _ingress_audit_record(
+            record_id="audit-2",
+            recorded_at="2026-07-20T02:00:00Z",
+        )
+
+        plan = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(
+                route_binding=created.record,
+                ingress_audits=(_ingress_audit_record(), refreshed_audit),
+            ),
+            request=_route_binding_reconcile_request(
+                evaluated_at="2026-07-20T03:00:00Z",
+                current_record=created.record,
+            ),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.operation, "refresh")
+        assert plan.record is not None
+        self.assertIn("ingress-audit:audit-2", plan.record.source.source_record_ids)
+
+    def test_reconcile_reports_authority_conflict_instead_of_overwrite(self) -> None:
+        created = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(),
+            request=_route_binding_reconcile_request(),
+        )
+        assert created.record is not None
+        changed_domain = "changed.example.test"
+
+        plan = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(
+                route_binding=created.record,
+                dokploy_target=_dokploy_target_record(domains=(changed_domain,)),
+                ingress_audits=(_ingress_audit_record(domains=(changed_domain,)),),
+            ),
+            request=_route_binding_reconcile_request(current_record=created.record),
+        )
+
+        self.assertEqual(plan.status, "conflict")
+        self.assertEqual(plan.findings[0].code, "route_binding_authority_conflict")
+
+    def test_reconcile_reports_changed_expected_current(self) -> None:
+        current = _route_binding_record()
+
+        plan = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(route_binding=current),
+            request=RouteBindingReconcileRequest(
+                product=current.product,
+                context=current.context,
+                instance=current.instance,
+                expected_current=RouteBindingExpectedCurrent(
+                    state="present",
+                    record_sha256="0" * 64,
+                ),
+                evaluated_at="2026-07-20T00:00:00Z",
+            ),
+        )
+
+        self.assertEqual(plan.status, "conflict")
+        self.assertEqual(plan.findings[0].code, "expected_current_changed")
+
+    def test_reconcile_reports_present_and_missing_expected_current_conflicts(self) -> None:
+        current = _route_binding_record()
+        expected_present = RouteBindingExpectedCurrent(
+            state="present",
+            record_sha256=route_binding_record_sha256(current),
+        )
+
+        unexpected_present = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(route_binding=current),
+            request=_route_binding_reconcile_request(),
+        )
+        unexpected_missing = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(),
+            request=RouteBindingReconcileRequest(
+                product=current.product,
+                context=current.context,
+                instance=current.instance,
+                expected_current=expected_present,
+                evaluated_at="2026-07-20T00:00:00Z",
+            ),
+        )
+
+        self.assertEqual(unexpected_present.findings[0].code, "expected_current_present")
+        self.assertEqual(unexpected_missing.findings[0].code, "expected_current_missing")
+
+    def test_reconcile_refuses_operator_owned_record(self) -> None:
+        current = _route_binding_record()
+
+        plan = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(route_binding=current),
+            request=_route_binding_reconcile_request(current_record=current),
+        )
+
+        self.assertEqual(plan.status, "conflict")
+        self.assertEqual(plan.findings[0].code, "route_binding_ownership_conflict")
+
+    def test_reconcile_rejects_future_source_evidence(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(
+                ingress_audits=(
+                    _ingress_audit_record(),
+                    _ingress_audit_record(
+                        record_id="audit-future",
+                        recorded_at="2026-07-21T00:00:00Z",
+                    ),
+                )
+            ),
+            request=_route_binding_reconcile_request(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.findings[0].code, "evidence_timestamp_future")
 
 
 def _route_binding_policy(*, action: str = "route_binding.read") -> LaunchplaneAuthzPolicy:
@@ -799,18 +1135,23 @@ def _route_binding_policy(*, action: str = "route_binding.read") -> LaunchplaneA
     )
 
 
-def _route_binding_backfill_payload(*, mode: str = "apply") -> dict[str, object]:
+def _route_binding_reconcile_payload(
+    *,
+    mode: str = "apply",
+    current_record: EnvironmentRouteBindingRecord | None = None,
+) -> dict[str, object]:
     payload: dict[str, object] = {
         "mode": mode,
         "product": "example-product",
         "context": "example-testing",
         "instance": "web",
+        "expected_current": _route_binding_expected_current(current_record).model_dump(mode="json"),
     }
     if mode == "apply":
         payload.update(
             {
-                "reason": "Backfill reviewed environment route binding.",
-                "confirmation": "APPLY LAUNCHPLANE ROUTE BINDING",
+                "reason": "Reconcile reviewed environment route binding.",
+                "confirmation": "APPLY LAUNCHPLANE ROUTE BINDING RECONCILE",
             }
         )
     return payload
@@ -835,6 +1176,10 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         read_payload = read_response.json()
         list_payload = list_response.json()
         self.assertEqual(read_payload["record"]["product"], "example-product")
+        self.assertEqual(
+            read_payload["record"]["record_sha256"],
+            route_binding_record_sha256(_route_binding_record()),
+        )
         self.assertNotIn("provider_evidence", read_payload["record"]["provider_target"])
         self.assertNotIn("provider_evidence", read_payload["record"]["ingress"])
         self.assertEqual(list_payload["count"], 1)
@@ -852,7 +1197,7 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
-    async def test_route_binding_backfill_apply_requires_scoped_authz(self) -> None:
+    async def test_route_binding_reconcile_apply_requires_scoped_authz(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=_route_binding_policy(),
@@ -862,18 +1207,18 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         response = await _asgi_request(
             app,
             "POST",
-            "/v1/route-bindings/backfill/apply",
+            "/v1/route-bindings/reconcile",
             headers={
                 "Authorization": "Bearer valid-token",
-                "Idempotency-Key": "route-binding-backfill-denied",
+                "Idempotency-Key": "route-binding-reconcile-denied",
             },
-            payload=_route_binding_backfill_payload(),
+            payload=_route_binding_reconcile_payload(),
         )
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
-    async def test_route_binding_backfill_apply_requires_idempotency_key(self) -> None:
+    async def test_route_binding_reconcile_apply_requires_idempotency_key(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=_route_binding_policy(action="route_binding.apply"),
@@ -883,15 +1228,15 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         response = await _asgi_request(
             app,
             "POST",
-            "/v1/route-bindings/backfill/apply",
+            "/v1/route-bindings/reconcile",
             headers={"Authorization": "Bearer valid-token"},
-            payload=_route_binding_backfill_payload(),
+            payload=_route_binding_reconcile_payload(),
         )
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
 
-    async def test_route_binding_backfill_apply_requires_database_mutation_store(self) -> None:
+    async def test_route_binding_reconcile_apply_requires_database_mutation_store(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
             app = create_launchplane_fastapi_app(
@@ -903,18 +1248,18 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
             response = await _asgi_request(
                 app,
                 "POST",
-                "/v1/route-bindings/backfill/apply",
+                "/v1/route-bindings/reconcile",
                 headers={
                     "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "route-binding-backfill-filesystem",
+                    "Idempotency-Key": "route-binding-reconcile-filesystem",
                 },
-                payload=_route_binding_backfill_payload(),
+                payload=_route_binding_reconcile_payload(),
             )
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
 
-    async def test_route_binding_backfill_apply_reports_running_reservation(self) -> None:
+    async def test_route_binding_reconcile_apply_reports_running_reservation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(
@@ -923,9 +1268,9 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             store.ensure_schema()
             identity = _identity()
-            payload = _route_binding_backfill_payload()
-            route_path = "/v1/route-bindings/backfill/apply"
-            idempotency_key = "route-binding-backfill-running"
+            payload = _route_binding_reconcile_payload()
+            route_path = "/v1/route-bindings/reconcile"
+            idempotency_key = "route-binding-reconcile-running"
             store.reserve_mutation(
                 scope=idempotency_scope(identity),
                 route_path=route_path,
@@ -957,7 +1302,86 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["code"], "mutation_in_progress")
 
-    async def test_route_binding_backfill_apply_writes_record_without_provider_evidence_response(
+    async def test_route_binding_reconcile_apply_releases_expired_reservation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(_provider_target_record())
+            store.write_dokploy_target_record(_dokploy_target_record())
+            store.write_dokploy_target_id_record(_dokploy_target_id_record())
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            store.write_ingress_route_audit_record(_ingress_audit_record())
+            identity = _identity()
+            payload = _route_binding_reconcile_payload()
+            route_path = "/v1/route-bindings/reconcile"
+            idempotency_key = "route-binding-reconcile-expired"
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                return_value="2026-07-20T00:00:00Z",
+            ):
+                store.reserve_mutation(
+                    scope=idempotency_scope(identity),
+                    route_path=route_path,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=idempotency_request_fingerprint(
+                        route_path=route_path,
+                        payload=payload,
+                    ),
+                    lease_owner="expired-worker",
+                    lease_seconds=1,
+                )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=_route_binding_policy(action="route_binding.apply"),
+                record_store_factory=lambda: store,
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_database_mutation_timestamp",
+                    return_value="2026-07-20T00:00:02Z",
+                ),
+                patch(
+                    "control_plane.http_app.utc_now_timestamp",
+                    return_value="2026-07-12T00:15:00Z",
+                ),
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    route_path,
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": idempotency_key,
+                    },
+                    payload=payload,
+                )
+            loaded = store.read_route_binding_record(
+                product="example-product",
+                context_name="example-testing",
+                instance_name="web",
+            )
+            stored_reservation = store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["records"]["route_binding_status"], "created")
+        self.assertIsNotNone(loaded)
+        assert stored_reservation is not None
+        self.assertEqual(stored_reservation.state, "completed")
+        self.assertEqual(stored_reservation.lease_owner, response.json()["trace_id"])
+
+    async def test_route_binding_reconcile_apply_writes_record_without_provider_evidence_response(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -980,9 +1404,9 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
 
             request_headers = {
                 "Authorization": "Bearer valid-token",
-                "Idempotency-Key": "route-binding-backfill-1",
+                "Idempotency-Key": "route-binding-reconcile-1",
             }
-            request_payload = _route_binding_backfill_payload()
+            request_payload = _route_binding_reconcile_payload()
             with patch(
                 "control_plane.http_app.utc_now_timestamp",
                 return_value="2026-07-12T00:15:00Z",
@@ -990,14 +1414,14 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
                 response = await _asgi_request(
                     app,
                     "POST",
-                    "/v1/route-bindings/backfill/apply",
+                    "/v1/route-bindings/reconcile",
                     headers=request_headers,
                     payload=request_payload,
                 )
                 replayed_response = await _asgi_request(
                     app,
                     "POST",
-                    "/v1/route-bindings/backfill/apply",
+                    "/v1/route-bindings/reconcile",
                     headers=request_headers,
                     payload=request_payload,
                 )
@@ -1008,8 +1432,8 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             stored_reservation = store.read_idempotency_record(
                 scope=idempotency_scope(_identity()),
-                route_path="/v1/route-bindings/backfill/apply",
-                idempotency_key="route-binding-backfill-1",
+                route_path="/v1/route-bindings/reconcile",
+                idempotency_key="route-binding-reconcile-1",
             )
             store.close()
 
@@ -1020,14 +1444,74 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replayed_payload["replayed"])
         self.assertEqual(replayed_payload["original_trace_id"], payload["trace_id"])
         self.assertEqual(replayed_payload["result"], payload["result"])
-        self.assertEqual(payload["records"]["route_binding_status"], "applied")
+        self.assertEqual(payload["records"]["route_binding_status"], "created")
         self.assertNotIn("provider_evidence", payload["result"]["record"]["provider_target"])
         self.assertEqual(loaded.ingress.endpoint_key, "example-edge")
         self.assertIsNotNone(stored_reservation)
         assert stored_reservation is not None
         self.assertEqual(stored_reservation.state, "completed")
 
-    async def test_route_binding_backfill_dry_run_reports_blockers_without_writing(self) -> None:
+    async def test_route_binding_reconcile_apply_refreshes_existing_evidence(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(_provider_target_record())
+            store.write_dokploy_target_record(_dokploy_target_record())
+            store.write_dokploy_target_id_record(_dokploy_target_id_record())
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            store.write_ingress_route_audit_record(_ingress_audit_record())
+            current_plan = plan_route_binding_reconcile(
+                record_store=store,
+                request=_route_binding_reconcile_request(evaluated_at="2026-07-19T00:00:00Z"),
+            )
+            assert current_plan.record is not None
+            current_record = current_plan.record
+            store.write_route_binding_record(current_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_route_binding_policy(action="route_binding.apply"),
+                record_store_factory=lambda: store,
+            )
+
+            with patch(
+                "control_plane.http_app.utc_now_timestamp",
+                return_value="2026-07-20T00:00:00Z",
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/route-bindings/reconcile",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "route-binding-refresh-1",
+                    },
+                    payload=_route_binding_reconcile_payload(current_record=current_record),
+                )
+            refreshed_record = store.read_route_binding_record(
+                product=current_record.product,
+                context_name=current_record.context,
+                instance_name=current_record.instance,
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"]["route_binding_status"], "refreshed")
+        self.assertEqual(payload["result"]["operation"], "refresh")
+        self.assertEqual(
+            refreshed_record.source.stale_after,
+            "2026-07-21T00:00:00Z",
+        )
+        self.assertNotEqual(
+            route_binding_record_sha256(current_record),
+            route_binding_record_sha256(refreshed_record),
+        )
+
+    async def test_route_binding_reconcile_dry_run_reports_blockers_without_writing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(
@@ -1041,7 +1525,7 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
             store.write_edge_endpoint_record(_edge_endpoint_record())
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
-                authz_policy=_route_binding_policy(action="route_binding.apply"),
+                authz_policy=_route_binding_policy(action="route_binding.read"),
                 record_store_factory=lambda: store,
             )
 
@@ -1052,9 +1536,9 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
                 response = await _asgi_request(
                     app,
                     "POST",
-                    "/v1/route-bindings/backfill/apply",
+                    "/v1/route-bindings/reconcile",
                     headers={"Authorization": "Bearer valid-token"},
-                    payload=_route_binding_backfill_payload(mode="dry-run"),
+                    payload=_route_binding_reconcile_payload(mode="dry-run"),
                 )
             with self.assertRaises(FileNotFoundError):
                 store.read_route_binding_record(
@@ -1069,7 +1553,7 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"]["route_binding_status"], "blocked")
         self.assertEqual(payload["result"]["findings"][0]["code"], "ingress_audit_missing")
 
-    async def test_route_binding_backfill_refuses_to_overwrite_existing_record(self) -> None:
+    async def test_route_binding_reconcile_refuses_operator_owned_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(
@@ -1079,6 +1563,11 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
             store.ensure_schema()
             existing_record = _route_binding_record(domain="existing.example.test")
             store.write_route_binding_record(existing_record)
+            store.write_provider_target_record(_provider_target_record())
+            store.write_dokploy_target_record(_dokploy_target_record())
+            store.write_dokploy_target_id_record(_dokploy_target_id_record())
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            store.write_ingress_route_audit_record(_ingress_audit_record())
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_route_binding_policy(action="route_binding.apply"),
@@ -1088,12 +1577,12 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
             response = await _asgi_request(
                 app,
                 "POST",
-                "/v1/route-bindings/backfill/apply",
+                "/v1/route-bindings/reconcile",
                 headers={
                     "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "route-binding-backfill-existing",
+                    "Idempotency-Key": "route-binding-reconcile-existing",
                 },
-                payload=_route_binding_backfill_payload(),
+                payload=_route_binding_reconcile_payload(current_record=existing_record),
             )
             loaded = store.read_route_binding_record(
                 product="example-product",
@@ -1102,15 +1591,18 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             stored_reservation = store.read_idempotency_record(
                 scope=idempotency_scope(_identity()),
-                route_path="/v1/route-bindings/backfill/apply",
-                idempotency_key="route-binding-backfill-existing",
+                route_path="/v1/route-bindings/reconcile",
+                idempotency_key="route-binding-reconcile-existing",
             )
             store.close()
 
         self.assertEqual(response.status_code, 202)
         payload = response.json()
-        self.assertEqual(payload["records"]["route_binding_status"], "blocked")
-        self.assertEqual(payload["result"]["findings"][0]["code"], "route_binding_exists")
+        self.assertEqual(payload["records"]["route_binding_status"], "conflict")
+        self.assertEqual(
+            payload["result"]["findings"][0]["code"],
+            "route_binding_ownership_conflict",
+        )
         self.assertEqual(loaded, existing_record)
         self.assertIsNone(stored_reservation)
 
@@ -1134,13 +1626,14 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
             "read_route_binding_record",
         )
         self.assertEqual(
-            openapi["paths"]["/v1/route-bindings/backfill/apply"]["post"]["operationId"],
-            "apply_route_binding_backfill",
+            openapi["paths"]["/v1/route-bindings/reconcile"]["post"]["operationId"],
+            "reconcile_route_binding",
         )
+        self.assertNotIn("/v1/route-bindings/backfill/apply", openapi["paths"])
         self.assertEqual(
-            openapi["paths"]["/v1/route-bindings/backfill/apply"]["post"]["responses"]["202"][
-                "content"
-            ]["application/json"]["schema"]["$ref"],
+            openapi["paths"]["/v1/route-bindings/reconcile"]["post"]["responses"]["202"]["content"][
+                "application/json"
+            ]["schema"]["$ref"],
             "#/components/schemas/AcceptedEvidenceResponse",
         )
         self.assertEqual(
@@ -1148,6 +1641,8 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
             False,
         )
         self.assertIn("RouteBindingRecordResponse", openapi["components"]["schemas"])
+        self.assertIn("RouteBindingReconcileEnvelope", openapi["components"]["schemas"])
+        self.assertIn("RouteBindingExpectedCurrent", openapi["components"]["schemas"])
         self.assertIn("AcceptedEvidenceResponse", openapi["components"]["schemas"])
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Literal
 
@@ -243,6 +244,7 @@ class EnvironmentRouteBindingReadModel(BaseModel):
     status: RouteBindingStatus
     source: RouteBindingSource
     updated_at: str
+    record_sha256: str
 
 
 def build_route_binding_key(*, product: str, context: str, instance: str) -> str:
@@ -283,7 +285,18 @@ def redacted_route_binding_record(
         status=record.status,
         source=record.source,
         updated_at=record.updated_at,
+        record_sha256=route_binding_record_sha256(record),
     )
+
+
+def route_binding_record_sha256(record: EnvironmentRouteBindingRecord) -> str:
+    canonical_payload = json.dumps(
+        record.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
 
 
 def _required_text(value: str, message: str) -> str:
