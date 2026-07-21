@@ -135,7 +135,10 @@ cleanup scope so the store is always closed.
     expect either an absent binding or the opaque SHA-256 returned by the current
     record read. The service derives topology only from DB-backed provider-target,
     tracked Dokploy target and target-id, edge-endpoint, and terminal ingress
-    audit records. It returns create, unchanged, evidence-refresh, blocked, or
+    audit records. The terminal audit's exact `edge_endpoint_key` joins the
+    route to its active edge-endpoint record; provider project/display names do
+    not substitute for that persisted relationship. It returns create,
+    unchanged, evidence-refresh, blocked, or
     authority-conflict findings without accepting caller-supplied domains or
     provider identifiers. `dry-run` does not require an `Idempotency-Key`;
     `apply` does. Apply compare-and-writes the full expected record and commits

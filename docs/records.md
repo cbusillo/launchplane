@@ -550,7 +550,10 @@ an ORM column/table or remains only in the evidence payload.
   comparing existing Launchplane provider-target, tracked Dokploy target, edge
   endpoint, and applied ingress audit records. The provider-target record must
   equal the projection of the Dokploy target plus target-id record; the latest
-  matching apply audit must be terminal and include explicit TLS ownership.
+  matching apply audit must be terminal, include explicit TLS ownership, and
+  name the active edge-endpoint record used for the route. The applied audit is
+  the join authority for that edge endpoint; Dokploy project/display names are
+  not treated as edge-server identities.
   Source record timestamps are retained as versions. Each successful service
   re-evaluation attests the derived binding for 24 hours; reconcile is an
   unchanged no-op while more than 12 hours remain and refreshes at half-life or

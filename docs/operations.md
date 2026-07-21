@@ -436,6 +436,12 @@ the API. It never accepts domains, provider target IDs, ingress host IDs,
 certificate references, edge addresses, or provider payloads as workflow
 inputs, and it performs no provider mutation.
 
+The latest terminal applied ingress audit is the authority linking a tracked
+domain set to its active edge endpoint. Reconcile does not infer that link from
+Dokploy project or display names. Missing audits or an audit that names no active
+endpoint remain explicit blockers and require the ingress authority to be
+recorded through its supported service workflow before route-binding apply.
+
 Route-binding read and apply authority is instance-aware. Context-scoped rules
 may list bindings only when no instance filter is supplied; current-record reads
 and reconcile calls require the requested instance. Production-instance grants
