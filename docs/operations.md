@@ -393,14 +393,15 @@ secret. `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` owns the primary operator set;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
 Odoo stable managed route-binding set; and
 `LAUNCHPLANE_AUTHZ_ODOO_EXTERNAL_ROUTE_BINDING_MANAGED_SET_JSON` owns the
-testing-first external route-binding set. The `Manage Launchplane Authorization` wrapper
-selects one of those explicit secrets and forwards it into the reusable worker,
-whose OIDC-minting job remains gated by the `launchplane-authz-admin`
-environment. Never replace the unreadable primary secret with a partial set;
-use a distinct managed set and protected secret instead. The JSON owns desired state only:
-`schema_version`, `product`, `managed_set_id`, migration/adoption intent, and
-`desired_policy`. Dispatch-time mode, reason, issue reference, and reviewed plan
-digest are deliberately excluded from that secret.
+testing-first external route-binding set. The
+`Manage Launchplane Authorization` wrapper selects one of those explicit
+secrets and forwards it into the reusable worker, whose OIDC-minting job remains
+gated by the `launchplane-authz-admin` environment. Never replace the unreadable
+primary secret with a partial set; use a distinct managed set and protected
+secret instead. The JSON owns desired state only: `schema_version`, `product`,
+`managed_set_id`, migration/adoption intent, and `desired_policy`.
+Dispatch-time mode, reason, issue reference, and reviewed plan digest are
+deliberately excluded from that secret.
 
 Use the `Manage Launchplane Authorization` workflow on the default branch.
 Select the intended `managed_set`, then dispatch `mode=dry_run` with the final
@@ -411,6 +412,46 @@ one non-canceling concurrency group. During the one-time bootstrap before the
 dedicated wrapper is present in active policy, dispatch `Deploy Launchplane`
 with `authz_managed_mode=dry_run`; that job calls the same protected immutable
 worker without building or deploying an image.
+
+Babysit protected operator workflows with the installed GitHub workflow helper
+instead of dispatching and then polling by workflow name:
+
+```sh
+skills_home="${CODE_HOME:-${CODEX_HOME:-$HOME/.code}}/skills"
+uv run "$skills_home/github/scripts/github_workflow_babysit.py" dispatch \
+  --repo OWNER/REPO \
+  --workflow authz-policy-reconcile.yml \
+  --ref main \
+  --field mode=dry_run \
+  --field managed_set=MANAGED_SET \
+  --field reason=REASON \
+  --field related_issue=ISSUE \
+  --approve-environment launchplane-authz-admin \
+  --timeout-seconds 1800
+```
+
+The helper dispatches with the configured automation actor and reviews the
+protected environment with the active local human GitHub account. Those
+identities must be distinct; do not weaken the environment's self-review
+protection. GitHub's returned run ID and URL are authoritative. If dispatch
+does not return exact run details, stop rather than rediscovering a just-created
+run through list filtering. An already-known run may be resumed with `watch
+--run-id RUN_ID`.
+
+Every `status=waiting` poll queries `pending_deployments` immediately and
+reports the environment, eligible reviewers, wait timer, and
+`current_user_can_approve`. Approval occurs only when the active human is
+eligible and the exact environment name was supplied with
+`--approve-environment`, which is the operator's explicit authorization for
+that protected action. A triggering-actor self-review denial or ineligible
+reviewer stops immediately with an actionable result. The run must also report
+the configured automation actor as its triggering actor. Before approval, the
+helper reads the active human's existing review history so resuming the same run
+does not repeat a non-idempotent approval. Timer-only and custom protection
+waits remain bounded; queued runner jobs and waiting runs with no pending
+deployment are reported as distinct diagnostics. The default timeout is 30
+minutes and the hard maximum is two hours, so workflow babysitting cannot
+silently poll overnight.
 
 Review the job summary and 30-day evidence artifact. The review must cover
 `result.diff.plan_sha256`, previous and desired policy hashes, desired-set and
