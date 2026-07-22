@@ -17,6 +17,14 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
         "target_logs.read",
     }
 )
+_EXACT_INSTANCE_WORKFLOW_AUTHZ_ACTIONS = frozenset(
+    {
+        "product_profile.health_monitoring.apply",
+        "product_profile.health_monitoring.plan",
+        "route_binding.external.apply",
+        "route_binding.external.plan",
+    }
+)
 _DUAL_SCOPE_AUTHZ_ACTIONS = frozenset(
     {
         "driver.read",
@@ -46,3 +54,8 @@ def instance_scoped_authz_actions() -> frozenset[str]:
 @lru_cache(maxsize=1)
 def exclusively_instance_scoped_authz_actions() -> frozenset[str]:
     return instance_scoped_authz_actions() - _DUAL_SCOPE_AUTHZ_ACTIONS
+
+
+@lru_cache(maxsize=1)
+def exact_instance_workflow_authz_actions() -> frozenset[str]:
+    return _EXACT_INSTANCE_WORKFLOW_AUTHZ_ACTIONS

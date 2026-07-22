@@ -637,6 +637,10 @@ mutable reusable ref may appear only in a reviewed overlap plan when the active
 policy already authorizes that exact ref; narrowing removes it from the same
 stable managed rule after canary evidence.
 
+Reviewed exact-instance external-route and product-health-monitoring workflow
+rules require the same immutable reusable-workflow identity even for non-prod
+instances, and those actions cannot be authorized by schema-v1 policy.
+
 
 The service also serves the built operator UI shell at `/`, with `/ui` retained
 as a route alias. This route family is native FastAPI. Built assets live under
@@ -1521,6 +1525,10 @@ host. The plan binds the complete current profile digest. Apply rebuilds the
 candidate from fresh DB-backed state and commits the profile compare-and-write
 with completed replay evidence atomically, so reviewed-plan drift and concurrent
 profile changes fail stale.
+
+Before authentication or JSON parsing, the ASGI boundary requires
+`application/json`, exactly one bounded `Content-Length`, no transfer encoding,
+and no more than 64 KiB of declared or observed request body.
 
 Preview TLS apply is a field-bounded mutation for Odoo-driver profiles and
 `preview.domain_certificate_type`. It requires

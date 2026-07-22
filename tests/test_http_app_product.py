@@ -191,11 +191,18 @@ def _product_health_monitoring_profile() -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord.model_validate(payload)
 
 
-def _product_health_monitoring_identity() -> GitHubActionsIdentity:
+def _product_health_monitoring_identity(
+    *,
+    job_workflow_ref: str = (
+        "cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml@"
+        "e61dc9a6161f9b97d2182ca69c4cadaa1df81fca"
+    ),
+) -> GitHubActionsIdentity:
     return _identity(
         workflow_ref=(
             "every/verireel/.github/workflows/product-health-monitoring.yml@refs/heads/main"
         ),
+        job_workflow_ref=job_workflow_ref,
         event_name="workflow_dispatch",
     )
 
@@ -2533,6 +2540,70 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_apply_product_health_monitoring_rejects_schema_v1_authority(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/"
+                            "product-health-monitoring.yml@refs/heads/main"
+                        ],
+                        "job_workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/"
+                            "reusable-product-health-monitoring.yml@"
+                            "e61dc9a6161f9b97d2182ca69c4cadaa1df81fca"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["odoo-product"],
+                        "contexts": ["cm"],
+                        "actions": ["product_profile.health_monitoring.plan"],
+                    }
+                ]
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_health_monitoring_identity()),
+            authz_policy=policy,
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("state")),
+        )
+
+        response = await _post_product_health_monitoring(
+            app,
+            _product_health_monitoring_payload(),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_apply_product_health_monitoring_requires_pinned_worker_identity(
+        self,
+    ) -> None:
+        for job_workflow_ref in (
+            "",
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-product-health-monitoring.yml@" + "b" * 40,
+        ):
+            with self.subTest(job_workflow_ref=job_workflow_ref):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(
+                        _product_health_monitoring_identity(
+                            job_workflow_ref=job_workflow_ref,
+                        )
+                    ),
+                    authz_policy=_product_health_monitoring_policy(),
+                    record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("state")),
+                )
+
+                response = await _post_product_health_monitoring(
+                    app,
+                    _product_health_monitoring_payload(),
+                )
+
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
     async def test_apply_product_health_monitoring_rejects_non_public_check(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

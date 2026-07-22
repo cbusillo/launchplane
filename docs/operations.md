@@ -539,6 +539,10 @@ into explicit context and `*` instance representations so their current breadth
 is preserved without teaching new schema-v2 rules that an empty selector means
 all instances.
 
+Reviewed exact-instance workflow actions for external route binding and product
+health monitoring require schema v2 and cannot be authorized by a schema-v1
+compatibility rule.
+
 When the CLI uses `--session-cookie`, it first reads `GET /v1/auth/session` and
 then sends the returned single-use CSRF token with strict same-origin fetch
 metadata. Use the configured public Launchplane URL so its origin matches

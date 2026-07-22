@@ -2573,6 +2573,11 @@ def _product_health_monitoring_policy(
                         "every/verireel/.github/workflows/"
                         "product-health-monitoring.yml@refs/heads/main"
                     ],
+                    "job_workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/"
+                        "reusable-product-health-monitoring.yml@"
+                        "e61dc9a6161f9b97d2182ca69c4cadaa1df81fca"
+                    ],
                     "event_names": ["workflow_dispatch"],
                     "products": [product],
                     "contexts": [context],

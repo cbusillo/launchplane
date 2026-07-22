@@ -594,7 +594,9 @@ _SECRET_REENCRYPT_ROUTE = "/v1/secrets/reencrypt"
 _EVIDENCE_INGRESS_MAX_BODY_BYTES = 2 * 1024 * 1024
 _GITHUB_WEBHOOK_MAX_BODY_BYTES = 2 * 1024 * 1024
 _PRODUCT_CONFIG_MAX_BODY_BYTES = 2 * 1024 * 1024
+_PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES = 64 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
+_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     **{
         route: ("Evidence ingress", _EVIDENCE_INGRESS_MAX_BODY_BYTES, True, False)
@@ -609,6 +611,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     _PRODUCT_CONFIG_APPLY_ROUTE: (
         "Product config",
         _PRODUCT_CONFIG_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE: (
+        "Product health monitoring",
+        _PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -647,7 +655,6 @@ _EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE = "/v1/route-bindings/external/reconcile
 _ROUTE_BINDING_RECONCILE_ROUTE = "/v1/route-bindings/reconcile"
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
-_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"

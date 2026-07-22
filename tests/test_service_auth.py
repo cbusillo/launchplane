@@ -1149,6 +1149,27 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
                 target=AuthorizationTarget(scope="instance", instances=("testing",)),
             )
         )
+
+    def test_schema_v1_rejects_exact_instance_workflow_actions(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/verireel",
+                    products=("verireel",),
+                    contexts=("verireel",),
+                ),
+            )
+        )
+
+        self.assertFalse(
+            policy.allows(
+                identity=_actions_identity(),
+                action="product_profile.health_monitoring.plan",
+                product="verireel",
+                context="verireel",
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+            )
+        )
         self.assertTrue(
             policy.allows(
                 identity=_actions_identity(),

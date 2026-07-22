@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from control_plane.authz_scope import exact_instance_workflow_authz_actions
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -414,7 +415,9 @@ def _github_rule_requires_immutable_workflow(
     rule: GitHubActionsPolicyRule,
 ) -> bool:
     return any(
-        action_safety(action) in _IMMUTABLE_WORKFLOW_ACTION_SAFETIES for action in rule.actions
+        action in exact_instance_workflow_authz_actions()
+        or action_safety(action) in _IMMUTABLE_WORKFLOW_ACTION_SAFETIES
+        for action in rule.actions
     ) or any(instance in {"*", "prod"} for instance in rule.instances)
 
 
