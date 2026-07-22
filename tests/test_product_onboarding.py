@@ -1193,7 +1193,12 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("input_status", workflow_text)
 
     def test_ingress_route_dry_run_workflow_rejects_non_object_options(self) -> None:
-        workflow_text = Path(".github/workflows/ingress-route-dry-run.yml").read_text(
+        wrapper_text = Path(".github/workflows/ingress-route-dry-run.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow_text = Path(
+            ".github/workflows/reusable-ingress-route-dry-run.yml"
+        ).read_text(
             encoding="utf-8"
         )
 
@@ -1234,8 +1239,14 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("edge_endpoint_key: $edge_endpoint_key", workflow_text)
         self.assertNotIn('                "forward_host",', workflow_text)
         self.assertNotIn('                "edge_endpoint_key",', workflow_text)
-        inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
-        self.assertEqual(inputs_section.count("        description:"), 11)
+        inputs_section = wrapper_text.split("permissions:", maxsplit=1)[0]
+        self.assertEqual(inputs_section.count("        description:"), 12)
+        self.assertIn("      instance:", inputs_section)
+        self.assertIn(
+            "reusable-ingress-route-dry-run.yml@"
+            "878e6a317cfbd028c89d49cfa4ce34553aac0123",
+            wrapper_text,
+        )
         self.assertIn("edge_endpoint_key:", inputs_section)
         self.assertIn('default: ""', inputs_section)
         self.assertNotIn("identity_access_provider:", inputs_section)
@@ -1292,7 +1303,7 @@ class ProductOnboardingTests(unittest.TestCase):
         ):
             self.assertIn(f'"{route_option}"', workflow_text)
         for forward_scheme in ("http", "https", "path", "empty", "grpc", "grpcs"):
-            self.assertIn(f"          - {forward_scheme}", workflow_text)
+            self.assertIn(f"          - {forward_scheme}", wrapper_text)
 
     def test_ingress_route_audit_read_workflow_is_plan_scoped_get(self) -> None:
         workflow_text = Path(".github/workflows/ingress-route-audit-read.yml").read_text(
@@ -1367,7 +1378,12 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("route_options_json", workflow_text)
 
     def test_ingress_route_apply_workflow_requires_operator_guards(self) -> None:
-        workflow_text = Path(".github/workflows/ingress-route-apply.yml").read_text(
+        wrapper_text = Path(".github/workflows/ingress-route-apply.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow_text = Path(
+            ".github/workflows/reusable-ingress-route-apply.yml"
+        ).read_text(
             encoding="utf-8"
         )
 
@@ -1400,8 +1416,14 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('echo "- Context: $CONTEXT"', workflow_text)
         self.assertNotIn('echo "- Product: ${{ inputs.product }}"', workflow_text)
         self.assertNotIn('echo "- Context: ${{ inputs.context }}"', workflow_text)
-        inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
-        self.assertEqual(inputs_section.count("        description:"), 6)
+        inputs_section = wrapper_text.split("permissions:", maxsplit=1)[0]
+        self.assertEqual(inputs_section.count("        description:"), 7)
+        self.assertIn("      instance:", inputs_section)
+        self.assertIn(
+            "reusable-ingress-route-apply.yml@"
+            "878e6a317cfbd028c89d49cfa4ce34553aac0123",
+            wrapper_text,
+        )
 
     def test_product_context_cutover_uses_launchplane_request(self) -> None:
         workflow_text = Path(".github/workflows/product-context-cutover.yml").read_text(
