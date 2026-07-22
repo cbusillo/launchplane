@@ -10,6 +10,8 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
         "inventory.read",
         "promotion.write",
         "promotion.read",
+        "route_binding.external.apply",
+        "route_binding.external.plan",
         "target_logs.read",
     }
 )

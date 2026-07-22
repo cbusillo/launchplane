@@ -15,6 +15,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentRecord,
     PublicIngressObservationRecord,
     PublicIngressObservationStatus,
+    PublicIngressRouteBindingSourceKind,
     PublicIngressTargetObservation,
     PublicIngressTlsObservation,
     PublicIngressTlsProbeEvidence,
@@ -27,6 +28,7 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTerminationKind,
     RouteBindingTlsOwner,
 )
+from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 
 
 _NOW = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
@@ -68,6 +70,7 @@ def _route_binding(
     target_name: str = "example-site-prod",
     ingress_provider: str = "npmplus",
     tls_owner: RouteBindingTlsOwner = "launchplane",
+    source_kind: str = "service",
     freshness_status: str = "recorded",
     stale_after: str = "2099-01-01T00:00:00Z",
 ) -> EnvironmentRouteBindingRecord:
@@ -90,17 +93,21 @@ def _route_binding(
                 "provider": ingress_provider,
                 "endpoint_key": "public-edge",
                 "termination_kind": "edge",
-                "provider_evidence": {"host_id": "edge-host-private-456"},
+                "provider_evidence": (
+                    {} if ingress_provider == "external" else {"host_id": "edge-host-private-456"}
+                ),
             },
             "domains": ({"domain_name": domain_name, "role": "primary"},),
             "tls": {
                 "owner": tls_owner,
                 "provider_evidence": (
-                    {"certificate_id": "certificate-private-789"} if tls_owner != "none" else {}
+                    {"certificate_id": "certificate-private-789"}
+                    if tls_owner not in {"none", "external"}
+                    else {}
                 ),
             },
             "source": {
-                "source_kind": "service",
+                "source_kind": source_kind,
                 "source_label": "provider reconciliation",
                 "source_record_ids": ("provider-target-record", "ingress-audit-record"),
                 "refreshed_at": "2026-07-14T10:30:00Z",
@@ -137,6 +144,7 @@ def _tls_observation(
     recorded_owner: RouteBindingTlsOwner = "launchplane",
     recorded_ingress_provider: str = "npmplus",
     recorded_termination_kind: RouteBindingTerminationKind = "edge",
+    recorded_source_kind: PublicIngressRouteBindingSourceKind = "service",
     probe_stale_after: str = "2099-01-01T00:00:00Z",
 ) -> PublicIngressObservationRecord:
     failure_codes: dict[PublicIngressTlsStatus, PublicIngressFailureCode] = {
@@ -182,7 +190,7 @@ def _tls_observation(
                 owner=recorded_owner,
                 ingress_provider=recorded_ingress_provider,
                 termination_kind=recorded_termination_kind,
-                source_kind="service",
+                source_kind=recorded_source_kind,
                 source_label="provider reconciliation",
                 source_record_ids=("provider-target-record",),
                 refreshed_at="2026-07-14T10:30:00Z",
@@ -222,6 +230,66 @@ def _tls_observation(
         failure_code=failure_code,
         targets=(target,),
         summary=f"TLS status for {domain_name}: {status}",
+    )
+
+
+def _http_observation(
+    *,
+    product: str = "example-site",
+    domain_name: str = "example.test",
+    observed_at: str = "2026-07-14T11:30:00Z",
+    runtime_identity_status: RuntimeIdentityStatus = "match",
+) -> PublicIngressObservationRecord:
+    expected_identity = RuntimeIdentity(
+        product=product,
+        context="example-context",
+        instance="prod",
+        deployment_record_id="deployment-1",
+        artifact_id="artifact-1",
+        source_git_ref="refs/heads/main",
+    )
+    observed_identity = expected_identity if runtime_identity_status == "match" else None
+    status: PublicIngressObservationStatus = (
+        "pass" if runtime_identity_status in {"match", "unchecked"} else "fail"
+    )
+    failure_code: PublicIngressFailureCode | None = (
+        None if status == "pass" else "wrong_runtime_identity"
+    )
+    target = PublicIngressTargetObservation(
+        target="health_url",
+        url=f"https://{domain_name}/healthz",
+        status=status,
+        failure_code=failure_code,
+        http_status=200,
+        final_url=f"https://{domain_name}/healthz",
+        runtime_identity_status=runtime_identity_status,
+        runtime_identity_detail=(
+            "Runtime identity matched expected deployment."
+            if runtime_identity_status == "match"
+            else ""
+            if runtime_identity_status == "unchecked"
+            else "Expected identity unavailable."
+        ),
+        observed_runtime_identity=observed_identity,
+        summary="Public health route verified." if status == "pass" else "Runtime unverified.",
+    )
+    return PublicIngressObservationRecord(
+        record_id=f"http-observation-{product}-{runtime_identity_status}",
+        product=product,
+        repository=f"example/{product}",
+        driver_id="generic-web",
+        context="example-context",
+        instance="prod",
+        check_name="public-ingress",
+        check_kind="public_http",
+        observed_at=observed_at,
+        status=status,
+        failure_code=failure_code,
+        base_url=f"https://{domain_name}",
+        health_url=f"https://{domain_name}/healthz",
+        expected_runtime_identity=expected_identity,
+        targets=(target,),
+        summary=target.summary,
     )
 
 
@@ -321,6 +389,117 @@ class _TopologyStore:
 
 
 class ProductTopologyReadModelTests(unittest.TestCase):
+    def test_external_ingress_projects_fresh_public_runtime_proof(self) -> None:
+        profile = _profile()
+        route_binding = _route_binding(
+            ingress_provider="external",
+            tls_owner="external",
+            source_kind="operator",
+        )
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=route_binding,
+                observations=(
+                    _http_observation(runtime_identity_status="unchecked"),
+                    _http_observation(),
+                    _tls_observation(
+                        status="valid",
+                        recorded_owner="external",
+                        recorded_ingress_provider="external",
+                        recorded_source_kind="operator",
+                    ),
+                ),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=LaunchplaneLaneSummary(
+                context="example-context",
+                instance="prod",
+                provider_target=_provider_target(),
+            ),
+            now=_NOW,
+        )
+
+        self.assertEqual(topology.provider_recorded.ingress.provider, "external")
+        self.assertEqual(topology.provider_recorded.ingress.path, "edge_to_provider")
+        self.assertEqual(topology.provider_recorded.tls.terminator, "external")
+        self.assertEqual(topology.observed.ingress.trust_state, "verified")
+        self.assertEqual(topology.observed.ingress.runtime_identity_status, "match")
+        self.assertEqual(
+            topology.observed.ingress.observed_runtime_identity,
+            topology.observed.ingress.expected_runtime_identity,
+        )
+        warning_codes = {warning.code for warning in topology.warnings}
+        self.assertIn("external_ingress_internals_unsupported", warning_codes)
+        self.assertNotIn("public_ingress_observation_missing", warning_codes)
+        self.assertNotIn("stale_public_ingress_observation", warning_codes)
+        self.assertNotIn("public_runtime_identity_unverified", warning_codes)
+
+    def test_external_ingress_fails_closed_for_missing_stale_or_unverified_public_proof(
+        self,
+    ) -> None:
+        profile = _profile()
+        route_binding = _route_binding(
+            ingress_provider="external",
+            tls_owner="external",
+            source_kind="operator",
+        )
+        missing = build_product_environment_topology(
+            record_store=_TopologyStore(route_binding=route_binding),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=LaunchplaneLaneSummary(
+                context="example-context",
+                instance="prod",
+                provider_target=_provider_target(),
+            ),
+            now=_NOW,
+        )
+        stale = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=route_binding,
+                observations=(_http_observation(observed_at="2026-07-14T08:00:00Z"),),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=LaunchplaneLaneSummary(
+                context="example-context",
+                instance="prod",
+                provider_target=_provider_target(),
+            ),
+            now=_NOW,
+        )
+        unverified = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=route_binding,
+                observations=(_http_observation(runtime_identity_status="unverifiable"),),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=LaunchplaneLaneSummary(
+                context="example-context",
+                instance="prod",
+                provider_target=_provider_target(),
+            ),
+            now=_NOW,
+        )
+
+        self.assertIn(
+            "public_ingress_observation_missing",
+            {warning.code for warning in missing.warnings},
+        )
+        missing_severity = {warning.code: warning.severity for warning in missing.warnings}
+        self.assertEqual(missing_severity["tls_observation_missing"], "error")
+        self.assertEqual(stale.observed.ingress.trust_state, "stale")
+        self.assertIn(
+            "stale_public_ingress_observation",
+            {warning.code for warning in stale.warnings},
+        )
+        self.assertIn(
+            "public_runtime_identity_unverified",
+            {warning.code for warning in unverified.warnings},
+        )
+
     def test_projection_diagnoses_cm_website_tls_hostname_mismatch(self) -> None:
         profile = _profile(
             product="odoo-tenant-cm-website",

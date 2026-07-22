@@ -4044,6 +4044,73 @@
         "title": "EveryCodeWorkRequestSummary",
         "type": "object"
       },
+      "ExternalRouteBindingReconcileEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmation": {
+            "default": "",
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "desired_status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "disabled"
+            ],
+            "title": "Desired Status",
+            "type": "string"
+          },
+          "expected_current": {
+            "$ref": "#/components/schemas/RouteBindingExpectedCurrent"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_label": {
+            "default": "operator-external-reconcile",
+            "title": "Source Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "expected_current"
+        ],
+        "title": "ExternalRouteBindingReconcileEnvelope",
+        "type": "object"
+      },
       "GenericWebDeployEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -12241,6 +12308,16 @@
       "ProductObservedIngress": {
         "additionalProperties": false,
         "properties": {
+          "expected_runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "failure_code": {
             "default": "",
             "title": "Failure Code",
@@ -12261,12 +12338,45 @@
             "title": "Observed At",
             "type": "string"
           },
+          "observed_runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
           "record_id": {
             "default": "",
             "title": "Record Id",
+            "type": "string"
+          },
+          "runtime_identity_detail": {
+            "default": "",
+            "title": "Runtime Identity Detail",
+            "type": "string"
+          },
+          "runtime_identity_status": {
+            "default": "unchecked",
+            "enum": [
+              "unchecked",
+              "match",
+              "mismatch",
+              "missing",
+              "malformed",
+              "unverifiable"
+            ],
+            "title": "Runtime Identity Status",
+            "type": "string"
+          },
+          "stale_after": {
+            "default": "",
+            "title": "Stale After",
             "type": "string"
           },
           "status": {
@@ -14746,6 +14856,7 @@
               "domain_divergence",
               "provider_placement_missing",
               "placement_divergence",
+              "external_ingress_internals_unsupported",
               "ingress_ownership_unknown",
               "ingress_divergence",
               "tls_ownership_unknown",
@@ -14758,6 +14869,9 @@
               "tls_untrusted",
               "tls_unavailable",
               "tls_unsupported",
+              "public_ingress_observation_missing",
+              "stale_public_ingress_observation",
+              "public_runtime_identity_unverified",
               "public_ingress_failure"
             ],
             "title": "Code",
@@ -42995,6 +43109,106 @@
           }
         },
         "summary": "Read repository product mapping"
+      }
+    },
+    "/v1/route-bindings/external/reconcile": {
+      "post": {
+        "operationId": "reconcile_external_route_binding",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExternalRouteBindingReconcileEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run or apply one externally managed route-binding reconcile"
       }
     },
     "/v1/route-bindings/reconcile": {

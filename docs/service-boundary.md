@@ -147,6 +147,19 @@ cleanup scope so the store is always closed.
     creates and current-row refreshes. Filesystem-backed service apply fails
     closed because it cannot provide that atomic boundary; filesystem storage
     remains available for explicit local rehearsal.
+  - `POST /v1/route-bindings/external/reconcile`, requiring exclusively
+    instance-scoped `route_binding.external.plan` for `dry-run` and
+    `route_binding.external.apply` for `apply`. The request supplies only the
+    product/context/instance tuple, desired active or disabled authority state,
+    expected-current digest, provenance label, reason, and confirmation. The
+    service derives public HTTPS domains and provider placement from DB-backed
+    product-profile and provider-target records, requires a strict public
+    runtime-identity check, and records an operator-owned external edge with
+    external TLS ownership. It does not call or claim internal evidence from an
+    external proxy. Apply reuses the same atomic PostgreSQL CAS/idempotency
+    boundary as managed reconciliation. Setting `desired_status = "disabled"`
+    explicitly relinquishes external authority; only then may managed reconcile
+    replace it with service-owned provider evidence.
 - native FastAPI ingress route apply write:
   - `POST /v1/drivers/ingress/route-apply`, requiring `ingress_route.plan` for
     `dry-run` and `ingress_route.apply` for `apply`, resolving optional edge

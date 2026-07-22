@@ -937,6 +937,25 @@ def _check_url(
     observed_runtime_identity: RuntimeIdentity | None = None
     if (
         target_kind in {"health_url", "private_health_url"}
+        and target.require_runtime_identity
+        and target.expected_runtime_identity is None
+    ):
+        return PublicIngressTargetObservation(
+            target=target_kind,
+            url=url,
+            status="fail",
+            failure_code="wrong_runtime_identity",
+            http_status=observation.status_code,
+            final_url=observation.final_url,
+            redirect_count=observation.redirect_count,
+            runtime_identity_status="unverifiable",
+            runtime_identity_detail=(
+                "No expected runtime identity is recorded for this strict public health check."
+            ),
+            summary="Expected runtime identity is unavailable.",
+        )
+    if (
+        target_kind in {"health_url", "private_health_url"}
         and target.expected_runtime_identity is not None
     ):
         runtime_status, runtime_detail, observed_runtime_identity = (

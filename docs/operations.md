@@ -350,6 +350,7 @@ Current implementation scope:
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `GET /v1/route-bindings/records/current`
 - `POST /v1/route-bindings/reconcile`
+- `POST /v1/route-bindings/external/reconcile`
 - `POST /v1/provider-targets/operations`
 - `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
@@ -390,7 +391,9 @@ through direct DB commands or a local CLI from an arbitrary checkout. Store the
 complete desired rules for one `managed_set_id` in a protected repository
 secret. `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` owns the primary operator set;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
-Odoo stable route-binding set. The `Manage Launchplane Authorization` wrapper
+Odoo stable managed route-binding set; and
+`LAUNCHPLANE_AUTHZ_ODOO_EXTERNAL_ROUTE_BINDING_MANAGED_SET_JSON` owns the
+testing-first external route-binding set. The `Manage Launchplane Authorization` wrapper
 selects one of those explicit secrets and forwards it into the reusable worker,
 whose OIDC-minting job remains gated by the `launchplane-authz-admin`
 environment. Never replace the unreadable primary secret with a partial set;
@@ -464,6 +467,44 @@ at or after half-life refresh evidence even when the underlying source versions
 are unchanged. A domain, target, ingress, TLS-owner, lifecycle, or operator-
 ownership difference is not a refresh and must be resolved through the owning
 authority workflow before retrying.
+
+Use the `External Route Binding Reconcile` workflow when the public TLS
+terminator or reverse proxy is owned outside Launchplane and no provider API is
+available. This path adds external authority; it does not replace managed route
+creation. When Launchplane owns a supported proxy adapter and managed
+credentials, create or update the provider route through the normal ingress
+apply workflow, record its terminal audit, and use `Route Binding Reconcile`.
+
+The external workflow accepts only mode, product/context/instance, desired
+active or disabled status, source label, reason, idempotency key, and
+confirmation. The service derives domains from the DB-backed product profile
+and placement from the DB-backed provider target. It requires an enabled public
+HTTP health check with strict runtime-identity verification and records no proxy
+host id, certificate id, upstream, edge address, or other internal provider
+evidence. Dry-run requires `route_binding.external.plan`; apply requires the
+separate exact-instance `route_binding.external.apply` action and confirmation
+`APPLY EXTERNAL ROUTE BINDING RECONCILE`.
+
+After external apply, run `Public Ingress Monitor` and read product topology.
+The route binding is the recorded operator authority; it is not proof of proxy
+configuration. Readiness requires a fresh successful public HTTP observation,
+an exact expected runtime-identity match, and fresh valid TLS evidence for every
+recorded domain. Public HTTP and TLS observations expire after two hours.
+Launchplane reports the external proxy's internal state as unsupported while
+continuing to verify customer-visible behavior. Runtime identity is strong
+control-plane-correlated routing evidence, not cryptographic proof against a
+malicious TLS terminator that can cache or rewrite downstream responses; that
+terminator remains an explicit accepted trust boundary.
+
+To move a lane from external to Launchplane-managed ingress, first dry-run and
+apply the external workflow with `desired_status=disabled`. That explicit CAS
+write relinquishes operator-owned authority. Create the managed provider route
+and terminal audit through the supported provider workflow, then run managed
+route-binding reconcile. Managed reconcile may replace a disabled external
+record, but it continues to reject active external ownership. The reverse
+transition is intentionally not added by this slice: external apply continues
+to reject active or disabled service-owned bindings until a separately reviewed
+managed-authority retirement contract exists.
 
 Schema-v1 migration requires `schema_migration: "migrate_v1_to_v2"` in the
 protected desired-set JSON. Taking ownership of an existing matching unmanaged

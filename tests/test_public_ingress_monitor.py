@@ -1298,6 +1298,33 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(health.status, "fail")
         self.assertEqual(store.incidents[0].status, "open")
 
+    def test_strict_lane_fails_when_expected_runtime_identity_is_unavailable(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test",
+            health_monitoring=_public_health_monitoring(require_runtime_identity=True),
+        )
+        store = _Store((_profile(lane=lane),))
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"status": "ok", "revision": "abc123"},
+            ),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        health = store.records[0].targets[-1]
+        self.assertEqual(health.runtime_identity_status, "unverifiable")
+        self.assertEqual(health.failure_code, "wrong_runtime_identity")
+        self.assertEqual(health.status, "fail")
+        self.assertEqual(store.incidents[0].status, "open")
+
     def test_runtime_identity_mismatch_fails_even_when_advisory(self) -> None:
         expected_identity = _identity()
         observed_identity = expected_identity.model_copy(

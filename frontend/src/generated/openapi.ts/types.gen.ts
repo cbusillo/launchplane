@@ -1291,12 +1291,17 @@ export type ProductManagedSecretConfigStatusItem = {
 };
 
 export type ProductObservedIngress = {
+    expected_runtime_identity: RuntimeIdentity | null;
     failure_code: string;
     incident_id: string;
     incident_status: string;
     observed_at: string;
+    observed_runtime_identity: RuntimeIdentity | null;
     provenance: DataProvenance;
     record_id: string;
+    runtime_identity_detail: string;
+    runtime_identity_status: 'unchecked' | 'match' | 'mismatch' | 'missing' | 'malformed' | 'unverifiable';
+    stale_after: string;
     status: string;
     summary: string;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
@@ -1743,7 +1748,7 @@ export type ProductTopologyTlsOwnership = {
 };
 
 export type ProductTopologyWarning = {
-    code: 'missing_route_authority' | 'route_authority_disabled' | 'stale_route_authority' | 'desired_domain_unknown' | 'domain_divergence' | 'provider_placement_missing' | 'placement_divergence' | 'ingress_ownership_unknown' | 'ingress_divergence' | 'tls_ownership_unknown' | 'tls_ownership_divergence' | 'tls_observation_missing' | 'stale_tls_observation' | 'tls_mismatch' | 'tls_expiring' | 'tls_expired' | 'tls_untrusted' | 'tls_unavailable' | 'tls_unsupported' | 'public_ingress_failure';
+    code: 'missing_route_authority' | 'route_authority_disabled' | 'stale_route_authority' | 'desired_domain_unknown' | 'domain_divergence' | 'provider_placement_missing' | 'placement_divergence' | 'external_ingress_internals_unsupported' | 'ingress_ownership_unknown' | 'ingress_divergence' | 'tls_ownership_unknown' | 'tls_ownership_divergence' | 'tls_observation_missing' | 'stale_tls_observation' | 'tls_mismatch' | 'tls_expiring' | 'tls_expired' | 'tls_untrusted' | 'tls_unavailable' | 'tls_unsupported' | 'public_ingress_observation_missing' | 'stale_public_ingress_observation' | 'public_runtime_identity_unverified' | 'public_ingress_failure';
     detail: string;
     domain_name: string;
     scope: 'authority' | 'placement' | 'domains' | 'ingress' | 'tls' | 'observation';

@@ -72,6 +72,7 @@ PublicIngressTlsNameMatchSource = Literal["san", "subject", "none"]
 PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service"]
 
 PUBLIC_TLS_EXPIRING_DAYS = 14
+PUBLIC_HTTP_STALE_AFTER_SECONDS = 2 * 60 * 60
 PUBLIC_TLS_STALE_AFTER_SECONDS = 2 * 60 * 60
 
 
