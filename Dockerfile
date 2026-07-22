@@ -14,10 +14,20 @@ RUN pnpm build
 
 FROM mirror.gcr.io/library/golang:1.26.5-bookworm AS github-cli-build
 
+ARG GITHUB_CLI_VERSION=v2.96.0
+ARG GITHUB_CLI_GRPC_VERSION=v1.82.1
+
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local
 
-RUN go install github.com/cli/cli/v2/cmd/gh@v2.95.0
+RUN mkdir -p /tmp/github-cli-build \
+    && cd /tmp/github-cli-build \
+    && go mod init launchplane.local/github-cli-build \
+    && go get "github.com/cli/cli/v2/cmd/gh@${GITHUB_CLI_VERSION}" \
+    && go get "google.golang.org/grpc@${GITHUB_CLI_GRPC_VERSION}" \
+    && go build -trimpath -o /go/bin/gh github.com/cli/cli/v2/cmd/gh \
+    && go version -m /go/bin/gh | grep -F "github.com/cli/cli/v2" | grep -F "${GITHUB_CLI_VERSION}" \
+    && go version -m /go/bin/gh | grep -F "google.golang.org/grpc" | grep -F "${GITHUB_CLI_GRPC_VERSION}"
 
 FROM mirror.gcr.io/library/python:3.13-slim
 
