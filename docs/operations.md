@@ -411,6 +411,14 @@ instance. When present, the service authorizes `ingress_route.plan` or
 against the DB-backed product lane before any provider access. An instance-
 scoped apply is intentionally adoption-only: it requires an existing host ID,
 exact expected-host domains, a DB-backed edge endpoint, and `allow_create=false`.
+When the authorized lane domain is one member of a shared provider host, the
+service resolves that expected host from the lane-domain subset, then compares
+the provider's complete live domain set internally. The audit's
+`requested_domains` remains limited to the authorized lane; operation evidence
+and the workflow response remain lane-scoped. Response records report whether
+the service compared the full expected host and the provider-domain count
+without disclosing sibling domain names. Those extra domains never become
+Launchplane route authority for that lane.
 The service performs a fresh provider dry-run and rejects any create, update,
 enable, or disable before recording an unchanged audit. It repeats the provider
 read with all mutation flags disabled so drift fails closed instead of changing

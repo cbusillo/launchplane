@@ -169,7 +169,13 @@ cleanup scope so the store is always closed.
     those calls require instance-scoped authority and DB-backed lane-domain
     validation. Exact-instance apply is limited to a reviewed existing-host
     no-op with an edge-endpoint record and cannot create or mutate provider
-    routes.
+    routes. A lane domain may be a subset of a shared provider host: the service
+    compares the full live host internally for no-op and drift checks while the
+    persisted audit keeps `requested_domains` scoped to the authorized lane.
+    Audit operations, response operations, and proxy-host evidence are redacted
+    to that lane. Response metadata records full-host comparison and the
+    provider-domain count without disclosing sibling domain names or granting
+    route authority over them.
 - native FastAPI Dokploy target inspect read:
   - `GET /v1/dokploy-targets/inspect`, requiring `dokploy_target.inspect` for
     the Launchplane service context and returning redacted provider identity

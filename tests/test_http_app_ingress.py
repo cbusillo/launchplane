@@ -11,6 +11,7 @@ from click import ClickException
 from fastapi.routing import APIRoute
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.npmplus import NpmplusProxyHost
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -130,6 +131,26 @@ def _instance_ingress_product_profile() -> LaunchplaneProductProfileRecord:
         updated_at="2026-07-22T00:00:00Z",
         source="test",
     )
+
+
+def _instance_ingress_exact_host_payload(*, mode: str = "dry-run") -> dict[str, object]:
+    payload = _npmplus_ingress_route_payload(
+        mode=mode,
+        instance="testing",
+        forward_host="",
+        edge_endpoint_key="cm-prod-dokploy",
+        forward_scheme="https",
+        forward_port=443,
+    )
+    ingress = cast(dict[str, object], payload["ingress"])
+    ingress.update(
+        {
+            "expected_host_id": 79,
+            "require_exact_expected_host_domains": True,
+            "allow_create": False,
+        }
+    )
+    return payload
 
 
 class FastApiIngressTopologyRegistrarTests(unittest.TestCase):
@@ -1165,6 +1186,164 @@ class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(records[0].status, "unchanged")
         self.assertEqual(records[0].edge_endpoint_key, "cm-prod-dokploy")
         self.assertEqual(records[0].tls_owner, "provider")
+
+    async def test_ingress_route_instance_dry_run_reviews_shared_host_scope(self) -> None:
+        shared_domains = (
+            "ingress-canary.example.test",
+            "sibling.example.test",
+        )
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(domain_names=shared_domains),))
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_product_profile_record(_instance_ingress_product_profile())
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_instance_ingress_route_policy(action="ingress_route.plan"),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            payload = _instance_ingress_exact_host_payload()
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=payload,
+            )
+            records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["status"], "unchanged")
+        self.assertEqual(
+            response.json()["result"]["operations"][0]["domain_names"],
+            ["ingress-canary.example.test"],
+        )
+        self.assertEqual(
+            response.json()["result"]["proxy_host"]["domain_names"],
+            ["ingress-canary.example.test"],
+        )
+        self.assertEqual(
+            response.json()["records"]["ingress_provider_domain_comparison"],
+            "full_expected_host",
+        )
+        self.assertEqual(response.json()["records"]["ingress_provider_domain_count"], 2)
+        self.assertEqual(client.calls, ["list", "list"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].requested_domains, ("ingress-canary.example.test",))
+        self.assertEqual(
+            records[0].operations[0].domain_names,
+            ("ingress-canary.example.test",),
+        )
+
+    async def test_ingress_route_instance_apply_records_shared_host_no_op(self) -> None:
+        shared_domains = (
+            "ingress-canary.example.test",
+            "sibling.example.test",
+        )
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(domain_names=shared_domains),))
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_product_profile_record(_instance_ingress_product_profile())
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_instance_ingress_route_policy(action="ingress_route.apply"),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            payload = _instance_ingress_exact_host_payload(mode="apply")
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "instance-shared-ingress-no-op",
+                },
+                payload=payload,
+            )
+            records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["status"], "unchanged")
+        self.assertEqual(
+            response.json()["result"]["operations"][0]["domain_names"],
+            ["ingress-canary.example.test"],
+        )
+        self.assertEqual(
+            response.json()["result"]["proxy_host"]["domain_names"],
+            ["ingress-canary.example.test"],
+        )
+        self.assertEqual(
+            response.json()["records"]["ingress_provider_domain_comparison"],
+            "full_expected_host",
+        )
+        self.assertEqual(response.json()["records"]["ingress_provider_domain_count"], 2)
+        self.assertEqual(client.calls, ["list", "list", "list"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].mode, "apply")
+        self.assertEqual(records[0].requested_domains, ("ingress-canary.example.test",))
+        self.assertEqual(
+            records[0].operations[0].domain_names,
+            ("ingress-canary.example.test",),
+        )
+        self.assertEqual(client.proxy_hosts[0].domain_names, shared_domains)
+
+    async def test_ingress_route_instance_apply_rejects_shared_host_drift(self) -> None:
+        shared_domains = (
+            "ingress-canary.example.test",
+            "sibling.example.test",
+        )
+        drifted_domains = (*shared_domains, "drifted.example.test")
+
+        class DriftingNpmplusIngressClient(_FakeNpmplusIngressClient):
+            def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]:
+                if self.calls == ["list", "list"]:
+                    self.proxy_hosts[0] = self.proxy_hosts[0].model_copy(
+                        update={"domain_names": drifted_domains}
+                    )
+                return super().list_proxy_hosts()
+
+        client = DriftingNpmplusIngressClient((_npmplus_proxy_host(domain_names=shared_domains),))
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_product_profile_record(_instance_ingress_product_profile())
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_instance_ingress_route_policy(action="ingress_route.apply"),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            payload = _instance_ingress_exact_host_payload(mode="apply")
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "instance-shared-ingress-drift",
+                },
+                payload=payload,
+            )
+            records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "instance_scoped_ingress_changed")
+        self.assertEqual(client.calls, ["list", "list", "list"])
+        self.assertNotIn("update:79", client.calls)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].status, "pending")
 
     async def test_ingress_route_instance_apply_rejects_provider_change(self) -> None:
         client = _FakeNpmplusIngressClient((_npmplus_proxy_host(forward_port=8443),))
