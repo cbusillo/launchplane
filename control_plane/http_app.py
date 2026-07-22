@@ -11986,6 +11986,76 @@ def create_launchplane_fastapi_app(
         )
         return request.model_copy(update={"route": resolved_route})
 
+    def plan_instance_scoped_existing_ingress_route(
+        *,
+        ingress_provider: IngressProvider,
+        request: NpmplusIngressApplyRequest,
+    ) -> tuple[NpmplusIngressApplyRequest, NpmplusIngressApplyResult]:
+        if request.expected_host_id is None or not request.require_exact_expected_host_domains:
+            raise ValueError(
+                "Instance-scoped shared-host planning requires an exact expected provider host."
+            )
+        inspection_request = request.model_copy(
+            update={
+                "mode": "dry-run",
+                "require_exact_expected_host_domains": False,
+                "allow_create": False,
+                "allow_update": True,
+                "allow_enable_disable": True,
+            }
+        )
+        inspection_result = ingress_provider.apply_route(request=inspection_request)
+        existing_host = inspection_result.proxy_host
+        if existing_host is None or existing_host.id != request.expected_host_id:
+            raise click.ClickException(
+                "Instance-scoped ingress review could not resolve the expected provider host."
+            )
+        requested_domains = frozenset(request.route.domain_names)
+        existing_domains = frozenset(existing_host.domain_names)
+        if not requested_domains.issubset(existing_domains):
+            raise click.ClickException(
+                "Instance-scoped ingress domains are not all present on the expected provider host."
+            )
+        if requested_domains == existing_domains:
+            return request, inspection_result
+
+        provider_route = request.route.model_copy(
+            update={"domain_names": existing_host.domain_names}
+        )
+        provider_request = request.model_copy(update={"route": provider_route})
+        comparison_result = ingress_provider.apply_route(
+            request=provider_request.model_copy(
+                update={
+                    "mode": "dry-run",
+                    "allow_create": False,
+                    "allow_update": True,
+                    "allow_enable_disable": True,
+                }
+            )
+        )
+        return provider_request, comparison_result
+
+    def scope_instance_ingress_result(
+        *,
+        result: NpmplusIngressApplyResult,
+        requested_domains: tuple[str, ...],
+    ) -> NpmplusIngressApplyResult:
+        scoped_operations = tuple(
+            operation.model_copy(update={"domain_names": requested_domains})
+            for operation in result.operations
+        )
+        scoped_host = (
+            result.proxy_host.model_copy(update={"domain_names": requested_domains})
+            if result.proxy_host is not None
+            else None
+        )
+        return result.model_copy(
+            update={
+                "operations": scoped_operations,
+                "proxy_host": scoped_host,
+            }
+        )
+
     def active_ingress_canary_route_record(
         *,
         canary_store: _IngressCanaryRouteApplyStore,
@@ -12958,6 +13028,9 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
 
+        audit_ingress_request = resolved_ingress_request
+        provider_ingress_request = resolved_ingress_request
+        preflight_result: NpmplusIngressApplyResult | None = None
         guarded_instance_apply = False
         try:
             ingress_provider = resolved_ingress_provider_factory()
@@ -12992,9 +13065,22 @@ def create_launchplane_fastapi_app(
                         code="instance_scoped_ingress_edge_endpoint_required",
                         message="Instance-scoped ingress apply requires a DB-backed edge endpoint.",
                     )
-                preflight_result = ingress_provider.apply_route(
-                    request=resolved_ingress_request.model_copy(update={"mode": "dry-run"})
+            if (
+                instance_name
+                and resolved_ingress_request.expected_host_id is not None
+                and resolved_ingress_request.require_exact_expected_host_domains
+            ):
+                provider_ingress_request, preflight_result = (
+                    plan_instance_scoped_existing_ingress_route(
+                        ingress_provider=ingress_provider,
+                        request=resolved_ingress_request,
+                    )
                 )
+            if instance_name and resolved_ingress_request.mode == "apply":
+                if preflight_result is None:
+                    preflight_result = ingress_provider.apply_route(
+                        request=provider_ingress_request.model_copy(update={"mode": "dry-run"})
+                    )
                 if preflight_result.status != "unchanged" or any(
                     operation.requires_apply for operation in preflight_result.operations
                 ):
@@ -13006,7 +13092,7 @@ def create_launchplane_fastapi_app(
                             "Instance-scoped ingress apply can record only a reviewed no-op route."
                         ),
                     )
-                resolved_ingress_request = resolved_ingress_request.model_copy(
+                provider_ingress_request = provider_ingress_request.model_copy(
                     update={
                         "allow_create": False,
                         "allow_update": False,
@@ -13020,11 +13106,14 @@ def create_launchplane_fastapi_app(
                     product=route_request.product,
                     context=route_request.context,
                     provider=ingress_provider.provider_id,
-                    request=resolved_ingress_request,
+                    request=audit_ingress_request,
                     idempotency_key=normalized_key,
                 )
                 guarded_instance_apply = bool(instance_name)
-            ingress_result = ingress_provider.apply_route(request=resolved_ingress_request)
+            if resolved_ingress_request.mode == "dry-run" and preflight_result is not None:
+                ingress_result = preflight_result
+            else:
+                ingress_result = ingress_provider.apply_route(request=provider_ingress_request)
         except (ValueError, click.ClickException) as error:
             if guarded_instance_apply:
                 raise _launchplane_http_error(
@@ -13041,23 +13130,47 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
+        response_ingress_result = ingress_result
+        response_records: dict[str, object] = {
+            "ingress_provider": ingress_provider.provider_id,
+        }
+        if instance_name:
+            provider_domain_count = (
+                len(ingress_result.proxy_host.domain_names)
+                if ingress_result.proxy_host is not None
+                else 0
+            )
+            comparison_scope = (
+                "full_expected_host"
+                if frozenset(provider_ingress_request.route.domain_names)
+                != frozenset(audit_ingress_request.route.domain_names)
+                else "requested_domains"
+            )
+            response_records.update(
+                {
+                    "ingress_provider_domain_comparison": comparison_scope,
+                    "ingress_provider_domain_count": provider_domain_count,
+                }
+            )
+            response_ingress_result = scope_instance_ingress_result(
+                result=ingress_result,
+                requested_domains=audit_ingress_request.route.domain_names,
+            )
         ingress_audit_record = write_ingress_route_audit_record(
             ingress_store=ingress_store,
             trace_id=trace_id,
             product=route_request.product,
             context=route_request.context,
             provider=ingress_provider.provider_id,
-            request=resolved_ingress_request,
-            result=ingress_result,
+            request=audit_ingress_request,
+            result=response_ingress_result,
             idempotency_key=normalized_key,
         )
+        response_records["ingress_route_audit_record_id"] = ingress_audit_record.record_id
         response = accepted_evidence_response(
             trace_id=trace_id,
-            records={
-                "ingress_provider": ingress_provider.provider_id,
-                "ingress_route_audit_record_id": ingress_audit_record.record_id,
-            },
-            result=ingress_result.model_dump(mode="json"),
+            records=response_records,
+            result=response_ingress_result.model_dump(mode="json"),
         )
         if resolved_ingress_request.mode == "apply":
             store_apply_idempotency(
