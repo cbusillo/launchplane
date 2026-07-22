@@ -50,6 +50,32 @@ class IngressRouteOperatorWorkflowTests(unittest.TestCase):
                 self.assertEqual(instance["default"], "")
                 self.assertEqual(instance["type"], "string")
 
+    def test_dry_run_wrapper_normalizes_port_for_number_input(self) -> None:
+        trigger = self.dry_run_wrapper.data["on"]
+        assert isinstance(trigger, dict)
+        dispatch = trigger["workflow_dispatch"]
+        assert isinstance(dispatch, dict)
+        dispatch_inputs = dispatch["inputs"]
+        assert isinstance(dispatch_inputs, dict)
+        dispatch_port = dispatch_inputs["forward_port"]
+        assert isinstance(dispatch_port, dict)
+        self.assertEqual(dispatch_port["type"], "string")
+
+        worker_trigger = self.dry_run.data["on"]
+        assert isinstance(worker_trigger, dict)
+        workflow_call = worker_trigger["workflow_call"]
+        assert isinstance(workflow_call, dict)
+        worker_inputs = workflow_call["inputs"]
+        assert isinstance(worker_inputs, dict)
+        worker_port = worker_inputs["forward_port"]
+        assert isinstance(worker_port, dict)
+        self.assertEqual(worker_port["type"], "number")
+
+        wrapper_job = self.dry_run_wrapper.job("dry-run")
+        forwarded = wrapper_job["with"]
+        assert isinstance(forwarded, dict)
+        self.assertEqual(forwarded["forward_port"], "${{ fromJSON(inputs.forward_port) }}")
+
     def test_reusable_workers_send_instance_to_service(self) -> None:
         dry_run_text = Path(self.dry_run.path).read_text(encoding="utf-8")
         apply_text = Path(self.apply.path).read_text(encoding="utf-8")

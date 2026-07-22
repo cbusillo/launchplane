@@ -32,9 +32,9 @@ name: Ingress Route Dry Run
         default: ""
         type: string
       forward_port:
-        description: Upstream port for the desired provider route.
+        description: Decimal upstream port normalized for the reusable worker.
         required: true
-        type: number
+        type: string
       certificate_id:
         description: Existing provider certificate id, or new for provider-managed issuance.
         required: true
@@ -78,7 +78,7 @@ jobs:
       domain: ${{ inputs.domain }}
       forward_host: ${{ inputs.forward_host }}
       edge_endpoint_key: ${{ inputs.edge_endpoint_key }}
-      forward_port: ${{ inputs.forward_port }}
+      forward_port: ${{ fromJSON(inputs.forward_port) }}
       certificate_id: ${{ inputs.certificate_id }}
       expected_host_id: ${{ inputs.expected_host_id }}
       reason: ${{ inputs.reason }}
