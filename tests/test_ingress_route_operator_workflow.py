@@ -17,13 +17,13 @@ class IngressRouteOperatorWorkflowTests(unittest.TestCase):
                 self.dry_run_wrapper,
                 "cbusillo/launchplane/.github/workflows/"
                 "reusable-ingress-route-dry-run.yml@"
-                "878e6a317cfbd028c89d49cfa4ce34553aac0123",
+                "b649f41982c478189aabb7c9e5a5e8649279b01b",
             ),
             "apply": (
                 self.apply_wrapper,
                 "cbusillo/launchplane/.github/workflows/"
                 "reusable-ingress-route-apply.yml@"
-                "878e6a317cfbd028c89d49cfa4ce34553aac0123",
+                "b649f41982c478189aabb7c9e5a5e8649279b01b",
             ),
         }
         for job_name, (workflow, worker_ref) in expected.items():

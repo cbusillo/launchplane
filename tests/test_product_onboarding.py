@@ -1241,7 +1241,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(inputs_section.count("        description:"), 12)
         self.assertIn("      instance:", inputs_section)
         self.assertIn(
-            "reusable-ingress-route-dry-run.yml@878e6a317cfbd028c89d49cfa4ce34553aac0123",
+            "reusable-ingress-route-dry-run.yml@b649f41982c478189aabb7c9e5a5e8649279b01b",
             wrapper_text,
         )
         self.assertIn("edge_endpoint_key:", inputs_section)
@@ -1413,7 +1413,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(inputs_section.count("        description:"), 7)
         self.assertIn("      instance:", inputs_section)
         self.assertIn(
-            "reusable-ingress-route-apply.yml@878e6a317cfbd028c89d49cfa4ce34553aac0123",
+            "reusable-ingress-route-apply.yml@b649f41982c478189aabb7c9e5a5e8649279b01b",
             wrapper_text,
         )
 
