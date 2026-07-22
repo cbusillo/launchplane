@@ -28,6 +28,8 @@ _EXACT_INSTANCE_WORKFLOW_AUTHZ_ACTIONS = frozenset(
 _DUAL_SCOPE_AUTHZ_ACTIONS = frozenset(
     {
         "driver.read",
+        "ingress_route.apply",
+        "ingress_route.plan",
         "operations.read",
         "product_config.apply",
         "product_config.plan",

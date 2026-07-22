@@ -11,6 +11,11 @@ from click import ClickException
 from fastapi.routing import APIRoute
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+    ProductLaneProfile,
+)
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import (
     HumanSessionManager,
@@ -58,6 +63,73 @@ from tests.support.ingress import (
     _private_health_endpoint_read_policy,
     _private_health_endpoint_record,
 )
+
+
+def _instance_ingress_route_policy(*, action: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "schema_version": 2,
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["launchplane"],
+                    "contexts": ["reon-prod"],
+                    "instances": ["testing"],
+                    "actions": [action],
+                }
+            ],
+        }
+    )
+
+
+def _context_ingress_route_policy(*, action: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "schema_version": 2,
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["launchplane"],
+                    "contexts": ["reon-prod"],
+                    "actions": [action],
+                }
+            ],
+        }
+    )
+
+
+def _instance_ingress_product_profile() -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="launchplane",
+        display_name="Launchplane",
+        repository="cbusillo/launchplane",
+        driver_id="generic-web",
+        image=ProductImageProfile(repository="ghcr.io/cbusillo/launchplane"),
+        runtime_port=8123,
+        health_path="/health",
+        lanes=(
+            ProductLaneProfile(
+                context="reon-prod",
+                instance="testing",
+                base_url="https://ingress-canary.example.test",
+            ),
+            ProductLaneProfile(
+                context="reon-prod",
+                instance="prod",
+                base_url="https://launchplane.example.test",
+            ),
+        ),
+        updated_at="2026-07-22T00:00:00Z",
+        source="test",
+    )
 
 
 class FastApiIngressTopologyRegistrarTests(unittest.TestCase):
@@ -968,6 +1040,183 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ingress_route_instance_scope_uses_exact_instance_authority(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_product_profile_record(_instance_ingress_product_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_instance_ingress_route_policy(action="ingress_route.plan"),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_npmplus_ingress_route_payload(instance="testing"),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["status"], "planned")
+        self.assertEqual(client.calls, ["list"])
+
+    async def test_ingress_route_instance_scope_rejects_context_only_authority(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_context_ingress_route_policy(action="ingress_route.plan"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            npmplus_ingress_client_factory=lambda: client,
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/drivers/ingress/route-apply",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=_npmplus_ingress_route_payload(instance="testing"),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(client.calls, [])
+
+    async def test_ingress_route_instance_scope_rejects_unowned_domain(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_product_profile_record(_instance_ingress_product_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_instance_ingress_route_policy(action="ingress_route.plan"),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_npmplus_ingress_route_payload(
+                    instance="testing",
+                    domain_names=["launchplane.example.test"],
+                ),
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "ingress_route_domain_scope_mismatch",
+        )
+        self.assertEqual(client.calls, [])
+
+    async def test_ingress_route_instance_apply_records_only_reviewed_no_op(self) -> None:
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(),))
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_product_profile_record(_instance_ingress_product_profile())
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_instance_ingress_route_policy(action="ingress_route.apply"),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            payload = _npmplus_ingress_route_payload(
+                mode="apply",
+                instance="testing",
+                forward_host="",
+                edge_endpoint_key="cm-prod-dokploy",
+                forward_scheme="https",
+                forward_port=443,
+            )
+            ingress = cast(dict[str, object], payload["ingress"])
+            ingress.update(
+                {
+                    "expected_host_id": 79,
+                    "require_exact_expected_host_domains": True,
+                    "allow_create": False,
+                }
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "instance-ingress-no-op",
+                },
+                payload=payload,
+            )
+            records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["status"], "unchanged")
+        self.assertEqual(client.calls, ["list", "list"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].status, "unchanged")
+        self.assertEqual(records[0].edge_endpoint_key, "cm-prod-dokploy")
+        self.assertEqual(records[0].tls_owner, "provider")
+
+    async def test_ingress_route_instance_apply_rejects_provider_change(self) -> None:
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(forward_port=8443),))
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_product_profile_record(_instance_ingress_product_profile())
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_instance_ingress_route_policy(action="ingress_route.apply"),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            payload = _npmplus_ingress_route_payload(
+                mode="apply",
+                instance="testing",
+                forward_host="",
+                edge_endpoint_key="cm-prod-dokploy",
+                forward_scheme="https",
+                forward_port=443,
+            )
+            ingress = cast(dict[str, object], payload["ingress"])
+            ingress.update(
+                {
+                    "expected_host_id": 79,
+                    "require_exact_expected_host_domains": True,
+                    "allow_create": False,
+                }
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "instance-ingress-change",
+                },
+                payload=payload,
+            )
+            records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "instance_scoped_ingress_change_forbidden",
+        )
+        self.assertEqual(client.calls, ["list"])
+        self.assertEqual(records, ())
+
     async def test_ingress_route_dry_run_returns_plan_without_mutation(self) -> None:
         client = _FakeNpmplusIngressClient()
         with TemporaryDirectory() as temporary_directory_name:
