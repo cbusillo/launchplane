@@ -1130,6 +1130,33 @@ class RouteBindingReconcileTests(unittest.TestCase):
         self.assertEqual(plan.status, "conflict")
         self.assertEqual(plan.findings[0].code, "route_binding_ownership_conflict")
 
+    def test_reconcile_accepts_explicitly_relinquished_external_authority(self) -> None:
+        current = _route_binding_record().model_copy(
+            update={
+                "ingress": RouteBindingIngress(
+                    provider="external",
+                    endpoint_key="external:app.example.test",
+                    termination_kind="edge",
+                ),
+                "tls": RouteBindingTls(owner="external"),
+                "status": "disabled",
+            }
+        )
+
+        plan = plan_route_binding_reconcile(
+            record_store=_ready_route_binding_reconcile_store(route_binding=current),
+            request=_route_binding_reconcile_request(current_record=current),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.operation, "refresh")
+        self.assertEqual(plan.findings[0].code, "external_route_authority_handoff")
+        self.assertIsNotNone(plan.record)
+        assert plan.record is not None
+        self.assertEqual(plan.record.source.source_kind, "service")
+        self.assertEqual(plan.record.ingress.provider, "npmplus")
+        self.assertEqual(plan.record.status, "active")
+
     def test_reconcile_rejects_future_source_evidence(self) -> None:
         plan = plan_route_binding_reconcile(
             record_store=_ready_route_binding_reconcile_store(

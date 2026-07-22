@@ -9843,6 +9843,16 @@
       "ProductObservedIngress": {
         "additionalProperties": false,
         "properties": {
+          "expected_runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "failure_code": {
             "default": "",
             "title": "Failure Code",
@@ -9863,12 +9873,45 @@
             "title": "Observed At",
             "type": "string"
           },
+          "observed_runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
           "record_id": {
             "default": "",
             "title": "Record Id",
+            "type": "string"
+          },
+          "runtime_identity_detail": {
+            "default": "",
+            "title": "Runtime Identity Detail",
+            "type": "string"
+          },
+          "runtime_identity_status": {
+            "default": "unchecked",
+            "enum": [
+              "unchecked",
+              "match",
+              "mismatch",
+              "missing",
+              "malformed",
+              "unverifiable"
+            ],
+            "title": "Runtime Identity Status",
+            "type": "string"
+          },
+          "stale_after": {
+            "default": "",
+            "title": "Stale After",
             "type": "string"
           },
           "status": {
@@ -9897,12 +9940,17 @@
         "title": "ProductObservedIngress",
         "type": "object",
         "required": [
+          "expected_runtime_identity",
           "failure_code",
           "incident_id",
           "incident_status",
           "observed_at",
+          "observed_runtime_identity",
           "provenance",
           "record_id",
+          "runtime_identity_detail",
+          "runtime_identity_status",
+          "stale_after",
           "status",
           "summary",
           "trust_state"
@@ -12593,6 +12641,7 @@
               "domain_divergence",
               "provider_placement_missing",
               "placement_divergence",
+              "external_ingress_internals_unsupported",
               "ingress_ownership_unknown",
               "ingress_divergence",
               "tls_ownership_unknown",
@@ -12605,6 +12654,9 @@
               "tls_untrusted",
               "tls_unavailable",
               "tls_unsupported",
+              "public_ingress_observation_missing",
+              "stale_public_ingress_observation",
+              "public_runtime_identity_unverified",
               "public_ingress_failure"
             ],
             "title": "Code",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -14,6 +14,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    PUBLIC_HTTP_STALE_AFTER_SECONDS,
     PublicIngressIncidentRecord,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
@@ -58,6 +59,7 @@ ProductTopologyWarningCode = Literal[
     "domain_divergence",
     "provider_placement_missing",
     "placement_divergence",
+    "external_ingress_internals_unsupported",
     "ingress_ownership_unknown",
     "ingress_divergence",
     "tls_ownership_unknown",
@@ -70,6 +72,9 @@ ProductTopologyWarningCode = Literal[
     "tls_untrusted",
     "tls_unavailable",
     "tls_unsupported",
+    "public_ingress_observation_missing",
+    "stale_public_ingress_observation",
+    "public_runtime_identity_unverified",
     "public_ingress_failure",
 ]
 
@@ -190,6 +195,11 @@ class ProductObservedIngress(BaseModel):
     summary: str = ""
     incident_status: str = ""
     incident_id: str = ""
+    expected_runtime_identity: RuntimeIdentity | None = None
+    observed_runtime_identity: RuntimeIdentity | None = None
+    runtime_identity_status: RuntimeIdentityStatus = "unchecked"
+    runtime_identity_detail: str = ""
+    stale_after: str = ""
     trust_state: FreshnessStatus = "missing"
     provenance: DataProvenance = Field(
         default_factory=lambda: _missing_provenance(
@@ -520,6 +530,7 @@ def _observed_topology(
         product=profile.product,
         context=lane.context,
         instance=lane.instance,
+        now=now,
     )
     domain_roles: dict[str, ProductTopologyDomainRole] = {
         domain.domain_name: domain.role for domain in desired.domains
@@ -605,7 +616,12 @@ def _observed_placement(
 
 
 def _observed_ingress(
-    *, record_store: object, product: str, context: str, instance: str
+    *,
+    record_store: object,
+    product: str,
+    context: str,
+    instance: str,
+    now: datetime,
 ) -> ProductObservedIngress:
     records = _optional_records(
         record_store,
@@ -630,13 +646,46 @@ def _observed_ingress(
         check_name=latest.check_name,
         check_kind="public_http",
     )
-    trust_state: FreshnessStatus = "unsupported" if latest.status == "skipped" else "verified"
+    observed_timestamp = _parse_timestamp(latest.observed_at)
+    stale_after = (
+        observed_timestamp + timedelta(seconds=PUBLIC_HTTP_STALE_AFTER_SECONDS)
+        if observed_timestamp is not None
+        else None
+    )
+    stale_after_value = (
+        stale_after.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+        if stale_after is not None
+        else ""
+    )
+    if latest.status == "skipped":
+        trust_state: FreshnessStatus = "unsupported"
+    elif observed_timestamp is None:
+        trust_state = "stale"
+    else:
+        trust_state = _effective_freshness(
+            "verified",
+            stale_after=stale_after_value,
+            now=now,
+        )
+    runtime_target = next(
+        (
+            target
+            for target_kind in ("health_url", "base_url")
+            for target in latest.targets
+            if target.target == target_kind and target.runtime_identity_status != "unchecked"
+        ),
+        None,
+    )
     provenance = DataProvenance(
         source_kind="provider",
         source_record_id=latest.record_id,
         recorded_at=latest.observed_at,
         refreshed_at=latest.observed_at,
         freshness_status=trust_state,
+        stale_after=stale_after_value,
         detail="Launchplane public ingress active observation.",
     )
     return ProductObservedIngress(
@@ -647,6 +696,17 @@ def _observed_ingress(
         summary=latest.summary,
         incident_status=incident.status if incident is not None else "",
         incident_id=incident.incident_id if incident is not None else "",
+        expected_runtime_identity=latest.expected_runtime_identity,
+        observed_runtime_identity=(
+            runtime_target.observed_runtime_identity if runtime_target is not None else None
+        ),
+        runtime_identity_status=(
+            runtime_target.runtime_identity_status if runtime_target is not None else "unchecked"
+        ),
+        runtime_identity_detail=(
+            runtime_target.runtime_identity_detail if runtime_target is not None else ""
+        ),
+        stale_after=stale_after_value,
         trust_state=trust_state,
         provenance=provenance,
     )
@@ -875,6 +935,57 @@ def _topology_warnings(
                 observed=observed,
             )
         )
+        if route_binding.ingress.provider == "external":
+            warnings.append(
+                _warning(
+                    code="external_ingress_internals_unsupported",
+                    scope="ingress",
+                    severity="warning",
+                    detail=(
+                        "Ingress is externally managed; Launchplane verifies public behavior "
+                        "but does not claim access to the proxy's internal configuration."
+                    ),
+                )
+            )
+            if observed.ingress.status == "missing":
+                warnings.append(
+                    _warning(
+                        code="public_ingress_observation_missing",
+                        scope="observation",
+                        severity="error",
+                        detail=(
+                            "Externally managed ingress has no public HTTP observation for "
+                            "the requested lane."
+                        ),
+                    )
+                )
+            elif observed.ingress.trust_state == "stale":
+                warnings.append(
+                    _warning(
+                        code="stale_public_ingress_observation",
+                        scope="observation",
+                        severity="error",
+                        detail=(
+                            "The latest public HTTP observation for externally managed ingress "
+                            "is stale."
+                        ),
+                    )
+                )
+            if (
+                observed.ingress.status != "missing"
+                and observed.ingress.runtime_identity_status != "match"
+            ):
+                warnings.append(
+                    _warning(
+                        code="public_runtime_identity_unverified",
+                        scope="observation",
+                        severity="error",
+                        detail=(
+                            "The public ingress observation did not prove the exact expected "
+                            "runtime identity."
+                        ),
+                    )
+                )
 
     observed_tls_by_domain = {
         evidence.projection.domain_name: evidence for evidence in tls_evidence

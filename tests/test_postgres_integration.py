@@ -2392,6 +2392,98 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             ["completed", "missing"],
         )
 
+    def test_external_route_binding_replacement_rejects_stale_competing_cas(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            current_record = _route_binding()
+            store.write_route_binding_record(current_record)
+            first_replacement = current_record.model_copy(
+                update={
+                    "source": current_record.source.model_copy(
+                        update={"source_label": "external-operator-a"}
+                    ),
+                    "updated_at": "2026-07-22T00:01:00Z",
+                }
+            )
+            second_replacement = current_record.model_copy(
+                update={
+                    "source": current_record.source.model_copy(
+                        update={"source_label": "external-operator-b"}
+                    ),
+                    "updated_at": "2026-07-22T00:02:00Z",
+                }
+            )
+            first_mutation = DbOnlyMutationRequest(
+                scope="github-actions:external-route-binding-test",
+                route_path="/v1/route-bindings/external/reconcile",
+                idempotency_key="external-route-binding-first",
+                request_fingerprint="external-route-binding-fingerprint-first",
+                lease_owner="worker-a",
+                response_status_code=202,
+                response_trace_id="trace-worker-a",
+                response_payload={"status": "accepted", "trace_id": "trace-worker-a"},
+            )
+            second_mutation = DbOnlyMutationRequest(
+                scope="github-actions:external-route-binding-test",
+                route_path="/v1/route-bindings/external/reconcile",
+                idempotency_key="external-route-binding-second",
+                request_fingerprint="external-route-binding-fingerprint-second",
+                lease_owner="worker-b",
+                response_status_code=202,
+                response_trace_id="trace-worker-b",
+                response_payload={"status": "accepted", "trace_id": "trace-worker-b"},
+            )
+            barrier = threading.Barrier(2)
+
+            def replace_binding(
+                active_store: PostgresRecordStore,
+                replacement_record: EnvironmentRouteBindingRecord,
+                mutation: DbOnlyMutationRequest,
+            ) -> str:
+                barrier.wait()
+                return active_store.reconcile_route_binding_record(
+                    expected_record=current_record,
+                    replacement_record=replacement_record,
+                    mutation=mutation,
+                ).status
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: replace_binding(*arguments),
+                            (
+                                (store, first_replacement, first_mutation),
+                                (second_store, second_replacement, second_mutation),
+                            ),
+                        )
+                    )
+                stored_record = store.read_route_binding_record(
+                    product=current_record.product,
+                    context_name=current_record.context,
+                    instance_name=current_record.instance,
+                )
+                reservation_records = tuple(
+                    store.read_idempotency_record(
+                        scope=reservation.scope,
+                        route_path=reservation.route_path,
+                        idempotency_key=reservation.idempotency_key,
+                    )
+                    for reservation in (first_mutation, second_mutation)
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["changed", "refreshed"])
+        self.assertIn(stored_record, (first_replacement, second_replacement))
+        self.assertEqual(
+            sorted(
+                reservation.state if reservation is not None else "missing"
+                for reservation in reservation_records
+            ),
+            ["completed", "missing"],
+        )
+
     def test_profile_write_rolls_back_when_completion_persistence_fails(self) -> None:
         with _store_for_fresh_head_database() as store:
             profile = _product_profile()

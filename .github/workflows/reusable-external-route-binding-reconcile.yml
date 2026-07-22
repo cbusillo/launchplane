@@ -1,0 +1,230 @@
+---
+name: Reusable External Route Binding Reconcile
+
+"on":
+  workflow_call:
+    inputs:
+      mode:
+        description: Inspect or apply one externally managed route-binding reconcile.
+        required: true
+        type: string
+      product:
+        description: Launchplane product key from DB-backed product authority.
+        required: true
+        type: string
+      context:
+        description: Launchplane context key from DB-backed environment authority.
+        required: true
+        type: string
+      instance:
+        description: Launchplane instance key from DB-backed environment authority.
+        required: true
+        type: string
+      desired_status:
+        description: Keep external authority active or explicitly relinquish it.
+        required: false
+        default: active
+        type: string
+      source_label:
+        description: Stable operator provenance label for the reconciliation.
+        required: false
+        default: operator-external-reconcile
+        type: string
+      reason:
+        description: Operator reason recorded with the Launchplane request.
+        required: true
+        type: string
+      idempotency_key:
+        description: Unique idempotency key required for apply mode.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: Exact confirmation required for apply mode.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: >-
+    launchplane-external-route-binding-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+    steps:
+      - name: Prepare current route-binding read
+        id: current_request
+        shell: bash
+        env:
+          PRODUCT: ${{ inputs.product }}
+          CONTEXT: ${{ inputs.context }}
+          INSTANCE: ${{ inputs.instance }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >>"$GITHUB_OUTPUT"
+          import os
+          from urllib.parse import urlencode
+
+          query = urlencode(
+              {
+                  "product": os.environ["PRODUCT"].strip(),
+                  "context": os.environ["CONTEXT"].strip(),
+                  "instance": os.environ["INSTANCE"].strip(),
+              }
+          )
+          print(f"route=/v1/route-bindings/records/current?{query}")
+          print("response_file=external-route-binding-current.json")
+          PY
+
+      - name: Read current route binding
+        id: current
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.current_request.outputs.route }}
+          expected-status: 200,404
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: ${{ steps.current_request.outputs.response_file }}
+
+      - name: Build external route-binding reconcile request
+        id: payload
+        shell: bash
+        env:
+          CURRENT_STATUS: ${{ steps.current.outputs.status-code }}
+          CURRENT_FILE: ${{ steps.current_request.outputs.response_file }}
+          MODE: ${{ inputs.mode }}
+          PRODUCT: ${{ inputs.product }}
+          CONTEXT: ${{ inputs.context }}
+          INSTANCE: ${{ inputs.instance }}
+          DESIRED_STATUS: ${{ inputs.desired_status }}
+          SOURCE_LABEL: ${{ inputs.source_label }}
+          REASON: ${{ inputs.reason }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          payload_file="$RUNNER_TEMP/external-route-binding-reconcile-request.json"
+          case "$CURRENT_STATUS" in
+            200)
+              current_sha256="$(jq -er '.record.record_sha256' "$CURRENT_FILE")"
+              expected_current="$(
+                jq -cn --arg record_sha256 "$current_sha256" \
+                  '{state:"present", record_sha256:$record_sha256}'
+              )"
+              ;;
+            404)
+              expected_current='{"state":"absent"}'
+              ;;
+            *)
+              echo "Unexpected current route-binding status: $CURRENT_STATUS" >&2
+              exit 1
+              ;;
+          esac
+          jq -n \
+            --arg mode "$MODE" \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg instance "$INSTANCE" \
+            --arg desired_status "$DESIRED_STATUS" \
+            --arg source_label "$SOURCE_LABEL" \
+            --arg reason "$REASON" \
+            --arg confirmation "$CONFIRMATION" \
+            --argjson expected_current "$expected_current" \
+            '{
+              schema_version: 1,
+              mode: $mode,
+              product: $product,
+              context: $context,
+              instance: $instance,
+              expected_current: $expected_current,
+              desired_status: $desired_status,
+              source_label: $source_label,
+              reason: $reason,
+              confirmation: $confirmation
+            }' >"$payload_file"
+          echo "payload_file=$payload_file" >>"$GITHUB_OUTPUT"
+
+      - name: Validate external route-binding apply guards
+        if: ${{ inputs.mode == 'apply' }}
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "APPLY EXTERNAL ROUTE BINDING RECONCILE" ]; then
+            echo "confirmation must be APPLY EXTERNAL ROUTE BINDING RECONCILE" >&2
+            exit 1
+          fi
+          if [ -z "${IDEMPOTENCY_KEY// }" ]; then
+            echo "idempotency_key is required for apply." >&2
+            exit 1
+          fi
+
+      - name: Request external route-binding reconcile
+        id: reconcile
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: POST
+          route-path: /v1/route-bindings/external/reconcile
+          payload-file: ${{ steps.payload.outputs.payload_file }}
+          idempotency-key: ${{ inputs.idempotency_key }}
+          timeout-ms: "30000"
+          fail-result-paths: result.status
+          fail-result-statuses: blocked,conflict
+          log-response-body: "false"
+          response-output-file: external-route-binding-reconcile.json
+
+      - name: Summarize external route-binding reconcile
+        if: always()
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          PRODUCT: ${{ inputs.product }}
+          CONTEXT: ${{ inputs.context }}
+          INSTANCE: ${{ inputs.instance }}
+          DESIRED_STATUS: ${{ inputs.desired_status }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## External route-binding reconcile'
+            echo
+            echo "- Product: $PRODUCT"
+            echo "- Context: $CONTEXT"
+            echo "- Instance: $INSTANCE"
+            echo "- Mode: $MODE"
+            echo "- Desired status: $DESIRED_STATUS"
+            if [ -f external-route-binding-reconcile.json ]; then
+              echo "- Status: $(jq -r '.records.route_binding_status // "unknown"' external-route-binding-reconcile.json)"
+              echo "- Operation: $(jq -r '.result.operation // "none"' external-route-binding-reconcile.json)"
+              echo "- Current record: $(jq -r '.result.current_record_sha256 // "absent"' external-route-binding-reconcile.json)"
+              echo "- Candidate record: $(jq -r '.result.candidate_record_sha256 // "none"' external-route-binding-reconcile.json)"
+            else
+              echo "- Status: request-failed"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload external route-binding evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: external-route-binding-reconcile
+          path: |
+            external-route-binding-current.json
+            external-route-binding-reconcile.json
+          if-no-files-found: warn
+          retention-days: 30

@@ -153,8 +153,9 @@ repeating the effect. Lease renewal, completion, and reconciliation binding use
 owner checks and fail closed for stale owners.
 
 DB-only mutations should reserve and complete inside the same transaction as
-their business write. `POST /v1/product-profiles/preview-tls/apply` and
-`POST /v1/route-bindings/reconcile` use that boundary: the reservation
+their business write. `POST /v1/product-profiles/preview-tls/apply`,
+`POST /v1/route-bindings/reconcile`, and
+`POST /v1/route-bindings/external/reconcile` use that boundary: the reservation
 insert occurs before the domain write, and the domain record plus completed
 response commit atomically. A no-op apply still commits the completed
 reservation so concurrent and later same-key requests replay the original
@@ -563,6 +564,26 @@ an ORM column/table or remains only in the evidence payload.
   operator ownership, missing join, ambiguity, unresolved audit, bounded-scan
   exhaustion, or CAS drift is an explicit conflict or blocker rather than an
   overwrite.
+  Externally managed ingress uses the separate native FastAPI
+  `POST /v1/route-bindings/external/reconcile` contract. It derives the exact
+  lane, public HTTPS domains, and provider target from DB-backed product-profile
+  and provider-target records; callers cannot submit domains, provider ids,
+  proxy host ids, certificates, upstreams, or edge addresses. The product lane
+  must declare an enabled public HTTP health check that requires runtime
+  identity. The resulting operator-owned binding records
+  `ingress.provider = "external"`, edge termination, external TLS ownership,
+  and no internal proxy evidence. Its deterministic endpoint key identifies the
+  declared public edge without claiming a provider host identity.
+  External authority is attested for 30 days and refreshes at 15-day half-life
+  or when DB-backed source versions change. Public behavior remains separate:
+  the public-ingress monitor independently verifies HTTP, exact runtime
+  identity, and TLS, and its observations expire after two hours. Apply uses
+  separate exact-instance `route_binding.external.apply` authority;
+  dry-run uses `route_binding.external.plan`. An operator can explicitly set an
+  external binding to `disabled` to relinquish authority. Managed reconcile may
+  replace only that disabled external record after the managed provider route
+  has terminal audit evidence; it never silently takes over active external
+  authority.
   Product repositories must not own route bindings, TLS ownership, provider
   host ids, certificate ids, or edge topology.
 

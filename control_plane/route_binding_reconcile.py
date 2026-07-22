@@ -354,13 +354,32 @@ def plan_route_binding_reconcile(
             candidate_record_sha256=candidate_record_sha256,
             record=record,
         )
-    if current_record.source.source_kind not in {"backfill", "service"}:
+    external_handoff = _is_relinquished_external_operator_binding(current_record)
+    if current_record.source.source_kind not in {"backfill", "service"} and not external_handoff:
         return _conflict_plan(
             code="route_binding_ownership_conflict",
             detail=("Reconcile cannot replace a route-binding record owned by an operator source."),
             current_record=current_record,
             current_record_sha256=current_record_sha256,
             candidate_record_sha256=candidate_record_sha256,
+        )
+    if external_handoff:
+        return RouteBindingReconcilePlan(
+            status="ready",
+            operation="refresh",
+            findings=(
+                RouteBindingReconcileFinding(
+                    code="external_route_authority_handoff",
+                    detail=(
+                        "Managed reconcile will replace explicitly relinquished external "
+                        "route authority with service-owned provider evidence."
+                    ),
+                ),
+            ),
+            current_record_sha256=current_record_sha256,
+            candidate_record_sha256=candidate_record_sha256,
+            current_record=current_record,
+            record=record,
         )
     if _route_binding_authority_projection(current_record) != (
         _route_binding_authority_projection(record)
@@ -395,6 +414,18 @@ def plan_route_binding_reconcile(
         candidate_record_sha256=current_record_sha256,
         current_record=current_record,
         record=current_record,
+    )
+
+
+def _is_relinquished_external_operator_binding(
+    record: EnvironmentRouteBindingRecord,
+) -> bool:
+    return (
+        record.status == "disabled"
+        and record.source.source_kind == "operator"
+        and record.ingress.provider == "external"
+        and record.ingress.termination_kind == "edge"
+        and record.tls.owner == "external"
     )
 
 
