@@ -8,6 +8,7 @@ from tests.support.workflows import SELF_HOSTED_RUNNER, load_workflow
 
 class ExternalRouteBindingOperatorWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.workflow = load_workflow(".github/workflows/external-route-binding-reconcile.yml")
         self.worker = load_workflow(
             ".github/workflows/reusable-external-route-binding-reconcile.yml"
         )
@@ -103,6 +104,70 @@ class ExternalRouteBindingOperatorWorkflowTests(unittest.TestCase):
         self.assertNotIn("target_id", workflow_text)
         self.assertNotIn("domain_name", workflow_text)
         self.assertNotIn("upstream_host", workflow_text)
+
+    def test_dispatch_wrapper_calls_immutable_worker(self) -> None:
+        trigger = self.workflow.data["on"]
+        assert isinstance(trigger, dict)
+        self.assertEqual(set(trigger), {"workflow_dispatch"})
+        self.assertEqual(self.workflow.permissions, {"contents": "read", "id-token": "write"})
+        self.assertEqual(set(self.workflow.jobs), {"reconcile"})
+        self.assertEqual(
+            self.workflow.job_uses("reconcile"),
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-external-route-binding-reconcile.yml@"
+            "33801fbf510a1ab2cf858b7be5742b90bacc22a3",
+        )
+        self.assertEqual(
+            self.workflow.job_permissions("reconcile"),
+            {"contents": "read", "id-token": "write"},
+        )
+        job = self.workflow.job("reconcile")
+        forwarded_inputs = job["with"]
+        assert isinstance(forwarded_inputs, dict)
+        self.assertEqual(
+            set(forwarded_inputs),
+            {
+                "mode",
+                "product",
+                "context",
+                "instance",
+                "desired_status",
+                "source_label",
+                "reason",
+                "idempotency_key",
+                "confirmation",
+            },
+        )
+
+    def test_dispatch_wrapper_exposes_only_neutral_authority_inputs(self) -> None:
+        dispatch = self.workflow.data["on"]
+        assert isinstance(dispatch, dict)
+        workflow_dispatch = dispatch["workflow_dispatch"]
+        assert isinstance(workflow_dispatch, dict)
+        inputs = workflow_dispatch["inputs"]
+        assert isinstance(inputs, dict)
+        self.assertEqual(
+            set(inputs),
+            {
+                "mode",
+                "product",
+                "context",
+                "instance",
+                "desired_status",
+                "source_label",
+                "reason",
+                "idempotency_key",
+                "confirmation",
+            },
+        )
+        desired_status = inputs["desired_status"]
+        assert isinstance(desired_status, dict)
+        self.assertEqual(desired_status["options"], ["active", "disabled"])
+        workflow_text = Path(self.workflow.path).read_text(encoding="utf-8")
+        self.assertNotIn("provider_host_id", workflow_text)
+        self.assertNotIn("provider_certificate_ref", workflow_text)
+        self.assertNotIn("target_id", workflow_text)
+        self.assertNotIn("domain_name", workflow_text)
 
 
 if __name__ == "__main__":

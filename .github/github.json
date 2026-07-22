@@ -123,6 +123,8 @@
     "Odoo Target Replacement Apply",
     "Preview Lifecycle",
     "Public Ingress Monitor",
+    "External Route Binding Reconcile",
+    "Reusable External Route Binding Reconcile",
     "Route Binding Reconcile",
     "Reusable Route Binding Reconcile",
     "Product Context Cutover Audit",

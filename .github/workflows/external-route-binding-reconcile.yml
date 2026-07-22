@@ -1,0 +1,71 @@
+---
+name: External Route Binding Reconcile
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Inspect or apply one externally managed route-binding reconcile.
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+      product:
+        description: Launchplane product key from DB-backed product authority.
+        required: true
+        type: string
+      context:
+        description: Launchplane context key from DB-backed environment authority.
+        required: true
+        type: string
+      instance:
+        description: Launchplane instance key from DB-backed environment authority.
+        required: true
+        type: string
+      desired_status:
+        description: Keep external authority active or explicitly relinquish it.
+        required: true
+        default: active
+        type: choice
+        options:
+          - active
+          - disabled
+      source_label:
+        description: Stable operator provenance label for the reconciliation.
+        required: false
+        default: operator-external-reconcile
+        type: string
+      reason:
+        description: Operator reason recorded with the Launchplane request.
+        required: true
+        type: string
+      idempotency_key:
+        description: Unique idempotency key required for apply mode.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: Type APPLY EXTERNAL ROUTE BINDING RECONCILE to confirm apply.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  reconcile:
+    uses: cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml@33801fbf510a1ab2cf858b7be5742b90bacc22a3 # main
+    with:
+      mode: ${{ inputs.mode }}
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: ${{ inputs.instance }}
+      desired_status: ${{ inputs.desired_status }}
+      source_label: ${{ inputs.source_label }}
+      reason: ${{ inputs.reason }}
+      idempotency_key: ${{ inputs.idempotency_key }}
+      confirmation: ${{ inputs.confirmation }}
