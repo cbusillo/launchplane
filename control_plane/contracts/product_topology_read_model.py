@@ -630,11 +630,14 @@ def _observed_ingress(
         context_name=context,
         instance_name=instance,
         check_kind="public_http",
-        limit=1,
+        limit=50,
+    )
+    observations = tuple(
+        record for record in records if isinstance(record, PublicIngressObservationRecord)
     )
     latest = next(
-        (record for record in records if isinstance(record, PublicIngressObservationRecord)),
-        None,
+        (record for record in observations if _public_runtime_identity_target(record) is not None),
+        observations[0] if observations else None,
     )
     if latest is None:
         return ProductObservedIngress()
@@ -670,15 +673,7 @@ def _observed_ingress(
             stale_after=stale_after_value,
             now=now,
         )
-    runtime_target = next(
-        (
-            target
-            for target_kind in ("health_url", "base_url")
-            for target in latest.targets
-            if target.target == target_kind and target.runtime_identity_status != "unchecked"
-        ),
-        None,
-    )
+    runtime_target = _public_runtime_identity_target(latest)
     provenance = DataProvenance(
         source_kind="provider",
         source_record_id=latest.record_id,
@@ -709,6 +704,20 @@ def _observed_ingress(
         stale_after=stale_after_value,
         trust_state=trust_state,
         provenance=provenance,
+    )
+
+
+def _public_runtime_identity_target(
+    record: PublicIngressObservationRecord,
+) -> PublicIngressTargetObservation | None:
+    return next(
+        (
+            target
+            for target_kind in ("health_url", "base_url")
+            for target in record.targets
+            if target.target == target_kind and target.runtime_identity_status != "unchecked"
+        ),
+        None,
     )
 
 
@@ -889,7 +898,9 @@ def _topology_warnings(
                 _warning(
                     code="stale_route_authority",
                     scope="authority",
-                    severity="warning",
+                    severity=(
+                        "error" if route_binding.ingress.provider == "external" else "warning"
+                    ),
                     detail="The provider-neutral route-binding evidence is stale.",
                 )
             )
@@ -999,7 +1010,12 @@ def _topology_warnings(
                 _warning(
                     code="tls_observation_missing",
                     scope="tls",
-                    severity="warning",
+                    severity=(
+                        "error"
+                        if route_binding is not None
+                        and route_binding.ingress.provider == "external"
+                        else "warning"
+                    ),
                     domain_name=domain_name,
                     detail="No TLS certificate observation is recorded for the expected domain.",
                 )
@@ -1095,7 +1111,11 @@ def _tls_warnings(
             _warning(
                 code="stale_tls_observation",
                 scope="tls",
-                severity="warning",
+                severity=(
+                    "error"
+                    if route_binding is not None and route_binding.ingress.provider == "external"
+                    else "warning"
+                ),
                 domain_name=projection.domain_name,
                 detail="The latest TLS observation is stale.",
             )

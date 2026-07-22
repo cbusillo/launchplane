@@ -42,10 +42,7 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
         {"cbusillo/launchplane/.github/workflows/reusable-route-binding-reconcile.yml"}
     ),
     Path(".github/workflows/external-route-binding-reconcile.yml"): frozenset(
-        {
-            "cbusillo/launchplane/.github/workflows/"
-            "reusable-external-route-binding-reconcile.yml"
-        }
+        {"cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml"}
     ),
 }
 

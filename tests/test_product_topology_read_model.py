@@ -250,7 +250,7 @@ def _http_observation(
     )
     observed_identity = expected_identity if runtime_identity_status == "match" else None
     status: PublicIngressObservationStatus = (
-        "pass" if runtime_identity_status == "match" else "fail"
+        "pass" if runtime_identity_status in {"match", "unchecked"} else "fail"
     )
     failure_code: PublicIngressFailureCode | None = (
         None if status == "pass" else "wrong_runtime_identity"
@@ -266,7 +266,9 @@ def _http_observation(
         runtime_identity_detail=(
             "Runtime identity matched expected deployment."
             if runtime_identity_status == "match"
-            else "Expected runtime identity was unavailable."
+            else ""
+            if runtime_identity_status == "unchecked"
+            else "Expected identity unavailable."
         ),
         observed_runtime_identity=observed_identity,
         summary="Public health route verified." if status == "pass" else "Runtime unverified.",
@@ -398,6 +400,7 @@ class ProductTopologyReadModelTests(unittest.TestCase):
             record_store=_TopologyStore(
                 route_binding=route_binding,
                 observations=(
+                    _http_observation(runtime_identity_status="unchecked"),
                     _http_observation(),
                     _tls_observation(
                         status="valid",
@@ -485,6 +488,8 @@ class ProductTopologyReadModelTests(unittest.TestCase):
             "public_ingress_observation_missing",
             {warning.code for warning in missing.warnings},
         )
+        missing_severity = {warning.code: warning.severity for warning in missing.warnings}
+        self.assertEqual(missing_severity["tls_observation_missing"], "error")
         self.assertEqual(stale.observed.ingress.trust_state, "stale")
         self.assertIn(
             "stale_public_ingress_observation",
