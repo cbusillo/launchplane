@@ -491,7 +491,10 @@ configuration. Readiness requires a fresh successful public HTTP observation,
 an exact expected runtime-identity match, and fresh valid TLS evidence for every
 recorded domain. Public HTTP and TLS observations expire after two hours.
 Launchplane reports the external proxy's internal state as unsupported while
-continuing to verify customer-visible behavior.
+continuing to verify customer-visible behavior. Runtime identity is strong
+control-plane-correlated routing evidence, not cryptographic proof against a
+malicious TLS terminator that can cache or rewrite downstream responses; that
+terminator remains an explicit accepted trust boundary.
 
 To move a lane from external to Launchplane-managed ingress, first dry-run and
 apply the external workflow with `desired_status=disabled`. That explicit CAS
