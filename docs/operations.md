@@ -539,6 +539,10 @@ into explicit context and `*` instance representations so their current breadth
 is preserved without teaching new schema-v2 rules that an empty selector means
 all instances.
 
+Reviewed exact-instance workflow actions for external route binding and product
+health monitoring require schema v2 and cannot be authorized by a schema-v1
+compatibility rule.
+
 When the CLI uses `--session-cookie`, it first reads `GET /v1/auth/session` and
 then sends the returned single-use CSRF token with strict same-origin fetch
 metadata. Use the configured public Launchplane URL so its origin matches
@@ -663,6 +667,21 @@ reason, the reviewed plan SHA-256, and the exact confirmation text. Launchplane
 re-reads the current DB-backed profile, rejects stale plans, and preserves every
 unrelated profile field. Do not replace this workflow with whole-profile API,
 direct DB, or direct provider mutation.
+
+Use the manual Product Health Monitoring workflow to create or update one
+stable-lane `public_http` check without replacing the product profile. Run
+`mode=dry-run` with the exact product/context/instance, check name, desired
+enabled state, runtime-identity requirement, and operator reason. The workflow
+does not accept URLs, domains, provider targets, proxy details, or certificate
+references; Launchplane preserves or derives the URL from the current DB-backed
+lane. Enabling strict runtime identity requires an existing lane-owned HTTPS
+host. Review the current/requested values, resolved URL, profile digest, and plan
+SHA-256. Apply from a second run with identical target and desired values, the
+reviewed digest, a unique idempotency key, and confirmation
+`APPLY PRODUCT HEALTH MONITORING`. The service re-reads the complete profile and
+atomically rejects stale or concurrent edits. Authority uses separate exact-
+instance `product_profile.health_monitoring.plan` and `.apply` actions supplied
+through managed authz reconciliation.
 
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. The workflow

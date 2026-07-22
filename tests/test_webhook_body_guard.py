@@ -14,6 +14,7 @@ _WEBHOOK_PATH = "/v1/every-code/github-webhook"
 _WEBHOOK_BODY_LIMIT = 2 * 1024 * 1024
 _JSON_MUTATION_ROUTES = (
     ("/v1/product-config/apply", 2 * 1024 * 1024),
+    ("/v1/product-profiles/health-monitoring/apply", 64 * 1024),
     ("/v1/secrets/reencrypt", 64 * 1024),
 )
 
@@ -45,6 +46,39 @@ class WebhookBodyGuardTests(unittest.IsolatedAsyncioTestCase):
                         ("Content-Length", str(limit + 1)),
                     ],
                     chunks=(b"",),
+                    guarded_bodies=guarded_bodies,
+                )
+
+                self.assertEqual(response.status_code, 413)
+                self.assertEqual(response.receive_count, 0)
+                self.assertEqual(guarded_bodies, [])
+
+    async def test_json_mutation_routes_require_content_length(self) -> None:
+        for path, _limit in _JSON_MUTATION_ROUTES:
+            with self.subTest(path=path):
+                guarded_bodies: list[bytes] = []
+                response = await _invoke_guarded_webhook(
+                    path=path,
+                    headers=[("Content-Type", "application/json")],
+                    chunks=(b"{}",),
+                    guarded_bodies=guarded_bodies,
+                )
+
+                self.assertEqual(response.status_code, 413)
+                self.assertEqual(response.receive_count, 0)
+                self.assertEqual(guarded_bodies, [])
+
+    async def test_json_mutation_routes_reject_chunked_transfer_encoding(self) -> None:
+        for path, _limit in _JSON_MUTATION_ROUTES:
+            with self.subTest(path=path):
+                guarded_bodies: list[bytes] = []
+                response = await _invoke_guarded_webhook(
+                    path=path,
+                    headers=[
+                        ("Content-Type", "application/json"),
+                        ("Transfer-Encoding", "chunked"),
+                    ],
+                    chunks=(b"{}",),
                     guarded_bodies=guarded_bodies,
                 )
 

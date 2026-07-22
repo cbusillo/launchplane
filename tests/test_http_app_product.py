@@ -57,12 +57,14 @@ from tests.http_app_test_support import (
     _local_operator_work_graph_rank_policy,
     _MissingProductReadStore,
     _post_product_expected_config,
+    _post_product_health_monitoring,
     _post_product_profile,
     _post_product_preview_tls,
     _post_work_graph_issue_inbox_reconcile,
     _post_work_graph_rank,
     _product_environment_read_policy,
     _product_expected_config_policy,
+    _product_health_monitoring_policy,
     _product_profile_read_policy,
     _product_preview_tls_policy,
     _product_profile_write_policy,
@@ -147,6 +149,60 @@ def _product_preview_tls_profile() -> LaunchplaneProductProfileRecord:
 def _product_preview_tls_identity() -> GitHubActionsIdentity:
     return _identity(
         workflow_ref="every/verireel/.github/workflows/product-preview-tls.yml@refs/heads/main",
+        event_name="workflow_dispatch",
+    )
+
+
+def _product_health_monitoring_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "odoo-product",
+        "context": "cm",
+        "instance": "testing",
+        "check_name": "public-ingress",
+        "enabled": True,
+        "require_runtime_identity": True,
+        "mode": "dry-run",
+        "reason": "Require strict public runtime identity.",
+        "reviewed_plan_sha256": "",
+    }
+
+
+def _product_health_monitoring_profile() -> LaunchplaneProductProfileRecord:
+    payload = _product_profile_payload()
+    payload["product"] = "odoo-product"
+    payload["driver_id"] = "odoo"
+    lanes = cast(list[dict[str, object]], payload["lanes"])
+    lanes[0]["context"] = "cm"
+    lanes[0]["instance"] = "testing"
+    lanes[0]["base_url"] = "https://cm-testing.example.com"
+    lanes[0]["health_url"] = "https://cm-testing.example.com/launchplane/health"
+    lanes[0]["health_monitoring"] = {
+        "checks": [
+            {
+                "name": "public-ingress",
+                "kind": "public_http",
+                "enabled": True,
+                "url": "",
+                "require_runtime_identity": False,
+            }
+        ]
+    }
+    return LaunchplaneProductProfileRecord.model_validate(payload)
+
+
+def _product_health_monitoring_identity(
+    *,
+    job_workflow_ref: str = (
+        "cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml@"
+        "e61dc9a6161f9b97d2182ca69c4cadaa1df81fca"
+    ),
+) -> GitHubActionsIdentity:
+    return _identity(
+        workflow_ref=(
+            "every/verireel/.github/workflows/product-health-monitoring.yml@refs/heads/main"
+        ),
+        job_workflow_ref=job_workflow_ref,
         event_name="workflow_dispatch",
     )
 
@@ -2334,6 +2390,311 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_apply_product_health_monitoring_dry_run_preserves_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_health_monitoring_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_health_monitoring_identity()),
+                authz_policy=_product_health_monitoring_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_health_monitoring(
+                app,
+                _product_health_monitoring_payload(),
+            )
+            stored_profile = store.read_product_profile_record("odoo-product")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(
+            payload["records"],
+            {
+                "product_profile": "odoo-product",
+                "context": "cm",
+                "instance": "testing",
+                "health_check": "public-ingress",
+            },
+        )
+        self.assertEqual(payload["result"]["operation"], "update")
+        self.assertFalse(payload["result"]["current_require_runtime_identity"])
+        self.assertTrue(payload["result"]["requested_require_runtime_identity"])
+        self.assertRegex(payload["result"]["plan_sha256"], r"^[0-9a-f]{64}$")
+        self.assertFalse(
+            stored_profile.lanes[0].health_monitoring.checks[0].require_runtime_identity
+        )
+
+    async def test_apply_product_health_monitoring_persists_and_replays_reviewed_plan(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            original_profile = _product_health_monitoring_profile()
+            store.write_product_profile_record(original_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_health_monitoring_identity()),
+                authz_policy=_product_health_monitoring_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            dry_run_response = await _post_product_health_monitoring(
+                app,
+                _product_health_monitoring_payload(),
+            )
+            apply_payload = {
+                **_product_health_monitoring_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+            apply_response = await _post_product_health_monitoring(
+                app,
+                apply_payload,
+                idempotency_key="product-health-monitoring-apply",
+            )
+            replay_response = await _post_product_health_monitoring(
+                app,
+                apply_payload,
+                idempotency_key="product-health-monitoring-apply",
+            )
+            stored_profile = store.read_product_profile_record("odoo-product")
+
+        self.assertEqual(apply_response.status_code, 202)
+        self.assertTrue(apply_response.json()["result"]["applied"])
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertTrue(
+            stored_profile.lanes[0].health_monitoring.checks[0].require_runtime_identity
+        )
+        self.assertEqual(stored_profile.source, "service:product-health-monitoring")
+        self.assertEqual(stored_profile.repository, original_profile.repository)
+
+    async def test_apply_product_health_monitoring_rejects_stale_plan(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            original_profile = _product_health_monitoring_profile()
+            store.write_product_profile_record(original_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_health_monitoring_identity()),
+                authz_policy=_product_health_monitoring_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            dry_run_response = await _post_product_health_monitoring(
+                app,
+                _product_health_monitoring_payload(),
+            )
+            store.write_product_profile_record(
+                original_profile.model_copy(
+                    update={
+                        "updated_at": "2026-07-22T02:00:00Z",
+                        "source": "service:concurrent-update",
+                    }
+                )
+            )
+            apply_response = await _post_product_health_monitoring(
+                app,
+                {
+                    **_product_health_monitoring_payload(),
+                    "mode": "apply",
+                    "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+                },
+                idempotency_key="product-health-monitoring-stale",
+            )
+
+        self.assertEqual(apply_response.status_code, 409)
+        self.assertEqual(apply_response.json()["error"]["code"], "stale")
+
+    async def test_apply_product_health_monitoring_requires_exact_instance_authority(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_health_monitoring_identity()),
+            authz_policy=_product_health_monitoring_policy(instance="testing"),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("state")),
+        )
+
+        response = await _post_product_health_monitoring(
+            app,
+            {
+                **_product_health_monitoring_payload(),
+                "instance": "prod",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_apply_product_health_monitoring_rejects_schema_v1_authority(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/"
+                            "product-health-monitoring.yml@refs/heads/main"
+                        ],
+                        "job_workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/"
+                            "reusable-product-health-monitoring.yml@"
+                            "e61dc9a6161f9b97d2182ca69c4cadaa1df81fca"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["odoo-product"],
+                        "contexts": ["cm"],
+                        "actions": ["product_profile.health_monitoring.plan"],
+                    }
+                ]
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_health_monitoring_identity()),
+            authz_policy=policy,
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("state")),
+        )
+
+        response = await _post_product_health_monitoring(
+            app,
+            _product_health_monitoring_payload(),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_apply_product_health_monitoring_requires_pinned_worker_identity(
+        self,
+    ) -> None:
+        for job_workflow_ref in (
+            "",
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-product-health-monitoring.yml@" + "b" * 40,
+        ):
+            with self.subTest(job_workflow_ref=job_workflow_ref):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(
+                        _product_health_monitoring_identity(
+                            job_workflow_ref=job_workflow_ref,
+                        )
+                    ),
+                    authz_policy=_product_health_monitoring_policy(),
+                    record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("state")),
+                )
+
+                response = await _post_product_health_monitoring(
+                    app,
+                    _product_health_monitoring_payload(),
+                )
+
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_apply_product_health_monitoring_rejects_non_public_check(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            profile_payload = _product_health_monitoring_profile().model_dump(mode="json")
+            profile_payload["lanes"][0]["health_monitoring"]["checks"] = [
+                {
+                    "name": "provider-health",
+                    "kind": "provider",
+                    "enabled": True,
+                    "provider": "example",
+                    "provider_check": "ready",
+                }
+            ]
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_health_monitoring_identity()),
+                authz_policy=_product_health_monitoring_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_health_monitoring(
+                app,
+                {
+                    **_product_health_monitoring_payload(),
+                    "check_name": "provider-health",
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "unsupported_health_check_kind",
+        )
+
+    async def test_apply_product_health_monitoring_requires_idempotency_key(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_health_monitoring_identity()),
+            authz_policy=_product_health_monitoring_policy(),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("state")),
+        )
+
+        response = await _post_product_health_monitoring(
+            app,
+            {
+                **_product_health_monitoring_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": "a" * 64,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
+
+    async def test_apply_product_health_monitoring_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            store.write_product_profile_record(_product_health_monitoring_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_health_monitoring_identity()),
+                authz_policy=_product_health_monitoring_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_health_monitoring(
+                app,
+                _product_health_monitoring_payload(),
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_required")
+
+    async def test_openapi_includes_product_health_monitoring_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_health_monitoring_identity()),
+            authz_policy=_product_health_monitoring_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/product-profiles/health-monitoring/apply"]["post"]
+        self.assertEqual(route["operationId"], "apply_product_health_monitoring")
 
     async def test_apply_product_preview_tls_dry_run_preserves_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

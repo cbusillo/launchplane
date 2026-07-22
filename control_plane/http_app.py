@@ -33,6 +33,7 @@ from control_plane.dokploy_target_setup_http import (
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service as control_plane_product_config_service
 from control_plane import product_context_cutover as control_plane_product_context_cutover
+from control_plane import product_health_monitoring as control_plane_product_health_monitoring
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_preview_tls as control_plane_product_preview_tls
 from control_plane import (
@@ -593,7 +594,9 @@ _SECRET_REENCRYPT_ROUTE = "/v1/secrets/reencrypt"
 _EVIDENCE_INGRESS_MAX_BODY_BYTES = 2 * 1024 * 1024
 _GITHUB_WEBHOOK_MAX_BODY_BYTES = 2 * 1024 * 1024
 _PRODUCT_CONFIG_MAX_BODY_BYTES = 2 * 1024 * 1024
+_PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES = 64 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
+_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     **{
         route: ("Evidence ingress", _EVIDENCE_INGRESS_MAX_BODY_BYTES, True, False)
@@ -608,6 +611,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     _PRODUCT_CONFIG_APPLY_ROUTE: (
         "Product config",
         _PRODUCT_CONFIG_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE: (
+        "Product health monitoring",
+        _PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -8890,6 +8899,302 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_product_health_monitoring(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product health monitoring request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product health monitoring request failed validation.",
+            )
+        try:
+            health_monitoring_request = control_plane_product_health_monitoring.ProductHealthMonitoringApplyRequest.model_validate(
+                raw_payload
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product health monitoring request failed validation.",
+            ) from error
+        action = (
+            "product_profile.health_monitoring.apply"
+            if health_monitoring_request.mode == "apply"
+            else "product_profile.health_monitoring.plan"
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=health_monitoring_request.product,
+            context=health_monitoring_request.context,
+            target=AuthorizationTarget(
+                scope="instance",
+                instances=(health_monitoring_request.instance,),
+            ),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply product health monitoring policy.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if health_monitoring_request.mode == "apply" and not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Product health monitoring apply requests require an Idempotency-Key header.",
+            )
+        database_store = require_product_health_monitoring_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        payload_fingerprint = ""
+
+        def prepare_product_health_monitoring_mutation() -> AcceptedEvidenceResponse | None:
+            preflight = database_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
+            )
+            if preflight.status in {"missing", "released"}:
+                return None
+            if preflight.record is None:
+                raise RuntimeError(
+                    "Product health monitoring mutation preflight requires evidence."
+                )
+            if preflight.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=preflight.record,
+                    route_path=_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
+                )
+            if preflight.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if preflight.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product health monitoring mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if preflight.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product health monitoring mutation requires reconciliation "
+                        "before retry."
+                    ),
+                )
+            raise RuntimeError(
+                "Unsupported product health monitoring mutation preflight status: "
+                f"{preflight.status}"
+            )
+
+        if health_monitoring_request.mode == "apply":
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
+                payload=cast(dict[str, object], raw_payload),
+            )
+            replay_response = prepare_product_health_monitoring_mutation()
+            if replay_response is not None:
+                return replay_response
+        try:
+            profile = database_store.read_product_profile_record(health_monitoring_request.product)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        try:
+            plan = control_plane_product_health_monitoring.build_product_health_monitoring_plan(
+                profile=profile,
+                request=health_monitoring_request,
+            )
+        except (
+            control_plane_product_health_monitoring.ProductHealthMonitoringCheckKindError
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="unsupported_health_check_kind",
+                message=str(error),
+            ) from error
+        except control_plane_product_health_monitoring.ProductHealthMonitoringTargetError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_health_monitoring_target",
+                message=str(error),
+            ) from error
+        if (
+            health_monitoring_request.mode == "apply"
+            and health_monitoring_request.reviewed_plan_sha256 != plan.plan_sha256
+        ):
+            replay_response = prepare_product_health_monitoring_mutation()
+            if replay_response is not None:
+                return replay_response
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message=(
+                    "Reviewed product health monitoring plan no longer matches the stored profile."
+                ),
+            )
+        if health_monitoring_request.mode == "apply":
+            replacement_profile = profile
+            profile_updated_at_after = profile.updated_at
+            if plan.changed:
+                try:
+                    replacement_profile = control_plane_product_health_monitoring.updated_product_health_monitoring_profile(
+                        profile=profile,
+                        request=health_monitoring_request,
+                        updated_at=utc_now_timestamp(),
+                    )
+                except ValueError as error:
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="invalid_product_profile",
+                        message="Updated product profile failed validation.",
+                    ) from error
+                profile_updated_at_after = replacement_profile.updated_at
+            result_plan = plan.model_copy(
+                update={
+                    "applied": True,
+                    "profile_updated_at_after": profile_updated_at_after,
+                }
+            )
+            response = accepted_evidence_response(
+                trace_id=trace_id,
+                records={
+                    "product_profile": health_monitoring_request.product,
+                    "context": health_monitoring_request.context,
+                    "instance": health_monitoring_request.instance,
+                    "health_check": result_plan.check_name,
+                },
+                result=result_plan.model_dump(mode="json"),
+            )
+            mutation = DbOnlyMutationRequest(
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+            )
+            write_result = database_store.compare_and_write_product_profile_record(
+                expected_record=profile,
+                replacement_record=replacement_profile,
+                mutation=mutation,
+            )
+            if write_result.status == "replayed":
+                if write_result.idempotency_record is None:
+                    raise RuntimeError("Replayed product profile write requires evidence.")
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=write_result.idempotency_record,
+                    route_path=_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
+                )
+            if write_result.status == "idempotency_conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if write_result.status == "missing":
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message=(
+                        "Product profile disappeared before the health monitoring "
+                        "change could be applied."
+                    ),
+                )
+            if write_result.status == "changed":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="stale",
+                    message=(
+                        "Product profile changed while applying the reviewed health "
+                        "monitoring plan."
+                    ),
+                )
+            if write_result.status == "reservation_in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product health monitoring mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if write_result.status == "reconciliation_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product health monitoring mutation requires reconciliation "
+                        "before retry."
+                    ),
+                )
+            return response
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "product_profile": health_monitoring_request.product,
+                "context": health_monitoring_request.context,
+                "instance": health_monitoring_request.instance,
+                "health_check": plan.check_name,
+            },
+            result=plan.model_dump(mode="json"),
+        )
+
     async def apply_product_preview_tls(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -9255,6 +9560,18 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="database_required",
                 message="Product preview TLS writes require Launchplane database storage.",
+            )
+        return record_store
+
+    def require_product_health_monitoring_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Product health monitoring writes require Launchplane database storage.",
             )
         return record_store
 
@@ -16822,6 +17139,37 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_product_expected_config",
         summary="Add product expected config metadata",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
+        apply_product_health_monitoring,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            control_plane_product_health_monitoring.ProductHealthMonitoringApplyRequest
+                        )
+                    }
+                },
+            }
+        },
+        operation_id="apply_product_health_monitoring",
+        summary="Plan or apply product health monitoring policy",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

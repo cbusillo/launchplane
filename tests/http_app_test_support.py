@@ -2553,6 +2553,42 @@ def _product_preview_tls_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+def _product_health_monitoring_policy(
+    *,
+    actions: tuple[str, ...] = (
+        "product_profile.health_monitoring.plan",
+        "product_profile.health_monitoring.apply",
+    ),
+    product: str = "odoo-product",
+    context: str = "cm",
+    instance: str = "testing",
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "schema_version": 2,
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/"
+                        "product-health-monitoring.yml@refs/heads/main"
+                    ],
+                    "job_workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/"
+                        "reusable-product-health-monitoring.yml@"
+                        "e61dc9a6161f9b97d2182ca69c4cadaa1df81fca"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": [product],
+                    "contexts": [context],
+                    "instances": [instance],
+                    "actions": list(actions),
+                }
+            ],
+        }
+    )
+
+
 def _product_config_policy(
     *,
     action: str,
@@ -4082,6 +4118,28 @@ async def _post_product_preview_tls(
         app,
         "POST",
         "/v1/product-profiles/preview-tls/apply",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+async def _post_product_health_monitoring(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/product-profiles/health-monitoring/apply",
         headers=request_headers,
         payload=payload,
     )

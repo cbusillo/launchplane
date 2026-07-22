@@ -19,6 +19,7 @@ from pydantic import (
 )
 
 from control_plane.authz_scope import (
+    exact_instance_workflow_authz_actions,
     exclusively_instance_scoped_authz_actions,
     instance_scoped_authz_actions,
 )
@@ -881,6 +882,8 @@ class LaunchplaneAuthzPolicy(BaseModel):
         target: AuthorizationTarget | None = None,
     ) -> bool:
         resolved_target = target or AuthorizationTarget(scope="context")
+        if self.schema_version != 2 and action in exact_instance_workflow_authz_actions():
+            return False
         if (
             self.schema_version == 2
             and action in exclusively_instance_scoped_authz_actions()
