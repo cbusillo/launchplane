@@ -237,35 +237,27 @@ def plan_route_binding_reconcile(
             current_record_sha256=current_record_sha256,
         )
 
-    edge_endpoint = _resolve_edge_endpoint(
-        record_store=record_store,
-        provider_target=provider_target,
-        findings=findings,
-    )
     audit_record = _resolve_ingress_audit(
         record_store=record_store,
         request=request,
         domains=domains,
         findings=findings,
     )
-    if edge_endpoint is None or audit_record is None:
+    if audit_record is None:
         return _blocked_plan(
             findings=findings,
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )
-    if audit_record.edge_endpoint_key != edge_endpoint.endpoint_key:
+    edge_endpoint = _resolve_edge_endpoint(
+        record_store=record_store,
+        provider_target=provider_target,
+        audit_record=audit_record,
+        findings=findings,
+    )
+    if edge_endpoint is None:
         return _blocked_plan(
-            findings=(
-                *findings,
-                RouteBindingReconcileFinding(
-                    code="ingress_edge_endpoint_conflict",
-                    detail=(
-                        "The matching ingress audit points at a different edge endpoint than "
-                        "the resolved active edge endpoint."
-                    ),
-                ),
-            ),
+            findings=findings,
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )
@@ -506,6 +498,7 @@ def _resolve_edge_endpoint(
     *,
     record_store: RouteBindingReconcileStore,
     provider_target: ProviderTargetRecord,
+    audit_record: IngressRouteAuditRecord,
     findings: list[RouteBindingReconcileFinding],
 ) -> EdgeEndpointRecord | None:
     active_endpoints = record_store.list_edge_endpoint_records(
@@ -532,27 +525,22 @@ def _resolve_edge_endpoint(
             )
         )
         return None
-    project_name = provider_target.provider_evidence.get("project_name", "").strip()
-    if not project_name:
-        findings.append(
-            RouteBindingReconcileFinding(
-                code="edge_endpoint_evidence_missing",
-                detail=(
-                    "Provider-target evidence does not identify the edge endpoint server name."
-                ),
-            )
-        )
-        return None
     candidates = tuple(
-        endpoint for endpoint in active_endpoints if endpoint.server_name == project_name
+        endpoint
+        for endpoint in active_endpoints
+        if endpoint.endpoint_key == audit_record.edge_endpoint_key
     )
     if len(candidates) != 1:
         findings.append(
             RouteBindingReconcileFinding(
-                code="edge_endpoint_ambiguous" if candidates else "edge_endpoint_conflict",
+                code=(
+                    "ingress_edge_endpoint_ambiguous"
+                    if candidates
+                    else "ingress_edge_endpoint_missing"
+                ),
                 detail=(
-                    "Reconcile could not resolve exactly one active edge endpoint for the "
-                    "provider target."
+                    "Reconcile could not resolve exactly one active edge endpoint named by "
+                    "the matching ingress audit."
                 ),
             )
         )
@@ -586,7 +574,7 @@ def _resolve_ingress_audit(
         return None
     matching_records: list[tuple[IngressRouteAuditRecord, datetime]] = []
     for record in audit_records:
-        if record.mode != "apply" or not record.edge_endpoint_key.strip():
+        if record.mode != "apply":
             continue
         requested_domains, requested_domain_finding = _normalized_domains(record.requested_domains)
         if requested_domain_finding is not None:
@@ -625,6 +613,17 @@ def _resolve_ingress_audit(
                 detail=(
                     "The latest matching ingress audit is not terminal, so route evidence "
                     "cannot be promoted."
+                ),
+            )
+        )
+        return None
+    if any(not record.edge_endpoint_key.strip() for record in latest_records):
+        findings.append(
+            RouteBindingReconcileFinding(
+                code="ingress_audit_edge_endpoint_missing",
+                detail=(
+                    "The latest matching ingress audit does not name an edge endpoint, so "
+                    "route evidence cannot be promoted."
                 ),
             )
         )
