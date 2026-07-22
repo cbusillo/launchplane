@@ -8,6 +8,8 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
         "backup_gate.write",
         "deployment.read",
         "inventory.read",
+        "product_profile.health_monitoring.apply",
+        "product_profile.health_monitoring.plan",
         "promotion.write",
         "promotion.read",
         "route_binding.external.apply",

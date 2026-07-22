@@ -740,6 +740,19 @@ surface for both modes and supplies the target product and requested `none` or
 from service-backed or operator-supplied authz input rather than a checked-in
 product catalog.
 
+Stable-lane public health policy changes use
+`POST /v1/product-profiles/health-monitoring/apply`. The request identifies one
+exact product/context/instance lane and one health-check name, then supplies only
+the desired enabled and runtime-identity requirements. It cannot carry a URL,
+domain, provider target, proxy record, certificate reference, or replacement
+product profile. Launchplane reads the DB-backed profile, preserves any existing
+public-check URL or derives the check from lane-owned `health_url`/`base_url`,
+and rejects non-public checks. Enabling strict runtime identity requires an HTTPS
+host already owned by that lane. Dry-run returns a canonical plan bound to the
+complete current profile; apply requires the reviewed digest and an idempotency
+key, then compare-and-writes only the selected check plus server-owned profile
+audit fields. Concurrent profile edits fail stale instead of being overwritten.
+
 For initial seed or repair work, operators can write the same DB-backed record
 directly with
 `uv run launchplane product-profiles upsert --database-url ... --allow-direct-db-mutation`.

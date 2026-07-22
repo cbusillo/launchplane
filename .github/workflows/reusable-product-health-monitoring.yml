@@ -1,0 +1,225 @@
+---
+name: Reusable Product Health Monitoring
+
+"on":
+  workflow_call:
+    inputs:
+      mode:
+        description: Plan the change or apply a reviewed plan.
+        required: true
+        type: string
+      product:
+        description: Existing Launchplane product profile key.
+        required: true
+        type: string
+      context:
+        description: Exact DB-backed stable lane context.
+        required: true
+        type: string
+      instance:
+        description: Exact DB-backed stable lane instance.
+        required: true
+        type: string
+      check_name:
+        description: Existing or new public HTTP check name.
+        required: true
+        type: string
+      enabled:
+        description: Whether the public HTTP check is enabled.
+        required: true
+        type: boolean
+      require_runtime_identity:
+        description: Whether the check must match recorded runtime identity.
+        required: true
+        type: boolean
+      reviewed_plan_sha256:
+        description: Plan SHA-256 from the reviewed dry run; required for apply.
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: Operator reason recorded with the request.
+        required: true
+        type: string
+      idempotency_key:
+        description: Unique idempotency key required for apply mode.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: Exact confirmation required for apply mode.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: >-
+    launchplane-product-health-monitoring-${{ inputs.product }}-${{
+    inputs.context }}-${{ inputs.instance }}-${{ inputs.check_name }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      MODE: ${{ inputs.mode }}
+      PRODUCT: ${{ inputs.product }}
+      CONTEXT: ${{ inputs.context }}
+      INSTANCE: ${{ inputs.instance }}
+      CHECK_NAME: ${{ inputs.check_name }}
+      ENABLED: ${{ inputs.enabled }}
+      REQUIRE_RUNTIME_IDENTITY: ${{ inputs.require_runtime_identity }}
+      REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
+      REASON: ${{ inputs.reason }}
+      IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - name: Validate product health monitoring request
+        shell: bash
+        run: |
+          set -euo pipefail
+          for required in PRODUCT CONTEXT INSTANCE CHECK_NAME REASON; do
+            if [[ -z "${!required//[[:space:]]/}" ]]; then
+              echo "${required} is required." >&2
+              exit 1
+            fi
+            case "${!required}" in
+              *$'\n'*)
+                echo "${required} must be a single-line value." >&2
+                exit 1
+                ;;
+            esac
+          done
+          if [ "$ENABLED" = "false" ] && [ "$REQUIRE_RUNTIME_IDENTITY" = "true" ]; then
+            echo "A disabled check cannot require runtime identity." >&2
+            exit 1
+          fi
+          case "$MODE" in
+            dry-run)
+              if [[ -n "${REVIEWED_PLAN_SHA256//[[:space:]]/}" ]]; then
+                echo "reviewed_plan_sha256 must be empty for dry-run." >&2
+                exit 1
+              fi
+              if [[ -n "${IDEMPOTENCY_KEY//[[:space:]]/}" ]]; then
+                echo "idempotency_key must be empty for dry-run." >&2
+                exit 1
+              fi
+              ;;
+            apply)
+              if [ "$CONFIRMATION" != "APPLY PRODUCT HEALTH MONITORING" ]; then
+                echo "Exact confirmation text is required for apply." >&2
+                exit 1
+              fi
+              if ! [[ "$REVIEWED_PLAN_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+                echo "apply requires the reviewed dry-run plan SHA-256." >&2
+                exit 1
+              fi
+              if [[ -z "${IDEMPOTENCY_KEY//[[:space:]]/}" ]]; then
+                echo "idempotency_key is required for apply." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "mode must be dry-run or apply." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Build product health monitoring request
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_file="$RUNNER_TEMP/product-health-monitoring-request.json"
+          jq -n \
+            --arg mode "$MODE" \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg instance "$INSTANCE" \
+            --arg check_name "$CHECK_NAME" \
+            --argjson enabled "$ENABLED" \
+            --argjson require_runtime_identity "$REQUIRE_RUNTIME_IDENTITY" \
+            --arg reviewed_plan_sha256 "$REVIEWED_PLAN_SHA256" \
+            --arg reason "$REASON" \
+            '{
+              schema_version: 1,
+              mode: $mode,
+              product: $product,
+              context: $context,
+              instance: $instance,
+              check_name: $check_name,
+              enabled: $enabled,
+              require_runtime_identity: $require_runtime_identity,
+              reviewed_plan_sha256: $reviewed_plan_sha256,
+              reason: $reason
+            }' >"$request_file"
+          echo "request_file=$request_file" >>"$GITHUB_OUTPUT"
+
+      - name: Request product health monitoring operation
+        id: health_monitoring_request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/product-profiles/health-monitoring/apply
+          payload-file: ${{ steps.request.outputs.request_file }}
+          idempotency-key: ${{ inputs.idempotency_key }}
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: product-health-monitoring.json
+
+      - name: Check product health monitoring response
+        shell: bash
+        env:
+          STATUS_CODE: ${{ steps.health_monitoring_request.outputs.status-code }}
+        run: |
+          set -euo pipefail
+          if [ "$STATUS_CODE" != "202" ]; then
+            jq '{status, trace_id, error}' product-health-monitoring.json >&2 || true
+            echo "Product health monitoring request failed with HTTP ${STATUS_CODE}." >&2
+            exit 1
+          fi
+          if [ "$(jq -r '.status // ""' product-health-monitoring.json)" != "accepted" ]; then
+            jq '{status, trace_id, error}' product-health-monitoring.json >&2 || true
+            echo "Product health monitoring request was not accepted." >&2
+            exit 1
+          fi
+
+      - name: Upload product health monitoring evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: product-health-monitoring-result
+          path: product-health-monitoring.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Summarize product health monitoring
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Product health monitoring"
+            echo
+            echo "- Product: ${PRODUCT}"
+            echo "- Lane: ${CONTEXT}/${INSTANCE}"
+            echo "- Check: ${CHECK_NAME}"
+            echo "- Mode: ${MODE}"
+            echo "- Enabled: ${ENABLED}"
+            echo "- Require runtime identity: ${REQUIRE_RUNTIME_IDENTITY}"
+            echo "- Evidence artifact: product-health-monitoring-result"
+            if [ -f product-health-monitoring.json ]; then
+              echo "- Status: $(jq -r '.status // "unknown"' product-health-monitoring.json)"
+              echo "- Operation: $(jq -r '.result.operation // "none"' product-health-monitoring.json)"
+              echo "- Changed: $(jq -r '.result.changed // false' product-health-monitoring.json)"
+              echo "- Applied: $(jq -r '.result.applied // false' product-health-monitoring.json)"
+              echo "- Resolved URL: $(jq -r '.result.resolved_url // ""' product-health-monitoring.json)"
+              echo "- Plan SHA-256: $(jq -r '.result.plan_sha256 // ""' product-health-monitoring.json)"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
