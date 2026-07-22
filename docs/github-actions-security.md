@@ -15,7 +15,7 @@ an immutable `sha256` manifest digest.
 | Reference class | Trust | Typical privilege | Required form |
 | --- | --- | --- | --- |
 | Same-repository local action or reusable workflow | Same reviewed workflow commit | Depends on the caller workflow | `./.github/actions/...` or `./.github/workflows/...` |
-| Same-repository privileged reusable worker | First-party immutable trust anchor | Authz policy administration or production route-authority reconciliation | Repository-qualified path at a full reviewed SHA, limited to the approved dispatch wrappers |
+| Same-repository privileged reusable worker | First-party immutable trust anchor | Authz administration, route-authority reconciliation, or exact-instance reviewed product-policy mutation | Repository-qualified path at a full reviewed SHA, limited to the approved dispatch wrappers |
 | GitHub-maintained action | GitHub-maintained | Checkout, artifacts, cache, runtime setup, GitHub API, CodeQL | Full SHA plus a release-tag provenance comment |
 | Third-party publisher | Third-party publisher | Python bootstrap, registry authentication, image build and publication | Full SHA plus a release-tag provenance comment |
 | First-party cross-repository Launchplane action | First-party cross-repository | OIDC-authenticated Launchplane requests and preview-client setup | Full SHA plus `# main` provenance |
@@ -51,8 +51,9 @@ remote code or move workflow data across trust boundaries.
 - Same-repository reusable workflows must use relative paths rather than a
   repository-qualified reference, except narrowly approved privileged workers
   whose full-SHA `job_workflow_ref` is itself part of the active policy trust
-  boundary. The approved set is limited to managed authz administration and
-  production route-binding reconciliation.
+boundary. The approved set is limited to managed authz administration and
+route-binding reconciliation, plus exact-instance product health-policy
+mutation whose plan/apply actions are separately authorized.
 - Changes to that authorization worker's `workflow_call` interface require two
   landings. First land the worker contract without changing caller pins, then
   pin each caller to that landed commit and start passing the new input or

@@ -44,6 +44,9 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/external-route-binding-reconcile.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml"}
     ),
+    Path(".github/workflows/product-health-monitoring.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml"}
+    ),
 }
 
 
@@ -104,6 +107,11 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     "cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml": (
         ActionClassification(
             "First-party same-repository", "external route authority reconciliation"
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml": (
+        ActionClassification(
+            "First-party same-repository", "exact-instance product health policy mutation"
         )
     ),
     "docker/build-push-action": ActionClassification(
