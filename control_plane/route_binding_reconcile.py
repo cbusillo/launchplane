@@ -574,7 +574,7 @@ def _resolve_ingress_audit(
         return None
     matching_records: list[tuple[IngressRouteAuditRecord, datetime]] = []
     for record in audit_records:
-        if record.mode != "apply" or not record.edge_endpoint_key.strip():
+        if record.mode != "apply":
             continue
         requested_domains, requested_domain_finding = _normalized_domains(record.requested_domains)
         if requested_domain_finding is not None:
@@ -613,6 +613,17 @@ def _resolve_ingress_audit(
                 detail=(
                     "The latest matching ingress audit is not terminal, so route evidence "
                     "cannot be promoted."
+                ),
+            )
+        )
+        return None
+    if any(not record.edge_endpoint_key.strip() for record in latest_records):
+        findings.append(
+            RouteBindingReconcileFinding(
+                code="ingress_audit_edge_endpoint_missing",
+                detail=(
+                    "The latest matching ingress audit does not name an edge endpoint, so "
+                    "route evidence cannot be promoted."
                 ),
             )
         )

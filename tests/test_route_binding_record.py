@@ -841,6 +841,37 @@ class RouteBindingEvidenceTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "ingress_audit_unresolved")
 
+    def test_reconcile_fails_closed_when_latest_ingress_audit_has_no_edge_endpoint(
+        self,
+    ) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
+                provider_target=_provider_target_record(),
+                dokploy_target=_dokploy_target_record(),
+                edge_endpoints=(_edge_endpoint_record(),),
+                ingress_audits=(
+                    _ingress_audit_record(record_id="audit-linked"),
+                    _ingress_audit_record(
+                        record_id="audit-unlinked",
+                        endpoint_key="",
+                        recorded_at="2026-07-12T00:10:00Z",
+                    ),
+                ),
+            ),
+            request=RouteBindingReconcileRequest(
+                product="example-product",
+                context="example-testing",
+                instance="web",
+                evaluated_at="2026-07-12T00:15:00Z",
+            ),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            plan.findings[0].code,
+            "ingress_audit_edge_endpoint_missing",
+        )
+
     def test_reconcile_fails_closed_when_tls_ownership_is_unknown(self) -> None:
         plan = plan_route_binding_reconcile(
             record_store=_RouteBindingReconcileFakeStore(
