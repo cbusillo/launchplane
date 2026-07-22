@@ -7818,6 +7818,11 @@
           "ingress": {
             "$ref": "#/components/schemas/NpmplusIngressApplyRequest"
           },
+          "instance": {
+            "default": "",
+            "title": "Instance",
+            "type": "string"
+          },
           "product": {
             "title": "Product",
             "type": "string"

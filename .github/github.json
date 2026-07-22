@@ -92,6 +92,8 @@
     "Ingress Route Apply",
     "Ingress Route Audit Read",
     "Ingress Route Dry Run",
+    "Reusable Ingress Route Apply",
+    "Reusable Ingress Route Dry Run",
     "Live Target Runtime",
     "Manage Launchplane Authorization",
     "Merge Train Runner",

@@ -26,6 +26,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from control_plane import authz_grant_service as control_plane_authz_grant_service
+from control_plane import ingress_route_scope as control_plane_ingress_route_scope
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
@@ -1703,6 +1704,7 @@ class NpmplusIngressApplyEnvelope(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     product: str
     context: str
+    instance: str = ""
     ingress: NpmplusIngressApplyRequest
 
     @field_validator("product", "context", mode="after")
@@ -1712,6 +1714,11 @@ class NpmplusIngressApplyEnvelope(BaseModel):
         if not normalized_value:
             raise ValueError("NPMplus ingress apply requires non-empty product/context")
         return normalized_value
+
+    @field_validator("instance", mode="after")
+    @classmethod
+    def _normalize_instance(cls, value: str) -> str:
+        return value.strip()
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> "NpmplusIngressApplyEnvelope":
@@ -12859,11 +12866,17 @@ def create_launchplane_fastapi_app(
             if route_request.ingress.mode == "apply"
             else native_routes._native_driver_route_alternate_authz_action(apply_ingress_route)
         )
+        instance_name = route_request.instance.strip()
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action=authz_action,
             product=route_request.product,
             context=route_request.context,
+            target=(
+                AuthorizationTarget(scope="instance", instances=(instance_name,))
+                if instance_name
+                else AuthorizationTarget(scope="context")
+            ),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -12871,9 +12884,40 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message=(
                     "Workflow cannot plan or apply the ingress route for the requested "
-                    "product/context."
+                    + ("product/context/instance." if instance_name else "product/context.")
                 ),
             )
+        if instance_name:
+            try:
+                profile_store = require_product_profile_read_store(record_store)
+                profile = profile_store.read_product_profile_record(route_request.product)
+                control_plane_ingress_route_scope.validate_ingress_route_instance_scope(
+                    profile=profile,
+                    context=route_request.context,
+                    instance=instance_name,
+                    requested_domains=route_request.ingress.route.domain_names,
+                )
+            except TypeError as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message=str(error),
+                ) from error
+            except FileNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_ingress_instance_scope",
+                    message="Ingress route instance scope requires an existing product profile.",
+                ) from error
+            except control_plane_ingress_route_scope.IngressRouteInstanceScopeError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code=error.code,
+                    message=error.message,
+                ) from error
         if route_request.ingress.mode == "apply" and not idempotency_key.strip():
             raise _launchplane_http_error(
                 status_code=400,
@@ -12914,8 +12958,61 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
 
+        guarded_instance_apply = False
         try:
             ingress_provider = resolved_ingress_provider_factory()
+            if instance_name and resolved_ingress_request.mode == "apply":
+                if resolved_ingress_request.expected_host_id is None:
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="instance_scoped_ingress_expected_host_required",
+                        message="Instance-scoped ingress apply requires expected_host_id.",
+                    )
+                if resolved_ingress_request.allow_create:
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="instance_scoped_ingress_create_forbidden",
+                        message="Instance-scoped ingress apply cannot create a provider route.",
+                    )
+                if not resolved_ingress_request.require_exact_expected_host_domains:
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="instance_scoped_ingress_exact_domains_required",
+                        message=(
+                            "Instance-scoped ingress apply requires exact expected-host domains."
+                        ),
+                    )
+                if not resolved_ingress_request.route.edge_endpoint_key.strip():
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="instance_scoped_ingress_edge_endpoint_required",
+                        message="Instance-scoped ingress apply requires a DB-backed edge endpoint.",
+                    )
+                preflight_result = ingress_provider.apply_route(
+                    request=resolved_ingress_request.model_copy(update={"mode": "dry-run"})
+                )
+                if preflight_result.status != "unchanged" or any(
+                    operation.requires_apply for operation in preflight_result.operations
+                ):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="instance_scoped_ingress_change_forbidden",
+                        message=(
+                            "Instance-scoped ingress apply can record only a reviewed no-op route."
+                        ),
+                    )
+                resolved_ingress_request = resolved_ingress_request.model_copy(
+                    update={
+                        "allow_create": False,
+                        "allow_update": False,
+                        "allow_enable_disable": False,
+                    }
+                )
             if resolved_ingress_request.mode == "apply":
                 write_ingress_route_pending_audit_record(
                     ingress_store=ingress_store,
@@ -12926,8 +13023,18 @@ def create_launchplane_fastapi_app(
                     request=resolved_ingress_request,
                     idempotency_key=normalized_key,
                 )
+                guarded_instance_apply = bool(instance_name)
             ingress_result = ingress_provider.apply_route(request=resolved_ingress_request)
         except (ValueError, click.ClickException) as error:
+            if guarded_instance_apply:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="instance_scoped_ingress_changed",
+                    message=(
+                        "The provider route changed after review; repeat the exact-instance dry run."
+                    ),
+                ) from error
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,

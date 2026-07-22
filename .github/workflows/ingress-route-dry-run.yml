@@ -12,6 +12,11 @@ name: Ingress Route Dry Run
         description: Launchplane context authorized for the route plan.
         required: true
         type: string
+      instance:
+        description: Optional exact DB-backed lane instance for narrow authorization.
+        required: false
+        default: ""
+        type: string
       domain:
         description: Public domain name to compare against the provider route.
         required: true
@@ -58,216 +63,24 @@ name: Ingress Route Dry Run
         description: Optional JSON object for route toggles and provider options.
         required: true
         type: string
+
 permissions:
   contents: read
   id-token: write
 
-concurrency:
-  group: launchplane-ingress-route-dry-run-${{ inputs.product }}-${{ inputs.context }}
-  cancel-in-progress: false
-
 jobs:
   dry-run:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
-    env:
-      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Build ingress route dry run payload
-        id: payload
-        shell: bash
-        env:
-          PRODUCT: ${{ inputs.product }}
-          CONTEXT: ${{ inputs.context }}
-          DOMAIN: ${{ inputs.domain }}
-          REASON: ${{ inputs.reason }}
-          EXPECTED_HOST_ID: ${{ inputs.expected_host_id }}
-          FORWARD_SCHEME: ${{ inputs.forward_scheme }}
-          FORWARD_HOST: ${{ inputs.forward_host }}
-          EDGE_ENDPOINT_KEY: ${{ inputs.edge_endpoint_key }}
-          FORWARD_PORT: ${{ inputs.forward_port }}
-          CERTIFICATE_ID: ${{ inputs.certificate_id }}
-          ROUTE_OPTIONS_JSON: ${{ inputs.route_options_json }}
-        run: |
-          set -euo pipefail
-          payload_file="$RUNNER_TEMP/ingress-route-dry-run-request.json"
-          jq -n \
-            --arg product "$PRODUCT" \
-            --arg context "$CONTEXT" \
-            --arg domain "$DOMAIN" \
-            --arg reason "$REASON" \
-            --arg forward_scheme "$FORWARD_SCHEME" \
-            --arg forward_host "$FORWARD_HOST" \
-            --arg edge_endpoint_key "$EDGE_ENDPOINT_KEY" \
-            --arg route_options_json "$ROUTE_OPTIONS_JSON" \
-            --arg expected_host_id "$EXPECTED_HOST_ID" \
-            --argjson forward_port "$FORWARD_PORT" \
-            --arg certificate_id "$CERTIFICATE_ID" \
-            '($route_options_json | fromjson) as $options |
-            ($certificate_id | gsub("^\\s+|\\s+$"; "")) as $certificate_id_text |
-            (if $certificate_id_text == "new" then
-              "new"
-            else
-              try ($certificate_id_text | tonumber) catch error(
-                "certificate_id must be an integer or new"
-              )
-            end) as $certificate_id_value |
-            ($expected_host_id |
-              if . == "" then
-                null
-              elif . == "null" then
-                error("expected_host_id must be blank or a JSON number")
-              else
-                try fromjson catch error(
-                  "expected_host_id must be a JSON number when provided"
-                )
-              end) as $expected_host_id_value |
-            def option($key; $default):
-              if $options | has($key) then $options[$key] else $default end;
-            if ($options | type) != "object" then
-              error("route_options_json must be a JSON object")
-            elif (
-              ($forward_host | length) == 0
-              and ($edge_endpoint_key | length) == 0
-            ) then
-              error("forward_host or edge_endpoint_key is required")
-            elif (
-              ($forward_host | length) != 0
-              and ($edge_endpoint_key | length) != 0
-            ) then
-              error("forward_host and edge_endpoint_key are mutually exclusive")
-            elif (
-              $expected_host_id_value != null
-              and ($expected_host_id_value | type) != "number"
-            ) then
-              error("expected_host_id must be a number when provided")
-            elif ([
-              $options
-              | keys[]
-              | select(. as $key | [
-                "enabled",
-                "require_exact_expected_host_domains",
-                "allow_create",
-                "allow_update",
-                "allow_enable_disable",
-                "ssl_forced",
-                "hsts_enabled",
-                "hsts_subdomains",
-                "trust_forwarded_proto",
-                "http2_support",
-                "npmplus_http3_support",
-                "access_list_id",
-                "npmplus_noindex",
-                "npmplus_crowdsec_appsec",
-                "npmplus_proxy_request_buffering",
-                "npmplus_proxy_response_buffering",
-                "npmplus_upstream_compression",
-                "npmplus_fancyindex",
-                "npmplus_x_frame_options",
-                "npmplus_auth_request",
-                "identity_access",
-                "advanced_config",
-                "locations"
-              ] | index($key) | not)
-            ] | length) > 0 then
-              error("route_options_json contains unsupported route option key(s)")
-            else
-            ($options | del(
-              .require_exact_expected_host_domains,
-              .allow_create,
-              .allow_update,
-              .allow_enable_disable
-            )) as $route_options |
-            ({
-              domain_names: [$domain],
-              forward_scheme: $forward_scheme,
-              forward_host: $forward_host,
-              edge_endpoint_key: $edge_endpoint_key,
-              forward_port: $forward_port,
-              certificate_id: $certificate_id_value,
-              enabled: true,
-              ssl_forced: true,
-              http2_support: true,
-              npmplus_http3_support: true,
-              npmplus_noindex: false,
-              access_list_id: 0
-            } + $route_options) as $route |
-            if (
-              (($route.forward_host // "") | length) == 0
-              and (($route.edge_endpoint_key // "") | length) == 0
-            ) then
-              error("route.forward_host or route.edge_endpoint_key is required")
-            elif (
-              (($route.forward_host // "") | length) != 0
-              and (($route.edge_endpoint_key // "") | length) != 0
-            ) then
-              error("route.forward_host and route.edge_endpoint_key are mutually exclusive")
-            else
-            {
-              schema_version: 1,
-              product: $product,
-              context: $context,
-              ingress: {
-                schema_version: 1,
-                mode: "dry-run",
-                expected_host_id: $expected_host_id_value,
-                require_exact_expected_host_domains: option("require_exact_expected_host_domains"; false),
-                allow_create: option("allow_create"; true),
-                allow_update: option("allow_update"; true),
-                allow_enable_disable: option("allow_enable_disable"; true),
-                reason: $reason,
-                route: $route
-              }
-            }
-            end
-            end' >"$payload_file"
-          echo "payload_file=$payload_file" >>"$GITHUB_OUTPUT"
-
-      - name: Request ingress route dry run
-        id: launchplane
-        uses: ./.github/actions/launchplane-request
-        with:
-          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
-          method: POST
-          route-path: /v1/drivers/ingress/route-apply
-          payload-file: ${{ steps.payload.outputs.payload_file }}
-          timeout-ms: "30000"
-          fail-result-paths: result.status
-          response-output-file: ingress-route-dry-run.json
-
-      - name: Summarize dry run
-        shell: bash
-        env:
-          PRODUCT: ${{ inputs.product }}
-          CONTEXT: ${{ inputs.context }}
-          DOMAIN: ${{ inputs.domain }}
-        run: |
-          set -euo pipefail
-          result_file="ingress-route-dry-run.json"
-          jq . "$result_file"
-          {
-            echo '## Ingress route dry run'
-            echo
-            echo "- Product: $PRODUCT"
-            echo "- Context: $CONTEXT"
-            echo "- Domain: $DOMAIN"
-            echo "- Status: $(jq -r '.result.status' "$result_file")"
-            echo "- Dry run: $(jq -r '.result.dry_run' "$result_file")"
-            echo
-            echo '### Operations'
-            jq -r '
-              .result.operations[]?
-              | (.change_categories // [] | if length == 0 then "none" else join(",") end) as $categories
-              | "- \(.action) host=\(.host_id // "new") requires_apply=\(.requires_apply) categories=\($categories)"
-            ' "$result_file"
-          } >>"$GITHUB_STEP_SUMMARY"
-
-      - name: Upload dry run response
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ingress-route-dry-run
-          path: ingress-route-dry-run.json
-          if-no-files-found: error
+    uses: cbusillo/launchplane/.github/workflows/reusable-ingress-route-dry-run.yml@b649f41982c478189aabb7c9e5a5e8649279b01b # main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: ${{ inputs.instance }}
+      domain: ${{ inputs.domain }}
+      forward_host: ${{ inputs.forward_host }}
+      edge_endpoint_key: ${{ inputs.edge_endpoint_key }}
+      forward_port: ${{ inputs.forward_port }}
+      certificate_id: ${{ inputs.certificate_id }}
+      expected_host_id: ${{ inputs.expected_host_id }}
+      reason: ${{ inputs.reason }}
+      forward_scheme: ${{ inputs.forward_scheme }}
+      route_options_json: ${{ inputs.route_options_json }}

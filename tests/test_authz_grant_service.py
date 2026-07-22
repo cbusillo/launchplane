@@ -164,6 +164,86 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             ),
         )
 
+    def test_instance_ingress_managed_rule_requires_pinned_reusable_workflow(self) -> None:
+        current_record = _active_record_for_policy(LaunchplaneAuthzPolicy(schema_version=2))
+        desired_rule = {
+            "managed_set_id": "operator.odoo.testing-ingress-route",
+            "managed_rule_id": "opw.testing.ingress-route",
+            "repository": "cbusillo/launchplane",
+            "repository_id": "1001",
+            "repository_owner_id": "2001",
+            "workflow_refs": [
+                "cbusillo/launchplane/.github/workflows/ingress-route-dry-run.yml@refs/heads/main"
+            ],
+            "event_names": ["workflow_dispatch"],
+            "products": ["odoo-tenant-opw"],
+            "contexts": ["opw"],
+            "instances": ["testing"],
+            "actions": ["ingress_route.plan"],
+        }
+        request_payload = {
+            "schema_version": 2,
+            "product": "launchplane",
+            "managed_set_id": "operator.odoo.testing-ingress-route",
+            "desired_policy": {
+                "schema_version": 2,
+                "github_actions": [desired_rule],
+            },
+        }
+
+        with self.assertRaisesRegex(AuthzPolicyRequestError, "reviewed reusable workflow"):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=AuthzManagedPolicyReconcileEnvelope.model_validate(request_payload),
+            )
+
+        desired_rule["job_workflow_refs"] = [
+            "cbusillo/launchplane/.github/workflows/reusable-ingress-route-dry-run.yml@" + "a" * 40
+        ]
+        _, _, updated_policy, _ = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=AuthzManagedPolicyReconcileEnvelope.model_validate(request_payload),
+        )
+
+        self.assertEqual(updated_policy.github_actions[0].instances, ("testing",))
+
+    def test_context_ingress_managed_rule_preserves_legacy_unpinned_scope(self) -> None:
+        current_record = _active_record_for_policy(LaunchplaneAuthzPolicy(schema_version=2))
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.legacy-ingress-route",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "managed_set_id": "operator.legacy-ingress-route",
+                            "managed_rule_id": "legacy.context.plan",
+                            "repository": "cbusillo/launchplane",
+                            "repository_id": "1001",
+                            "repository_owner_id": "2001",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/"
+                                "ingress-route-dry-run.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["legacy-product"],
+                            "contexts": ["legacy"],
+                            "actions": ["ingress_route.plan"],
+                        }
+                    ],
+                },
+            }
+        )
+
+        _, _, updated_policy, _ = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
+
+        self.assertEqual(updated_policy.github_actions[0].instances, ())
+
     def test_managed_route_rejects_policy_change_after_authorization(self) -> None:
         active_record = _active_record()
         request = AuthzManagedPolicyReconcileEnvelope.model_validate(

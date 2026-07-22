@@ -84,7 +84,11 @@ class _FakeIngressProvider:
 
 
 def _npmplus_ingress_route_payload(
-    *, mode: str = "dry-run", context: str = "reon-prod", **overrides: object
+    *,
+    mode: str = "dry-run",
+    context: str = "reon-prod",
+    instance: str = "",
+    **overrides: object,
 ) -> dict[str, object]:
     route: dict[str, object] = {
         "domain_names": ["ingress-canary.example.test"],
@@ -98,6 +102,7 @@ def _npmplus_ingress_route_payload(
         "schema_version": 1,
         "product": "launchplane",
         "context": context,
+        "instance": instance,
         "ingress": {
             "mode": mode,
             "route": route,

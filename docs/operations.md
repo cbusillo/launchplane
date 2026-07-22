@@ -393,7 +393,9 @@ secret. `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` owns the primary operator set;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
 Odoo stable managed route-binding set; and
 `LAUNCHPLANE_AUTHZ_ODOO_EXTERNAL_ROUTE_BINDING_MANAGED_SET_JSON` owns the
-testing-first external route-binding set. The
+testing-first external route-binding set.
+`LAUNCHPLANE_AUTHZ_ODOO_TESTING_INGRESS_ROUTE_MANAGED_SET_JSON` owns narrow
+testing-lane ingress inspection and reviewed no-op audit authority. The
 `Manage Launchplane Authorization` wrapper selects one of those explicit
 secrets and forwards it into the reusable worker, whose OIDC-minting job remains
 gated by the `launchplane-authz-admin` environment. Never replace the unreadable
@@ -402,6 +404,18 @@ secret instead. The JSON owns desired state only: `schema_version`, `product`,
 `managed_set_id`, migration/adoption intent, and `desired_policy`.
 Dispatch-time mode, reason, issue reference, and reviewed plan digest are
 deliberately excluded from that secret.
+
+`Ingress Route Dry Run` and `Ingress Route Apply` accept an optional exact
+instance. When present, the service authorizes `ingress_route.plan` or
+`ingress_route.apply` against that instance and verifies every requested domain
+against the DB-backed product lane before any provider access. An instance-
+scoped apply is intentionally adoption-only: it requires an existing host ID,
+exact expected-host domains, a DB-backed edge endpoint, and `allow_create=false`.
+The service performs a fresh provider dry-run and rejects any create, update,
+enable, or disable before recording an unchanged audit. It repeats the provider
+read with all mutation flags disabled so drift fails closed instead of changing
+the route. Context-scoped callers retain the existing provider-mutation
+contract; do not grant that broader scope merely to inspect one testing lane.
 
 Use the `Manage Launchplane Authorization` workflow on the default branch.
 Select the intended `managed_set`, then dispatch `mode=dry_run` with the final

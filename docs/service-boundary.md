@@ -165,7 +165,11 @@ cleanup scope so the store is always closed.
     `dry-run` and `ingress_route.apply` for `apply`, resolving optional edge
     endpoint records before provider execution, writing ingress route audit
     records, using the bearer/OIDC write identity path, and requiring an
-    `Idempotency-Key` only for `apply`
+    `Idempotency-Key` only for `apply`. Requests may name an exact instance;
+    those calls require instance-scoped authority and DB-backed lane-domain
+    validation. Exact-instance apply is limited to a reviewed existing-host
+    no-op with an edge-endpoint record and cannot create or mutate provider
+    routes.
 - native FastAPI Dokploy target inspect read:
   - `GET /v1/dokploy-targets/inspect`, requiring `dokploy_target.inspect` for
     the Launchplane service context and returning redacted provider identity

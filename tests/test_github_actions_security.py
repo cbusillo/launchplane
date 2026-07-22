@@ -44,6 +44,12 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/external-route-binding-reconcile.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml"}
     ),
+    Path(".github/workflows/ingress-route-apply.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-ingress-route-apply.yml"}
+    ),
+    Path(".github/workflows/ingress-route-dry-run.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-ingress-route-dry-run.yml"}
+    ),
     Path(".github/workflows/product-health-monitoring.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml"}
     ),
@@ -107,6 +113,16 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     "cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml": (
         ActionClassification(
             "First-party same-repository", "external route authority reconciliation"
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-ingress-route-apply.yml": (
+        ActionClassification(
+            "First-party same-repository", "exact-instance reviewed ingress evidence apply"
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-ingress-route-dry-run.yml": (
+        ActionClassification(
+            "First-party same-repository", "exact-instance ingress route inspection"
         )
     ),
     "cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml": (

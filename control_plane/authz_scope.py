@@ -25,9 +25,17 @@ _EXACT_INSTANCE_WORKFLOW_AUTHZ_ACTIONS = frozenset(
         "route_binding.external.plan",
     }
 )
+_INSTANCE_PINNED_WORKFLOW_AUTHZ_ACTIONS = frozenset(
+    {
+        "ingress_route.apply",
+        "ingress_route.plan",
+    }
+)
 _DUAL_SCOPE_AUTHZ_ACTIONS = frozenset(
     {
         "driver.read",
+        "ingress_route.apply",
+        "ingress_route.plan",
         "operations.read",
         "product_config.apply",
         "product_config.plan",
@@ -59,3 +67,8 @@ def exclusively_instance_scoped_authz_actions() -> frozenset[str]:
 @lru_cache(maxsize=1)
 def exact_instance_workflow_authz_actions() -> frozenset[str]:
     return _EXACT_INSTANCE_WORKFLOW_AUTHZ_ACTIONS
+
+
+@lru_cache(maxsize=1)
+def instance_pinned_workflow_authz_actions() -> frozenset[str]:
+    return _INSTANCE_PINNED_WORKFLOW_AUTHZ_ACTIONS

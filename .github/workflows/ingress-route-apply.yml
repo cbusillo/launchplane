@@ -12,6 +12,11 @@ name: Ingress Route Apply
         description: Launchplane context authorized for the route apply.
         required: true
         type: string
+      instance:
+        description: Optional exact DB-backed lane instance for narrow authorization.
+        required: false
+        default: ""
+        type: string
       route_json:
         description: >-
           JSON object with desired route and apply guard options. Set
@@ -35,139 +40,14 @@ permissions:
   contents: read
   id-token: write
 
-concurrency:
-  group: >-
-    launchplane-ingress-route-apply-${{ inputs.product }}-${{
-    inputs.context }}
-  cancel-in-progress: false
-
 jobs:
   apply:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
-    env:
-      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Validate ingress route apply confirmation
-        shell: bash
-        env:
-          CONFIRMATION: ${{ inputs.confirmation }}
-          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
-        run: |
-          set -euo pipefail
-          if [ "$CONFIRMATION" != "APPLY LAUNCHPLANE INGRESS ROUTE" ]; then
-            echo "confirmation must be APPLY LAUNCHPLANE INGRESS ROUTE" >&2
-            exit 1
-          fi
-          if [ -z "${IDEMPOTENCY_KEY// }" ]; then
-            echo "idempotency_key is required." >&2
-            exit 1
-          fi
-
-      - name: Build ingress route apply payload
-        id: payload
-        shell: bash
-        env:
-          PRODUCT: ${{ inputs.product }}
-          CONTEXT: ${{ inputs.context }}
-          REASON: ${{ inputs.reason }}
-          ROUTE_JSON: ${{ inputs.route_json }}
-        run: |
-          set -euo pipefail
-          payload_file="$RUNNER_TEMP/ingress-route-apply-request.json"
-          jq -n \
-            --arg product "$PRODUCT" \
-            --arg context "$CONTEXT" \
-            --arg reason "$REASON" \
-            --arg route_json "$ROUTE_JSON" \
-            '($route_json | fromjson) as $input |
-            def option($key; $default):
-              if $input | has($key) then $input[$key] else $default end;
-            if ($input | type) != "object" then
-              error("route_json must be a JSON object")
-            elif ($input.route | type) != "object" then
-              error("route_json.route must be a JSON object")
-            elif (($input.route.domain_names // []) | length) == 0 then
-              error("route_json.route.domain_names must be non-empty")
-            else
-              option("allow_create"; false) as $allow_create |
-              ($input.expected_host_id // null) as $expected_host_id |
-              if ($allow_create | type) != "boolean" then
-                error("route_json.allow_create must be a boolean")
-              elif (
-                $expected_host_id != null
-                and ($expected_host_id | type) != "number"
-              ) then
-                error("route_json.expected_host_id must be a number or null")
-              else
-              {
-                schema_version: 1,
-                product: $product,
-                context: $context,
-                ingress: {
-                  schema_version: 1,
-                  mode: "apply",
-                  expected_host_id: $expected_host_id,
-                  require_exact_expected_host_domains: option(
-                    "require_exact_expected_host_domains"; false
-                  ),
-                  allow_create: $allow_create,
-                  allow_update: option("allow_update"; true),
-                  allow_enable_disable: option("allow_enable_disable"; false),
-                  reason: $reason,
-                  route: $input.route
-                }
-              }
-              end
-            end' >"$payload_file"
-          echo "payload_file=$payload_file" >>"$GITHUB_OUTPUT"
-
-      - name: Request ingress route apply
-        id: launchplane
-        uses: ./.github/actions/launchplane-request
-        with:
-          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
-          method: POST
-          route-path: /v1/drivers/ingress/route-apply
-          payload-file: ${{ steps.payload.outputs.payload_file }}
-          idempotency-key: ${{ inputs.idempotency_key }}
-          timeout-ms: "30000"
-          fail-result-paths: result.status
-          response-output-file: ingress-route-apply.json
-
-      - name: Summarize apply
-        shell: bash
-        env:
-          PRODUCT: ${{ inputs.product }}
-          CONTEXT: ${{ inputs.context }}
-        run: |
-          set -euo pipefail
-          result_file="ingress-route-apply.json"
-          jq . "$result_file"
-          {
-            echo '## Ingress route apply'
-            echo
-            echo "- Product: $PRODUCT"
-            echo "- Context: $CONTEXT"
-            echo "- Status: $(jq -r '.result.status' "$result_file")"
-            echo "- Dry run: $(jq -r '.result.dry_run' "$result_file")"
-            echo
-            echo '### Operations'
-            jq -r '
-              .result.operations[]?
-              | (.change_categories // []
-                 | if length == 0 then "none" else join(",") end) as $categories
-              | "- \(.action) host=\(.host_id // "new") "
-                + "requires_apply=\(.requires_apply) categories=\($categories)"
-            ' "$result_file"
-          } >>"$GITHUB_STEP_SUMMARY"
-
-      - name: Upload apply response
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ingress-route-apply
-          path: ingress-route-apply.json
-          if-no-files-found: error
+    uses: cbusillo/launchplane/.github/workflows/reusable-ingress-route-apply.yml@b649f41982c478189aabb7c9e5a5e8649279b01b # main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: ${{ inputs.instance }}
+      route_json: ${{ inputs.route_json }}
+      reason: ${{ inputs.reason }}
+      idempotency_key: ${{ inputs.idempotency_key }}
+      confirmation: ${{ inputs.confirmation }}
