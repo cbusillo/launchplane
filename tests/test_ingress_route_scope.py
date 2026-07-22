@@ -98,6 +98,24 @@ class IngressRouteInstanceScopeTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "ingress_route_domain_scope_ambiguous")
 
+    def test_ignores_sibling_lane_without_public_domains(self) -> None:
+        profile = _profile()
+        profile_with_empty_sibling = profile.model_copy(
+            update={
+                "lanes": (
+                    profile.lanes[0],
+                    profile.lanes[1].model_copy(update={"base_url": ""}),
+                )
+            }
+        )
+
+        validate_ingress_route_instance_scope(
+            profile=profile_with_empty_sibling,
+            context="example",
+            instance="testing",
+            requested_domains=("app-testing.example.test",),
+        )
+
     def test_rejects_non_https_lane_url(self) -> None:
         profile = _profile()
         invalid_profile = profile.model_copy(

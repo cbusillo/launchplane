@@ -38,7 +38,7 @@ def validate_ingress_route_instance_scope(
 
     requested = frozenset(_normalized_domain(domain) for domain in requested_domains)
     lane = matching_lanes[0]
-    authorized_domains = _lane_public_domains(lane)
+    authorized_domains = _lane_public_domains(lane, require_domains=True)
     if not requested.issubset(authorized_domains):
         raise IngressRouteInstanceScopeError(
             code="ingress_route_domain_scope_mismatch",
@@ -48,14 +48,18 @@ def validate_ingress_route_instance_scope(
     for other_lane in profile.lanes:
         if other_lane is lane:
             continue
-        if requested & _lane_public_domains(other_lane):
+        if requested & _lane_public_domains(other_lane, require_domains=False):
             raise IngressRouteInstanceScopeError(
                 code="ingress_route_domain_scope_ambiguous",
                 message="Ingress route domains are shared with another product lane.",
             )
 
 
-def _lane_public_domains(lane: ProductLaneProfile) -> frozenset[str]:
+def _lane_public_domains(
+    lane: ProductLaneProfile,
+    *,
+    require_domains: bool,
+) -> frozenset[str]:
     urls: list[tuple[str, str]] = [
         ("base_url", lane.base_url),
         ("health_url", lane.health_url),
@@ -66,11 +70,9 @@ def _lane_public_domains(lane: ProductLaneProfile) -> frozenset[str]:
         if check.enabled and check.kind == "public_http" and check.url.strip()
     )
     domains = {
-        _public_https_domain(value=value, label=label)
-        for label, value in urls
-        if value.strip()
+        _public_https_domain(value=value, label=label) for label, value in urls if value.strip()
     }
-    if not domains:
+    if require_domains and not domains:
         raise IngressRouteInstanceScopeError(
             code="ingress_route_lane_domains_missing",
             message="Ingress route instance scope requires a DB-backed public HTTPS domain.",

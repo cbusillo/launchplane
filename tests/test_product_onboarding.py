@@ -1196,9 +1196,7 @@ class ProductOnboardingTests(unittest.TestCase):
         wrapper_text = Path(".github/workflows/ingress-route-dry-run.yml").read_text(
             encoding="utf-8"
         )
-        workflow_text = Path(
-            ".github/workflows/reusable-ingress-route-dry-run.yml"
-        ).read_text(
+        workflow_text = Path(".github/workflows/reusable-ingress-route-dry-run.yml").read_text(
             encoding="utf-8"
         )
 
@@ -1243,8 +1241,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(inputs_section.count("        description:"), 12)
         self.assertIn("      instance:", inputs_section)
         self.assertIn(
-            "reusable-ingress-route-dry-run.yml@"
-            "878e6a317cfbd028c89d49cfa4ce34553aac0123",
+            "reusable-ingress-route-dry-run.yml@878e6a317cfbd028c89d49cfa4ce34553aac0123",
             wrapper_text,
         )
         self.assertIn("edge_endpoint_key:", inputs_section)
@@ -1378,12 +1375,8 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("route_options_json", workflow_text)
 
     def test_ingress_route_apply_workflow_requires_operator_guards(self) -> None:
-        wrapper_text = Path(".github/workflows/ingress-route-apply.yml").read_text(
-            encoding="utf-8"
-        )
-        workflow_text = Path(
-            ".github/workflows/reusable-ingress-route-apply.yml"
-        ).read_text(
+        wrapper_text = Path(".github/workflows/ingress-route-apply.yml").read_text(encoding="utf-8")
+        workflow_text = Path(".github/workflows/reusable-ingress-route-apply.yml").read_text(
             encoding="utf-8"
         )
 
@@ -1420,8 +1413,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(inputs_section.count("        description:"), 7)
         self.assertIn("      instance:", inputs_section)
         self.assertIn(
-            "reusable-ingress-route-apply.yml@"
-            "878e6a317cfbd028c89d49cfa4ce34553aac0123",
+            "reusable-ingress-route-apply.yml@878e6a317cfbd028c89d49cfa4ce34553aac0123",
             wrapper_text,
         )
 

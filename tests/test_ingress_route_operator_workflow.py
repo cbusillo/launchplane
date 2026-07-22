@@ -6,18 +6,10 @@ from tests.support.workflows import load_workflow
 
 class IngressRouteOperatorWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.dry_run_wrapper = load_workflow(
-            ".github/workflows/ingress-route-dry-run.yml"
-        )
-        self.apply_wrapper = load_workflow(
-            ".github/workflows/ingress-route-apply.yml"
-        )
-        self.dry_run = load_workflow(
-            ".github/workflows/reusable-ingress-route-dry-run.yml"
-        )
-        self.apply = load_workflow(
-            ".github/workflows/reusable-ingress-route-apply.yml"
-        )
+        self.dry_run_wrapper = load_workflow(".github/workflows/ingress-route-dry-run.yml")
+        self.apply_wrapper = load_workflow(".github/workflows/ingress-route-apply.yml")
+        self.dry_run = load_workflow(".github/workflows/reusable-ingress-route-dry-run.yml")
+        self.apply = load_workflow(".github/workflows/reusable-ingress-route-apply.yml")
 
     def test_dispatch_wrappers_pin_and_forward_to_workers(self) -> None:
         expected = {

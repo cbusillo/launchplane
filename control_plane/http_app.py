@@ -13013,7 +13013,6 @@ def create_launchplane_fastapi_app(
                         "allow_enable_disable": False,
                     }
                 )
-                guarded_instance_apply = True
             if resolved_ingress_request.mode == "apply":
                 write_ingress_route_pending_audit_record(
                     ingress_store=ingress_store,
@@ -13024,6 +13023,7 @@ def create_launchplane_fastapi_app(
                     request=resolved_ingress_request,
                     idempotency_key=normalized_key,
                 )
+                guarded_instance_apply = bool(instance_name)
             ingress_result = ingress_provider.apply_route(request=resolved_ingress_request)
         except (ValueError, click.ClickException) as error:
             if guarded_instance_apply:

@@ -43,7 +43,7 @@ permissions:
 concurrency:
   group: >-
     launchplane-ingress-route-apply-${{ inputs.product }}-${{
-    inputs.context }}-${{ inputs.instance || 'context' }}
+    inputs.context }}-${{ inputs.instance || '_context_scope' }}
   cancel-in-progress: false
 
 jobs:
