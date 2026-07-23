@@ -3500,6 +3500,7 @@ class FastApiOdooStableBootstrapTests(unittest.IsolatedAsyncioTestCase):
         *,
         product: str = "odoo-tenant-cm",
         context: str = "cm",
+        instances: tuple[str, ...] = ("testing", "prod"),
         action: str = "odoo_stable_bootstrap.execute",
         repository: str = "cbusillo/launchplane",
         workflow_ref: str = (
@@ -3508,16 +3509,20 @@ class FastApiOdooStableBootstrapTests(unittest.IsolatedAsyncioTestCase):
     ) -> LaunchplaneAuthzPolicy:
         return LaunchplaneAuthzPolicy.model_validate(
             {
+                "schema_version": 2,
                 "github_actions": [
                     {
+                        "managed_set_id": "operator.odoo-stable-operations",
+                        "managed_rule_id": "cm-stable-bootstrap",
                         "repository": repository,
                         "workflow_refs": [workflow_ref],
                         "event_names": ["workflow_dispatch"],
                         "products": [product],
                         "contexts": [context],
+                        "instances": list(instances),
                         "actions": [action],
                     }
-                ]
+                ],
             }
         )
 
@@ -3609,6 +3614,17 @@ class FastApiOdooStableBootstrapTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_operation.finished_at, "")
             self.assertEqual(stored_operation.deployment_record_id, "")
             self.assertIsNone(stored_operation.result)
+            self.assertEqual(stored_operation.schema_version, 2)
+            self.assertIsNotNone(stored_operation.authorization)
+            assert stored_operation.authorization is not None
+            self.assertEqual(
+                stored_operation.authorization.managed_rule_id,
+                "cm-stable-bootstrap",
+            )
+            self.assertEqual(
+                stored_operation.authorization.caller.workflow_ref,
+                self._identity().workflow_ref,
+            )
 
     async def test_odoo_stable_bootstrap_requires_idempotency_key(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -4324,10 +4340,10 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
     def _policy(
         self,
         *,
-        schema_version: int = 1,
+        schema_version: int = 2,
         product: str = "odoo-tenant-cm",
         context: str = "cm",
-        instances: tuple[str, ...] = (),
+        instances: tuple[str, ...] = ("testing", "prod"),
         action: str = "odoo_target_replacement_apply.execute",
         repository: str = "cbusillo/launchplane",
         workflow_refs: tuple[str, ...] = (
@@ -4339,6 +4355,8 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
                 "schema_version": schema_version,
                 "github_actions": [
                     {
+                        "managed_set_id": "operator.odoo-stable-operations",
+                        "managed_rule_id": "cm-target-replacement",
                         "repository": repository,
                         "workflow_refs": list(workflow_refs),
                         "event_names": ["workflow_dispatch"],
@@ -4449,6 +4467,13 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_operation.finished_at, "")
             self.assertEqual(stored_operation.deployment_record_id, "")
             self.assertIsNone(stored_operation.result)
+            self.assertEqual(stored_operation.schema_version, 2)
+            self.assertIsNotNone(stored_operation.authorization)
+            assert stored_operation.authorization is not None
+            self.assertEqual(
+                stored_operation.authorization.managed_rule_id,
+                "cm-target-replacement",
+            )
 
     async def test_testing_instance_grant_denies_prod_in_shared_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

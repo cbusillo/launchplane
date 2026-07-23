@@ -81,6 +81,7 @@ from control_plane.storage.postgres import (
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
 )
+from tests.support.durable_operations import durable_operation_cancellation_payload
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
@@ -1823,6 +1824,54 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         assert recovered_claim is not None
         self.assertEqual(recovered_claim.lease_owner, "worker-b")
         self.assertEqual(recovered_claim.attempt, 2)
+
+    def test_pending_operation_cancel_and_claim_are_mutually_exclusive(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            pending_record = _bootstrap_operation()
+            store.write_odoo_stable_bootstrap_operation_record(pending_record)
+            cancelled_record = OdooStableBootstrapOperationRecord.model_validate(
+                {
+                    **pending_record.model_dump(mode="json"),
+                    "status": "cancelled",
+                    "phase": "cancelled",
+                    "updated_at": "2026-07-23T03:32:00Z",
+                    "finished_at": "2026-07-23T03:32:00Z",
+                    "cancellation": durable_operation_cancellation_payload(),
+                }
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def cancel() -> bool:
+                barrier.wait(timeout=5)
+                return store.cancel_pending_odoo_stable_bootstrap_operation_record(cancelled_record)
+
+            def claim() -> OdooStableBootstrapOperationRecord | None:
+                barrier.wait(timeout=5)
+                return second_store.claim_next_odoo_stable_bootstrap_operation_record(
+                    lease_owner="worker-a",
+                    lease_expires_at="2026-07-23T03:40:00Z",
+                    claimed_at="2026-07-23T03:35:00Z",
+                )
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    cancel_future = executor.submit(cancel)
+                    claim_future = executor.submit(claim)
+                    cancellation_committed = cancel_future.result(timeout=10)
+                    claimed_record = claim_future.result(timeout=10)
+                loaded = store.read_odoo_stable_bootstrap_operation_record(
+                    pending_record.operation_id
+                )
+            finally:
+                second_store.close()
+
+        self.assertNotEqual(cancellation_committed, claimed_record is not None)
+        if cancellation_committed:
+            self.assertEqual(loaded.status, "cancelled")
+        else:
+            self.assertIsNotNone(claimed_record)
+            self.assertEqual(loaded.status, "running")
 
     def test_merge_train_controller_lease_blocks_other_owner_until_expiry(self) -> None:
         with _store_for_fresh_head_database() as store:

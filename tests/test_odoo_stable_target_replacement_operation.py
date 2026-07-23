@@ -16,6 +16,10 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.support.durable_operations import (
+    durable_operation_authorization_payload,
+    durable_operation_cancellation_payload,
+)
 
 
 def _operation_payload(operation_id: str = "operation-cm-testing") -> dict[str, object]:
@@ -63,6 +67,107 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
         self.assertEqual(record.context, "cm")
         self.assertIsInstance(record.request, OdooStableTargetReplacementApplyRequest)
         self.assertEqual(record.request.confirmation, "recreate cm testing")
+
+    def test_schema_v2_operation_requires_matching_authorization_provenance(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires authorization provenance"):
+            OdooStableTargetReplacementOperationRecord.model_validate(
+                {**_operation_payload(), "schema_version": 2}
+            )
+
+        record = OdooStableTargetReplacementOperationRecord.model_validate(
+            {
+                **_operation_payload(),
+                "schema_version": 2,
+                "authorization": durable_operation_authorization_payload(
+                    action="odoo_target_replacement_apply.execute",
+                    managed_rule_id="cm-testing-replacement",
+                ),
+            }
+        )
+
+        assert record.authorization is not None
+        self.assertEqual(record.authorization.policy_revision, 41)
+        self.assertEqual(record.authorization.instances, ("testing",))
+
+    def test_cancelled_operation_is_terminal_and_requires_cancellation_evidence(self) -> None:
+        authorization = durable_operation_authorization_payload(
+            action="odoo_target_replacement_apply.execute",
+            managed_rule_id="cm-testing-replacement",
+        )
+        cancellation = durable_operation_cancellation_payload()
+        cancellation["caller"] = authorization["caller"]
+        record = OdooStableTargetReplacementOperationRecord.model_validate(
+            {
+                **_operation_payload(),
+                "schema_version": 2,
+                "authorization": authorization,
+                "status": "cancelled",
+                "phase": "cancelled",
+                "finished_at": "2026-07-23T03:32:00Z",
+                "cancellation": cancellation,
+            }
+        )
+        self.assertEqual(record.status, "cancelled")
+        assert record.cancellation is not None
+        self.assertEqual(record.cancellation.cancelled_at, "2026-07-23T03:32:00Z")
+
+    def test_pending_cancellation_prevents_worker_claim(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            stores = (
+                FilesystemRecordStore(state_dir=root / "filesystem"),
+                PostgresRecordStore(database_url=f"sqlite:///{root / 'launchplane.sqlite3'}"),
+            )
+            stores[1].ensure_schema()
+            try:
+                for store in stores:
+                    with self.subTest(store=type(store).__name__):
+                        authorization = durable_operation_authorization_payload(
+                            action="odoo_target_replacement_apply.execute",
+                            managed_rule_id="cm-testing-replacement",
+                        )
+                        pending_record = OdooStableTargetReplacementOperationRecord.model_validate(
+                            {
+                                **_operation_payload(),
+                                "schema_version": 2,
+                                "authorization": authorization,
+                            }
+                        )
+                        store.write_odoo_stable_target_replacement_operation_record(pending_record)
+                        cancellation = durable_operation_cancellation_payload()
+                        cancellation["caller"] = authorization["caller"]
+                        cancelled_record = (
+                            OdooStableTargetReplacementOperationRecord.model_validate(
+                                {
+                                    **pending_record.model_dump(mode="json"),
+                                    "status": "cancelled",
+                                    "phase": "cancelled",
+                                    "updated_at": "2026-07-23T03:32:00Z",
+                                    "finished_at": "2026-07-23T03:32:00Z",
+                                    "cancellation": cancellation,
+                                }
+                            )
+                        )
+
+                        self.assertTrue(
+                            store.cancel_pending_odoo_stable_target_replacement_operation_record(
+                                cancelled_record
+                            )
+                        )
+                        self.assertFalse(
+                            store.cancel_pending_odoo_stable_target_replacement_operation_record(
+                                cancelled_record
+                            )
+                        )
+                        self.assertIsNone(
+                            store.claim_next_odoo_stable_target_replacement_operation_record(
+                                lease_owner="worker-a",
+                                lease_expires_at="2026-07-23T03:40:00Z",
+                                claimed_at="2026-07-23T03:35:00Z",
+                            )
+                        )
+            finally:
+                stores[1].close()
 
     def test_operation_id_is_stable_for_same_inputs(self) -> None:
         first = build_odoo_stable_target_replacement_operation_id(

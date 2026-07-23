@@ -1600,7 +1600,8 @@ call `POST /v1/drivers/odoo/target-replacement-apply` for the guarded
 `recreate-in-place` path. The service creates a durable operation record and
 returns immediately; the workflow polls
 `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}` until the
-operation status is `pass` or `fail`, then uploads the final operation payload as
+operation status is `pass`, `fail`, or `cancelled`, then uploads the final
+operation payload as
 the workflow artifact. `Idempotency-Key` is required: a repeated request with the
 same key from the same caller identity returns the existing operation, while a
 different key for the same product/context/instance is rejected while a
@@ -1627,6 +1628,13 @@ a newly published stored artifact before it has become inventory; the service
 refuses mismatches against the stored artifact manifest. Do not manually delete
 canonical stable targets as a replacement shortcut; add the missing Launchplane
 apply coverage first, then use the service-backed workflow.
+
+Before the worker's first provider mutation it reauthorizes the stored caller,
+exact target, and managed rule against the current active policy. Revoked or
+narrowed authority and legacy operations without provenance fail terminally
+without provider mutation. Operators may cancel pending replacement work with
+`POST /v1/drivers/odoo/target-replacement/operations/{operation_id}/cancel` and
+a non-empty `reason`; running work returns `409 operation_not_pending`.
 
 Runtime identity is a driver-owned breadcrumb, not tenant config. Launchplane
 injects `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`, `LAUNCHPLANE_DEPLOYMENT_RECORD_ID`,
@@ -1668,7 +1676,8 @@ policy evidence for that lane.
 The service route creates a durable Odoo stable-bootstrap operation and returns
 an operation id immediately. The GitHub workflow polls
 `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` until the
-operation status is `pass` or `fail`, then uploads the final operation payload as
+operation status is `pass`, `fail`, or `cancelled`, then uploads the final
+operation payload as
 the workflow artifact. `Idempotency-Key` is required: a repeated request with the
 same key returns the existing operation, while a different key for the same
 product/context/instance is rejected while a `pending` or `running` operation is
@@ -1676,6 +1685,17 @@ active. The operation record stores the request, status, phase,
 deployment-record linkage when known, final bootstrap result, and any terminal
 error message so operators can inspect progress after the original HTTP request
 has ended.
+The worker reauthorizes the stored managed rule and exact lane after claim and
+immediately before the destructive Dokploy schedule. Operators may cancel only
+pending work through
+`POST /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}/cancel`; the
+request records a reason and caller identity, while running work fails the
+cancellation request with `409` rather than claiming no external effect occurred.
+
+Pending VeriReel backup-gate work uses the equivalent endpoint
+`POST /v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel`.
+Cancellation writes terminal operation evidence and failed backup-gate evidence
+atomically so later promotion checks continue to fail closed.
 
 For OPW prelaunch lanes that should be rebuilt from the current upstream
 non-Docker source, encode `odoo_prelaunch_rebuild` on the product profile lane

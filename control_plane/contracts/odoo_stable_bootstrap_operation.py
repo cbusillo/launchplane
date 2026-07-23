@@ -5,12 +5,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationAuthorization,
+    DurableOperationCancellation,
+)
 from control_plane.contracts.odoo_stable_bootstrap import (
     OdooStableBootstrapRequest,
     OdooStableBootstrapResult,
 )
 
-OdooStableBootstrapOperationStatus = Literal["pending", "running", "pass", "fail"]
+OdooStableBootstrapOperationStatus = Literal["pending", "running", "pass", "fail", "cancelled"]
 OdooStableBootstrapOperationPhase = Literal[
     "created",
     "running",
@@ -19,11 +23,13 @@ OdooStableBootstrapOperationPhase = Literal[
     "verification",
     "completed",
     "failed",
+    "cancelled",
 ]
 
 _TERMINAL_OPERATION_STATUSES: tuple[OdooStableBootstrapOperationStatus, ...] = (
     "pass",
     "fail",
+    "cancelled",
 )
 ODOO_STABLE_BOOTSTRAP_TERMINAL_OPERATION_STATUSES: frozenset[OdooStableBootstrapOperationStatus] = (
     frozenset(_TERMINAL_OPERATION_STATUSES)
@@ -41,6 +47,7 @@ class OdooStableBootstrapOperationRecord(BaseModel):
     idempotency_key: str
     request_fingerprint: str
     request: OdooStableBootstrapRequest
+    authorization: DurableOperationAuthorization | None = None
     status: OdooStableBootstrapOperationStatus = "pending"
     phase: OdooStableBootstrapOperationPhase = "created"
     deployment_record_id: str = ""
@@ -53,11 +60,15 @@ class OdooStableBootstrapOperationRecord(BaseModel):
     heartbeat_at: str = ""
     attempt: int = Field(default=0, ge=0)
     result: OdooStableBootstrapResult | None = None
+    cancellation: DurableOperationCancellation | None = None
+    error_code: str = ""
     error_message: str = ""
     runner_trace_id: str = ""
 
     @model_validator(mode="after")
     def _validate_record(self) -> "OdooStableBootstrapOperationRecord":
+        if self.schema_version not in {1, 2}:
+            raise ValueError("Unsupported Odoo stable bootstrap operation schema version.")
         self.operation_id = _normalize_required(
             self.operation_id, "Odoo stable bootstrap operation requires operation_id."
         )
@@ -90,6 +101,7 @@ class OdooStableBootstrapOperationRecord(BaseModel):
         self.lease_expires_at = self.lease_expires_at.strip()
         self.heartbeat_at = self.heartbeat_at.strip()
         self.deployment_record_id = self.deployment_record_id.strip()
+        self.error_code = self.error_code.strip()
         self.error_message = self.error_message.strip()
         self.runner_trace_id = self.runner_trace_id.strip()
         if self.product != self.request.product:
@@ -98,15 +110,49 @@ class OdooStableBootstrapOperationRecord(BaseModel):
             raise ValueError("Odoo stable bootstrap operation context must match request.")
         if self.instance != self.request.instance:
             raise ValueError("Odoo stable bootstrap operation instance must match request.")
+        if self.schema_version == 2 and self.authorization is None:
+            raise ValueError(
+                "Schema-v2 Odoo stable bootstrap operation requires authorization provenance."
+            )
+        if self.authorization is not None:
+            if self.schema_version != 2:
+                raise ValueError(
+                    "Odoo stable bootstrap authorization provenance requires schema version 2."
+                )
+            if self.authorization.action != "odoo_stable_bootstrap.execute":
+                raise ValueError(
+                    "Odoo stable bootstrap authorization action must match the operation."
+                )
+            if (
+                self.authorization.product != self.product
+                or self.authorization.context != self.context
+                or self.authorization.instances != (self.instance,)
+            ):
+                raise ValueError(
+                    "Odoo stable bootstrap authorization target must match the operation."
+                )
         if self.status in ODOO_STABLE_BOOTSTRAP_TERMINAL_OPERATION_STATUSES:
             if not self.finished_at:
                 raise ValueError("Terminal Odoo stable bootstrap operations require finished_at.")
-            if self.status == "pass" and self.error_message:
+            if self.status == "pass" and (self.error_code or self.error_message):
                 raise ValueError(
-                    "Passing Odoo stable bootstrap operations must not include error_message."
+                    "Passing Odoo stable bootstrap operations must not include an error."
                 )
             if self.status == "fail" and not self.error_message:
                 raise ValueError("Failed Odoo stable bootstrap operations require error_message.")
+            if self.status == "cancelled":
+                if self.cancellation is None:
+                    raise ValueError(
+                        "Cancelled Odoo stable bootstrap operation requires cancellation evidence."
+                    )
+                if self.result is not None or self.error_code or self.error_message:
+                    raise ValueError(
+                        "Cancelled Odoo stable bootstrap operation cannot include result or error."
+                    )
+        elif self.cancellation is not None:
+            raise ValueError(
+                "Only cancelled Odoo stable bootstrap operations can include cancellation evidence."
+            )
         return self
 
 

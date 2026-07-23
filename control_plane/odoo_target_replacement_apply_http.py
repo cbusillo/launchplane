@@ -5,6 +5,9 @@ from typing import Protocol, cast
 import click
 from pydantic import Field, model_validator
 
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationAuthorization,
+)
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
 )
@@ -122,6 +125,7 @@ def enqueue_odoo_target_replacement_apply_operation(
     idempotency_scope: str,
     request_fingerprint: str,
     created_at: str,
+    authorization: DurableOperationAuthorization,
 ) -> tuple[dict[str, object], dict[str, object]]:
     operation_store = odoo_target_replacement_apply_operation_store(record_store)
     existing_operation = find_odoo_target_replacement_apply_operation_by_idempotency_key(
@@ -143,6 +147,7 @@ def enqueue_odoo_target_replacement_apply_operation(
         idempotency_scope=idempotency_scope,
         request_fingerprint=request_fingerprint,
         created_at=created_at,
+        authorization=authorization,
     )
     operation, created_operation = (
         operation_store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
@@ -210,8 +215,10 @@ def build_odoo_target_replacement_apply_operation_record(
     idempotency_scope: str,
     request_fingerprint: str,
     created_at: str,
+    authorization: DurableOperationAuthorization,
 ) -> OdooStableTargetReplacementOperationRecord:
     return OdooStableTargetReplacementOperationRecord(
+        schema_version=2,
         operation_id=build_odoo_stable_target_replacement_operation_id(
             product=replacement_request.product,
             context=context,
@@ -227,6 +234,7 @@ def build_odoo_target_replacement_apply_operation_record(
         idempotency_scope=idempotency_scope,
         request_fingerprint=request_fingerprint,
         request=replacement_request,
+        authorization=authorization,
         status="pending",
         phase="created",
         created_at=created_at,

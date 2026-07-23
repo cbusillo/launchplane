@@ -103,6 +103,14 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationCancellationRequest,
+)
+from control_plane.durable_operation_authorization import (
+    DurableOperationAuthorizationCaptureError,
+    build_durable_operation_cancellation,
+    capture_durable_operation_authorization,
+)
 from control_plane.contracts.agent_write_intent import (
     AgentWriteIntentRecord,
     AgentWriteIntentRequest,
@@ -590,6 +598,16 @@ EveryCodeGitHubWebhookHandler = Callable[
 
 _LOGGER = logging.getLogger(__name__)
 
+_ODOO_STABLE_BOOTSTRAP_OPERATION_CANCEL_ROUTE = (
+    "/v1/drivers/odoo/stable-bootstrap/operations/{operation_id}/cancel"
+)
+_ODOO_TARGET_REPLACEMENT_OPERATION_CANCEL_ROUTE = (
+    "/v1/drivers/odoo/target-replacement/operations/{operation_id}/cancel"
+)
+_VERIREEL_PROD_BACKUP_GATE_OPERATION_CANCEL_ROUTE = (
+    "/v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel"
+)
+
 
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
@@ -742,6 +760,14 @@ class OdooStableBootstrapOperationActiveResponse(BaseModel):
     status: Literal["rejected"] = "rejected"
     trace_id: str
     error: LaunchplaneErrorDetail
+    operation: dict[str, object]
+
+
+class DurableOperationCancellationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
     operation: dict[str, object]
 
 
@@ -2993,10 +3019,14 @@ class LaunchplaneAuthzPolicyRuntime:
         *,
         policy_sha256: str = "",
         source: str = "bootstrap",
+        record_id: str = "",
+        revision: int = 0,
     ) -> None:
         self._policy = policy
         self._policy_sha256 = policy_sha256 or authz_policy_sha256(policy)
         self._source = source.strip() or "bootstrap"
+        self._record_id = record_id.strip()
+        self._revision = revision
 
     @property
     def policy(self) -> LaunchplaneAuthzPolicy:
@@ -3010,17 +3040,43 @@ class LaunchplaneAuthzPolicyRuntime:
     def source(self) -> str:
         return self._source
 
+    @property
+    def record_id(self) -> str:
+        return self._record_id
+
+    @property
+    def revision(self) -> int:
+        return self._revision
+
+    def policy_record(self, *, updated_at: str) -> LaunchplaneAuthzPolicyRecord:
+        record_id = self._record_id or f"runtime-authz-policy-{self._policy_sha256[:12]}"
+        return LaunchplaneAuthzPolicyRecord(
+            record_id=record_id,
+            revision=self._revision or 1,
+            status="active",
+            source=self._source,
+            updated_at=updated_at,
+            policy_sha256=self._policy_sha256,
+            policy=self._policy,
+        )
+
     def update(
         self,
         policy: LaunchplaneAuthzPolicy,
         *,
         policy_sha256: str = "",
         source: str = "",
+        record_id: str | None = None,
+        revision: int | None = None,
     ) -> None:
         self._policy = policy
         self._policy_sha256 = policy_sha256 or authz_policy_sha256(policy)
         if source.strip():
             self._source = source.strip()
+        if record_id is not None:
+            self._record_id = record_id.strip()
+        if revision is not None:
+            self._revision = revision
 
 
 class ResolvedLaunchplaneAuthzPolicy(BaseModel):
@@ -3029,6 +3085,8 @@ class ResolvedLaunchplaneAuthzPolicy(BaseModel):
     policy: LaunchplaneAuthzPolicy
     policy_sha256: str
     source: str
+    record_id: str = ""
+    revision: int = Field(default=0, ge=0)
 
 
 def resolve_launchplane_authz_policy(
@@ -3047,6 +3105,8 @@ def resolve_launchplane_authz_policy(
                 policy=record.policy,
                 policy_sha256=record.policy_sha256,
                 source="db",
+                record_id=record.record_id,
+                revision=record.revision,
             )
 
     policy_sha256 = authz_policy_sha256(bootstrap_policy)
@@ -3071,6 +3131,8 @@ def resolve_launchplane_authz_policy(
             source=(
                 "bootstrap_seeded_store" if seeded_record.record_id == record.record_id else "db"
             ),
+            record_id=seeded_record.record_id,
+            revision=seeded_record.revision,
         )
 
     return ResolvedLaunchplaneAuthzPolicy(
@@ -3130,6 +3192,8 @@ def create_launchplane_fastapi_app(
             resolved_authz_policy.policy,
             policy_sha256=resolved_authz_policy.policy_sha256,
             source=resolved_authz_policy.source,
+            record_id=resolved_authz_policy.record_id,
+            revision=resolved_authz_policy.revision,
         )
     else:
         resolved_authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(authz_policy)
@@ -3223,11 +3287,15 @@ def create_launchplane_fastapi_app(
             if (
                 resolved_authz_policy_runtime.policy_sha256 != active_record.policy_sha256
                 or resolved_authz_policy_runtime.source != "db"
+                or resolved_authz_policy_runtime.record_id != active_record.record_id
+                or resolved_authz_policy_runtime.revision != active_record.revision
             ):
                 resolved_authz_policy_runtime.update(
                     active_record.policy,
                     policy_sha256=active_record.policy_sha256,
                     source="db",
+                    record_id=active_record.record_id,
+                    revision=active_record.revision,
                 )
         return cast(Response, await call_next(request))
 
@@ -6145,6 +6213,160 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    def cancel_pending_durable_operation(
+        *,
+        trace_id: str,
+        record_store: object,
+        identity: LaunchplaneIdentity,
+        operation_id: str,
+        action: str,
+        read_method_name: str,
+        cancel_method_name: str,
+        cancellation_request: DurableOperationCancellationRequest,
+    ) -> Any:
+        read_operation = getattr(record_store, read_method_name, None)
+        cancel_operation = getattr(record_store, cancel_method_name, None)
+        if not callable(read_operation) or not callable(cancel_operation):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Durable operation cancellation requires operation-record storage.",
+            )
+        try:
+            operation = read_operation(operation_id.strip())
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Durable operation was not found.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=operation.product,
+            context=operation.context,
+            target=AuthorizationTarget(
+                scope="instance",
+                instances=(operation.instance,),
+            ),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot cancel this durable operation target.",
+            )
+        if operation.status == "cancelled":
+            return operation
+        if operation.status != "pending":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="operation_not_pending",
+                message="Only pending durable operations can be cancelled safely.",
+            )
+        cancelled_at = utc_now_timestamp()
+        cancelled_operation = type(operation).model_validate(
+            {
+                **operation.model_dump(mode="json"),
+                "status": "cancelled",
+                "phase": "cancelled",
+                "updated_at": cancelled_at,
+                "finished_at": cancelled_at,
+                "lease_owner": "",
+                "lease_expires_at": "",
+                "heartbeat_at": "",
+                "result": None,
+                "cancellation": build_durable_operation_cancellation(
+                    identity=identity,
+                    reason=cancellation_request.reason,
+                    cancelled_at=cancelled_at,
+                ).model_dump(mode="json"),
+                "error_code": "",
+                "error_message": "",
+                "runner_trace_id": trace_id,
+            }
+        )
+        if cancel_operation(cancelled_operation):
+            return cancelled_operation
+        current_operation = read_operation(operation_id.strip())
+        if current_operation.status == "cancelled":
+            return current_operation
+        raise _launchplane_http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code="operation_not_pending",
+            message="The durable operation left pending state before cancellation committed.",
+        )
+
+    async def cancel_odoo_stable_bootstrap_operation(
+        operation_id: str,
+        cancellation_request: DurableOperationCancellationRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> DurableOperationCancellationResponse:
+        trace_id = next_trace_id()
+        operation = cancel_pending_durable_operation(
+            trace_id=trace_id,
+            record_store=record_store,
+            identity=identity,
+            operation_id=operation_id,
+            action="odoo_stable_bootstrap.execute",
+            read_method_name="read_odoo_stable_bootstrap_operation_record",
+            cancel_method_name="cancel_pending_odoo_stable_bootstrap_operation_record",
+            cancellation_request=cancellation_request,
+        )
+        return DurableOperationCancellationResponse(
+            trace_id=trace_id,
+            operation=operation.model_dump(mode="json"),
+        )
+
+    async def cancel_odoo_target_replacement_operation(
+        operation_id: str,
+        cancellation_request: DurableOperationCancellationRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> DurableOperationCancellationResponse:
+        trace_id = next_trace_id()
+        operation = cancel_pending_durable_operation(
+            trace_id=trace_id,
+            record_store=record_store,
+            identity=identity,
+            operation_id=operation_id,
+            action="odoo_target_replacement_apply.execute",
+            read_method_name="read_odoo_stable_target_replacement_operation_record",
+            cancel_method_name=("cancel_pending_odoo_stable_target_replacement_operation_record"),
+            cancellation_request=cancellation_request,
+        )
+        return DurableOperationCancellationResponse(
+            trace_id=trace_id,
+            operation=operation.model_dump(mode="json"),
+        )
+
+    async def cancel_verireel_prod_backup_gate_operation(
+        operation_id: str,
+        cancellation_request: DurableOperationCancellationRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> DurableOperationCancellationResponse:
+        trace_id = next_trace_id()
+        operation = cancel_pending_durable_operation(
+            trace_id=trace_id,
+            record_store=record_store,
+            identity=identity,
+            operation_id=operation_id,
+            action="verireel_prod_backup_gate.execute",
+            read_method_name="read_verireel_prod_backup_gate_operation_record",
+            cancel_method_name="cancel_pending_verireel_prod_backup_gate_operation_record",
+            cancellation_request=cancellation_request,
+        )
+        return DurableOperationCancellationResponse(
+            trace_id=trace_id,
+            operation=operation.model_dump(mode="json"),
+        )
+
     async def write_odoo_stable_bootstrap(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -6232,13 +6454,32 @@ def create_launchplane_fastapi_app(
                 code="idempotency_key_required",
                 message="Odoo stable bootstrap operations require an Idempotency-Key header.",
             )
+        created_at = utc_now_timestamp()
+        try:
+            operation_authorization = capture_durable_operation_authorization(
+                identity=identity,
+                action=native_routes._native_driver_route_authz_action(write_odoo_stable_bootstrap),
+                product=bootstrap_request.product,
+                context=bootstrap_request.bootstrap.context,
+                instances=(bootstrap_request.bootstrap.instance,),
+                policy_record=resolved_authz_policy_runtime.policy_record(updated_at=created_at),
+                authorized_at=created_at,
+            )
+        except DurableOperationAuthorizationCaptureError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authorization_provenance_unavailable",
+                message="Durable operation authorization provenance is unavailable.",
+            ) from error
         try:
             records, driver_result = enqueue_odoo_stable_bootstrap_operation(
                 record_store=record_store,
                 request=bootstrap_request,
                 idempotency_key=normalized_idempotency_key,
                 request_fingerprint=request_fingerprint(raw_payload),
-                created_at=utc_now_timestamp(),
+                created_at=created_at,
+                authorization=operation_authorization,
             )
         except OdooStableBootstrapIdempotencyKeyReusedError as error:
             raise _launchplane_http_error(
@@ -6463,6 +6704,26 @@ def create_launchplane_fastapi_app(
                 code="idempotency_key_required",
                 message="Odoo target replacement operations require an Idempotency-Key header.",
             )
+        created_at = utc_now_timestamp()
+        try:
+            operation_authorization = capture_durable_operation_authorization(
+                identity=identity,
+                action=native_routes._native_driver_route_authz_action(
+                    write_odoo_target_replacement_apply
+                ),
+                product=apply_request.product,
+                context=lane.context,
+                instances=(lane.instance,),
+                policy_record=resolved_authz_policy_runtime.policy_record(updated_at=created_at),
+                authorized_at=created_at,
+            )
+        except DurableOperationAuthorizationCaptureError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authorization_provenance_unavailable",
+                message="Durable operation authorization provenance is unavailable.",
+            ) from error
         try:
             records, driver_result = enqueue_odoo_target_replacement_apply_operation(
                 record_store=record_store,
@@ -6471,7 +6732,8 @@ def create_launchplane_fastapi_app(
                 idempotency_key=normalized_idempotency_key,
                 idempotency_scope=idempotency_scope(identity),
                 request_fingerprint=request_fingerprint(raw_payload),
-                created_at=utc_now_timestamp(),
+                created_at=created_at,
+                authorization=operation_authorization,
             )
         except OdooTargetReplacementApplyIdempotencyKeyReusedError as error:
             raise _launchplane_http_error(
@@ -11523,6 +11785,8 @@ def create_launchplane_fastapi_app(
             route_result.updated_policy,
             policy_sha256=route_result.authz_policy_record.policy_sha256,
             source="db",
+            record_id=route_result.authz_policy_record.record_id,
+            revision=route_result.authz_policy_record.revision,
         )
         return response
 
@@ -14393,10 +14657,31 @@ def create_launchplane_fastapi_app(
         )
         if replayed_response is not None:
             return replayed_response
+        created_at = utc_now_timestamp()
+        try:
+            operation_authorization = capture_durable_operation_authorization(
+                identity=identity,
+                action=native_routes._native_driver_route_authz_action(
+                    apply_verireel_prod_backup_gate
+                ),
+                product=authorization_product,
+                context=authorization_context,
+                instances=(backup_gate_request.backup_gate.instance,),
+                policy_record=resolved_authz_policy_runtime.policy_record(updated_at=created_at),
+                authorized_at=created_at,
+            )
+        except DurableOperationAuthorizationCaptureError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authorization_provenance_unavailable",
+                message="Durable operation authorization provenance is unavailable.",
+            ) from error
         try:
             records, result = apply_verireel_prod_backup_gate_result(
                 record_store=record_store,
                 request=backup_gate_request,
+                authorization=operation_authorization,
             )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -16786,6 +17071,44 @@ def create_launchplane_fastapi_app(
             503: {"model": LaunchplaneErrorResponse},
         },
     )
+
+    for route_path, endpoint, operation_id, summary in (
+        (
+            _ODOO_STABLE_BOOTSTRAP_OPERATION_CANCEL_ROUTE,
+            cancel_odoo_stable_bootstrap_operation,
+            "cancel_odoo_stable_bootstrap_operation",
+            "Cancel pending Odoo stable bootstrap operation",
+        ),
+        (
+            _ODOO_TARGET_REPLACEMENT_OPERATION_CANCEL_ROUTE,
+            cancel_odoo_target_replacement_operation,
+            "cancel_odoo_target_replacement_operation",
+            "Cancel pending Odoo target replacement operation",
+        ),
+        (
+            _VERIREEL_PROD_BACKUP_GATE_OPERATION_CANCEL_ROUTE,
+            cancel_verireel_prod_backup_gate_operation,
+            "cancel_verireel_prod_backup_gate_operation",
+            "Cancel pending VeriReel prod backup gate operation",
+        ),
+    ):
+        app.add_api_route(
+            route_path,
+            endpoint,
+            methods=["POST"],
+            response_model=DurableOperationCancellationResponse,
+            response_model_exclude_none=True,
+            operation_id=operation_id,
+            summary=summary,
+            responses={
+                400: {"model": LaunchplaneErrorResponse},
+                401: {"model": LaunchplaneErrorResponse},
+                403: {"model": LaunchplaneErrorResponse},
+                404: {"model": LaunchplaneErrorResponse},
+                409: {"model": LaunchplaneErrorResponse},
+                503: {"model": LaunchplaneErrorResponse},
+            },
+        )
 
     register_operation_status_read_routes(app, dependencies=read_route_dependencies)
     register_protected_artifact_read_routes(

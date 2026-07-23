@@ -6,6 +6,7 @@ from threading import Event
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from click import ClickException
 from click.testing import CliRunner
 
 from control_plane.cli import main
@@ -19,6 +20,10 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
 )
+from control_plane.odoo_stable_bootstrap_http import (
+    OdooStableBootstrapEnvelope,
+    enqueue_odoo_stable_bootstrap_operation,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerLoopResult,
@@ -27,10 +32,25 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     run_odoo_stable_operation_worker_loop,
     run_odoo_stable_operation_worker_once,
 )
+from tests.support.durable_operations import (
+    durable_operation_authorization_payload,
+    durable_operation_policy_record,
+)
+
+
+_BOOTSTRAP_AUTHORIZATION = durable_operation_authorization_payload(
+    action="odoo_stable_bootstrap.execute",
+    managed_rule_id="cm-testing-bootstrap",
+)
+_REPLACEMENT_AUTHORIZATION = durable_operation_authorization_payload(
+    action="odoo_target_replacement_apply.execute",
+    managed_rule_id="cm-testing-target-replacement",
+)
 
 
 def _bootstrap_payload(operation_id: str = "operation-cm-testing") -> dict[str, object]:
     return {
+        "schema_version": 2,
         "operation_id": operation_id,
         "product": "odoo-tenant-cm",
         "context": "cm",
@@ -44,6 +64,7 @@ def _bootstrap_payload(operation_id: str = "operation-cm-testing") -> dict[str, 
             "instance": "testing",
             "confirmation": "bootstrap cm testing",
         },
+        "authorization": _BOOTSTRAP_AUTHORIZATION,
         "status": "pending",
         "phase": "created",
         "created_at": "2026-05-17T00:00:00Z",
@@ -53,6 +74,7 @@ def _bootstrap_payload(operation_id: str = "operation-cm-testing") -> dict[str, 
 
 def _replacement_payload(operation_id: str = "operation-cm-testing") -> dict[str, object]:
     return {
+        "schema_version": 2,
         "operation_id": operation_id,
         "product": "odoo-tenant-cm",
         "context": "cm",
@@ -69,6 +91,7 @@ def _replacement_payload(operation_id: str = "operation-cm-testing") -> dict[str
             "data_source_mode": "empty",
             "allow_empty_data": True,
         },
+        "authorization": _REPLACEMENT_AUTHORIZATION,
         "status": "pending",
         "phase": "created",
         "created_at": "2026-05-17T00:00:00Z",
@@ -77,6 +100,155 @@ def _replacement_payload(operation_id: str = "operation-cm-testing") -> dict[str
 
 
 class OdooStableOperationWorkerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.authorization_policy_record = durable_operation_policy_record(
+            _BOOTSTRAP_AUTHORIZATION,
+            _REPLACEMENT_AUTHORIZATION,
+        )
+        self.authorization_policy_patcher = patch(
+            "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
+            return_value=self.authorization_policy_record,
+        )
+        self.authorization_policy_patcher.start()
+        self.addCleanup(self.authorization_policy_patcher.stop)
+
+    def test_worker_fails_closed_when_grant_is_removed_after_enqueue(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            envelope = OdooStableBootstrapEnvelope.model_validate(
+                {
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "bootstrap": _bootstrap_payload()["request"],
+                }
+            )
+            authorization = OdooStableBootstrapOperationRecord.model_validate(
+                _bootstrap_payload()
+            ).authorization
+            assert authorization is not None
+            _, payload = enqueue_odoo_stable_bootstrap_operation(
+                record_store=store,
+                request=envelope,
+                idempotency_key="bootstrap-cm-testing",
+                request_fingerprint="fingerprint-123",
+                created_at="2026-07-23T03:34:00Z",
+                authorization=authorization,
+            )
+            operation_id = str(payload["operation_id"])
+            revoked_policy = durable_operation_policy_record(revision=43)
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
+                    return_value=revoked_policy,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_bootstrap"
+                ) as execute_mock,
+            ):
+                worker_result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            operation = store.read_odoo_stable_bootstrap_operation_record(operation_id)
+            self.assertEqual(worker_result.status, "worked")
+            self.assertEqual(operation.status, "fail")
+            self.assertEqual(operation.error_code, "operation_authorization_revoked")
+            execute_mock.assert_not_called()
+
+    def test_worker_reauthorizes_at_first_provider_effect(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(_bootstrap_payload())
+            )
+            revoked_policy = durable_operation_policy_record(revision=43)
+            provider_call_count = 0
+
+            def execute_with_provider_checkpoint(
+                **kwargs: object,
+            ) -> OdooStableBootstrapResult:
+                nonlocal provider_call_count
+                checkpoint = kwargs["provider_effect_checkpoint"]
+                assert callable(checkpoint)
+                try:
+                    checkpoint("stable_bootstrap_schedule")
+                except ClickException as error:
+                    return OdooStableBootstrapResult(
+                        product="odoo-tenant-cm",
+                        context="cm",
+                        instance="testing",
+                        deployment_record_id="deployment-cm-testing",
+                        bootstrap_status="fail",
+                        bootstrap_run_status="fail",
+                        readiness_status="fail",
+                        error_message=str(error),
+                    )
+                provider_call_count += 1
+                raise AssertionError("Revoked authorization reached the provider effect.")
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
+                    side_effect=(self.authorization_policy_record, revoked_policy),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_bootstrap",
+                    side_effect=execute_with_provider_checkpoint,
+                ) as execute_mock,
+            ):
+                worker_result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            operation = store.read_odoo_stable_bootstrap_operation_record("operation-cm-testing")
+            self.assertEqual(worker_result.status, "worked")
+            self.assertEqual(operation.status, "fail")
+            self.assertEqual(operation.error_code, "operation_authorization_revoked")
+            self.assertEqual(provider_call_count, 0)
+            execute_mock.assert_called_once()
+
+    def test_worker_fails_closed_for_legacy_operation_without_provenance(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            legacy_payload = _bootstrap_payload()
+            legacy_payload["schema_version"] = 1
+            legacy_payload.pop("authorization")
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(legacy_payload)
+            )
+
+            with patch(
+                "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_bootstrap"
+            ) as execute_mock:
+                worker_result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            operation = store.read_odoo_stable_bootstrap_operation_record("operation-cm-testing")
+            self.assertEqual(worker_result.status, "worked")
+            self.assertEqual(operation.status, "fail")
+            self.assertEqual(
+                operation.error_code,
+                "operation_authorization_provenance_missing",
+            )
+            execute_mock.assert_not_called()
+
     def test_worker_executes_bootstrap_and_writes_terminal_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

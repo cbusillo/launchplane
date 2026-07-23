@@ -665,7 +665,6 @@ Reviewed exact-instance external-route and product-health-monitoring workflow
 rules require the same immutable reusable-workflow identity even for non-prod
 instances, and those actions cannot be authorized by schema-v1 policy.
 
-
 The service also serves the built operator UI shell at `/`, with `/ui` retained
 as a route alias. This route family is native FastAPI. Built assets live under
 `/ui/assets/...`, while `/ui/*` falls back to the app shell so the frontend can
@@ -1122,6 +1121,30 @@ not from human repo-admin status and not from copied long-lived service
 tokens.
 
 The first policy model should be allow-list based and fail closed.
+
+### Durable operation reauthorization
+
+Authorization at enqueue time does not grant permanent provider-mutation
+authority. Odoo stable bootstrap, Odoo target-replacement apply, and VeriReel
+prod backup-gate operation records persist the exact action, product, context,
+instances, managed rule identity, policy evidence, and normalized caller or
+reusable-workflow identity used at enqueue. Workers load the current active
+DB-backed policy and require that same managed rule to still authorize the
+recorded caller and target after claim and immediately before the first provider
+mutation.
+
+If the rule was removed, narrowed, no longer matches the caller, or the active
+policy cannot be read unambiguously, execution fails closed with durable error
+evidence and no provider mutation. Legacy queued records without provenance also
+fail closed; Launchplane never invents historical authority from current policy.
+Policy revision or digest changes alone do not block execution when the same
+managed rule still grants the exact target.
+
+Pending operations can be cancelled through authenticated service endpoints
+using the operation's existing exact-instance action. The storage transition is
+atomic and pending-only. Already-cancelled requests replay the terminal record;
+running work returns a conflict because Launchplane cannot promise that no
+provider effect has begun after a worker claim.
 
 ### Claims Launchplane should rely on first
 

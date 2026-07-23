@@ -1053,6 +1053,10 @@ state/
   evidence, and completes the operation record. Expired operations retry only
   before the external backup side-effect boundary; once the phase reaches
   `backup_gate`, lease expiry fails closed for operator review.
+  A pending operation can be cancelled through the deployed service. The
+  storage transition is pending-only and writes terminal cancellation evidence
+  together with a failed backup-gate record so promotion cannot treat an
+  abandoned pending gate as usable authority.
 - Promotion execution should fail closed unless the referenced backup-gate
   record exists, targets the same destination environment, and has `status`
   `pass`.
@@ -1110,6 +1114,29 @@ state/
   for a concurrent owner id to settle, then give that owner record its own
   bounded settle window before clearing abandoned empty or orphaned reservations
   so an interrupted writer cannot block the lane forever.
+- New records for all three durable driver queues use schema version 2 and
+  persist authorization provenance in the canonical operation payload: action,
+  product, context, exact instances, managed set/rule ids, policy record id,
+  revision, schema version, digest, source, authorization time, and normalized
+  caller identity. GitHub Actions evidence includes repository/workflow/reusable
+  workflow/ref/event/subject facts but never the bearer token or raw claims.
+  The payload remains the storage authority, so this contract does not require
+  promoted SQL columns or an Alembic migration.
+- A worker re-evaluates the recorded caller and the same managed rule against
+  the current active policy after claim and again immediately before the first
+  provider mutation. A later policy revision may authorize execution only when
+  that same rule still permits the exact recorded target. Missing legacy
+  provenance, a missing or ambiguous active policy, removed authority, narrowed
+  instances, or caller mismatch terminates the operation with a stable
+  `error_code` before provider mutation. Launchplane does not fabricate
+  provenance for schema-v1 queued records.
+- Pending Odoo bootstrap, Odoo target-replacement, and VeriReel backup-gate
+  operations expose authenticated `POST .../operations/{operation_id}/cancel`
+  endpoints. Cancellation is idempotent after it commits, records the normalized
+  caller, reason, timestamp, and trace id, releases the active-lane predicate,
+  and never rewrites `running` or terminal work. A claim that wins the race
+  returns `409 operation_not_pending`; operators must inspect that running
+  operation rather than assume cancellation prevented an effect.
 - The target execution model for these Odoo long-running operation records is a
   dedicated Launchplane worker process backed by DB leases and heartbeats. The
   HTTP route creates or replays the operation record and returns the poll URL;

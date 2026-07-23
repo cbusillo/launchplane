@@ -17,6 +17,11 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
+from control_plane.durable_operation_authorization import (
+    DurableOperationAuthorizationDeniedError,
+    DurableOperationAuthorizationGuard,
+    read_active_authz_policy_record,
+)
 from control_plane.workflows.odoo_stable_bootstrap import (
     OdooStableBootstrapStore,
     execute_odoo_stable_bootstrap,
@@ -447,11 +452,37 @@ def _execute_bootstrap_operation(
         stop_event=stop_event,
         heartbeat_lost_event=heartbeat_lost_event,
     )
+    authorization_guard = DurableOperationAuthorizationGuard(
+        authorization=operation.authorization,
+        policy_record_reader=lambda: read_active_authz_policy_record(record_store),
+    )
     try:
+        authorization_guard.authorize_execution()
         result = execute_odoo_stable_bootstrap(
             control_plane_root=control_plane_root_path,
             record_store=cast(OdooStableBootstrapStore, record_store),
             request=operation.request,
+            provider_effect_checkpoint=authorization_guard.checkpoint_provider_effect,
+        )
+        if authorization_guard.denial_error is not None:
+            raise authorization_guard.denial_error
+    except DurableOperationAuthorizationDeniedError as error:
+        logging.warning(
+            "Odoo stable bootstrap operation %s was denied before provider mutation: %s",
+            operation.operation_id,
+            error,
+        )
+        finished_at = _utc_now_timestamp()
+        terminal_operation = operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "updated_at": finished_at,
+                "finished_at": finished_at,
+                "lease_owner": lease_owner,
+                "error_code": error.code,
+                "error_message": str(error),
+            }
         )
     except Exception as error:
         logging.exception(
@@ -544,11 +575,37 @@ def _execute_target_replacement_operation(
         stop_event=stop_event,
         heartbeat_lost_event=heartbeat_lost_event,
     )
+    authorization_guard = DurableOperationAuthorizationGuard(
+        authorization=operation.authorization,
+        policy_record_reader=lambda: read_active_authz_policy_record(record_store),
+    )
     try:
+        authorization_guard.authorize_execution()
         result = execute_odoo_stable_target_replacement_apply(
             control_plane_root=control_plane_root_path,
             record_store=cast(OdooStableTargetReplacementStore, record_store),
             request=operation.request,
+            provider_effect_checkpoint=authorization_guard.checkpoint_provider_effect,
+        )
+        if authorization_guard.denial_error is not None:
+            raise authorization_guard.denial_error
+    except DurableOperationAuthorizationDeniedError as error:
+        logging.warning(
+            "Odoo stable target replacement operation %s was denied before provider mutation: %s",
+            operation.operation_id,
+            error,
+        )
+        finished_at = _utc_now_timestamp()
+        terminal_operation = operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "updated_at": finished_at,
+                "finished_at": finished_at,
+                "lease_owner": lease_owner,
+                "error_code": error.code,
+                "error_message": str(error),
+            }
         )
     except Exception as error:
         logging.exception(
@@ -602,6 +659,7 @@ def _bootstrap_terminal_operation(
             "finished_at": finished_at,
             "lease_owner": lease_owner,
             "result": result,
+            "error_code": "",
             "error_message": ""
             if passed
             else (result.error_message or "Odoo stable bootstrap failed."),
@@ -626,6 +684,7 @@ def _target_replacement_terminal_operation(
             "finished_at": finished_at,
             "lease_owner": lease_owner,
             "result": result,
+            "error_code": "",
             "error_message": ""
             if passed
             else (result.error_message or "Odoo stable target replacement failed."),

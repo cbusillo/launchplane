@@ -9,6 +9,9 @@ import click
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationAuthorization,
+)
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretClass,
@@ -38,6 +41,11 @@ from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
     run_verireel_prod_backup_gate_operation_worker_loop,
     run_verireel_prod_backup_gate_operation_worker_once,
 )
+from tests.support.durable_operations import (
+    durable_operation_authorization_payload,
+    durable_operation_cancellation_payload,
+    durable_operation_policy_record,
+)
 
 
 PROD_WORKER_SECRET_BINDING_KEYS = (
@@ -64,9 +72,11 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         lease_owner: str = "",
         lease_expires_at: str = "",
         error_message: str = "backup failed",
+        include_authorization: bool = True,
     ) -> VeriReelProdBackupGateOperationRecord:
         request = VeriReelProdBackupGateRequest(backup_record_id=backup_record_id)
         payload: dict[str, object] = {
+            "schema_version": 2 if include_authorization else 1,
             "operation_id": operation_id,
             "product": "verireel",
             "context": "verireel",
@@ -83,11 +93,33 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             "lease_expires_at": lease_expires_at,
             "heartbeat_at": "2026-04-25T00:01:00Z" if lease_owner else "",
         }
+        if include_authorization:
+            payload["authorization"] = self._operation_authorization().model_dump(mode="json")
         if status in {"pass", "fail"}:
             payload["finished_at"] = "2026-04-25T00:02:00Z"
             if status == "fail":
                 payload["error_message"] = error_message
         return VeriReelProdBackupGateOperationRecord.model_validate(payload)
+
+    def _operation_authorization(self) -> DurableOperationAuthorization:
+        payload = durable_operation_authorization_payload(
+            action="verireel_prod_backup_gate.execute",
+            managed_rule_id="verireel-prod-backup-gate",
+        )
+        payload["product"] = "verireel"
+        payload["context"] = "verireel"
+        payload["instances"] = ["prod"]
+        return DurableOperationAuthorization.model_validate(payload)
+
+    def setUp(self) -> None:
+        authorization = self._operation_authorization().model_dump(mode="json")
+        self.authorization_policy_record = durable_operation_policy_record(authorization)
+        self.authorization_policy_patcher = patch(
+            "control_plane.workflows.verireel_prod_backup_gate_operation_worker.read_active_authz_policy_record",
+            return_value=self.authorization_policy_record,
+        )
+        self.authorization_policy_patcher.start()
+        self.addCleanup(self.authorization_policy_patcher.stop)
 
     def _write_prod_worker_secret_bindings(
         self,
@@ -133,6 +165,112 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                 ),
             )
         )
+
+    def test_schema_v2_operation_requires_authorization_provenance(self) -> None:
+        legacy_record = self._operation_record(include_authorization=False)
+        with self.assertRaisesRegex(ValueError, "requires authorization provenance"):
+            VeriReelProdBackupGateOperationRecord.model_validate(
+                {**legacy_record.model_dump(mode="json"), "schema_version": 2}
+            )
+
+        authorization = durable_operation_authorization_payload(
+            action="verireel_prod_backup_gate.execute",
+            managed_rule_id="verireel-prod-backup-gate",
+        )
+        authorization["product"] = "verireel"
+        authorization["context"] = "verireel"
+        authorization["instances"] = ["prod"]
+        record = VeriReelProdBackupGateOperationRecord.model_validate(
+            {
+                **legacy_record.model_dump(mode="json"),
+                "schema_version": 2,
+                "authorization": authorization,
+            }
+        )
+        self.assertIsNotNone(record.authorization)
+        assert record.authorization is not None
+        self.assertEqual(record.authorization.managed_rule_id, "verireel-prod-backup-gate")
+
+    def test_pending_operation_can_be_cancelled_with_typed_evidence(self) -> None:
+        legacy_record = self._operation_record(include_authorization=False)
+        authorization = durable_operation_authorization_payload(
+            action="verireel_prod_backup_gate.execute",
+            managed_rule_id="verireel-prod-backup-gate",
+        )
+        authorization["product"] = "verireel"
+        authorization["context"] = "verireel"
+        authorization["instances"] = ["prod"]
+        cancellation = durable_operation_cancellation_payload()
+        cancellation["caller"] = authorization["caller"]
+        record = VeriReelProdBackupGateOperationRecord.model_validate(
+            {
+                **legacy_record.model_dump(mode="json"),
+                "schema_version": 2,
+                "authorization": authorization,
+                "status": "cancelled",
+                "phase": "cancelled",
+                "finished_at": "2026-07-23T03:32:00Z",
+                "cancellation": cancellation,
+            }
+        )
+        self.assertEqual(record.status, "cancelled")
+
+    def test_pending_verireel_cancellation_prevents_worker_claim(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            stores = (
+                FilesystemRecordStore(state_dir=root / "filesystem"),
+                PostgresRecordStore(database_url=f"sqlite:///{root / 'launchplane.sqlite3'}"),
+            )
+            stores[1].ensure_schema()
+            try:
+                for store in stores:
+                    with self.subTest(store=type(store).__name__):
+                        pending_record = self._operation_record()
+                        store.write_verireel_prod_backup_gate_operation_record(pending_record)
+                        cancellation = durable_operation_cancellation_payload()
+                        assert pending_record.authorization is not None
+                        cancellation["caller"] = pending_record.authorization.caller.model_dump(
+                            mode="json"
+                        )
+                        cancelled_record = VeriReelProdBackupGateOperationRecord.model_validate(
+                            {
+                                **pending_record.model_dump(mode="json"),
+                                "status": "cancelled",
+                                "phase": "cancelled",
+                                "updated_at": "2026-07-23T03:32:00Z",
+                                "finished_at": "2026-07-23T03:32:00Z",
+                                "cancellation": cancellation,
+                            }
+                        )
+
+                        self.assertTrue(
+                            store.cancel_pending_verireel_prod_backup_gate_operation_record(
+                                cancelled_record
+                            )
+                        )
+                        self.assertFalse(
+                            store.cancel_pending_verireel_prod_backup_gate_operation_record(
+                                cancelled_record
+                            )
+                        )
+                        self.assertIsNone(
+                            store.claim_next_verireel_prod_backup_gate_operation_record(
+                                lease_owner="worker-a",
+                                lease_expires_at="2026-07-23T03:40:00Z",
+                                claimed_at="2026-07-23T03:35:00Z",
+                            )
+                        )
+                        backup_record = store.read_backup_gate_record(
+                            pending_record.backup_record_id
+                        )
+                        self.assertEqual(backup_record.status, "fail")
+                        self.assertEqual(
+                            backup_record.evidence["operation_status"],
+                            "cancelled",
+                        )
+            finally:
+                stores[1].close()
 
     def test_run_delegated_worker_prefers_runtime_environment_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -338,6 +476,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             result = enqueue_verireel_prod_backup_gate(
                 record_store=record_store,
                 request=request,
+                authorization=self._operation_authorization(),
                 now="2026-04-25T00:00:00Z",
             )
 
@@ -353,6 +492,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             replay = enqueue_verireel_prod_backup_gate(
                 record_store=record_store,
                 request=request,
+                authorization=self._operation_authorization(),
                 now="2026-04-25T00:01:00Z",
             )
             self.assertEqual(replay.backup_status, "pending")
@@ -381,6 +521,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             completed_result = enqueue_verireel_prod_backup_gate(
                 record_store=record_store,
                 request=request,
+                authorization=self._operation_authorization(),
                 now="2026-04-25T00:02:00Z",
             )
 
@@ -397,6 +538,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             enqueue_verireel_prod_backup_gate(
                 record_store=record_store,
                 request=request,
+                authorization=self._operation_authorization(),
                 now="2026-04-25T00:00:00Z",
             )
 
@@ -407,6 +549,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                         backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
                         timeout_seconds=42,
                     ),
+                    authorization=self._operation_authorization(),
                     now="2026-04-25T00:01:00Z",
                 )
 
@@ -443,6 +586,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                     enqueue_verireel_prod_backup_gate(
                         record_store=record_store,
                         request=request,
+                        authorization=self._operation_authorization(),
                         now="2026-04-25T00:01:00Z",
                     )
 
@@ -484,6 +628,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             result = enqueue_verireel_prod_backup_gate(
                 record_store=record_store,
                 request=request,
+                authorization=self._operation_authorization(),
                 now="2026-04-25T00:03:00Z",
             )
 
@@ -494,6 +639,68 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 backup_record.evidence["error_message"], "lease expired in backup_gate"
             )
+
+    def test_verireel_operation_worker_reauthorizes_before_delegated_effect(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            record_store.write_verireel_prod_backup_gate_operation_record(self._operation_record())
+            revoked_policy = durable_operation_policy_record(revision=43)
+
+            with (
+                patch(
+                    "control_plane.workflows.verireel_prod_backup_gate_operation_worker.read_active_authz_policy_record",
+                    side_effect=(self.authorization_policy_record, revoked_policy),
+                ),
+                patch(
+                    "control_plane.workflows.verireel_prod_backup_gate_operation_worker._run_delegated_worker"
+                ) as delegated_worker,
+            ):
+                result = run_verireel_prod_backup_gate_operation_worker_once(
+                    record_store=record_store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            operation = record_store.read_verireel_prod_backup_gate_operation_record(
+                "verireel-operation-1"
+            )
+            self.assertEqual(result.status, "worked")
+            self.assertEqual(operation.status, "fail")
+            self.assertEqual(operation.error_code, "operation_authorization_revoked")
+            delegated_worker.assert_not_called()
+
+    def test_verireel_operation_worker_fails_closed_for_legacy_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._operation_record(include_authorization=False)
+            )
+
+            with patch(
+                "control_plane.workflows.verireel_prod_backup_gate_operation_worker._run_delegated_worker"
+            ) as delegated_worker:
+                result = run_verireel_prod_backup_gate_operation_worker_once(
+                    record_store=record_store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            operation = record_store.read_verireel_prod_backup_gate_operation_record(
+                "verireel-operation-1"
+            )
+            self.assertEqual(result.status, "worked")
+            self.assertEqual(operation.status, "fail")
+            self.assertEqual(
+                operation.error_code,
+                "operation_authorization_provenance_missing",
+            )
+            delegated_worker.assert_not_called()
 
     def test_verireel_operation_worker_claims_and_executes_pending_operation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -600,6 +807,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                 request=VeriReelProdBackupGateRequest(
                     backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
                 ),
+                authorization=self._operation_authorization(),
                 now="2026-04-25T00:17:00Z",
             )
             self.assertEqual(replay.backup_status, "fail")

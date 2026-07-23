@@ -15,6 +15,11 @@ from control_plane.contracts.verireel_prod_backup_gate import (
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
+from control_plane.durable_operation_authorization import (
+    DurableOperationAuthorizationDeniedError,
+    DurableOperationAuthorizationGuard,
+    read_active_authz_policy_record,
+)
 from control_plane.workflows.verireel_prod_backup_gate import (
     _build_backup_gate_record,
     _failed_backup_gate_record,
@@ -172,10 +177,12 @@ def run_verireel_prod_backup_gate_operation_worker_once(
     if max_attempts < 1:
         raise ValueError("VeriReel prod backup gate worker max_attempts must be positive.")
     now = _utc_now_timestamp()
-    recovered_operation_ids = record_store.recover_expired_verireel_prod_backup_gate_operation_records(
-        now=now,
-        safe_phases=SAFE_BACKUP_GATE_RETRY_PHASES,
-        max_attempts=max_attempts,
+    recovered_operation_ids = (
+        record_store.recover_expired_verireel_prod_backup_gate_operation_records(
+            now=now,
+            safe_phases=SAFE_BACKUP_GATE_RETRY_PHASES,
+            max_attempts=max_attempts,
+        )
     )
     claim_started_at = _utc_now_timestamp()
     operation = record_store.claim_next_verireel_prod_backup_gate_operation_record(
@@ -213,14 +220,14 @@ def reconcile_stale_verireel_prod_backup_gate_operation_records(
     if max_attempts < 1:
         raise ValueError("VeriReel prod backup gate worker max_attempts must be positive.")
     reconciled_at = now or _utc_now_timestamp()
-    reconciled_operation_ids = record_store.recover_expired_verireel_prod_backup_gate_operation_records(
-        now=reconciled_at,
-        safe_phases=SAFE_BACKUP_GATE_RETRY_PHASES,
-        max_attempts=max_attempts,
+    reconciled_operation_ids = (
+        record_store.recover_expired_verireel_prod_backup_gate_operation_records(
+            now=reconciled_at,
+            safe_phases=SAFE_BACKUP_GATE_RETRY_PHASES,
+            max_attempts=max_attempts,
+        )
     )
-    return VeriReelProdBackupGateReconcileResult(
-        reconciled_operation_ids=reconciled_operation_ids
-    )
+    return VeriReelProdBackupGateReconcileResult(reconciled_operation_ids=reconciled_operation_ids)
 
 
 def run_verireel_prod_backup_gate_operation_worker_loop(
@@ -241,9 +248,7 @@ def run_verireel_prod_backup_gate_operation_worker_loop(
     if poll_seconds < 1:
         raise ValueError("VeriReel prod backup gate worker poll_seconds must be positive.")
     if error_backoff_seconds < 1:
-        raise ValueError(
-            "VeriReel prod backup gate worker error_backoff_seconds must be positive."
-        )
+        raise ValueError("VeriReel prod backup gate worker error_backoff_seconds must be positive.")
     if max_consecutive_errors < 1:
         raise ValueError(
             "VeriReel prod backup gate worker max_consecutive_errors must be positive."
@@ -355,7 +360,12 @@ def _execute_operation(
         stop_event=stop_event,
         heartbeat_lost_event=heartbeat_lost_event,
     )
+    authorization_guard = DurableOperationAuthorizationGuard(
+        authorization=operation.authorization,
+        policy_record_reader=lambda: read_active_authz_policy_record(record_store),
+    )
     try:
+        authorization_guard.authorize_execution()
         running_operation = record_store.mark_verireel_prod_backup_gate_operation_phase(
             operation_id=operation.operation_id,
             lease_owner=lease_owner,
@@ -368,6 +378,7 @@ def _execute_operation(
                 operation.operation_id,
             )
             return False
+        authorization_guard.checkpoint_provider_effect("backup_gate")
         worker_result = _run_delegated_worker(
             control_plane_root=control_plane_root_path,
             request=VeriReelProdBackupGateWorkerRequest(
@@ -393,6 +404,28 @@ def _execute_operation(
             operation=running_operation,
             result=result,
             lease_owner=lease_owner,
+        )
+    except DurableOperationAuthorizationDeniedError as error:
+        logging.warning(
+            "VeriReel prod backup gate operation %s was denied before provider mutation: %s",
+            operation.operation_id,
+            error,
+        )
+        backup_gate_record = _failed_backup_gate_record(
+            request=operation.request,
+            error_message=str(error),
+        )
+        finished_at = _utc_now_timestamp()
+        terminal_operation = operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "updated_at": finished_at,
+                "finished_at": finished_at,
+                "lease_owner": lease_owner,
+                "error_code": error.code,
+                "error_message": str(error),
+            }
         )
     except Exception as error:
         logging.exception(
@@ -443,6 +476,7 @@ def _terminal_operation(
             "finished_at": finished_at,
             "lease_owner": lease_owner,
             "result": result,
+            "error_code": "",
             "error_message": "" if passed else (result.error_message or "Backup gate failed."),
         }
     )
@@ -505,7 +539,11 @@ def _lease_summary(
     heartbeat_age_seconds: int | None = None
     if record.heartbeat_at:
         heartbeat_age_seconds = max(
-            int((_parse_timestamp(recorded_at) - _parse_timestamp(record.heartbeat_at)).total_seconds()),
+            int(
+                (
+                    _parse_timestamp(recorded_at) - _parse_timestamp(record.heartbeat_at)
+                ).total_seconds()
+            ),
             0,
         )
     lease_expired = bool(
@@ -536,8 +574,10 @@ def _utc_now_timestamp() -> str:
 
 def _timestamp_after(timestamp: str, *, seconds: int) -> str:
     return (
-        _parse_timestamp(timestamp) + timedelta(seconds=seconds)
-    ).isoformat().replace("+00:00", "Z")
+        (_parse_timestamp(timestamp) + timedelta(seconds=seconds))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _parse_timestamp(timestamp: str) -> datetime:

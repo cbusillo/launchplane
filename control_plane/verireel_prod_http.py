@@ -5,6 +5,9 @@ from typing import cast
 
 from pydantic import Field, model_validator
 
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationAuthorization,
+)
 from control_plane.contracts.verireel_prod_backup_gate import (
     VeriReelProdBackupGateRequest,
 )
@@ -161,10 +164,12 @@ def apply_verireel_prod_backup_gate_result(
     *,
     record_store: object,
     request: VeriReelProdBackupGateEnvelope,
+    authorization: DurableOperationAuthorization,
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = enqueue_verireel_prod_backup_gate(
         record_store=cast(VeriReelProdBackupGateOperationStore, record_store),
         request=request.backup_gate,
+        authorization=authorization,
     )
     return (
         {"backup_gate_record_id": driver_result.backup_record_id},

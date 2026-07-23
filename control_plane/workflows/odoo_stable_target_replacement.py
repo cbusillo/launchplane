@@ -1036,6 +1036,7 @@ def execute_odoo_stable_target_replacement_apply(
     record_store: OdooStableTargetReplacementStore,
     request: OdooStableTargetReplacementApplyRequest,
     dokploy_request: DokployRequest = dokploy_api.dokploy_request,
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> OdooStableTargetReplacementApplyResult:
     plan = build_odoo_stable_target_replacement_plan(
         control_plane_root=control_plane_root,
@@ -1262,6 +1263,8 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint("target_replacement_raw_source")
         raw_compose_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,
             token=token,
@@ -1512,6 +1515,7 @@ def execute_odoo_stable_target_replacement_apply(
             phase=post_deploy_phase,
         ),
         run_destructive_restore=plan.data_source_mode == "upstream_restore",
+        provider_effect_checkpoint=provider_effect_checkpoint,
     )
     post_deploy_evidence = PostDeployUpdateEvidence(
         attempted=True,
