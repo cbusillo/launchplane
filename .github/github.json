@@ -129,6 +129,7 @@
     "Reusable External Route Binding Reconcile",
     "Route Binding Reconcile",
     "Reusable Route Binding Reconcile",
+    "Odoo Testing Route Binding Refresh",
     "Reusable Odoo Testing Route Binding Refresh",
     "Product Context Cutover Audit",
     "Product Context Cutover",

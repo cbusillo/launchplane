@@ -559,6 +559,15 @@ reusable workflow accepts only mode, reason, and an idempotency key, preserves a
 requires attention. Production enrollment is a separate change and cannot be
 selected through this endpoint.
 
+`Odoo Testing Route Binding Refresh` is the clock-only wrapper. It accepts no
+target selectors and calls the reusable worker pinned to an immutable commit.
+Manual dispatch defaults to `dry-run`; reviewed proof may select `apply`. The
+schedule runs apply at minute 37 every six hours, so a half-life failure surfaces
+with at least one additional scheduled attempt before the 24-hour attestation
+expires. Workflow concurrency prevents overlapping controller runs while the
+service's parent reservation and per-binding locks remain the authoritative
+serialization boundary.
+
 Use the `External Route Binding Reconcile` workflow when the public TLS
 terminator or reverse proxy is owned outside Launchplane and no provider API is
 available. This path adds external authority; it does not replace managed route
