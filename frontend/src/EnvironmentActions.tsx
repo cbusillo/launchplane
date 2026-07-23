@@ -19,6 +19,7 @@ import type { BrowserActionKind } from "./browser-operation";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { ProductPromotionFlow } from "./ProductPromotionFlow";
 import { EvidenceBadge, MissingEvidenceState, humanize } from "./ProductOps";
+import { EnvironmentReadinessPanel } from "./EnvironmentReadiness";
 import type { ResourceState } from "./resource";
 
 import type {
@@ -90,6 +91,13 @@ export function EnvironmentActionsView({
           </p>
         </div>
       </div>
+
+      <EnvironmentReadinessPanel
+        actions={detail.available_actions}
+        detail={detail}
+        fixtureMode={fixtureMode}
+        key={`${detail.product}:${detail.context}:${detail.environment}`}
+      />
 
       <div className="action-summary-strip" aria-label="Operator action summary">
         <div>
