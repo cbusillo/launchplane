@@ -70,10 +70,35 @@ from tests.http_app_test_support import (
 )
 from tests.support.http import lifespan_client
 from tests.support.auth import _identity, _StubVerifier
+from tests.support.durable_operations import durable_operation_authorization_payload
 from tests.support.stores import _sqlite_database_url
 
 
 class FastApiConstructionMetadataTests(unittest.TestCase):
+    def test_authz_runtime_preserves_exact_record_metadata(self) -> None:
+        policy = _odoo_operation_status_policy(action="odoo_stable_bootstrap.execute")
+        runtime = LaunchplaneAuthzPolicyRuntime(
+            policy,
+            source="db",
+            record_id="launchplane-authz-policy-r1",
+            revision=1,
+        )
+
+        runtime.update(policy, source="db")
+        preserved_record = runtime.policy_record(updated_at="2026-07-23T03:30:00Z")
+        runtime.update(
+            policy,
+            source="db",
+            record_id="launchplane-authz-policy-r2",
+            revision=2,
+        )
+        updated_record = runtime.policy_record(updated_at="2026-07-23T03:31:00Z")
+
+        self.assertEqual(preserved_record.record_id, "launchplane-authz-policy-r1")
+        self.assertEqual(preserved_record.revision, 1)
+        self.assertEqual(updated_record.record_id, "launchplane-authz-policy-r2")
+        self.assertEqual(updated_record.revision, 2)
+
     def test_openapi_model_schema_cache_returns_independent_payloads(self) -> None:
         first_schema = _openapi_model_schema(VeriReelProdBackupGateRequest)
         second_schema = _openapi_model_schema(VeriReelProdBackupGateRequest)
@@ -1738,6 +1763,166 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pending_odoo_operation_can_be_cancelled_idempotently(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            pending_record = _pending_odoo_stable_bootstrap_record()
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                type(pending_record).model_validate(
+                    {
+                        **pending_record.model_dump(mode="json"),
+                        "schema_version": 2,
+                        "authorization": durable_operation_authorization_payload(
+                            action="odoo_stable_bootstrap.execute",
+                            managed_rule_id="cm-testing-bootstrap",
+                        ),
+                    }
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_stable_bootstrap.execute",
+                    instances=("testing",),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: record_store,
+            )
+            path = "/v1/drivers/odoo/stable-bootstrap/operations/bootstrap-cm-testing/cancel"
+
+            first_response = await _asgi_request(
+                app,
+                "POST",
+                path,
+                headers={"Authorization": "Bearer valid-token"},
+                payload={"reason": "Operator cancelled pending destructive work."},
+            )
+            second_response = await _asgi_request(
+                app,
+                "POST",
+                path,
+                headers={"Authorization": "Bearer valid-token"},
+                payload={"reason": "Operator cancelled pending destructive work."},
+            )
+            operation = record_store.read_odoo_stable_bootstrap_operation_record(
+                "bootstrap-cm-testing"
+            )
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(first_response.json()["operation"]["status"], "cancelled")
+        self.assertEqual(second_response.json()["operation"]["status"], "cancelled")
+        self.assertEqual(operation.status, "cancelled")
+        self.assertIsNotNone(operation.cancellation)
+        self.assertIsNotNone(operation.authorization)
+
+    async def test_running_odoo_operation_cannot_be_cancelled(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                _running_odoo_stable_bootstrap_record()
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_stable_bootstrap.execute",
+                    instances=("testing",),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing/cancel",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={"reason": "Operator cancellation request."},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "operation_not_pending")
+
+    async def test_pending_target_replacement_operation_can_be_cancelled(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            running_record = _running_odoo_target_replacement_record()
+            pending_record = type(running_record).model_validate(
+                {
+                    **running_record.model_dump(mode="json"),
+                    "status": "pending",
+                    "phase": "created",
+                    "started_at": "",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "attempt": 0,
+                }
+            )
+            record_store.write_odoo_stable_target_replacement_operation_record(pending_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_target_replacement_apply.execute",
+                    instances=("testing",),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/odoo/target-replacement/operations/operation-cm-testing/cancel",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={"reason": "Operator cancelled pending target replacement."},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["operation"]["status"], "cancelled")
+
+    async def test_pending_verireel_backup_operation_can_be_cancelled(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            request = VeriReelProdBackupGateRequest(
+                backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
+            )
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                VeriReelProdBackupGateOperationRecord(
+                    operation_id="verireel-operation-1",
+                    product="verireel",
+                    context="verireel",
+                    instance="prod",
+                    backup_record_id=request.backup_record_id,
+                    request_fingerprint=request.model_dump_json(),
+                    request=request,
+                    created_at="2026-07-23T03:30:00Z",
+                    updated_at="2026-07-23T03:30:00Z",
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="verireel_prod_backup_gate.execute",
+                    products=("verireel",),
+                    contexts=("verireel",),
+                    instances=("prod",),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/verireel/prod-backup-gate/operations/verireel-operation-1/cancel",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={"reason": "Operator cancelled pending production-capable work."},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["operation"]["status"], "cancelled")
+
     async def test_stable_bootstrap_operation_status_returns_native_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -1921,6 +2106,15 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
         replacement_route = openapi["paths"][
             "/v1/drivers/odoo/target-replacement/operations/{operation_id}"
         ]["get"]
+        bootstrap_cancel_route = openapi["paths"][
+            "/v1/drivers/odoo/stable-bootstrap/operations/{operation_id}/cancel"
+        ]["post"]
+        replacement_cancel_route = openapi["paths"][
+            "/v1/drivers/odoo/target-replacement/operations/{operation_id}/cancel"
+        ]["post"]
+        verireel_cancel_route = openapi["paths"][
+            "/v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel"
+        ]["post"]
         self.assertEqual(
             bootstrap_route["operationId"],
             "read_odoo_stable_bootstrap_operation_status",
@@ -1928,6 +2122,18 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             replacement_route["operationId"],
             "read_odoo_target_replacement_operation_status",
+        )
+        self.assertEqual(
+            bootstrap_cancel_route["operationId"],
+            "cancel_odoo_stable_bootstrap_operation",
+        )
+        self.assertEqual(
+            replacement_cancel_route["operationId"],
+            "cancel_odoo_target_replacement_operation",
+        )
+        self.assertEqual(
+            verireel_cancel_route["operationId"],
+            "cancel_verireel_prod_backup_gate_operation",
         )
         self.assertEqual(
             bootstrap_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],

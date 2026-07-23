@@ -9205,8 +9205,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             state_dir = root / "state"
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
+                    "schema_version": 2,
                     "github_actions": [
                         {
+                            "managed_set_id": "operator.verireel-prod-operations",
+                            "managed_rule_id": "prod-backup-gate",
                             "repository": "every/verireel",
                             "workflow_refs": [
                                 "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
@@ -9214,9 +9217,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["verireel"],
                             "contexts": ["verireel"],
+                            "instances": ["prod"],
                             "actions": ["verireel_prod_backup_gate.execute"],
                         }
-                    ]
+                    ],
                 }
             )
             app = create_launchplane_fastapi_test_app(
@@ -9269,6 +9273,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 execute_mock.call_args.kwargs["request"].backup_record_id,
                 "backup-gate-verireel-prod-run-12345-attempt-1",
             )
+            self.assertEqual(
+                execute_mock.call_args.kwargs["authorization"].managed_rule_id,
+                "prod-backup-gate",
+            )
 
     def test_verireel_prod_backup_gate_retry_runs_again_after_pending_result(
         self,
@@ -9278,8 +9286,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             state_dir = root / "state"
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
+                    "schema_version": 2,
                     "github_actions": [
                         {
+                            "managed_set_id": "operator.verireel-prod-operations",
+                            "managed_rule_id": "prod-backup-gate",
                             "repository": "every/verireel",
                             "workflow_refs": [
                                 "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
@@ -9287,9 +9298,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["verireel"],
                             "contexts": ["verireel"],
+                            "instances": ["prod"],
                             "actions": ["verireel_prod_backup_gate.execute"],
                         }
-                    ]
+                    ],
                 }
             )
             app = create_launchplane_fastapi_test_app(

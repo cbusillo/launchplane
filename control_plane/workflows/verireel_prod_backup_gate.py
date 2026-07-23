@@ -10,6 +10,9 @@ from typing import Literal, Protocol
 import click
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationAuthorization,
+)
 from control_plane.contracts.verireel_prod_backup_gate import (
     DEFAULT_VERIREEL_PROD_BACKUP_GATE_TIMEOUT_SECONDS,
     VeriReelProdBackupGateRequest,
@@ -268,8 +271,10 @@ def _build_operation_record(
     *,
     request: VeriReelProdBackupGateRequest,
     created_at: str,
+    authorization: DurableOperationAuthorization,
 ) -> VeriReelProdBackupGateOperationRecord:
     return VeriReelProdBackupGateOperationRecord(
+        schema_version=2,
         operation_id=build_verireel_prod_backup_gate_operation_id(
             product="verireel",
             context=request.context,
@@ -282,6 +287,7 @@ def _build_operation_record(
         backup_record_id=request.backup_record_id,
         request_fingerprint=_request_fingerprint(request),
         request=request,
+        authorization=authorization,
         status="pending",
         phase="created",
         created_at=created_at,
@@ -293,6 +299,7 @@ def enqueue_verireel_prod_backup_gate(
     *,
     record_store: VeriReelProdBackupGateOperationStore,
     request: VeriReelProdBackupGateRequest,
+    authorization: DurableOperationAuthorization,
     now: str | None = None,
 ) -> VeriReelProdBackupGateResult:
     existing_record = _read_existing_backup_gate_record(
@@ -307,19 +314,25 @@ def enqueue_verireel_prod_backup_gate(
         existing_record = _pending_backup_gate_record(request=request)
         record_store.write_backup_gate_record(existing_record)
 
-    operation = _build_operation_record(request=request, created_at=recorded_at)
+    operation = _build_operation_record(
+        request=request,
+        created_at=recorded_at,
+        authorization=authorization,
+    )
     operation_records = record_store.list_verireel_prod_backup_gate_operation_records(
         backup_record_id=request.backup_record_id,
         limit=1,
     )
-    if operation_records and operation_records[0].request_fingerprint != operation.request_fingerprint:
+    if (
+        operation_records
+        and operation_records[0].request_fingerprint != operation.request_fingerprint
+    ):
         raise click.ClickException(
             "VeriReel prod backup gate request conflicts with an existing operation."
         )
     if (
         operation_records
-        and operation_records[0].status
-        in VERIREEL_PROD_BACKUP_GATE_TERMINAL_OPERATION_STATUSES
+        and operation_records[0].status in VERIREEL_PROD_BACKUP_GATE_TERMINAL_OPERATION_STATUSES
     ):
         terminal_operation = operation_records[0]
         if terminal_operation.result is not None:

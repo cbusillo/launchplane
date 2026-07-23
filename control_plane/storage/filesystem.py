@@ -116,6 +116,7 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
+    build_cancelled_verireel_prod_backup_gate_record,
 )
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
@@ -2381,6 +2382,18 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def cancel_pending_odoo_stable_bootstrap_operation_record(
+        self, record: OdooStableBootstrapOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError("Odoo stable bootstrap cancellation requires a cancelled record.")
+        with self._exclusive_record_lock("odoo_stable_bootstrap_operations", record.operation_id):
+            current_record = self.read_odoo_stable_bootstrap_operation_record(record.operation_id)
+            if current_record.status != "pending":
+                return False
+            self.write_odoo_stable_bootstrap_operation_record(record)
+            return True
+
     def claim_next_odoo_stable_bootstrap_operation_record(
         self,
         *,
@@ -2398,24 +2411,33 @@ class FilesystemRecordStore:
         pending_records = self.list_odoo_stable_bootstrap_operation_records(statuses=("pending",))
         if not pending_records:
             return None
-        record = sorted(
+        for record in sorted(
             pending_records,
             key=lambda item: (item.created_at, item.operation_id),
-        )[0]
-        claimed_record = record.model_copy(
-            update={
-                "status": "running",
-                "phase": "running",
-                "started_at": record.started_at or claimed_at,
-                "updated_at": claimed_at,
-                "lease_owner": normalized_lease_owner,
-                "lease_expires_at": lease_expires_at.strip(),
-                "heartbeat_at": claimed_at.strip(),
-                "attempt": record.attempt + 1,
-            }
-        )
-        self.write_odoo_stable_bootstrap_operation_record(claimed_record)
-        return claimed_record
+        ):
+            with self._exclusive_record_lock(
+                "odoo_stable_bootstrap_operations", record.operation_id
+            ):
+                current_record = self.read_odoo_stable_bootstrap_operation_record(
+                    record.operation_id
+                )
+                if current_record.status != "pending":
+                    continue
+                claimed_record = current_record.model_copy(
+                    update={
+                        "status": "running",
+                        "phase": "running",
+                        "started_at": current_record.started_at or claimed_at,
+                        "updated_at": claimed_at,
+                        "lease_owner": normalized_lease_owner,
+                        "lease_expires_at": lease_expires_at.strip(),
+                        "heartbeat_at": claimed_at.strip(),
+                        "attempt": current_record.attempt + 1,
+                    }
+                )
+                self.write_odoo_stable_bootstrap_operation_record(claimed_record)
+                return claimed_record
+        return None
 
     def heartbeat_odoo_stable_bootstrap_operation_record(
         self,
@@ -2577,6 +2599,22 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def cancel_pending_odoo_stable_target_replacement_operation_record(
+        self, record: OdooStableTargetReplacementOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError("Odoo target replacement cancellation requires a cancelled record.")
+        with self._exclusive_record_lock(
+            "odoo_stable_target_replacement_operations", record.operation_id
+        ):
+            current_record = self.read_odoo_stable_target_replacement_operation_record(
+                record.operation_id
+            )
+            if current_record.status != "pending":
+                return False
+            self.write_odoo_stable_target_replacement_operation_record(record)
+            return True
+
     def create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
@@ -2638,24 +2676,33 @@ class FilesystemRecordStore:
         )
         if not pending_records:
             return None
-        record = sorted(
+        for record in sorted(
             pending_records,
             key=lambda item: (item.created_at, item.operation_id),
-        )[0]
-        claimed_record = record.model_copy(
-            update={
-                "status": "running",
-                "phase": "running",
-                "started_at": record.started_at or claimed_at,
-                "updated_at": claimed_at,
-                "lease_owner": normalized_lease_owner,
-                "lease_expires_at": lease_expires_at.strip(),
-                "heartbeat_at": claimed_at.strip(),
-                "attempt": record.attempt + 1,
-            }
-        )
-        self.write_odoo_stable_target_replacement_operation_record(claimed_record)
-        return claimed_record
+        ):
+            with self._exclusive_record_lock(
+                "odoo_stable_target_replacement_operations", record.operation_id
+            ):
+                current_record = self.read_odoo_stable_target_replacement_operation_record(
+                    record.operation_id
+                )
+                if current_record.status != "pending":
+                    continue
+                claimed_record = current_record.model_copy(
+                    update={
+                        "status": "running",
+                        "phase": "running",
+                        "started_at": current_record.started_at or claimed_at,
+                        "updated_at": claimed_at,
+                        "lease_owner": normalized_lease_owner,
+                        "lease_expires_at": lease_expires_at.strip(),
+                        "heartbeat_at": claimed_at.strip(),
+                        "attempt": current_record.attempt + 1,
+                    }
+                )
+                self.write_odoo_stable_target_replacement_operation_record(claimed_record)
+                return claimed_record
+        return None
 
     def heartbeat_odoo_stable_target_replacement_operation_record(
         self,
@@ -2809,6 +2856,33 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def cancel_pending_verireel_prod_backup_gate_operation_record(
+        self, record: VeriReelProdBackupGateOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError("VeriReel backup gate cancellation requires a cancelled record.")
+        with self._exclusive_record_lock(
+            "verireel_prod_backup_gate_operations", record.operation_id
+        ):
+            current_record = self.read_verireel_prod_backup_gate_operation_record(
+                record.operation_id
+            )
+            if current_record.status != "pending":
+                return False
+            backup_gate_record = build_cancelled_verireel_prod_backup_gate_record(record)
+            with self._product_authority_bundle_lock():
+                self._write_model_locked(
+                    "verireel_prod_backup_gate_operations",
+                    record.operation_id,
+                    record,
+                )
+                self._write_model_locked(
+                    "backup_gates",
+                    backup_gate_record.record_id,
+                    backup_gate_record,
+                )
+            return True
+
     def claim_next_verireel_prod_backup_gate_operation_record(
         self,
         *,
@@ -2828,21 +2902,33 @@ class FilesystemRecordStore:
         )
         if not pending_records:
             return None
-        record = sorted(pending_records, key=lambda item: (item.created_at, item.operation_id))[0]
-        claimed_record = record.model_copy(
-            update={
-                "status": "running",
-                "phase": "running",
-                "started_at": record.started_at or claimed_at,
-                "updated_at": claimed_at,
-                "lease_owner": normalized_lease_owner,
-                "lease_expires_at": lease_expires_at.strip(),
-                "heartbeat_at": claimed_at.strip(),
-                "attempt": record.attempt + 1,
-            }
-        )
-        self.write_verireel_prod_backup_gate_operation_record(claimed_record)
-        return claimed_record
+        for record in sorted(
+            pending_records,
+            key=lambda item: (item.created_at, item.operation_id),
+        ):
+            with self._exclusive_record_lock(
+                "verireel_prod_backup_gate_operations", record.operation_id
+            ):
+                current_record = self.read_verireel_prod_backup_gate_operation_record(
+                    record.operation_id
+                )
+                if current_record.status != "pending":
+                    continue
+                claimed_record = current_record.model_copy(
+                    update={
+                        "status": "running",
+                        "phase": "running",
+                        "started_at": current_record.started_at or claimed_at,
+                        "updated_at": claimed_at,
+                        "lease_owner": normalized_lease_owner,
+                        "lease_expires_at": lease_expires_at.strip(),
+                        "heartbeat_at": claimed_at.strip(),
+                        "attempt": current_record.attempt + 1,
+                    }
+                )
+                self.write_verireel_prod_backup_gate_operation_record(claimed_record)
+                return claimed_record
+        return None
 
     def heartbeat_verireel_prod_backup_gate_operation_record(
         self,

@@ -141,6 +141,7 @@ from control_plane.contracts.secret_record import (
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
+    build_cancelled_verireel_prod_backup_gate_record,
 )
 from control_plane.service_auth import GitHubHumanIdentity
 from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
@@ -4030,6 +4031,34 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def cancel_pending_odoo_stable_bootstrap_operation_record(
+        self, record: OdooStableBootstrapOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError("Odoo stable bootstrap cancellation requires a cancelled record.")
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneOdooStableBootstrapOperationRow)
+                .where(
+                    LaunchplaneOdooStableBootstrapOperationRow.operation_id == record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            current_record = self._read_payload(
+                model_type=OdooStableBootstrapOperationRecord,
+                payload=row.payload,
+            )
+            if current_record.status != "pending":
+                return False
+            self._sync_odoo_stable_bootstrap_operation_row(row, record)
+            session.commit()
+            return True
+
     def claim_next_odoo_stable_bootstrap_operation_record(
         self,
         *,
@@ -4354,6 +4383,35 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def cancel_pending_odoo_stable_target_replacement_operation_record(
+        self, record: OdooStableTargetReplacementOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError("Odoo target replacement cancellation requires a cancelled record.")
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneOdooStableTargetReplacementOperationRow)
+                .where(
+                    LaunchplaneOdooStableTargetReplacementOperationRow.operation_id
+                    == record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            current_record = self._read_payload(
+                model_type=OdooStableTargetReplacementOperationRecord,
+                payload=row.payload,
+            )
+            if current_record.status != "pending":
+                return False
+            self._sync_odoo_stable_target_replacement_operation_row(row, record)
+            session.commit()
+            return True
+
     def claim_next_odoo_stable_target_replacement_operation_record(
         self,
         *,
@@ -4664,6 +4722,46 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def cancel_pending_verireel_prod_backup_gate_operation_record(
+        self, record: VeriReelProdBackupGateOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError("VeriReel backup gate cancellation requires a cancelled record.")
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneVeriReelProdBackupGateOperationRow)
+                .where(
+                    LaunchplaneVeriReelProdBackupGateOperationRow.operation_id
+                    == record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            current_record = self._read_payload(
+                model_type=VeriReelProdBackupGateOperationRecord,
+                payload=row.payload,
+            )
+            if current_record.status != "pending":
+                return False
+            backup_gate_record = build_cancelled_verireel_prod_backup_gate_record(record)
+            session.merge(
+                LaunchplaneBackupGateRow(
+                    record_id=backup_gate_record.record_id,
+                    context=backup_gate_record.context,
+                    instance=backup_gate_record.instance,
+                    created_at=backup_gate_record.created_at,
+                    status=backup_gate_record.status,
+                    payload=self._payload_dict(backup_gate_record),
+                )
+            )
+            self._sync_verireel_prod_backup_gate_operation_row(row, record)
+            session.commit()
+            return True
 
     def claim_next_verireel_prod_backup_gate_operation_record(
         self,

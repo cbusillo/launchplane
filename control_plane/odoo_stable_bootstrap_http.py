@@ -5,6 +5,9 @@ from typing import Protocol, cast
 import click
 from pydantic import Field, model_validator
 
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationAuthorization,
+)
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapRequest
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
@@ -108,6 +111,7 @@ def enqueue_odoo_stable_bootstrap_operation(
     idempotency_key: str,
     request_fingerprint: str,
     created_at: str,
+    authorization: DurableOperationAuthorization,
 ) -> tuple[dict[str, object], dict[str, object]]:
     operation_store = odoo_stable_bootstrap_operation_store(record_store)
     existing_operation = find_odoo_stable_bootstrap_operation_by_idempotency_key(
@@ -127,6 +131,7 @@ def enqueue_odoo_stable_bootstrap_operation(
         idempotency_key=idempotency_key,
         request_fingerprint=request_fingerprint,
         created_at=created_at,
+        authorization=authorization,
     )
     operation, created_operation = (
         operation_store.create_odoo_stable_bootstrap_operation_record_if_no_active_lane(operation)
@@ -191,8 +196,10 @@ def build_odoo_stable_bootstrap_operation_record(
     idempotency_key: str,
     request_fingerprint: str,
     created_at: str,
+    authorization: DurableOperationAuthorization,
 ) -> OdooStableBootstrapOperationRecord:
     return OdooStableBootstrapOperationRecord(
+        schema_version=2,
         operation_id=build_odoo_stable_bootstrap_operation_id(
             product=bootstrap_request.product,
             context=bootstrap_request.context,
@@ -206,6 +213,7 @@ def build_odoo_stable_bootstrap_operation_record(
         idempotency_key=idempotency_key,
         request_fingerprint=request_fingerprint,
         request=bootstrap_request,
+        authorization=authorization,
         status="pending",
         phase="created",
         created_at=created_at,

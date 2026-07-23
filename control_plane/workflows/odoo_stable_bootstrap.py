@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -323,6 +324,7 @@ def execute_odoo_stable_bootstrap(
     request: OdooStableBootstrapRequest,
     env_file: Path | None = None,
     dokploy_request: DokployRequest = dokploy_api.dokploy_request,
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> OdooStableBootstrapResult:
     profile = record_store.read_product_profile_record(request.product)
     lane = _read_lane(profile=profile, instance=request.instance)
@@ -453,6 +455,8 @@ def execute_odoo_stable_bootstrap(
             required_workflow_environment_keys = (
                 post_deploy_environment.required_container_environment_keys
             )
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint("stable_bootstrap_schedule")
         dokploy_post_deploy.run_compose_odoo_stable_bootstrap(
             host=host,
             token=token,
@@ -501,6 +505,7 @@ def execute_odoo_stable_bootstrap(
             request=OdooPostDeployRequest(
                 context=request.context, instance=request.instance, phase="deploy"
             ),
+            provider_effect_checkpoint=provider_effect_checkpoint,
         )
     except click.ClickException as error:
         post_deploy_evidence = PostDeployUpdateEvidence(

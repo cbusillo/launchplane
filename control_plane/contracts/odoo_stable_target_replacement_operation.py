@@ -6,12 +6,18 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationAuthorization,
+    DurableOperationCancellation,
+)
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementApplyResult,
 )
 
-OdooStableTargetReplacementOperationStatus = Literal["pending", "running", "pass", "fail"]
+OdooStableTargetReplacementOperationStatus = Literal[
+    "pending", "running", "pass", "fail", "cancelled"
+]
 OdooStableTargetReplacementOperationPhase = Literal[
     "created",
     "running",
@@ -21,11 +27,13 @@ OdooStableTargetReplacementOperationPhase = Literal[
     "verification",
     "completed",
     "failed",
+    "cancelled",
 ]
 
 _TERMINAL_OPERATION_STATUSES: tuple[OdooStableTargetReplacementOperationStatus, ...] = (
     "pass",
     "fail",
+    "cancelled",
 )
 ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES: frozenset[
     OdooStableTargetReplacementOperationStatus
@@ -44,6 +52,7 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     idempotency_scope: str = ""
     request_fingerprint: str
     request: OdooStableTargetReplacementApplyRequest
+    authorization: DurableOperationAuthorization | None = None
     status: OdooStableTargetReplacementOperationStatus = "pending"
     phase: OdooStableTargetReplacementOperationPhase = "created"
     deployment_record_id: str = ""
@@ -56,11 +65,15 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     heartbeat_at: str = ""
     attempt: int = Field(default=0, ge=0)
     result: OdooStableTargetReplacementApplyResult | None = None
+    cancellation: DurableOperationCancellation | None = None
+    error_code: str = ""
     error_message: str = ""
     runner_trace_id: str = ""
 
     @model_validator(mode="after")
     def _validate_record(self) -> "OdooStableTargetReplacementOperationRecord":
+        if self.schema_version not in {1, 2}:
+            raise ValueError("Unsupported Odoo stable target replacement operation schema version.")
         self.operation_id = _normalize_required(
             self.operation_id, "Odoo stable target replacement operation requires operation_id."
         )
@@ -94,6 +107,7 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
         self.lease_expires_at = self.lease_expires_at.strip()
         self.heartbeat_at = self.heartbeat_at.strip()
         self.deployment_record_id = self.deployment_record_id.strip()
+        self.error_code = self.error_code.strip()
         self.error_message = self.error_message.strip()
         self.runner_trace_id = self.runner_trace_id.strip()
         if self.product != self.request.product:
@@ -102,19 +116,53 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
             raise ValueError(
                 "Odoo stable target replacement operation instance must match request."
             )
+        if self.schema_version == 2 and self.authorization is None:
+            raise ValueError(
+                "Schema-v2 Odoo stable target replacement operation requires authorization provenance."
+            )
+        if self.authorization is not None:
+            if self.schema_version != 2:
+                raise ValueError(
+                    "Odoo target replacement authorization provenance requires schema version 2."
+                )
+            if self.authorization.action != "odoo_target_replacement_apply.execute":
+                raise ValueError(
+                    "Odoo target replacement authorization action must match the operation."
+                )
+            if (
+                self.authorization.product != self.product
+                or self.authorization.context != self.context
+                or self.authorization.instances != (self.instance,)
+            ):
+                raise ValueError(
+                    "Odoo target replacement authorization target must match the operation."
+                )
         if self.status in ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES:
             if not self.finished_at:
                 raise ValueError(
                     "Terminal Odoo stable target replacement operations require finished_at."
                 )
-            if self.status == "pass" and self.error_message:
+            if self.status == "pass" and (self.error_code or self.error_message):
                 raise ValueError(
-                    "Passing Odoo stable target replacement operations must not include error_message."
+                    "Passing Odoo stable target replacement operations must not include an error."
                 )
             if self.status == "fail" and not self.error_message:
                 raise ValueError(
                     "Failed Odoo stable target replacement operations require error_message."
                 )
+            if self.status == "cancelled":
+                if self.cancellation is None:
+                    raise ValueError(
+                        "Cancelled Odoo target replacement operation requires cancellation evidence."
+                    )
+                if self.result is not None or self.error_code or self.error_message:
+                    raise ValueError(
+                        "Cancelled Odoo target replacement operation cannot include result or error."
+                    )
+        elif self.cancellation is not None:
+            raise ValueError(
+                "Only cancelled Odoo target replacement operations can include cancellation evidence."
+            )
         return self
 
 
