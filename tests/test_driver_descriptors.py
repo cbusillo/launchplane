@@ -162,6 +162,40 @@ def _product_profile(*, driver_id: str = "generic-web") -> LaunchplaneProductPro
     )
 
 
+def _named_product_profile(
+    *,
+    product: str,
+    display_name: str,
+    driver_id: str,
+    context: str,
+    instance: str = "testing",
+) -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product=product,
+        display_name=display_name,
+        repository=f"example/{product}",
+        driver_id=driver_id,
+        image=ProductImageProfile(repository=f"registry.example/{product}"),
+        runtime_port=8069,
+        health_path="/web/health",
+        lanes=(
+            ProductLaneProfile(
+                instance=instance,
+                context=context,
+                base_url=f"https://{context}.example.test",
+                health_url=f"https://{context}.example.test/web/health",
+            ),
+        ),
+        preview=ProductPreviewProfile(
+            enabled=True,
+            context=context,
+            app_name_prefix=f"{product}-preview",
+        ),
+        updated_at="2026-07-23T00:00:00Z",
+        source="test",
+    )
+
+
 RouteMetadataExpectation = tuple[Any, type[Any], str]
 
 
@@ -269,6 +303,130 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertNotIn("NPMplus", descriptor_json)
         self.assertNotIn("Dokploy", descriptor_json)
         self.assertNotIn("launchplane/self-deploy", descriptor_json)
+
+    def test_registry_descriptors_do_not_claim_runtime_product_contexts(self) -> None:
+        self.assertTrue(
+            all(not descriptor.context_patterns for descriptor in list_driver_descriptors())
+        )
+
+    def test_context_view_derives_one_odoo_descriptor_per_owned_profile(self) -> None:
+        profiles = (
+            _named_product_profile(
+                product="test-odoo-primary",
+                display_name="Test Odoo Primary",
+                driver_id="odoo",
+                context="test_primary",
+            ),
+            _named_product_profile(
+                product="test-odoo-website",
+                display_name="Test Odoo Website",
+                driver_id="odoo",
+                context="test_website",
+            ),
+            _named_product_profile(
+                product="test-odoo-partner",
+                display_name="Test Odoo Partner",
+                driver_id="odoo",
+                context="test_partner",
+            ),
+        )
+        store = _ProfileStore(*profiles)
+
+        for profile in profiles:
+            with self.subTest(product=profile.product):
+                context = profile.lanes[0].context
+                view = build_driver_context_view(
+                    record_store=store,
+                    context_name=context,
+                    instance_name="testing",
+                )
+
+                self.assertEqual(len(view.drivers), 1)
+                product_driver = view.drivers[0]
+                self.assertEqual(product_driver.driver_id, profile.product)
+                self.assertEqual(product_driver.descriptor.product, profile.product)
+                self.assertEqual(product_driver.descriptor.base_driver_id, "odoo")
+                self.assertEqual(product_driver.descriptor.context_patterns, (context,))
+                action_ids = [action.action_id for action in product_driver.available_actions]
+                self.assertEqual(len(action_ids), len(set(action_ids)))
+                self.assertIn("artifact_publish", action_ids)
+                self.assertIn("stable_deploy", action_ids)
+
+    def test_context_view_rejects_unknown_profile_driver(self) -> None:
+        profile = _named_product_profile(
+            product="test-unknown-product",
+            display_name="Test Unknown Product",
+            driver_id="missing-driver",
+            context="test_unknown",
+        )
+
+        view = build_driver_context_view(
+            record_store=_ProfileStore(profile),
+            context_name="test_unknown",
+            instance_name="testing",
+        )
+
+        self.assertEqual(view.drivers, ())
+
+    def test_context_view_fails_closed_for_duplicate_profile_ownership(self) -> None:
+        view = build_driver_context_view(
+            record_store=_ProfileStore(
+                _named_product_profile(
+                    product="test-odoo-primary",
+                    display_name="Test Odoo Primary",
+                    driver_id="odoo",
+                    context="test_shared",
+                ),
+                _named_product_profile(
+                    product="test-odoo-conflict",
+                    display_name="Test Odoo Conflict",
+                    driver_id="missing-driver",
+                    context="test_shared",
+                ),
+            ),
+            context_name="test_shared",
+            instance_name="testing",
+        )
+
+        self.assertEqual(view.drivers, ())
+
+    def test_verireel_context_view_is_derived_from_product_profile(self) -> None:
+        profile = _named_product_profile(
+            product="test-video-product",
+            display_name="Test Video Product",
+            driver_id="verireel",
+            context="test_video",
+        )
+
+        view = build_driver_context_view(
+            record_store=_ProfileStore(profile),
+            context_name="test_video",
+            instance_name="testing",
+        )
+
+        self.assertEqual(len(view.drivers), 1)
+        product_driver = view.drivers[0]
+        self.assertEqual(product_driver.driver_id, profile.product)
+        self.assertEqual(product_driver.descriptor.base_driver_id, "verireel")
+        action_ids = {action.action_id for action in product_driver.available_actions}
+        self.assertIn("preview_refresh", action_ids)
+        self.assertIn("prod_rollback", action_ids)
+
+    def test_instance_driver_view_requires_profile_owned_lane(self) -> None:
+        profile = _named_product_profile(
+            product="test-odoo-primary",
+            display_name="Test Odoo Primary",
+            driver_id="odoo",
+            context="test_primary",
+        )
+
+        view = build_driver_context_view(
+            record_store=_ProfileStore(profile),
+            context_name="test_primary",
+            instance_name="prod",
+        )
+
+        self.assertEqual(view.drivers, ())
 
     def test_ingress_descriptor_exposes_route_apply(self) -> None:
         descriptor = read_driver_descriptor("ingress")
@@ -1087,7 +1245,14 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
 
         with patch.object(registry, "_DESCRIPTORS", (registry.GENERIC_WEB_DRIVER, descriptor)):
             view = build_driver_context_view(
-                record_store=_PreviewStore(),
+                record_store=_ProfileStore(
+                    _named_product_profile(
+                        product="custom-web",
+                        display_name="Custom web",
+                        driver_id="custom-web",
+                        context="custom-web-preview",
+                    )
+                ),
                 context_name="custom-web-preview",
             )
 
@@ -1103,7 +1268,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "Preview identity record exists, but no generation evidence is recorded.",
         )
 
-    def test_driver_context_view_includes_generic_web_base_for_child_profile(self) -> None:
+    def test_driver_context_view_materializes_odoo_profile_inheritance(self) -> None:
         view = build_driver_context_view(
             record_store=_ProfileStore(_product_profile(driver_id="odoo")),
             context_name="cm",
@@ -1111,19 +1276,19 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
 
         drivers = {driver.driver_id: driver for driver in view.drivers}
 
-        self.assertIn("odoo", drivers)
-        self.assertIn("odoo-tenant-cm", drivers)
-        self.assertEqual(drivers["odoo-tenant-cm"].descriptor.base_driver_id, "generic-web")
+        self.assertEqual(tuple(drivers), ("odoo-tenant-cm",))
+        self.assertEqual(drivers["odoo-tenant-cm"].descriptor.base_driver_id, "odoo")
         inherited_actions = {
             action.action_id: action for action in drivers["odoo-tenant-cm"].available_actions
         }
+        self.assertIn("artifact_publish", inherited_actions)
         self.assertEqual(
             inherited_actions["stable_deploy"].route_path,
             "/v1/drivers/generic-web/deploy",
         )
         self.assertEqual(
             inherited_actions["prod_promotion"].route_path,
-            "/v1/drivers/generic-web/prod-promotion",
+            "/v1/drivers/odoo/prod-promotion",
         )
         self.assertEqual(
             inherited_actions["stable_verification"].route_path,

@@ -47,12 +47,13 @@ def resolve_odoo_prod_rollback_product_route(
     product: str,
     context: str,
     instance: str,
-) -> LaunchplaneProductProfileRecord | None:
-    _ = (context, instance)
+) -> LaunchplaneProductProfileRecord:
     try:
         return resolve_odoo_product_route(
             record_store=record_store,
             product=product,
+            context=context,
+            instance=instance,
         )
     except OdooRouteDependencyError as error:
         raise OdooProdRollbackRouteDependencyError from error
@@ -69,6 +70,7 @@ def execute_odoo_prod_rollback_result(
     driver_result = execute_odoo_prod_rollback(
         control_plane_root=control_plane_root,
         record_store=cast(OdooProdRollbackStore, record_store),
+        product=request.product,
         request=request.rollback,
     )
     records: dict[str, object] = {

@@ -1263,8 +1263,8 @@ Odoo stable-lane example:
 repository: example-org/product-repo
 workflow_ref: example-org/product-repo/.github/workflows/deploy-product.yml@refs/heads/main
 event_name: workflow_dispatch
-allowed product: odoo
-allowed contexts: opw
+allowed product: example-odoo-product
+allowed contexts: example-odoo
 allowed actions:
   - odoo_post_deploy.execute
   - odoo_prod_backup_gate.execute
@@ -2425,6 +2425,23 @@ FastAPI routes. Descriptor discovery authorizes against context `launchplane`;
 context views authorize against the requested context, and instance views also
 authorize the exact requested instance. These routes expose Launchplane
 capabilities and repository-backed read state, not runtime-provider primitives.
+The generic `odoo` descriptor remains visible through descriptor discovery but
+has no checked-in tenant context patterns and never appears as runtime authority
+in a product context view. Odoo context views require a DB-backed product
+profile whose declared driver is `odoo` and whose lane owns the requested
+context and, for instance views, the exact requested instance. The service
+returns one profile-scoped descriptor with the effective Odoo and generic-web
+inheritance surface. Stable instance names are unique within a product profile;
+if multiple profiles claim the same context or exact lane, the context view
+fails closed instead of returning competing product descriptors.
+
+All Odoo action routes enforce the same admission boundary before authorization:
+the envelope must name a product-specific DB-backed profile, the profile must
+use the Odoo driver, and every requested lane must be profile-owned. The base
+`product="odoo"` compatibility shortcut is not supported. Production promotion
+admission validates both the testing source and prod destination lanes before
+dispatch. Route admission also rejects ambiguous cross-profile ownership before
+authorization or provider dispatch.
 
 The logs route is the exception to the `driver.read` action because it reads live
 provider output. It is a native FastAPI route, uses action `target_logs.read`,

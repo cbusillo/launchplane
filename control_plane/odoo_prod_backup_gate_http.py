@@ -47,7 +47,7 @@ def resolve_odoo_prod_backup_gate_product_route(
     product: str,
     context: str,
     instance: str,
-) -> LaunchplaneProductProfileRecord | None:
+) -> LaunchplaneProductProfileRecord:
     try:
         return resolve_odoo_product_route(
             record_store=record_store,

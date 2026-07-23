@@ -6,7 +6,6 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementRequest,
 )
 from control_plane.contracts.product_profile_record import (
-    LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
 from control_plane.drivers.dispatch import (
@@ -16,7 +15,7 @@ from control_plane.drivers.dispatch import (
 from control_plane.odoo_product_driver_http import (
     OdooProductMismatchError,
     OdooRouteDependencyError,
-    product_profile_uses_odoo_driver,
+    resolve_odoo_product_route,
 )
 
 
@@ -46,23 +45,18 @@ class OdooTargetReplacementPlanEnvelope(_ProductRouteEnvelope):
 def resolve_odoo_target_replacement_plan_lane(
     *, record_store: object, product: str, instance: str
 ) -> ProductLaneProfile:
-    read_profile = getattr(record_store, "read_product_profile_record", None)
-    if not callable(read_profile):
-        raise ValueError("Product driver validation requires product profile storage.")
     try:
-        profile = read_profile(product.strip())
-    except FileNotFoundError as error:
-        raise OdooTargetReplacementPlanRouteDependencyError from error
-    if not isinstance(profile, LaunchplaneProductProfileRecord):
-        profile = LaunchplaneProductProfileRecord.model_validate(profile)
-    if not product_profile_uses_odoo_driver(profile):
-        raise OdooTargetReplacementPlanProductMismatchError(
-            "Product is not configured for the requested Odoo driver route."
+        profile = resolve_odoo_product_route(
+            record_store=record_store,
+            product=product,
+            instance=instance,
         )
+    except OdooRouteDependencyError as error:
+        raise OdooTargetReplacementPlanRouteDependencyError from error
+    except OdooProductMismatchError as error:
+        raise OdooTargetReplacementPlanProductMismatchError from error
     normalized_instance = instance.strip()
     for lane in profile.lanes:
         if lane.instance.strip() == normalized_instance:
             return lane
-    raise OdooTargetReplacementPlanProductMismatchError(
-        "Product profile does not own the requested Odoo driver lane."
-    )
+    raise OdooTargetReplacementPlanProductMismatchError

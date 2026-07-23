@@ -136,11 +136,38 @@ def _ready_odoo_preview_destroy_payload() -> dict[str, object]:
     }
 
 
+def _odoo_route_store(
+    state_dir: Path,
+    *,
+    product: str,
+    context: str,
+) -> FilesystemRecordStore:
+    store = FilesystemRecordStore(state_dir=state_dir)
+    profile_payload = _odoo_preview_profile_payload(product)
+    profile_payload["display_name"] = "Test Odoo Product"
+    lanes = [
+        {
+            "instance": instance,
+            "context": context,
+            "base_url": f"https://{instance}.{context}.example.test",
+            "health_url": f"https://{instance}.{context}.example.test/web/health",
+        }
+        for instance in ("testing", "prod")
+    ]
+    profile_payload["lanes"] = tuple(lanes)
+    preview = cast(dict[str, object], profile_payload["preview"])
+    preview["context"] = context
+    store.write_product_profile_record(
+        LaunchplaneProductProfileRecord.model_validate(profile_payload)
+    )
+    return store
+
+
 class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
     def _policy(
         self,
         *,
-        product: str = "odoo",
+        product: str = "odoo-tenant-opw",
         context: str = "opw",
         repository: str = "every/tenant-opw",
         workflow_ref: str = (
@@ -222,7 +249,11 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: _odoo_route_store(
+                    root / "state",
+                    product="odoo-tenant-opw",
+                    context="opw",
+                ),
                 control_plane_root_path=root,
             )
 
@@ -238,7 +269,7 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
                 response = await _post_odoo_artifact_publish_inputs(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-opw",
                         "inputs": {"context": "opw", "instance": "testing"},
                     },
                 )
@@ -250,12 +281,19 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
             payload["result"]["environment"],
             {"ODOO_BASE_RUNTIME_IMAGE": "ghcr.io/cbusillo/runtime:19"},
         )
-        self.assertIsNone(build_inputs.call_args.kwargs["product_profile"])
+        self.assertEqual(
+            build_inputs.call_args.kwargs["product_profile"].product,
+            "odoo-tenant-opw",
+        )
 
     async def test_odoo_artifact_publish_inputs_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = _odoo_route_store(
+                root / "state",
+                product="odoo-tenant-opw",
+                context="opw",
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -271,7 +309,7 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
                 first_response = await _post_odoo_artifact_publish_inputs(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-opw",
                         "inputs": {"context": "opw", "instance": "testing"},
                     },
                     idempotency_key="odoo-artifact-inputs:replay",
@@ -279,7 +317,7 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
                 replay_response = await _post_odoo_artifact_publish_inputs(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-opw",
                         "inputs": {"context": "opw", "instance": "testing"},
                     },
                     idempotency_key="odoo-artifact-inputs:replay",
@@ -293,7 +331,11 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_artifact_publish_inputs_rejects_idempotency_key_reuse(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = _odoo_route_store(
+                root / "state",
+                product="odoo-tenant-opw",
+                context="opw",
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -309,7 +351,7 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
                 first_response = await _post_odoo_artifact_publish_inputs(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-opw",
                         "inputs": {"context": "opw", "instance": "testing"},
                     },
                     idempotency_key="odoo-artifact-inputs:conflict",
@@ -317,7 +359,7 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
                 conflict_response = await _post_odoo_artifact_publish_inputs(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-opw",
                         "inputs": {"context": "opw", "instance": "prod"},
                     },
                     idempotency_key="odoo-artifact-inputs:conflict",
@@ -328,22 +370,56 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
 
     async def test_odoo_artifact_publish_inputs_rejects_unauthorized_workflow(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(self._identity()),
-            authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                record_store_factory=lambda: _odoo_route_store(
+                    root / "state",
+                    product="odoo-tenant-opw",
+                    context="opw",
+                ),
+            )
 
-        response = await _post_odoo_artifact_publish_inputs(
-            app,
-            {
-                "product": "odoo",
-                "inputs": {"context": "opw", "instance": "testing"},
-            },
-        )
+            response = await _post_odoo_artifact_publish_inputs(
+                app,
+                {
+                    "product": "odoo-tenant-opw",
+                    "inputs": {"context": "opw", "instance": "testing"},
+                },
+            )
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_base_odoo_descriptor_cannot_bypass_product_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(product="odoo"),
+                record_store_factory=lambda: _odoo_route_store(
+                    root / "state",
+                    product="odoo-tenant-opw",
+                    context="opw",
+                ),
+            )
+
+            with patch(
+                "control_plane.odoo_artifact_publish_inputs_http.build_odoo_artifact_publish_inputs"
+            ) as build_inputs:
+                response = await _post_odoo_artifact_publish_inputs(
+                    app,
+                    {
+                        "product": "odoo",
+                        "inputs": {"context": "opw", "instance": "testing"},
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+        build_inputs.assert_not_called()
 
     async def test_odoo_artifact_publish_inputs_rejects_non_odoo_product_profile(
         self,
@@ -549,7 +625,7 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
     def _policy(
         self,
         *,
-        product: str = "odoo",
+        product: str = "odoo-tenant-opw",
         context: str = "opw",
         repository: str = "every/tenant-opw",
         workflow_ref: str = (
@@ -571,7 +647,12 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-    def _payload(self, *, product: str = "odoo", context: str = "opw") -> dict[str, object]:
+    def _payload(
+        self,
+        *,
+        product: str = "odoo-tenant-opw",
+        context: str = "opw",
+    ) -> dict[str, object]:
         return {
             "product": product,
             "publish": {
@@ -589,7 +670,12 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-    def _v2_payload(self, *, product: str = "odoo", context: str = "opw") -> dict[str, object]:
+    def _v2_payload(
+        self,
+        *,
+        product: str = "odoo-tenant-opw",
+        context: str = "opw",
+    ) -> dict[str, object]:
         payload = self._payload(product=product, context=context)
         payload["schema_version"] = 2
         publish = payload["publish"]
@@ -647,7 +733,11 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: _odoo_route_store(
+                    root / "state",
+                    product="odoo-tenant-opw",
+                    context="opw",
+                ),
                 control_plane_root_path=root,
             )
 
@@ -678,7 +768,11 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: _odoo_route_store(
+                    root / "state",
+                    product="odoo-tenant-opw",
+                    context="opw",
+                ),
                 control_plane_root_path=root,
             )
 
@@ -884,17 +978,23 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_artifact_publish_handler_file_miss_is_not_dependency_503(
         self,
     ) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(self._identity()),
-            authz_policy=self._policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: _odoo_route_store(
+                    root / "state",
+                    product="odoo-tenant-opw",
+                    context="opw",
+                ),
+            )
 
-        with patch(
-            "control_plane.odoo_artifact_publish_http.ingest_odoo_artifact_publish_evidence",
-            side_effect=FileNotFoundError("handler-side file miss"),
-        ):
-            response = await _post_odoo_artifact_publish(app, self._payload())
+            with patch(
+                "control_plane.odoo_artifact_publish_http.ingest_odoo_artifact_publish_evidence",
+                side_effect=FileNotFoundError("handler-side file miss"),
+            ):
+                response = await _post_odoo_artifact_publish(app, self._payload())
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["error"]["code"], "not_found")
@@ -2611,7 +2711,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     def _policy(
         self,
         *,
-        product: str = "odoo",
+        product: str = "odoo-tenant-cm",
         context: str = "cm",
         action: str = "odoo_prod_promotion_inputs.read",
         repository: str = "every/tenant-cm",
@@ -2633,22 +2733,36 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
         return LaunchplaneAuthzPolicy.model_validate({"github_actions": [policy_entry]})
 
     def _store_with_tenant_profile(self, state_dir: Path) -> FilesystemRecordStore:
-        store = FilesystemRecordStore(state_dir=state_dir)
-        store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        return _odoo_route_store(
+            state_dir,
+            product="odoo-tenant-cm",
+            context="cm",
         )
-        return store
 
     def _store_with_non_odoo_tenant_profile(self, state_dir: Path) -> FilesystemRecordStore:
-        store = FilesystemRecordStore(state_dir=state_dir)
+        store = self._store_with_tenant_profile(state_dir)
         profile_payload = _odoo_preview_profile_payload()
         profile_payload["driver_id"] = "generic-web"
+        profile_payload["lanes"] = (
+            {
+                "instance": "testing",
+                "context": "cm",
+                "base_url": "https://testing.cm.example.test",
+                "health_url": "https://testing.cm.example.test/web/health",
+            },
+            {
+                "instance": "prod",
+                "context": "cm",
+                "base_url": "https://prod.cm.example.test",
+                "health_url": "https://prod.cm.example.test/web/health",
+            },
+        )
         store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(profile_payload)
         )
         return store
 
-    def _inputs_payload(self, *, product: str = "odoo") -> dict[str, object]:
+    def _inputs_payload(self, *, product: str = "odoo-tenant-cm") -> dict[str, object]:
         return {
             "product": product,
             "inputs": {
@@ -2659,7 +2773,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-    def _run_payload(self, *, product: str = "odoo") -> dict[str, object]:
+    def _run_payload(self, *, product: str = "odoo-tenant-cm") -> dict[str, object]:
         return {
             "product": product,
             "run": {
@@ -2668,7 +2782,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-    def _promotion_payload(self, *, product: str = "odoo") -> dict[str, object]:
+    def _promotion_payload(self, *, product: str = "odoo-tenant-cm") -> dict[str, object]:
         return {
             "product": product,
             "promotion": {
@@ -2765,7 +2879,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion.execute"),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
                 state_dir=root / "state",
             )
@@ -2802,7 +2916,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(promotion_call["request"].context, "cm")
         self.assertEqual(promotion_call["request"].from_instance, "testing")
         self.assertEqual(promotion_call["request"].to_instance, "prod")
-        self.assertEqual(promotion_call["request"].product, "odoo")
+        self.assertEqual(promotion_call["request"].product, "odoo-tenant-cm")
 
     async def test_odoo_prod_promotion_accepts_product_profile_driver_id(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2849,7 +2963,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_promotion_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion.execute"),
@@ -2881,7 +2995,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_promotion_rejects_idempotency_key_reuse(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion.execute"),
@@ -2902,7 +3016,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
                 conflict_response = await _post_odoo_prod_promotion(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-cm",
                         "promotion": {
                             "context": "cm",
                             "from_instance": "testing",
@@ -2921,7 +3035,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_promotion_does_not_replay_failed_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion.execute"),
@@ -2961,7 +3075,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_backup_gate.execute"),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
                 state_dir=root / "state",
             )
@@ -2995,6 +3109,37 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
 
+    async def test_odoo_prod_promotion_requires_owned_source_and_destination_lanes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_preview_profile_payload("odoo-tenant-cm")
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_prod_promotion.execute"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                state_dir=root / "state",
+            )
+
+            with patch(
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion"
+            ) as execute_mock:
+                response = await _post_odoo_prod_promotion(
+                    app,
+                    self._promotion_payload(),
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+        execute_mock.assert_not_called()
+
     async def test_odoo_prod_promotion_dependency_miss_is_dependency_503(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -3024,7 +3169,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion.execute"),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
                 state_dir=root / "state",
             )
@@ -3044,7 +3189,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
                 state_dir=root / "state",
             )
@@ -3076,7 +3221,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_promotion_inputs_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -3108,7 +3253,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_promotion_inputs_rejects_idempotency_key_reuse(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -3128,7 +3273,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
                 )
                 conflict_response = await _post_odoo_prod_promotion_inputs(
                     app,
-                    self._inputs_payload(product="odoo")
+                    self._inputs_payload()
                     | {"inputs": {"context": "cm", "request_id": "run-123-attempt-2"}},
                     idempotency_key="odoo-prod-promotion-inputs:conflict",
                 )
@@ -3140,7 +3285,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_promotion_inputs_does_not_replay_blocked_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -3179,7 +3324,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion.execute"),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
                 state_dir=root / "state",
             )
@@ -3237,7 +3382,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion_run.execute"),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
                 state_dir=root / "state",
             )
@@ -3270,7 +3415,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_call["control_plane_root"], root)
         self.assertEqual(run_call["state_dir"], root / "state")
         self.assertIsNone(run_call["database_url"])
-        self.assertEqual(run_call["request"].product, "odoo")
+        self.assertEqual(run_call["request"].product, "odoo-tenant-cm")
 
     async def test_odoo_prod_promotion_run_allows_reusable_launchplane_workflow(self) -> None:
         reusable_ref = "cbusillo/launchplane/.github/workflows/reusable-product-driver-prod-promotion.yml@refs/heads/main"
@@ -3282,7 +3427,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
                     action="odoo_prod_promotion_run.execute",
                     job_workflow_ref=reusable_ref,
                 ),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
                 state_dir=root / "state",
             )
@@ -3299,7 +3444,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_promotion_run_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion_run.execute"),
@@ -3331,7 +3476,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_promotion_run_rejects_idempotency_key_reuse(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion_run.execute"),
@@ -3352,7 +3497,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
                 conflict_response = await _post_odoo_prod_promotion_run(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-cm",
                         "run": {"context": "cm", "request_id": "run-123-attempt-2"},
                     },
                     idempotency_key="odoo-prod-promotion-run:conflict",
@@ -3365,7 +3510,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_promotion_run_does_not_replay_blocked_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion_run.execute"),
@@ -3402,7 +3547,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion.execute"),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
                 state_dir=root / "state",
             )
@@ -3422,7 +3567,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_prod_promotion_run.execute"),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
                 state_dir=root / "state",
             )
@@ -3442,7 +3587,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
                 state_dir=root / "state",
             )
@@ -4915,7 +5060,7 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
     def _policy(
         self,
         *,
-        product: str = "odoo",
+        product: str = "odoo-tenant-cm",
         context: str = "cm",
         action: str = "odoo_prod_backup_gate.execute",
         repository: str = "every/tenant-cm",
@@ -4976,7 +5121,7 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
     def _payload(
         self,
         *,
-        product: str = "odoo",
+        product: str = "odoo-tenant-cm",
         backup_record_id: str = "backup-gate-cm-prod-run-1",
     ) -> dict[str, object]:
         return {
@@ -5014,7 +5159,7 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
             )
 
@@ -5131,7 +5276,7 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_post_deploy.execute"),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
             )
 
@@ -5143,7 +5288,7 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_backup_gate_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -5174,7 +5319,7 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_backup_gate_rejects_idempotency_key_reuse(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -5204,7 +5349,7 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_backup_gate_does_not_replay_failed_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -5264,7 +5409,7 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
             )
 
@@ -5320,7 +5465,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
     def _policy(
         self,
         *,
-        product: str = "odoo",
+        product: str = "odoo-tenant-opw",
         context: str = "opw",
         action: str = "odoo_prod_rollback.execute",
         repository: str = "every/tenant-opw",
@@ -5342,22 +5487,36 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def _store_with_tenant_profile(self, state_dir: Path) -> FilesystemRecordStore:
-        store = FilesystemRecordStore(state_dir=state_dir)
-        store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        return _odoo_route_store(
+            state_dir,
+            product="odoo-tenant-opw",
+            context="opw",
         )
-        return store
 
     def _store_with_non_odoo_profile(self, state_dir: Path) -> FilesystemRecordStore:
         store = FilesystemRecordStore(state_dir=state_dir)
-        profile_payload = _odoo_preview_profile_payload()
+        profile_payload = _odoo_preview_profile_payload("odoo-tenant-opw")
         profile_payload["driver_id"] = "generic-web"
+        profile_payload["lanes"] = (
+            {
+                "instance": "testing",
+                "context": "opw",
+                "base_url": "https://testing.opw.example.test",
+                "health_url": "https://testing.opw.example.test/web/health",
+            },
+            {
+                "instance": "prod",
+                "context": "opw",
+                "base_url": "https://prod.opw.example.test",
+                "health_url": "https://prod.opw.example.test/web/health",
+            },
+        )
         store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(profile_payload)
         )
         return store
 
-    def _payload(self, *, product: str = "odoo") -> dict[str, object]:
+    def _payload(self, *, product: str = "odoo-tenant-opw") -> dict[str, object]:
         return {
             "product": product,
             "rollback": {
@@ -5395,7 +5554,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
             )
 
@@ -5446,7 +5605,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
             store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(product="odoo-tenant-cm"),
+                authz_policy=self._policy(product="odoo-tenant-opw"),
                 record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
@@ -5457,7 +5616,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
             ) as execute_mock:
                 response = await _post_odoo_prod_rollback(
                     app,
-                    self._payload(product="odoo-tenant-cm"),
+                    self._payload(product="odoo-tenant-opw"),
                 )
 
         self.assertEqual(response.status_code, 202)
@@ -5470,7 +5629,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
             store = self._store_with_non_odoo_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(product="odoo-tenant-cm"),
+                authz_policy=self._policy(product="odoo-tenant-opw"),
                 record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
@@ -5480,7 +5639,55 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
             ) as execute_mock:
                 response = await _post_odoo_prod_rollback(
                     app,
-                    self._payload(product="odoo-tenant-cm"),
+                    self._payload(product="odoo-tenant-opw"),
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+        execute_mock.assert_not_called()
+
+    async def test_odoo_prod_rollback_rejects_unowned_profile_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(
+                    product="odoo-tenant-opw",
+                    context="different-context",
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = self._payload()
+            rollback = cast(dict[str, object], request_payload["rollback"])
+            rollback["context"] = "different-context"
+
+            with patch(
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback"
+            ) as execute_mock:
+                response = await _post_odoo_prod_rollback(app, request_payload)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+        execute_mock.assert_not_called()
+
+    async def test_odoo_prod_rollback_rejects_base_driver_product(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(product="odoo"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback"
+            ) as execute_mock:
+                response = await _post_odoo_prod_rollback(
+                    app,
+                    self._payload(product="odoo"),
                 )
 
         self.assertEqual(response.status_code, 403)
@@ -5493,7 +5700,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="odoo_post_deploy.execute"),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
             )
 
@@ -5505,7 +5712,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_rollback_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -5539,7 +5746,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_rollback_rejects_idempotency_key_reuse(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -5572,7 +5779,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_prod_rollback_does_not_replay_failed_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_tenant_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -5628,7 +5835,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
                 control_plane_root_path=root,
             )
 
@@ -5684,7 +5891,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
     def _policy(
         self,
         *,
-        product: str = "odoo",
+        product: str = "odoo-tenant-opw",
         context: str = "opw",
         action: str = "odoo_post_deploy.execute",
         repository: str = "every/tenant-opw",
@@ -5733,6 +5940,13 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
         )
         return store
+
+    def _store_with_opw_profile(self, state_dir: Path) -> FilesystemRecordStore:
+        return _odoo_route_store(
+            state_dir,
+            product="odoo-tenant-opw",
+            context="opw",
+        )
 
     def _store_with_non_odoo_tenant_profile(self, state_dir: Path) -> FilesystemRecordStore:
         store = FilesystemRecordStore(state_dir=state_dir)
@@ -5967,7 +6181,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_opw_profile(root / "state"),
                 control_plane_root_path=root,
             )
 
@@ -5987,7 +6201,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                 response = await _post_odoo_post_deploy(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-opw",
                         "post_deploy": {
                             "context": "opw",
                             "instance": "testing",
@@ -6008,10 +6222,39 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["result"]["override_status"], "pass")
         execute_mock.assert_called_once()
 
+    async def test_odoo_post_deploy_rejects_unowned_profile_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_opw_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(context="different-context"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy"
+            ) as execute_mock:
+                response = await _post_odoo_post_deploy(
+                    app,
+                    {
+                        "product": "odoo-tenant-opw",
+                        "post_deploy": {
+                            "context": "different-context",
+                            "instance": "testing",
+                        },
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "product_driver_mismatch")
+        execute_mock.assert_not_called()
+
     async def test_odoo_post_deploy_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_opw_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -6033,7 +6276,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ) as execute_mock:
                 request_payload: dict[str, object] = {
-                    "product": "odoo",
+                    "product": "odoo-tenant-opw",
                     "post_deploy": {"context": "opw", "instance": "testing"},
                 }
                 first_response = await _post_odoo_post_deploy(
@@ -6055,7 +6298,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
     async def test_odoo_post_deploy_rejects_idempotency_key_reuse(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = self._store_with_opw_profile(root / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
@@ -6079,7 +6322,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                 first_response = await _post_odoo_post_deploy(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-opw",
                         "post_deploy": {"context": "opw", "instance": "testing"},
                     },
                     idempotency_key="odoo-post-deploy:conflict",
@@ -6087,7 +6330,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                 conflict_response = await _post_odoo_post_deploy(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-opw",
                         "post_deploy": {"context": "opw", "instance": "prod"},
                     },
                     idempotency_key="odoo-post-deploy:conflict",
@@ -6103,7 +6346,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_opw_profile(root / "state"),
                 control_plane_root_path=root,
             )
 
@@ -6114,7 +6357,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                 response = await _post_odoo_post_deploy(
                     app,
                     {
-                        "product": "odoo",
+                        "product": "odoo-tenant-opw",
                         "post_deploy": {"context": "opw", "instance": "testing"},
                     },
                     idempotency_key="odoo-post-deploy:file-miss",
@@ -6129,14 +6372,14 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=self._policy(action="deployment.write"),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                record_store_factory=lambda: self._store_with_opw_profile(root / "state"),
                 control_plane_root_path=root,
             )
 
             response = await _post_odoo_post_deploy(
                 app,
                 {
-                    "product": "odoo",
+                    "product": "odoo-tenant-opw",
                     "post_deploy": {"context": "opw", "instance": "testing"},
                 },
             )

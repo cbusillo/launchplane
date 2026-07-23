@@ -397,6 +397,39 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("tenant-primary", json.dumps(payload))
         self.assertNotIn("image-builder", json.dumps(payload))
 
+    def test_python_driver_descriptor_context_patterns_are_runtime_authority(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            source = root / "control_plane" / "drivers" / "registry.py"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "from control_plane.contracts.driver_descriptor import DriverDescriptor\n\n"
+                "DRIVER = DriverDescriptor(\n"
+                "    driver_id='test-driver',\n"
+                "    label='Test driver',\n"
+                "    product='test-driver',\n"
+                "    description='Test driver.',\n"
+                "    context_patterns=('test-tenant-context',),\n"
+                "    provider_boundary='Test boundary.',\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        findings = _findings(payload)
+        context_findings = [
+            finding
+            for finding in findings
+            if str(finding["key"]).startswith("DriverDescriptor.context")
+        ]
+        self.assertEqual(len(context_findings), 1)
+        self.assertEqual(context_findings[0]["rule_id"], "runtime_config_authority")
+        self.assertEqual(context_findings[0]["classification"], "needs_classification")
+        self.assertNotIn("test-tenant-context", json.dumps(payload))
+
     def test_module_qualified_dataclass_policy_catalog_is_reported_by_shape(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

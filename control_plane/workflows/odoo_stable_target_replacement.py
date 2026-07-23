@@ -213,9 +213,13 @@ class _ApplyResultBase(BaseModel):
 
 
 def _read_lane(*, profile: LaunchplaneProductProfileRecord, instance: str) -> ProductLaneProfile:
-    for lane in profile.lanes:
-        if lane.instance == instance:
-            return lane
+    matching_lanes = tuple(lane for lane in profile.lanes if lane.instance == instance)
+    if len(matching_lanes) == 1:
+        return matching_lanes[0]
+    if len(matching_lanes) > 1:
+        raise click.ClickException(
+            f"Product {profile.product!r} has multiple stable lanes for instance {instance!r}."
+        )
     raise click.ClickException(
         f"Product {profile.product!r} has no stable lane for instance {instance!r}."
     )

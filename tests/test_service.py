@@ -519,6 +519,58 @@ def create_launchplane_fastapi_test_app(**kwargs: object) -> Any:
     return factory(**kwargs)
 
 
+def _odoo_route_test_store(
+    state_dir: Path,
+    *,
+    product: str,
+    context: str,
+) -> FilesystemRecordStore:
+    store = FilesystemRecordStore(state_dir=state_dir)
+    profile_payload = _odoo_preview_profile_payload(product)
+    profile_payload["display_name"] = "Test Odoo Product"
+    profile_payload["lanes"] = (
+        {
+            "instance": "testing",
+            "context": context,
+            "base_url": f"https://testing.{context}.example.test",
+            "health_url": f"https://testing.{context}.example.test/web/health",
+        },
+    )
+    preview = cast(dict[str, object], profile_payload["preview"])
+    preview["context"] = context
+    store.write_product_profile_record(
+        LaunchplaneProductProfileRecord.model_validate(profile_payload)
+    )
+    return store
+
+
+def _verireel_route_test_store(state_dir: Path) -> FilesystemRecordStore:
+    store = FilesystemRecordStore(state_dir=state_dir)
+    profile_payload = _generic_site_profile_payload(product="verireel")
+    profile_payload["display_name"] = "Test VeriReel"
+    profile_payload["driver_id"] = "verireel"
+    profile_payload["lanes"] = (
+        {
+            "instance": "testing",
+            "context": "verireel",
+            "base_url": "https://testing.verireel.example.test",
+            "health_url": "https://testing.verireel.example.test/api/health",
+        },
+        {
+            "instance": "prod",
+            "context": "verireel",
+            "base_url": "https://verireel.example.test",
+            "health_url": "https://verireel.example.test/api/health",
+        },
+    )
+    preview = cast(dict[str, object], profile_payload["preview"])
+    preview["context"] = "verireel-testing"
+    store.write_product_profile_record(
+        LaunchplaneProductProfileRecord.model_validate(profile_payload)
+    )
+    return store
+
+
 class _HostedAuthzPolicyStore(PostgresRecordStore):
     @property
     def database_dialect_name(self) -> str:
@@ -4765,7 +4817,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+            store = _verireel_route_test_store(state_dir)
             for instance_name in ("prod", "testing"):
                 store.write_environment_inventory(
                     EnvironmentInventory(
@@ -4882,7 +4934,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+            store = _verireel_route_test_store(state_dir)
             store.write_preview_inventory_scan_record(
                 PreviewInventoryScanRecord(
                     scan_id="preview-inventory-scan-verireel-testing-20260420T100500Z",
@@ -8479,6 +8531,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_odoo_artifact_publish_driver_writes_manifest_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
+            store = _odoo_route_test_store(
+                root / "state",
+                product="odoo-tenant-opw",
+                context="opw",
+            )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -8488,7 +8545,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
                             ],
                             "event_names": ["workflow_dispatch"],
-                            "products": ["odoo"],
+                            "products": ["odoo-tenant-opw"],
                             "contexts": ["opw"],
                             "actions": ["odoo_artifact_publish.write"],
                         }
@@ -8508,6 +8565,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                local_record_store_for_tests=store,
             )
 
             with patch(
@@ -8527,7 +8585,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     method="POST",
                     path="/v1/drivers/odoo/artifact-publish",
                     payload={
-                        "product": "odoo",
+                        "product": "odoo-tenant-opw",
                         "publish": {
                             "context": "opw",
                             "instance": "testing",
@@ -8553,6 +8611,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_odoo_artifact_publish_driver_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
+            store = _odoo_route_test_store(
+                root / "state",
+                product="odoo-tenant-opw",
+                context="opw",
+            )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -8562,7 +8625,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
                             ],
                             "event_names": ["workflow_dispatch"],
-                            "products": ["odoo"],
+                            "products": ["odoo-tenant-opw"],
                             "contexts": ["opw"],
                             "actions": ["odoo_artifact_publish.write"],
                         }
@@ -8582,9 +8645,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                local_record_store_for_tests=store,
             )
             request_payload = {
-                "product": "odoo",
+                "product": "odoo-tenant-opw",
                 "publish": {
                     "context": "opw",
                     "instance": "testing",
@@ -8636,6 +8700,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_odoo_artifact_publish_driver_does_not_replay_failed_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
+            store = _odoo_route_test_store(
+                root / "state",
+                product="odoo-tenant-opw",
+                context="opw",
+            )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -8645,7 +8714,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
                             ],
                             "event_names": ["workflow_dispatch"],
-                            "products": ["odoo"],
+                            "products": ["odoo-tenant-opw"],
                             "contexts": ["opw"],
                             "actions": ["odoo_artifact_publish.write"],
                         }
@@ -8665,9 +8734,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                local_record_store_for_tests=store,
             )
             request_payload = {
-                "product": "odoo",
+                "product": "odoo-tenant-opw",
                 "publish": {
                     "context": "opw",
                     "instance": "testing",
@@ -8721,6 +8791,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_odoo_artifact_publish_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
+            store = _odoo_route_test_store(
+                root / "state",
+                product="odoo-tenant-opw",
+                context="opw",
+            )
             app = create_launchplane_fastapi_test_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
@@ -8741,7 +8816,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                     "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
                                 ],
                                 "event_names": ["workflow_dispatch"],
-                                "products": ["odoo"],
+                                "products": ["odoo-tenant-opw"],
                                 "contexts": ["opw"],
                                 "actions": ["odoo_post_deploy.execute"],
                             }
@@ -8749,6 +8824,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     }
                 ),
                 control_plane_root_path=root,
+                local_record_store_for_tests=store,
             )
 
             status_code, payload = _invoke_app(
@@ -8756,7 +8832,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 method="POST",
                 path="/v1/drivers/odoo/artifact-publish",
                 payload={
-                    "product": "odoo",
+                    "product": "odoo-tenant-opw",
                     "publish": {
                         "context": "opw",
                         "instance": "testing",

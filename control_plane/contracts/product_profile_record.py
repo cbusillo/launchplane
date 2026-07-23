@@ -491,6 +491,9 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 raise ValueError("enabled product preview requires runtime_port")
             if not self.health_path:
                 raise ValueError("enabled product preview requires health_path")
+        lane_instances = [lane.instance.strip().lower() for lane in self.lanes]
+        if len(lane_instances) != len(set(lane_instances)):
+            raise ValueError("product profile lane instances must be unique")
         if not self.updated_at.strip():
             raise ValueError("product profile requires updated_at")
         if not self.source.strip():
