@@ -2275,6 +2275,15 @@ Product activity reads are intentionally record-link oriented. They summarize
 deployments, promotions, rollbacks, backup gates, preview identity/lifecycle,
 preview feedback, and matching authz-policy changes with driver/action IDs and
 record references rather than embedding raw record payloads.
+Current managed-authz records are scoped by `audit.diff.changes` and the named
+previous/current managed rules, so an unrelated multi-product mutation cannot
+appear merely because the cumulative policy still mentions the product.
+Removals remain visible through the previous rule even when the replacement
+snapshot no longer names the product. Legacy records without managed diff audit
+use adjacent snapshot comparison and are omitted when product impact cannot be
+proven. Managed diffs also fail closed when their managed-set identity or named
+previous record is unavailable; the timeline does not guess across rule sets or
+substitute an unrelated adjacent record.
 
 Preview-related product actions are only shown when the product profile enables
 previews. That includes generic-web preview discovery and inventory actions,

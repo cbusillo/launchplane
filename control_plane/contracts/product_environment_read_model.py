@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -1223,34 +1225,307 @@ def _preview_context_activity_events(
     return tuple(events)
 
 
-def _authz_policy_mentions_product(record: object, product: str) -> bool:
-    policy = getattr(record, "policy", None)
-    if policy is None:
-        return False
-    rules = (*getattr(policy, "github_actions", ()), *getattr(policy, "github_humans", ()))
-    return any(product in getattr(rule, "products", ()) for rule in rules)
+_AUTHZ_POLICY_RULE_COLLECTIONS = (
+    "github_actions",
+    "github_humans",
+    "terminal_agents",
+    "local_operators",
+    "local_admins",
+)
+
+
+def _authz_policy_rules(policy: object) -> tuple[tuple[str, object], ...]:
+    return tuple(
+        (principal_type, rule)
+        for principal_type in _AUTHZ_POLICY_RULE_COLLECTIONS
+        for rule in getattr(policy, principal_type, ())
+    )
+
+
+def _authz_rule_matches_product(*, principal_type: str, rule: object, product: str) -> bool:
+    product_selectors = tuple(str(value) for value in getattr(rule, "products", ()))
+    if not product_selectors:
+        return True
+    if principal_type in {"github_actions", "local_operators", "local_admins"}:
+        return any(fnmatchcase(product, selector) for selector in product_selectors)
+    return product in product_selectors
+
+
+def _authz_rule_product_effect(
+    *, principal_type: str, rule: object | None, product: str
+) -> str | None:
+    if rule is None or not _authz_rule_matches_product(
+        principal_type=principal_type,
+        rule=rule,
+        product=product,
+    ):
+        return None
+    model_dump = getattr(rule, "model_dump", None)
+    if callable(model_dump):
+        payload = model_dump(mode="json", exclude_none=True)
+    elif isinstance(rule, dict):
+        payload = dict(rule)
+    else:
+        payload = {key: value for key, value in vars(rule).items() if not key.startswith("_")}
+    payload["products"] = [product]
+    return json.dumps(
+        {"principal_type": principal_type, "rule": payload},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _authz_policy_product_effects(*, policy: object, product: str) -> frozenset[str]:
+    return frozenset(
+        effect
+        for principal_type, rule in _authz_policy_rules(policy)
+        if (
+            effect := _authz_rule_product_effect(
+                principal_type=principal_type,
+                rule=rule,
+                product=product,
+            )
+        )
+        is not None
+    )
+
+
+def _authz_managed_rule_lookup(policy: object) -> dict[tuple[str, str, str], object]:
+    return {
+        (managed_set_id, principal_type, managed_rule_id): rule
+        for principal_type, rule in _authz_policy_rules(policy)
+        if (managed_set_id := str(getattr(rule, "managed_set_id", "") or "").strip())
+        if (managed_rule_id := str(getattr(rule, "managed_rule_id", "") or "").strip())
+    }
+
+
+def _authz_managed_set_id(record: object) -> str:
+    audit = getattr(record, "audit", None)
+    if not isinstance(audit, dict):
+        return ""
+    managed_set_id = str(audit.get("managed_set_id", "")).strip()
+    if managed_set_id:
+        return managed_set_id
+    diff = audit.get("diff")
+    if not isinstance(diff, dict):
+        return ""
+    return str(diff.get("managed_set_id", "")).strip()
+
+
+def _authz_managed_rule_for_change(
+    *,
+    rules: dict[tuple[str, str, str], object],
+    managed_set_id: str,
+    principal_type: str,
+    managed_rule_id: str,
+) -> object | None:
+    if not managed_set_id:
+        return None
+    return rules.get((managed_set_id, principal_type, managed_rule_id))
+
+
+def _authz_managed_changes(record: object) -> tuple[dict[str, object], ...] | None:
+    audit = getattr(record, "audit", None)
+    if not isinstance(audit, dict):
+        return None
+    diff = audit.get("diff")
+    if not isinstance(diff, dict):
+        return None
+    raw_changes = diff.get("changes")
+    if not isinstance(raw_changes, (list, tuple)):
+        return None
+    return tuple(change for change in raw_changes if isinstance(change, dict))
+
+
+def _authz_previous_record_id(record: object) -> str:
+    audit = getattr(record, "audit", None)
+    if not isinstance(audit, dict):
+        return ""
+    previous_record_id = str(audit.get("previous_policy_record_id", "")).strip()
+    if previous_record_id:
+        return previous_record_id
+    diff = audit.get("diff")
+    if not isinstance(diff, dict):
+        return ""
+    return str(diff.get("previous_record_id", "")).strip()
+
+
+def _authz_managed_product_change_kinds(
+    *,
+    record: object,
+    previous_record: object | None,
+    product: str,
+) -> tuple[tuple[str, str], ...] | None:
+    changes = _authz_managed_changes(record)
+    if changes is None:
+        return None
+    current_policy = getattr(record, "policy", None)
+    previous_policy = getattr(previous_record, "policy", None)
+    current_rules = _authz_managed_rule_lookup(current_policy) if current_policy is not None else {}
+    previous_rules = (
+        _authz_managed_rule_lookup(previous_policy) if previous_policy is not None else {}
+    )
+    managed_set_id = _authz_managed_set_id(record)
+    if not managed_set_id:
+        return ()
+    affected_changes: list[tuple[str, str]] = []
+    for change in changes:
+        managed_rule_id = str(change.get("managed_rule_id", "")).strip()
+        change_kind = str(change.get("change", "")).strip()
+        if not managed_rule_id or change_kind == "adopted":
+            continue
+        if change_kind in {"removed", "updated"} and previous_record is None:
+            continue
+        previous_principal_type = str(change.get("previous_principal_type") or "").strip()
+        desired_principal_type = str(change.get("desired_principal_type") or "").strip()
+        previous_effect = _authz_rule_product_effect(
+            principal_type=previous_principal_type,
+            rule=_authz_managed_rule_for_change(
+                rules=previous_rules,
+                managed_set_id=managed_set_id,
+                principal_type=previous_principal_type,
+                managed_rule_id=managed_rule_id,
+            ),
+            product=product,
+        )
+        desired_effect = _authz_rule_product_effect(
+            principal_type=desired_principal_type,
+            rule=_authz_managed_rule_for_change(
+                rules=current_rules,
+                managed_set_id=managed_set_id,
+                principal_type=desired_principal_type,
+                managed_rule_id=managed_rule_id,
+            ),
+            product=product,
+        )
+        if change_kind == "added" and desired_effect is not None:
+            affected_changes.append(("grant", managed_rule_id))
+            continue
+        if change_kind == "removed" and previous_effect is not None:
+            affected_changes.append(("remove", managed_rule_id))
+            continue
+        if change_kind != "updated" or previous_effect == desired_effect:
+            continue
+        if previous_effect is None and desired_effect is not None:
+            affected_changes.append(("grant", managed_rule_id))
+        elif previous_effect is not None and desired_effect is None:
+            affected_changes.append(("remove", managed_rule_id))
+        elif previous_effect is not None and desired_effect is not None:
+            affected_changes.append(("update", managed_rule_id))
+    return tuple(affected_changes)
+
+
+def _authz_activity_kind(affected_changes: tuple[tuple[str, str], ...]) -> str:
+    change_kinds = {change_kind for change_kind, _managed_rule_id in affected_changes}
+    if change_kinds == {"grant"}:
+        return "grant"
+    if change_kinds == {"remove"}:
+        return "remove"
+    return "update"
+
+
+def _authz_activity_event(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    record: object,
+    activity_kind: str,
+    managed_rule_ids: tuple[str, ...] = (),
+) -> ProductActivityEvent:
+    source = str(getattr(record, "source", "")).strip()
+    if activity_kind == "grant":
+        action_id = "authz_policy.grant"
+        title = f"{profile.display_name} authorization granted"
+        operation = "managed authorization grant"
+    elif activity_kind == "remove":
+        action_id = "authz_policy.remove"
+        title = f"{profile.display_name} authorization removed"
+        operation = "managed authorization removal"
+    elif activity_kind == "legacy_change":
+        action_id = "authz_policy.legacy_change"
+        title = f"{profile.display_name} authorization changed (legacy record)"
+        operation = "inferred from adjacent policy snapshots"
+    else:
+        action_id = "authz_policy.update"
+        title = f"{profile.display_name} authorization updated"
+        operation = "managed authorization update"
+    summary_parts = tuple(part for part in (source, operation) if part)
+    if managed_rule_ids:
+        summary_parts = (*summary_parts, ", ".join(sorted(set(managed_rule_ids))))
+    return _activity_event(
+        event_type="authz_policy",
+        product=profile.product,
+        context="launchplane",
+        environment="",
+        driver_id="launchplane",
+        action_id=action_id,
+        status=str(getattr(record, "status")),
+        occurred_at=str(getattr(record, "updated_at")),
+        title=title,
+        summary=" · ".join(summary_parts),
+        records=(_record_link("authz_policy", str(getattr(record, "record_id"))),),
+    )
 
 
 def _authz_policy_activity_events(
     *, record_store: object, profile: LaunchplaneProductProfileRecord, source_limit: int
 ) -> tuple[ProductActivityEvent, ...]:
+    if source_limit <= 0:
+        return ()
+    records = tuple(
+        _optional_records(
+            record_store,
+            "list_authz_policy_records",
+            limit=source_limit + 1,
+        )
+    )
+    records_by_id = {
+        str(getattr(record, "record_id")): record
+        for record in records
+        if str(getattr(record, "record_id", "")).strip()
+    }
     events: list[ProductActivityEvent] = []
-    for record in _optional_records(record_store, "list_authz_policy_records", limit=source_limit):
-        if not _authz_policy_mentions_product(record, profile.product):
+    for index, record in enumerate(records[:source_limit]):
+        previous_record_id = _authz_previous_record_id(record)
+        previous_record = records_by_id.get(previous_record_id)
+        affected_changes = _authz_managed_product_change_kinds(
+            record=record,
+            previous_record=previous_record,
+            product=profile.product,
+        )
+        if affected_changes is not None:
+            if not affected_changes:
+                continue
+            activity_kind = _authz_activity_kind(affected_changes)
+            events.append(
+                _authz_activity_event(
+                    profile=profile,
+                    record=record,
+                    activity_kind=activity_kind,
+                    managed_rule_ids=tuple(
+                        managed_rule_id for _change_kind, managed_rule_id in affected_changes
+                    ),
+                )
+            )
+            continue
+        if previous_record is None and not previous_record_id and index + 1 < len(records):
+            previous_record = records[index + 1]
+        current_policy = getattr(record, "policy", None)
+        previous_policy = getattr(previous_record, "policy", None)
+        if current_policy is None or previous_policy is None:
+            continue
+        if _authz_policy_product_effects(
+            policy=current_policy,
+            product=profile.product,
+        ) == _authz_policy_product_effects(
+            policy=previous_policy,
+            product=profile.product,
+        ):
             continue
         events.append(
-            _activity_event(
-                event_type="authz_policy",
-                product=profile.product,
-                context="launchplane",
-                environment="",
-                driver_id="launchplane",
-                action_id="authz_policy.update",
-                status=str(getattr(record, "status")),
-                occurred_at=str(getattr(record, "updated_at")),
-                title=f"{profile.display_name} authorization policy updated",
-                summary=str(getattr(record, "source")),
-                records=(_record_link("authz_policy", str(getattr(record, "record_id"))),),
+            _authz_activity_event(
+                profile=profile,
+                record=record,
+                activity_kind="legacy_change",
             )
         )
     return tuple(events)

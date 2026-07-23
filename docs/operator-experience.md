@@ -258,6 +258,13 @@ status, timestamp, and record links so the UI can render deployments,
 promotions, rollbacks, backup gates, previews, cleanup, feedback, and relevant
 authz changes without loading raw record payloads.
 
+Authz events are attributed from the managed reconcile mutation delta, not from
+membership in the resulting cumulative policy snapshot. Grant, removal, and
+update copy names the affected product and operation without exposing raw rule
+selectors. For older records without managed diff audit, the timeline compares
+adjacent policy snapshots and only emits a clearly labeled legacy change when a
+product-specific effect can be proven; otherwise it omits the record.
+
 Product environment config status compares product-profile expected config
 requirements against recorded runtime-environment keys and managed secret
 bindings for the stable lane. Expected keys are declarative product intent;

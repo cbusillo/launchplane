@@ -1585,7 +1585,13 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(set(payload), {"status", "trace_id", "activity"})
         self.assertEqual(payload["activity"]["product"], "example-site")
-        self.assertEqual(payload["activity"]["events"][0]["event_type"], "authz_policy")
+        authz_event = payload["activity"]["events"][0]
+        self.assertEqual(authz_event["event_type"], "authz_policy")
+        self.assertEqual(authz_event["product"], "example-site")
+        self.assertEqual(authz_event["action_id"], "authz_policy.grant")
+        self.assertEqual(authz_event["title"], "Example Site authorization granted")
+        self.assertIn("test", authz_event["summary"])
+        self.assertIn("example-site.read", authz_event["summary"])
 
     async def test_list_product_environments_returns_redacted_summaries(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
