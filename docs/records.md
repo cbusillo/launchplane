@@ -174,6 +174,19 @@ mutation boundary. Filesystem storage retains typed route-binding read/write
 parity for local rehearsal, but the service does not emulate the PostgreSQL
 transaction by performing a split filesystem apply.
 
+The Odoo testing route-binding refresh controller is a bounded batch over that
+same per-binding mutation boundary. Target discovery comes from DB-backed Odoo
+product-profile testing lanes intersected with active service-owned route
+bindings. Each due binding refresh and its child replay record commits
+atomically under the existing per-binding lock. Before the first child write,
+the controller acquires a parent mutation reservation that fences concurrent
+same-key runs. It compare-and-completes that parent response only after the
+bounded batch finishes. If an unexpected failure interrupts the batch, the
+bounded parent lease keeps immediate retries in progress; after safe release or
+expiry, retrying with the same controller key replans already-refreshed records
+as unchanged and continues remaining due bindings. The controller never creates
+a missing binding or selects production.
+
 Product authority bundle writes are the same atomicity boundary for product
 runtime/config ownership. PostgreSQL storage exposes a single
 `write_product_authority_bundle` repository method for the authority graph that
@@ -564,6 +577,13 @@ an ORM column/table or remains only in the evidence payload.
   operator ownership, missing join, ambiguity, unresolved audit, bounded-scan
   exhaustion, or CAS drift is an explicit conflict or blocker rather than an
   overwrite.
+  Native FastAPI
+  `POST /v1/route-bindings/odoo-testing/controller/run-once` performs bounded
+  testing-only discovery from product profiles and invokes this same planner for
+  each active service-owned binding. Its contract contains no target selectors,
+  caps discovery at 25 records, pre-authorizes every exact instance, and applies
+  due refreshes sequentially. Absent, disabled, operator-owned, non-Odoo, and
+  production records are not candidates. No schema migration is required.
   Externally managed ingress uses the separate native FastAPI
   `POST /v1/route-bindings/external/reconcile` contract. It derives the exact
   lane, public HTTPS domains, and provider target from DB-backed product-profile

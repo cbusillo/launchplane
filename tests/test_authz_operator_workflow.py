@@ -34,6 +34,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 "odoo-route-binding",
                 "odoo-external-route-binding",
                 "odoo-testing-ingress-route",
+                "odoo-testing-route-binding-refresh",
             ],
         )
         expected_jobs = {
@@ -52,6 +53,10 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "reconcile-odoo-testing-ingress-route": (
                 "${{ inputs.managed_set == 'odoo-testing-ingress-route' }}",
                 "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_TESTING_INGRESS_ROUTE_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-odoo-testing-route-binding-refresh": (
+                "${{ inputs.managed_set == 'odoo-testing-route-binding-refresh' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_TESTING_ROUTE_BINDING_REFRESH_MANAGED_SET_JSON }}",
             ),
         }
         self.assertEqual(set(self.dispatch_workflow.jobs), set(expected_jobs))

@@ -350,6 +350,7 @@ Current implementation scope:
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `GET /v1/route-bindings/records/current`
 - `POST /v1/route-bindings/reconcile`
+- `POST /v1/route-bindings/odoo-testing/controller/run-once`
 - `POST /v1/route-bindings/external/reconcile`
 - `POST /v1/provider-targets/operations`
 - `POST /v1/product-profiles/context-cutover/apply`
@@ -396,6 +397,8 @@ Odoo stable managed route-binding set; and
 testing-first external route-binding set.
 `LAUNCHPLANE_AUTHZ_ODOO_TESTING_INGRESS_ROUTE_MANAGED_SET_JSON` owns narrow
 testing-lane ingress inspection and reviewed no-op audit authority. The
+`LAUNCHPLANE_AUTHZ_ODOO_TESTING_ROUTE_BINDING_REFRESH_MANAGED_SET_JSON` owns the
+testing-only refresh controller and its exact-instance binding grants. The
 `Manage Launchplane Authorization` wrapper selects one of those explicit
 secrets and forwards it into the reusable worker, whose OIDC-minting job remains
 gated by the `launchplane-authz-admin` environment. Never replace the unreadable
@@ -530,6 +533,31 @@ at or after half-life refresh evidence even when the underlying source versions
 are unchanged. A domain, target, ingress, TLS-owner, lifecycle, or operator-
 ownership difference is not a refresh and must be resolved through the owning
 authority workflow before retrying.
+
+The Odoo testing refresh controller exposes
+`POST /v1/route-bindings/odoo-testing/controller/run-once`. It accepts no
+product, context, instance, domain, or provider selectors. The service derives
+its bounded target set from DB-backed Odoo product profiles, keeps only exact
+`testing` lanes with active service-owned route bindings, and skips absent,
+disabled, externally managed, non-Odoo, and production bindings. The target
+limit is 25 and exceeding it fails the whole plan before any write.
+
+Controller dry-run requires the service-scoped
+`route_binding.odoo_testing_refresh.plan` action plus `route_binding.read` for
+every discovered exact instance. Apply requires the separate service-scoped
+`route_binding.odoo_testing_refresh.apply` action, `route_binding.apply` for
+every discovered exact instance, a unique `Idempotency-Key`, and confirmation
+`APPLY ODOO TESTING ROUTE BINDING REFRESH`. All discovered binding grants are
+checked before the first write. The controller then invokes the same
+provider-neutral planner as manual reconcile and writes due refreshes
+sequentially through each binding's PostgreSQL CAS/transaction lock. A parent
+mutation reservation fences concurrent same-key controller runs and is completed
+only after the bounded child loop. Unchanged, blocked, and conflict outcomes are
+returned without mutation; one denied target blocks the whole batch. The
+reusable workflow accepts only mode, reason, and an idempotency key, preserves a
+30-day request/response artifact, and fails after artifact upload when any target
+requires attention. Production enrollment is a separate change and cannot be
+selected through this endpoint.
 
 Use the `External Route Binding Reconcile` workflow when the public TLS
 terminator or reverse proxy is owned outside Launchplane and no provider API is

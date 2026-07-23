@@ -1,0 +1,145 @@
+---
+name: Reusable Odoo Testing Route Binding Refresh
+
+"on":
+  workflow_call:
+    inputs:
+      mode:
+        description: Plan or apply the testing-only route-binding refresh.
+        required: true
+        type: string
+      reason:
+        description: Reason recorded with the Launchplane request.
+        required: true
+        type: string
+      idempotency_key:
+        description: Stable idempotency key for this controller run.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  refresh:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    concurrency:
+      group: launchplane-odoo-testing-route-binding-refresh-controller
+      cancel-in-progress: false
+    env:
+      LAUNCHPLANE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+    steps:
+      - name: Validate refresh request
+        env:
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          MODE: ${{ inputs.mode }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            dry-run|apply) ;;
+            *) echo "mode must be dry-run or apply" >&2; exit 1 ;;
+          esac
+          test -n "$REASON" || { echo "reason is required" >&2; exit 1; }
+          test -n "$IDEMPOTENCY_KEY" || {
+            echo "idempotency_key is required" >&2
+            exit 1
+          }
+
+      - name: Build refresh request
+        env:
+          MODE: ${{ inputs.mode }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          confirmation=''
+          if [ "$MODE" = 'apply' ]; then
+            confirmation='APPLY ODOO TESTING ROUTE BINDING REFRESH'
+          fi
+          jq -nc \
+            --arg mode "$MODE" \
+            --arg reason "$REASON" \
+            --arg confirmation "$confirmation" \
+            '{
+              schema_version: 1,
+              mode: $mode,
+              reason: $reason,
+              confirmation: $confirmation
+            }' \
+            > odoo-testing-route-binding-refresh-request.json
+
+      - name: Run Odoo testing route-binding refresh
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ env.LAUNCHPLANE_AUDIENCE }}
+          route-path: /v1/route-bindings/odoo-testing/controller/run-once
+          payload-file: odoo-testing-route-binding-refresh-request.json
+          idempotency-key: ${{ inputs.idempotency_key }}
+          response-output-file: odoo-testing-route-binding-refresh-response.json
+          timeout-ms: "180000"
+
+      - name: Summarize refresh outcomes
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          response_file='odoo-testing-route-binding-refresh-response.json'
+          status="$(jq -r '.result.status' "$response_file")"
+          targets="$(jq -r '.result.target_count' "$response_file")"
+          unchanged="$(jq -r '.result.unchanged_count' "$response_file")"
+          planned="$(jq -r '.result.planned_refresh_count' "$response_file")"
+          refreshed="$(jq -r '.result.refreshed_count' "$response_file")"
+          blocked="$(jq -r '.result.blocked_count' "$response_file")"
+          conflict="$(jq -r '.result.conflict_count' "$response_file")"
+          {
+            echo '## Odoo testing route-binding refresh'
+            echo
+            echo "- Mode: $MODE"
+            echo "- Status: $status"
+            echo "- Targets: $targets"
+            echo "- Unchanged: $unchanged"
+            echo "- Planned refresh: $planned"
+            echo "- Refreshed: $refreshed"
+            echo "- Blocked: $blocked"
+            echo "- Conflict: $conflict"
+            echo
+            jq -r \
+              '.result.outcomes[]? |
+              "- \(.product) / \(.context) / \(.instance): \(.status)"' \
+              "$response_file"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload refresh evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: odoo-testing-route-binding-refresh-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |-
+            odoo-testing-route-binding-refresh-request.json
+            odoo-testing-route-binding-refresh-response.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce refresh outcome
+        run: |
+          set -euo pipefail
+          status="$(
+            jq -r '.result.status' \
+              odoo-testing-route-binding-refresh-response.json
+          )"
+          case "$status" in
+            ok|empty) ;;
+            attention)
+              echo "Route-binding refresh requires operator attention." >&2
+              exit 1
+              ;;
+            *)
+              echo "Unexpected route-binding refresh status: $status" >&2
+              exit 1
+              ;;
+          esac
