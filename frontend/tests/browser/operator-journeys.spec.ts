@@ -252,6 +252,221 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("operator inspects mixed action readiness without executing a route", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod/actions?fixture=products",
+    );
+
+    await expect(
+      page.getByRole("heading", { name: "Exact lane and action evidence" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "2 dimensions need attention" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Browser identity limitation" }),
+    ).toContainText("Browser evidence view — not workflow authorization");
+
+    const authorization = page.getByRole("listitem").filter({
+      has: page.getByRole("heading", { name: "Authorization" }),
+    });
+    await expect(authorization.getByText("Blocked", { exact: true })).toBeVisible();
+    await expect(
+      authorization.getByText("Supported remediation metadata", { exact: true }),
+    ).toBeVisible();
+
+    const deployment = page.getByRole("listitem").filter({
+      has: page.getByRole("heading", { name: "Deployment" }),
+    });
+    await expect(deployment.getByText("Blocked", { exact: true })).toBeVisible();
+    await expect(deployment.getByText("runtime_identity_status:unchecked")).toBeVisible();
+    await expect(
+      deployment.getByText("No typed no-effect remediation is available in this browser."),
+    ).toBeVisible();
+
+    const routeBinding = page.getByRole("listitem").filter({
+      has: page.getByRole("heading", { name: "Route binding" }),
+    });
+    await expect(routeBinding.getByText("Ready", { exact: true })).toBeVisible();
+    await expect(
+      routeBinding.getByText("Advisory — does not block", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      routeBinding.getByText("external_ingress_internals_unsupported"),
+    ).toBeVisible();
+
+    await page
+      .getByLabel("Inspect exact action")
+      .selectOption({ label: "Deploy prod lane · Mutation" });
+    await expect(page.getByText("fixture.stable_deploy", { exact: true })).toBeVisible();
+    if (testInfo.project.name === "narrow") {
+      const hasHorizontalOverflow = await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth >
+          document.documentElement.clientWidth,
+      );
+      expect(hasHorizontalOverflow).toBe(false);
+    }
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "action-readiness-mixed");
+    diagnostics.assertClean();
+  });
+
+  test("operator sees ready immutable workflow preflight evidence", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod/actions?fixture=products&readiness=ready",
+    );
+
+    await expect(
+      page.getByRole("heading", {
+        name: "All required readiness dimensions pass",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "GitHub Actions workflow identity" }),
+    ).toContainText("Immutable workflow identity evaluated");
+    const needsAttention = page
+      .locator(".readiness-summary-strip > div")
+      .filter({ hasText: "need attention" });
+    await expect(needsAttention.getByText("0", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("list", { name: "Readiness dimensions" }),
+    ).not.toContainText("Blocked");
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "action-readiness-ready");
+    diagnostics.assertClean();
+  });
+
+  test("operator sees unsupported action readiness without execution", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod/actions?fixture=products&readiness=unsupported",
+    );
+
+    await expect(page.locator(".readiness-result[data-state='unsupported']")).toBeVisible();
+    await expect(
+      page.getByText(
+        "The requested action has no instance-scoped operational readiness contract.",
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        "Choose an instance-scoped driver action with declared readiness requirements.",
+      ),
+    ).toBeVisible();
+    const actionSupported = page
+      .locator(".readiness-summary-strip > div")
+      .filter({ hasText: "action supported" });
+    await expect(actionSupported.getByText("No", { exact: true })).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "action-readiness-unsupported");
+    diagnostics.assertClean();
+  });
+
+  test("operator sees readiness authorization denial with trace evidence", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod/actions?fixture=products&readiness=denied",
+    );
+
+    await expect(
+      page.getByText(
+        "This browser session cannot read operational readiness evidence.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByText("fixture-readiness-denied", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText(
+        "No prior action result is shown because readiness evidence is scoped to the exact caller, action, and lane.",
+      ),
+    ).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "action-readiness-denied");
+    diagnostics.assertClean();
+  });
+
+  test("operator sees readiness service failure without stale evidence", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod/actions?fixture=products&readiness=error",
+    );
+
+    await expect(
+      page.getByText("Operational readiness is intentionally unavailable."),
+    ).toBeVisible();
+    await expect(
+      page.getByText("fixture-readiness-unavailable", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("list", { name: "Readiness dimensions" }),
+    ).toHaveCount(0);
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "action-readiness-error");
+    diagnostics.assertClean();
+  });
+
+  test("operator sees a distinct empty readiness contract", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/beacon-docs/environments/testing/actions?fixture=missing",
+    );
+
+    await expect(
+      page.getByText("No exact action readiness contract", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("No operator actions advertised", { exact: true }),
+    ).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "action-readiness-empty");
+    diagnostics.assertClean();
+  });
+
+  test("operator sees a distinct readiness loading state", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod/actions?fixture=products&readiness=slow",
+    );
+
+    await expect(page.getByText("Evaluating exact readiness", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "2 dimensions need attention" }),
+    ).toBeVisible();
+    await expect(page.getByText("fixture.prod_promotion", { exact: true })).toBeVisible();
+    await page
+      .getByLabel("Inspect exact action")
+      .selectOption({ label: "Deploy prod lane · Mutation" });
+    await expect(page.getByText("Evaluating exact readiness", { exact: true })).toBeVisible();
+    await expect(page.getByText("fixture.prod_promotion", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("fixture.stable_deploy", { exact: true })).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "action-readiness-loading-settled");
+    diagnostics.assertClean();
+  });
+
   test("operator reaches confirmation without applying a change", async ({
     page,
   }, testInfo) => {

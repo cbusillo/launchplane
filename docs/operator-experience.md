@@ -244,7 +244,7 @@ The first product/site read endpoints are:
 - `GET /v1/products/{product}/environments`
 - `GET /v1/products/{product}/environments/{environment}`
 - `GET /v1/products/{product}/environments/{environment}/config-status`
-- `GET /v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness?action={authz_action}&artifact_id={artifact_id}`
+- `GET /v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness?action={authz_action}&artifact_id={artifact_id}&expected_current_artifact_id={expected_current_artifact_id}`
 
 These endpoints are profile and driver driven. A standard `generic-web` site
 should appear in the read model from Launchplane records alone: product profile,
@@ -304,6 +304,25 @@ blocked or missing result and does not create a route, grant, provider target,
 deployment, secret, or scheduler target. An exact artifact ID is required only
 when the selected driver action declares artifact readiness; Launchplane reads
 the persisted manifest and never rebuilds or infers it.
+
+The environment `Actions` route lets an operator select one unambiguous primary
+authorization action advertised by the environment read model, then derives the
+product, context, instance, candidate artifact, and expected current artifact
+from that same Launchplane-owned response before reading readiness. It does not
+accept caller-entered lane or artifact selectors. The browser renders overall
+state, every returned dimension, bounded owner/evidence records, advisory
+details, and remediation metadata. A ready dimension may still carry a clearly
+labeled non-blocking advisory.
+
+A browser readiness read evaluates the signed-in browser identity and therefore
+does not prove immutable workflow authorization. The UI calls this out directly;
+only the pinned GitHub Actions worker can prove its exact caller and reusable
+workflow refs by running the same preflight. Remediation methods and route paths
+are evidence, not dynamic browser controls. They remain non-executable until a
+typed browser operation or reviewed workflow owns the input, confirmation,
+idempotency, replay, and result contract. A non-ready dimension with no supported
+no-effect remediation says so explicitly instead of inventing a provider or
+record mutation.
 
 ## Promotion Safety
 

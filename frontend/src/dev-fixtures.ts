@@ -14,6 +14,8 @@ import type {
   ProductConfigWriteAvailability,
   ProductEnvironmentDetail,
   ProductEnvironmentSummary,
+  ProductOperationalReadiness,
+  ProductOperationalReadinessDimension,
   ProductPromotionDryRunResponse,
   ProductPromotionOperationAvailability,
   ProductPromotionStatus,
@@ -75,6 +77,28 @@ export async function waitForEngineeringFixture(
     const onAbort = () => {
       window.clearTimeout(timeout);
       reject(new DOMException("Engineering fixture request cancelled.", "AbortError"));
+    };
+    const timeout = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, 1800);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function waitForReadinessFixture(
+  signal: AbortSignal,
+): Promise<void> {
+  if (new URLSearchParams(window.location.search).get("readiness") !== "slow") {
+    return;
+  }
+  if (signal.aborted) {
+    throw new DOMException("Readiness fixture request cancelled.", "AbortError");
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      window.clearTimeout(timeout);
+      reject(new DOMException("Readiness fixture request cancelled.", "AbortError"));
     };
     const timeout = window.setTimeout(() => {
       signal.removeEventListener("abort", onAbort);
@@ -199,6 +223,279 @@ export function environmentForFixture(
           },
         ],
   };
+}
+
+export function operationalReadinessForFixture(
+  fixture: DataFixtureMode,
+  detail: ProductEnvironmentDetail,
+  action: ProductActionAvailability,
+): ProductOperationalReadiness {
+  assertFixtureAvailable(fixture);
+  const mode = new URLSearchParams(window.location.search).get("readiness");
+  if (mode === "error") {
+    throw Object.assign(
+      new Error("Operational readiness is intentionally unavailable."),
+      { statusCode: 503, traceId: "fixture-readiness-unavailable" },
+    );
+  }
+  if (mode === "denied") {
+    throw Object.assign(
+      new Error("This browser session cannot read operational readiness evidence."),
+      { statusCode: 403, traceId: "fixture-readiness-denied" },
+    );
+  }
+  const unsupported = mode === "unsupported";
+  const workflowCaller = mode === "ready";
+  const dimensions = unsupported
+    ? unsupportedReadinessDimensions(detail)
+    : readinessDimensions(detail, workflowCaller);
+  const nonReadyDimensions = dimensions
+    .filter((dimension) => dimension.state !== "ready")
+    .map((dimension) => dimension.dimension);
+  return {
+    schema_version: 1,
+    generated_at: OBSERVED_AT,
+    product: detail.product,
+    display_name: detail.display_name,
+    repository: detail.repository,
+    driver_id: detail.driver_id,
+    context: detail.context,
+    instance: detail.environment,
+    caller: workflowCaller
+      ? {
+          identity_type: "github_actions",
+          repository: "example-org/launchplane",
+          repository_id: "1001",
+          repository_owner_id: "2001",
+          workflow_ref:
+            "example-org/launchplane/.github/workflows/example-action.yml@refs/heads/main",
+          job_workflow_ref:
+            `example-org/launchplane/.github/workflows/reusable-example-action.yml@${"a".repeat(40)}`,
+        }
+      : {
+          identity_type: "github_human",
+          repository: "",
+          repository_id: "",
+          repository_owner_id: "",
+          workflow_ref: "",
+          job_workflow_ref: "",
+        },
+    action: {
+      requested_action: action.authz_action,
+      action_id: action.action_id,
+      label: action.label,
+      safety: action.safety,
+      scope: action.scope,
+      method: action.method,
+      route_path: action.route_path,
+      supported: !unsupported,
+      readiness_requirements: unsupported
+        ? []
+        : [
+            "provider_target",
+            "route_binding",
+            "runtime_environment",
+            "managed_secrets",
+            "artifact",
+            "deployment",
+            "topology",
+          ],
+    },
+    state: unsupported
+      ? "unsupported"
+      : nonReadyDimensions.length
+        ? "blocked"
+        : "ready",
+    ready: nonReadyDimensions.length === 0,
+    dimensions,
+    non_ready_dimensions: nonReadyDimensions,
+  };
+}
+
+function unsupportedReadinessDimensions(
+  detail: ProductEnvironmentDetail,
+): ProductOperationalReadinessDimension[] {
+  return [
+    {
+      dimension: "product_lane",
+      state: "ready",
+      required: true,
+      summary: "The product profile owns the requested context and instance.",
+      owner_record_type: "product_profile_record",
+      evidence: [
+        {
+          record_type: "product_profile_record",
+          record_id: detail.product,
+          revision: null,
+          recorded_at: OBSERVED_AT,
+          freshness_status: "recorded",
+        },
+      ],
+      details: [],
+      remediation: null,
+    },
+    {
+      dimension: "action",
+      state: "unsupported",
+      required: true,
+      summary:
+        "The requested action has no instance-scoped operational readiness contract.",
+      owner_record_type: "driver_descriptor",
+      evidence: [],
+      details: [],
+      remediation: {
+        action: "driver.read",
+        method: "GET",
+        route_path: "/v1/drivers",
+        summary:
+          "Choose an instance-scoped driver action with declared readiness requirements.",
+      },
+    },
+    {
+      dimension: "authorization",
+      state: "unsupported",
+      required: true,
+      summary:
+        "Authorization readiness cannot be evaluated for an unsupported action.",
+      owner_record_type: "authz_policy_record",
+      evidence: [],
+      details: [],
+      remediation: null,
+    },
+  ];
+}
+
+function readinessDimensions(
+  detail: ProductEnvironmentDetail,
+  workflowCaller: boolean,
+): ProductOperationalReadinessDimension[] {
+  const evidence = (
+    recordType: string,
+    recordId: string,
+    freshnessStatus: "verified" | "recorded" = "recorded",
+  ) => ({
+    record_type: recordType,
+    record_id: recordId,
+    revision: null,
+    recorded_at: OBSERVED_AT,
+    freshness_status: freshnessStatus,
+  });
+  const ready = (
+    dimension: ProductOperationalReadinessDimension["dimension"],
+    summary: string,
+    ownerRecordType: string,
+    recordId = "",
+    details: string[] = [],
+  ): ProductOperationalReadinessDimension => ({
+    dimension,
+    state: "ready",
+    required: true,
+    summary,
+    owner_record_type: ownerRecordType,
+    evidence: recordId ? [evidence(ownerRecordType, recordId)] : [],
+    details,
+    remediation: null,
+  });
+  return [
+    ready(
+      "product_lane",
+      "The product profile owns the requested context and instance.",
+      "product_profile_record",
+      detail.product,
+    ),
+    ready(
+      "action",
+      "The product driver declares operational readiness requirements for the action.",
+      "driver_descriptor",
+      `${detail.driver_id}:fixture-action`,
+    ),
+    workflowCaller
+      ? ready(
+          "authorization",
+          "The active policy authorizes the immutable workflow caller for this exact lane and action.",
+          "authz_policy_record",
+          "fixture-authz-policy-r285",
+        )
+      : {
+          dimension: "authorization",
+          state: "blocked",
+          required: true,
+          summary:
+            "Operational workflow readiness requires an authenticated GitHub Actions caller.",
+          owner_record_type: "authz_policy_record",
+          evidence: [evidence("authz_policy_record", "fixture-authz-policy-r285")],
+          details: [],
+          remediation: {
+            action: "authz_policy.manage",
+            method: "POST",
+            route_path: "/v1/authz-policies/managed-rule-sets/reconcile",
+            summary:
+              "Reconcile one exact managed workflow grant through the protected service workflow.",
+          },
+        },
+    ready(
+      "provider_target",
+      "Launchplane has recorded provider-target authority for this lane.",
+      "provider_target_record",
+      "fixture-provider-target",
+    ),
+    ready(
+      "route_binding",
+      "Provider-neutral route authority is active and current.",
+      "environment_route_binding_record",
+      "fixture-route-binding",
+      workflowCaller ? [] : ["external_ingress_internals_unsupported"],
+    ),
+    ready(
+      "runtime_environment",
+      "All declared runtime-environment keys are recorded for this lane.",
+      "runtime_environment_record",
+    ),
+    ready(
+      "managed_secrets",
+      "All declared managed-secret bindings are recorded and enabled.",
+      "secret_binding_record",
+    ),
+    ready(
+      "artifact",
+      "The exact requested artifact manifest is persisted in Launchplane.",
+      "artifact_manifest",
+      detail.target.expected_runtime_identity?.artifact_id || "fixture-artifact",
+    ),
+    workflowCaller
+      ? ready(
+          "deployment",
+          "Current deployment, health, and runtime-identity evidence are passing.",
+          "deployment_record",
+          "fixture-deployment-current",
+        )
+      : {
+          dimension: "deployment",
+          state: "blocked",
+          required: true,
+          summary:
+            "Current deployment, health, or runtime-identity evidence is not passing.",
+          owner_record_type: "deployment_record",
+          evidence: [evidence("deployment_record", "fixture-deployment-current")],
+          details: ["runtime_identity_status:unchecked"],
+          remediation: null,
+        },
+    {
+      ...ready(
+        "topology",
+        "Recorded and observed route, runtime, HTTP, and TLS topology evidence is current.",
+        "product_environment_topology",
+      ),
+      evidence: [
+        evidence("environment_route_binding_record", "fixture-route-binding"),
+        evidence(
+          "public_ingress_observation_record",
+          "fixture-ingress-observation",
+          "verified",
+        ),
+      ],
+    },
+  ];
 }
 
 export function configStatusForFixture(

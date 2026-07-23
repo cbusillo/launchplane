@@ -1595,6 +1595,16 @@ entrypoints and pin those reviewed reusable workers to a full commit SHA. When
 worker behavior changes, land and validate the reusable contracts first, then
 advance the wrapper pin in a separate reviewed change.
 
+The operator UI can inspect that same readiness contract from the environment
+`Actions` route without dispatching a workflow or invoking a descriptor route.
+It derives exact lane and artifact selectors from the product-environment read
+model, displays browser identity separately from immutable workflow identity,
+and treats remediation routes as non-executable metadata unless an explicit
+typed browser operation exists. Repository workflow metadata must keep the
+testing deploy worker plus the target-replacement dispatch and reusable workers
+discoverable so operators can follow reviewed workflow ownership instead of
+falling back to an arbitrary checkout or local live-target command.
+
 The plan reads the product profile, Launchplane Dokploy target/id records,
 current inventory, live Dokploy target payload, domains, volume env keys, latest
 deployment, and expected runtime identity. It does not create, delete, deploy,

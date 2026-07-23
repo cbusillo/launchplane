@@ -108,14 +108,15 @@ The Playwright suite starts the Vite development server and uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product
 inventory boundaries use `?fixture=empty` and `?fixture=error`. Anonymous
 authentication is simulated by intercepting only `/v1/auth/session`; no product
-or runtime mutation reaches a deployed Launchplane service. The suite exercises
-eight journeys: the rendered authentication prompt, honest empty and error
-product inventories, product workspace, recent activity, environment
-diagnostics, an honestly blocked action, and a dry-run confirmation without
-submitting the apply. Each journey runs at desktop and narrow widths, checks
-route-heading and keyboard focus behavior, rejects duplicate document IDs and
-horizontal overflow, and fails on unexpected mutation requests, console errors,
-uncaught page errors, failed requests, or HTTP error responses.
+or runtime mutation reaches a deployed Launchplane service. Journeys cover the
+rendered authentication prompt, honest empty and error product inventories,
+product workspace, recent activity, environment diagnostics, blocked and
+dry-run action boundaries, plus mixed, ready, unsupported, denied, failed,
+empty, and loading operational-readiness states. Each journey runs at desktop
+and narrow widths, checks route-heading and keyboard focus behavior, rejects
+duplicate document IDs and horizontal overflow, and fails on unexpected
+mutation requests, console errors, uncaught page errors, failed requests, or
+HTTP error responses.
 
 Screenshots, traces, and failure evidence are written under
 `tmp/browser-smoke/`. CI uploads that directory from the dedicated hosted browser

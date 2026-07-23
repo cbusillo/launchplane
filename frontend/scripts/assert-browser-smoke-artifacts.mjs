@@ -14,6 +14,13 @@ const journeys = [
   "product-activity",
   "environment-diagnostics",
   "blocked-action",
+  "action-readiness-mixed",
+  "action-readiness-ready",
+  "action-readiness-unsupported",
+  "action-readiness-denied",
+  "action-readiness-error",
+  "action-readiness-empty",
+  "action-readiness-loading-settled",
   "safe-change-confirmation",
 ];
 const missingArtifacts = [];

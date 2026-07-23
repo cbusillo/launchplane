@@ -16,12 +16,14 @@ import type {
   MergeTrainPolicyTargetsResponse,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
+  ProductOperationalReadinessResponse,
   ProductEnvironmentResponse,
   ProductOverviewResponse,
   ProductPromotionStatusResponse,
   ProductPromotionWorkflowDeliveryStatusResponse,
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
+  ReadProductOperationalReadinessData,
   WorkGraphIssueInboxResponse,
   WorkGraphSnapshot,
   WorkGraphSnapshotResponse,
@@ -217,6 +219,28 @@ export function readProductEnvironment(
 ): Promise<ProductEnvironmentResponse> {
   return requestJson<ProductEnvironmentResponse>(
     `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readProductOperationalReadiness(
+  request: Pick<ReadProductOperationalReadinessData, "path" | "query">,
+  signal?: AbortSignal,
+): Promise<ProductOperationalReadinessResponse> {
+  const params = new URLSearchParams({ action: request.query.action });
+  if (request.query.artifact_id) {
+    params.set("artifact_id", request.query.artifact_id);
+  }
+  if (request.query.expected_current_artifact_id) {
+    params.set(
+      "expected_current_artifact_id",
+      request.query.expected_current_artifact_id,
+    );
+  }
+  return requestJson<ProductOperationalReadinessResponse>(
+    `/v1/products/${encodeURIComponent(request.path.product)}/contexts/${encodeURIComponent(request.path.context)}/instances/${encodeURIComponent(request.path.instance)}/operational-readiness?${params.toString()}`,
     "GET",
     undefined,
     signal,
