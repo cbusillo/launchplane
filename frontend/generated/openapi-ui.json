@@ -1190,6 +1190,160 @@
         "summary": "Read product activity"
       }
     },
+    "/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness": {
+      "get": {
+        "operationId": "read_product_operational_readiness",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Action",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "artifact_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductOperationalReadinessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read exact operational enrollment readiness"
+      }
+    },
     "/v1/products/{product}/environments": {
       "get": {
         "operationId": "list_product_environments",
@@ -4348,6 +4502,23 @@
             "title": "Output Schema",
             "type": "object"
           },
+          "readiness_requirements": {
+            "default": [],
+            "items": {
+              "enum": [
+                "provider_target",
+                "route_binding",
+                "runtime_environment",
+                "managed_secrets",
+                "artifact",
+                "deployment",
+                "topology"
+              ],
+              "type": "string"
+            },
+            "title": "Readiness Requirements",
+            "type": "array"
+          },
           "route_path": {
             "title": "Route Path",
             "type": "string"
@@ -4391,6 +4562,7 @@
           "method",
           "operator_visible",
           "output_schema",
+          "readiness_requirements",
           "route_path",
           "safety",
           "scope",
@@ -10490,6 +10662,427 @@
           "require_health_verification",
           "require_logo_verification"
         ]
+      },
+      "ProductOperationalReadiness": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/ProductOperationalReadinessAction"
+          },
+          "caller": {
+            "$ref": "#/components/schemas/ProductOperationalReadinessCaller"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "dimensions": {
+            "items": {
+              "$ref": "#/components/schemas/ProductOperationalReadinessDimension"
+            },
+            "title": "Dimensions",
+            "type": "array"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "non_ready_dimensions": {
+            "default": [],
+            "items": {
+              "enum": [
+                "product_lane",
+                "action",
+                "authorization",
+                "provider_target",
+                "route_binding",
+                "runtime_environment",
+                "managed_secrets",
+                "artifact",
+                "deployment",
+                "topology"
+              ],
+              "type": "string"
+            },
+            "title": "Non Ready Dimensions",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "ready",
+              "blocked",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "caller",
+          "context",
+          "dimensions",
+          "display_name",
+          "driver_id",
+          "generated_at",
+          "instance",
+          "non_ready_dimensions",
+          "product",
+          "ready",
+          "repository",
+          "schema_version",
+          "state"
+        ],
+        "title": "ProductOperationalReadiness",
+        "type": "object"
+      },
+      "ProductOperationalReadinessAction": {
+        "additionalProperties": false,
+        "properties": {
+          "action_id": {
+            "default": "",
+            "title": "Action Id",
+            "type": "string"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "method": {
+            "default": "",
+            "title": "Method",
+            "type": "string"
+          },
+          "readiness_requirements": {
+            "default": [],
+            "items": {
+              "enum": [
+                "provider_target",
+                "route_binding",
+                "runtime_environment",
+                "managed_secrets",
+                "artifact",
+                "deployment",
+                "topology"
+              ],
+              "type": "string"
+            },
+            "title": "Readiness Requirements",
+            "type": "array"
+          },
+          "requested_action": {
+            "title": "Requested Action",
+            "type": "string"
+          },
+          "route_path": {
+            "default": "",
+            "title": "Route Path",
+            "type": "string"
+          },
+          "safety": {
+            "default": "",
+            "title": "Safety",
+            "type": "string"
+          },
+          "scope": {
+            "default": "",
+            "title": "Scope",
+            "type": "string"
+          },
+          "supported": {
+            "default": false,
+            "title": "Supported",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action_id",
+          "label",
+          "method",
+          "readiness_requirements",
+          "requested_action",
+          "route_path",
+          "safety",
+          "scope",
+          "supported"
+        ],
+        "title": "ProductOperationalReadinessAction",
+        "type": "object"
+      },
+      "ProductOperationalReadinessCaller": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_type": {
+            "enum": [
+              "github_actions",
+              "github_human",
+              "terminal_agent",
+              "local_operator",
+              "local_admin"
+            ],
+            "title": "Identity Type",
+            "type": "string"
+          },
+          "job_workflow_ref": {
+            "default": "",
+            "title": "Job Workflow Ref",
+            "type": "string"
+          },
+          "repository": {
+            "default": "",
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "default": "",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "default": "",
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "workflow_ref": {
+            "default": "",
+            "title": "Workflow Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity_type",
+          "job_workflow_ref",
+          "repository",
+          "repository_id",
+          "repository_owner_id",
+          "workflow_ref"
+        ],
+        "title": "ProductOperationalReadinessCaller",
+        "type": "object"
+      },
+      "ProductOperationalReadinessDimension": {
+        "additionalProperties": false,
+        "properties": {
+          "details": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Details",
+            "type": "array"
+          },
+          "dimension": {
+            "enum": [
+              "product_lane",
+              "action",
+              "authorization",
+              "provider_target",
+              "route_binding",
+              "runtime_environment",
+              "managed_secrets",
+              "artifact",
+              "deployment",
+              "topology"
+            ],
+            "title": "Dimension",
+            "type": "string"
+          },
+          "evidence": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductOperationalReadinessEvidence"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "owner_record_type": {
+            "title": "Owner Record Type",
+            "type": "string"
+          },
+          "remediation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductOperationalReadinessRemediation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "required": {
+            "default": true,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "ready",
+              "blocked",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "details",
+          "dimension",
+          "evidence",
+          "owner_record_type",
+          "remediation",
+          "required",
+          "state",
+          "summary"
+        ],
+        "title": "ProductOperationalReadinessDimension",
+        "type": "object"
+      },
+      "ProductOperationalReadinessEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "freshness_status": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Freshness Status",
+            "type": "string"
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "record_type": {
+            "title": "Record Type",
+            "type": "string"
+          },
+          "recorded_at": {
+            "default": "",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          }
+        },
+        "required": [
+          "freshness_status",
+          "record_id",
+          "record_type",
+          "recorded_at",
+          "revision"
+        ],
+        "title": "ProductOperationalReadinessEvidence",
+        "type": "object"
+      },
+      "ProductOperationalReadinessRemediation": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "method": {
+            "default": "",
+            "title": "Method",
+            "type": "string"
+          },
+          "route_path": {
+            "default": "",
+            "title": "Route Path",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "method",
+          "route_path",
+          "summary"
+        ],
+        "title": "ProductOperationalReadinessRemediation",
+        "type": "object"
+      },
+      "ProductOperationalReadinessResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "readiness": {
+            "$ref": "#/components/schemas/ProductOperationalReadiness"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "readiness",
+          "status",
+          "trace_id"
+        ],
+        "title": "ProductOperationalReadinessResponse",
+        "type": "object"
       },
       "ProductOverviewResponse": {
         "additionalProperties": false,

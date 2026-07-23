@@ -2239,6 +2239,32 @@ product intent; status is derived from records. The response exposes configured,
 missing, or disabled status plus key/source metadata only; managed secret IDs
 remain out of this readiness view.
 
+`GET /v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness`
+is the action-specific operational enrollment preflight. Query parameter
+`action` is the exact driver authorization action; `artifact_id` names the
+exact persisted artifact when the action declares artifact readiness. The route
+first requires `product_environment.read` for the exact product/context/instance
+tuple. It then reads exactly one active DB-backed authz policy and requires the
+authenticated GitHub Actions caller to match exactly one managed rule for the
+requested action and lane. Ready workflow authorization also requires numeric
+repository identities, an exact caller workflow ref, and an exact reusable
+workflow ref pinned to a full commit SHA. The captured managed rule must contain
+singleton exact product, context, instance, action, caller-workflow, and
+reusable-workflow selectors; wildcard or multi-lane rules remain blocked even if
+normal policy matching would allow the current call. Caller-supplied identity
+selectors are not accepted.
+
+The typed response reports overall and per-dimension `ready`, `blocked`,
+`stale`, `missing`, or `unsupported` state for product/lane ownership, action
+support, authorization, provider target, route binding, runtime-environment
+metadata, managed-secret bindings, exact artifact, deployment evidence, and
+topology. Only dimensions declared by the driver action are evaluated beyond
+the baseline ownership/action/authz checks. Non-ready dimensions identify the
+owning record class or a supported service remediation without exposing secret
+values, managed-secret IDs, provider credentials/evidence, provider target IDs,
+raw identity claims, or runtime values. The endpoint performs no writes or
+provider calls; absent production enrollment remains a non-ready result.
+
 `GET /v1/products/{product}/environments/{environment}/promotion-status` is the
 product-owned browser authority for generic-web production promotion. It exposes
 only generated runtime identity, inventory freshness, health, target readiness,

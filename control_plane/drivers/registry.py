@@ -9,6 +9,7 @@ from control_plane.contracts.data_provenance import DataProvenance, FreshnessSta
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import (
     DriverActionDescriptor,
+    DriverActionReadinessRequirement,
     DriverActionSafety,
     DriverActionScope,
     DriverCapabilityDescriptor,
@@ -266,6 +267,7 @@ def _action(
     operator_visible: bool = True,
     writes_records: tuple[str, ...] = (),
     alternate_authz_actions: tuple[str, ...] = (),
+    readiness_requirements: tuple[DriverActionReadinessRequirement, ...] = (),
 ) -> DriverActionDescriptor:
     return DriverActionDescriptor(
         action_id=action_id,
@@ -279,6 +281,7 @@ def _action(
         alternate_authz_actions=alternate_authz_actions,
         operator_visible=operator_visible,
         writes_records=writes_records,
+        readiness_requirements=readiness_requirements,
     )
 
 
@@ -604,6 +607,13 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/stable-bootstrap",
             authz_action="odoo_stable_bootstrap.execute",
             writes_records=("deployment", "inventory"),
+            readiness_requirements=(
+                "provider_target",
+                "route_binding",
+                "runtime_environment",
+                "managed_secrets",
+                "artifact",
+            ),
         ),
         _action(
             "preview_apply_inputs",
@@ -680,6 +690,15 @@ ODOO_DRIVER = DriverDescriptor(
             scope="instance",
             route_path="/v1/drivers/odoo/target-replacement-plan",
             authz_action="odoo_target_replacement_plan.read",
+            readiness_requirements=(
+                "provider_target",
+                "route_binding",
+                "runtime_environment",
+                "managed_secrets",
+                "artifact",
+                "deployment",
+                "topology",
+            ),
         ),
         _action(
             "target_replacement_apply",
@@ -690,6 +709,15 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/target-replacement-apply",
             authz_action="odoo_target_replacement_apply.execute",
             writes_records=("deployment", "inventory", "release_tuple"),
+            readiness_requirements=(
+                "provider_target",
+                "route_binding",
+                "runtime_environment",
+                "managed_secrets",
+                "artifact",
+                "deployment",
+                "topology",
+            ),
         ),
     ),
     setting_groups=(

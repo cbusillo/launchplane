@@ -95,6 +95,30 @@ async def _get_product_environment(
     )
 
 
+async def _get_product_operational_readiness(
+    app: FastAPI,
+    *,
+    product: str = "example-odoo",
+    context: str = "example-odoo",
+    instance: str = "testing",
+    action: str = "odoo_target_replacement_plan.read",
+    artifact_id: str = "artifact-example-odoo-0123456789abcdef",
+    authorization: str = "Bearer valid-token",
+) -> Response:
+    headers = {"Authorization": authorization} if authorization else {}
+    query = {"action": action}
+    if artifact_id:
+        query["artifact_id"] = artifact_id
+    return await http_get(
+        app,
+        (
+            f"/v1/products/{product}/contexts/{context}/instances/{instance}/"
+            f"operational-readiness?{urlencode(query)}"
+        ),
+        headers=headers,
+    )
+
+
 async def _get_product_profiles(
     app: FastAPI,
     *,

@@ -9,6 +9,15 @@ from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 
 DriverActionSafety = Literal["read", "safe_write", "mutation", "destructive"]
 DriverActionScope = Literal["global", "context", "instance", "preview"]
+DriverActionReadinessRequirement = Literal[
+    "provider_target",
+    "route_binding",
+    "runtime_environment",
+    "managed_secrets",
+    "artifact",
+    "deployment",
+    "topology",
+]
 DriverPanelKind = Literal[
     "summary",
     "lane_health",
@@ -39,6 +48,7 @@ class DriverActionDescriptor(BaseModel):
     input_schema: dict[str, object] = Field(default_factory=dict)
     output_schema: dict[str, object] = Field(default_factory=dict)
     writes_records: tuple[str, ...] = ()
+    readiness_requirements: tuple[DriverActionReadinessRequirement, ...] = ()
 
 
 class DriverCapabilityDescriptor(BaseModel):

@@ -155,6 +155,9 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/products/{product}/activity": "read_product_activity",
     "/v1/products/{product}/environments": "list_product_environments",
     "/v1/products/{product}/environments/{environment}": "read_product_environment",
+    "/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness": (
+        "read_product_operational_readiness"
+    ),
     "/v1/products/{product}/environments/{environment}/config-status": (
         "read_product_environment_config_status"
     ),
