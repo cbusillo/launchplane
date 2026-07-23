@@ -506,16 +506,19 @@ class ProductOnboardingTests(unittest.TestCase):
                 "/v1/drivers/odoo/config-parameter-override",
                 ".launchplane/odoo-config-parameter-override-payload.json",
                 "odoo-config-parameter-override.json",
+                'steps.launchplane.outputs.status-code }}" != "202"',
             ),
-            "odoo-target-replacement-plan.yml": (
+            "reusable-odoo-target-replacement-plan.yml": (
                 "/v1/drivers/odoo/target-replacement-plan",
                 ".launchplane/odoo-target-replacement-plan-payload.json",
                 "odoo-target-replacement-plan.json",
+                'if [ "$PLAN_STATUS_CODE" != "202" ]; then',
             ),
             "odoo-website-bootstrap-override.yml": (
                 "/v1/drivers/odoo/website-bootstrap-override",
                 ".launchplane/odoo-website-bootstrap-override-payload.json",
                 "odoo-website-bootstrap-override.json",
+                'steps.launchplane.outputs.status-code }}" != "202"',
             ),
         }
 
@@ -523,6 +526,7 @@ class ProductOnboardingTests(unittest.TestCase):
             route_path,
             payload_file,
             response_file,
+            status_check,
         ) in workflow_expectations.items():
             with self.subTest(workflow=workflow_name):
                 workflow_text = Path(f".github/workflows/{workflow_name}").read_text(
@@ -540,7 +544,7 @@ class ProductOnboardingTests(unittest.TestCase):
                 self.assertIn(
                     "idempotency-key: ${{ steps.request.outputs.idempotency_key }}", workflow_text
                 )
-                self.assertIn('steps.launchplane.outputs.status-code }}" != "202"', workflow_text)
+                self.assertIn(status_check, workflow_text)
                 self.assertIn('!= "accepted"', workflow_text)
                 self.assertIn("if: always()", workflow_text)
                 self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
@@ -632,7 +636,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("curl ", stable_bootstrap_workflow)
 
         target_apply_workflow = Path(
-            ".github/workflows/odoo-target-replacement-apply.yml"
+            ".github/workflows/reusable-odoo-target-replacement-apply.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("runs-on: ubuntu-latest", target_apply_workflow)
         self.assertIn(
@@ -675,9 +679,12 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("POLL_STATUS_CODE", target_apply_workflow)
         self.assertIn('case "$DATA_SOURCE_MODE" in', target_apply_workflow)
         self.assertIn("existing | empty | upstream_restore)", target_apply_workflow)
-        self.assertIn("*://* | //* | *'//'*)", target_apply_workflow)
         self.assertIn(
-            "Odoo target replacement poll URL must be a local Launchplane route path.",
+            "*$'\\n'* | *$'\\r'* | *://* | //* | *'//'* | *'?'* | *'#'* | *'%'*)",
+            target_apply_workflow,
+        )
+        self.assertIn(
+            "Odoo target replacement poll URL must be a local route path.",
             target_apply_workflow,
         )
         self.assertIn(
@@ -709,11 +716,14 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('post_deploy_status" != "pass"', target_apply_workflow)
         self.assertIn("odoo-target-replacement-apply-create.json", target_apply_workflow)
         self.assertIn("if: always()", target_apply_workflow)
+        target_apply_wrapper = Path(
+            ".github/workflows/odoo-target-replacement-apply.yml"
+        ).read_text(encoding="utf-8")
         self.assertIn(
             "group: >-\n    odoo-target-replacement-apply-${{ inputs.product }}-${{ inputs.instance }}",
-            target_apply_workflow,
+            target_apply_wrapper,
         )
-        self.assertIn("cancel-in-progress: false", target_apply_workflow)
+        self.assertIn("cancel-in-progress: false", target_apply_wrapper)
         self.assertNotIn(
             '${{ steps.create_replacement.outputs.status-code }}" !=', target_apply_workflow
         )

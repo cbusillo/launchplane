@@ -56,6 +56,12 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/odoo-testing-route-binding-refresh.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-odoo-testing-route-binding-refresh.yml"}
     ),
+    Path(".github/workflows/odoo-target-replacement-plan.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-plan.yml"}
+    ),
+    Path(".github/workflows/odoo-target-replacement-apply.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-apply.yml"}
+    ),
 }
 
 
@@ -117,6 +123,18 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
         ActionClassification(
             "First-party same-repository",
             "testing route-binding evidence refresh",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-plan.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "exact-instance Odoo target replacement planning",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-apply.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "exact-instance Odoo target replacement apply",
         )
     ),
     "cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml": (

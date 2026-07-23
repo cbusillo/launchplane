@@ -51,16 +51,17 @@ remote code or move workflow data across trust boundaries.
 - Same-repository reusable workflows must use relative paths rather than a
   repository-qualified reference, except narrowly approved privileged workers
   whose full-SHA `job_workflow_ref` is itself part of the active policy trust
-boundary. The approved set is limited to managed authz administration and
-route-binding reconciliation, plus exact-instance product health-policy
-mutation whose plan/apply actions are separately authorized.
-- Changes to that authorization worker's `workflow_call` interface require two
-  landings. First land the worker contract without changing caller pins, then
-  pin each caller to that landed commit and start passing the new input or
-  secret in a follow-up change. GitHub validates the interface at the pinned revision before
-  starting any job, so forwarding a value that only exists in the caller's
-  current revision causes a workflow startup failure rather than a safe skipped
-  job.
+  boundary. The approved set is limited to managed authz administration,
+  route-binding reconciliation, exact-instance product health-policy mutation,
+  and exact-instance Odoo target-replacement plan/apply workers whose actions
+  are separately authorized.
+- Changes to an approved privileged worker's `workflow_call` interface require
+  two landings. First land the worker contract without changing caller pins,
+  then pin each caller to that landed commit and start passing the new input or
+  secret in a follow-up change. GitHub validates the interface at the pinned
+  revision before starting any job, so forwarding a value that only exists in
+  the caller's current revision causes a workflow startup failure rather than a
+  safe skipped job.
 - Every static container image source must be classified in the policy test and
   use a release tag plus a 64-character `sha256` manifest digest. Mutable tags
   without a digest are rejected.
